@@ -1,16 +1,13 @@
 # Hi, this is Clicky.
+It's an AI teacher that lives as a buddy next to your cursor. It can see your screen, talk to you, and even point at stuff — kinda like having a real teacher next to you.
+
+Download it [here](https://www.clicky.so/) for free.
 
 ![Clicky — an ai buddy that lives on your mac](clicky-demo.gif)
 
-This is [Clicky](https://www.clicky.so/). 
-
-It's an AI teacher that lives as a buddy next to your cursor. It can see your screen, talk to you, and even point at stuff — kinda like having a real teacher next to you.
-
 Here's the [original tweet](https://x.com/FarzaTV/status/2041314633978659092) that kinda blew up for a demo for more context.
 
-This is the open-source version of Clicky. If you just want to use it and don't want to mess with code, grab the latest build from the main site [here](https://www.clicky.so/).
-
-If you want to hack on it, build your own features, or just see how it works under the hood — keep reading.
+This is the open-source version of Clicky for those that want to hack on it, build their own features, or just see how it works under the hood.
 
 ## Get started with Claude Code
 

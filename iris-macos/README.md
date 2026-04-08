@@ -14,13 +14,13 @@ If you want to hack on it, build your own features, or just see how it works und
 
 ## Get started with Claude Code
 
-If you have [Claude Code](https://docs.anthropic.com/en/docs/claude-code), just paste this:
+The fastest way to get this running is with [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Open it up and paste this:
 
 ```
-Clone https://github.com/farzaa/clicky and read the CLAUDE.md. I want to get Clicky running locally on my Mac. Help me set up everything — the Cloudflare Worker with my own API keys, the proxy URLs, and getting it building in Xcode. Walk me through it.
+Clone https://github.com/farzaa/clicky.git into my current directory. Then read the CLAUDE.md. I want to get Clicky running locally on my Mac. Help me set up everything — the Cloudflare Worker with my own API keys, the proxy URLs, and getting it building in Xcode. Walk me through it.
 ```
 
-It knows the whole project. You can also just start asking it to build features, fix bugs, whatever. Go crazy.
+That's it. It'll clone the repo, read the docs, and walk you through the whole setup. Once you're running you can just keep talking to it — build features, fix bugs, whatever. Go crazy.
 
 ## Manual setup
 

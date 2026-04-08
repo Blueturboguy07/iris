@@ -1,5 +1,5 @@
 # Hi, this is Clicky.
-It's an AI teacher that lives as a buddy next to your cursor. It can see your screen, talk to you, and even point at stuff — kinda like having a real teacher next to you.
+It's an AI teacher that lives as a buddy next to your cursor. It can see your screen, talk to you, and even point at stuff. Kinda like having a real teacher next to you.
 
 Download it [here](https://www.clicky.so/) for free.
 

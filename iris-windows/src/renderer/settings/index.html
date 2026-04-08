@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Clicky Settings</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      padding: 24px;
+    }
+
+    h1 { font-size: 20px; margin-bottom: 24px; color: #fff; }
+    h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: #888; margin: 20px 0 12px; }
+
+    .field {
+      margin-bottom: 16px;
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      margin-bottom: 4px;
+      color: #aaa;
+    }
+
+    input[type="text"], input[type="password"], select {
+      width: 100%;
+      padding: 8px 12px;
+      background: #16213e;
+      border: 1px solid #333;
+      border-radius: 6px;
+      color: #fff;
+      font-size: 14px;
+      outline: none;
+    }
+
+    input:focus, select:focus {
+      border-color: #3b82f6;
+    }
+
+    .toggle {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      cursor: pointer;
+    }
+
+    .toggle input[type="checkbox"] {
+      width: 36px;
+      height: 20px;
+      appearance: none;
+      background: #333;
+      border-radius: 10px;
+      position: relative;
+      cursor: pointer;
+      outline: none;
+    }
+
+    .toggle input[type="checkbox"]::after {
+      content: '';
+      width: 16px;
+      height: 16px;
+      background: #666;
+      border-radius: 50%;
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      transition: all 0.2s;
+    }
+
+    .toggle input[type="checkbox"]:checked {
+      background: #3b82f6;
+    }
+
+    .toggle input[type="checkbox"]:checked::after {
+      left: 18px;
+      background: #fff;
+    }
+
+    .status {
+      margin-top: 24px;
+      padding: 12px;
+      border-radius: 8px;
+      font-size: 13px;
+    }
+
+    .status.ok { background: rgba(34, 197, 94, 0.15); color: #22c55e; }
+    .status.warn { background: rgba(234, 179, 8, 0.15); color: #eab308; }
+
+    button {
+      margin-top: 16px;
+      padding: 10px 20px;
+      background: #3b82f6;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+
+    button:hover { background: #2563eb; }
+  </style>
+</head>
+<body>
+  <h1>Clicky Settings</h1>
+
+  <h2>API Keys (BYOK)</h2>
+
+  <div class="field">
+    <label>Anthropic API Key</label>
+    <input type="password" id="anthropicApiKey" placeholder="sk-ant-...">
+  </div>
+
+  <div class="field">
+    <label>AssemblyAI API Key</label>
+    <input type="password" id="assemblyaiApiKey" placeholder="(for voice transcription)">
+  </div>
+
+  <div class="field">
+    <label>ElevenLabs API Key</label>
+    <input type="password" id="elevenlabsApiKey" placeholder="(for text-to-speech)">
+  </div>
+
+  <h2>Or Use Proxy</h2>
+
+  <div class="field toggle">
+    <input type="checkbox" id="useProxy">
+    <label for="useProxy">Use API proxy instead of direct keys</label>
+  </div>
+
+  <div class="field">
+    <label>Proxy URL</label>
+    <input type="text" id="proxyUrl" placeholder="https://your-worker.your-subdomain.workers.dev">
+  </div>
+
+  <h2>Transcription</h2>
+
+  <div class="field">
+    <label>Provider</label>
+    <select id="transcriptionProvider">
+      <option value="assemblyai">AssemblyAI (cloud, best quality)</option>
+      <option value="openai">OpenAI Whisper API (cloud)</option>
+      <option value="whisper-local">Whisper Local (offline, HIPAA-safe)</option>
+    </select>
+  </div>
+
+  <h2>Text-to-Speech</h2>
+
+  <div class="field toggle">
+    <input type="checkbox" id="ttsEnabled" checked>
+    <label for="ttsEnabled">Enable spoken responses</label>
+  </div>
+
+  <div class="field">
+    <label>TTS Provider</label>
+    <select id="ttsProvider">
+      <option value="elevenlabs">ElevenLabs (cloud, natural voice)</option>
+      <option value="local">Windows SAPI (offline, HIPAA-safe)</option>
+    </select>
+  </div>
+
+  <h2>Model</h2>
+
+  <div class="field">
+    <label>Claude Model</label>
+    <select id="claudeModel">
+      <option value="claude-sonnet-4-6-20250514">Claude Sonnet 4.6 (fast)</option>
+      <option value="claude-opus-4-6-20250514">Claude Opus 4.6 (smartest)</option>
+    </select>
+  </div>
+
+  <h2>HIPAA Mode</h2>
+
+  <div class="field toggle">
+    <input type="checkbox" id="hipaaMode">
+    <label for="hipaaMode">HIPAA mode (forces local transcription + local TTS)</label>
+  </div>
+
+  <div id="status" class="status warn">Enter your Anthropic API key to get started.</div>
+
+  <button id="save">Save Settings</button>
+
+  <script>
+    const fields = [
+      'anthropicApiKey', 'assemblyaiApiKey', 'elevenlabsApiKey',
+      'proxyUrl', 'useProxy', 'transcriptionProvider', 'ttsEnabled',
+      'ttsProvider', 'claudeModel', 'hipaaMode'
+    ];
+
+    // Load settings
+    window.clicky.getSettings().then((settings) => {
+      fields.forEach((key) => {
+        const el = document.getElementById(key);
+        if (!el) return;
+        if (el.type === 'checkbox') {
+          el.checked = !!settings[key];
+        } else {
+          el.value = settings[key] || '';
+        }
+      });
+      updateStatus(settings);
+    });
+
+    // HIPAA mode enforcement
+    document.getElementById('hipaaMode').addEventListener('change', (e) => {
+      if (e.target.checked) {
+        document.getElementById('transcriptionProvider').value = 'whisper-local';
+        document.getElementById('ttsProvider').value = 'local';
+      }
+    });
+
+    // Save
+    document.getElementById('save').addEventListener('click', () => {
+      fields.forEach((key) => {
+        const el = document.getElementById(key);
+        const value = el.type === 'checkbox' ? el.checked : el.value;
+        window.clicky.setSetting(key, value);
+      });
+
+      const status = document.getElementById('status');
+      status.textContent = 'Settings saved!';
+      status.className = 'status ok';
+    });
+
+    function updateStatus(settings) {
+      const status = document.getElementById('status');
+      if (settings.useProxy && settings.proxyUrl) {
+        status.textContent = 'Using proxy — ready to go.';
+        status.className = 'status ok';
+      } else if (settings.anthropicApiKey) {
+        status.textContent = 'API key configured — ready to go.';
+        status.className = 'status ok';
+      } else {
+        status.textContent = 'Enter your Anthropic API key to get started.';
+        status.className = 'status warn';
+      }
+    }
+  </script>
+</body>
+</html>

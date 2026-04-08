@@ -1,0 +1,45 @@
+{
+  "name": "clicky-windows",
+  "version": "0.1.0",
+  "description": "AI-powered screen companion for Windows — see your screen, hear your voice, point at answers. Windows port of farzaa/clicky.",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "dev": "electron-forge start",
+    "build": "tsc && electron-forge make",
+    "package": "electron-forge package",
+    "make": "electron-forge make",
+    "lint": "eslint src/ --ext .ts,.tsx",
+    "lint:fix": "eslint src/ --ext .ts,.tsx --fix",
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tekram/clicky-windows.git"
+  },
+  "keywords": [
+    "ai",
+    "screen-companion",
+    "claude",
+    "electron",
+    "windows",
+    "accessibility",
+    "voice-assistant"
+  ],
+  "author": "tekram",
+  "license": "MIT",
+  "devDependencies": {
+    "@electron-forge/cli": "^7.6.0",
+    "@electron-forge/maker-nsis": "^7.6.0",
+    "@electron-forge/maker-zip": "^7.6.0",
+    "@electron-forge/plugin-auto-unpack-natives": "^7.6.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "electron": "^33.0.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "electron-store": "^10.0.0",
+    "electron-updater": "^6.3.0"
+  }
+}

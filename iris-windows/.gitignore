@@ -1,0 +1,28 @@
+node_modules/
+dist/
+out/
+.webpack/
+*.env
+.env.*
+.dev.vars
+
+# Electron
+release/
+*.dmg
+*.exe
+*.msi
+*.nsis
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Build artifacts
+*.tsbuildinfo

@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Clicky Overlay</title>
+  <style>
+    * { margin: 0; padding: 0; }
+    html, body {
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: transparent;
+      user-select: none;
+      -webkit-app-region: no-drag;
+    }
+
+    #cursor {
+      position: absolute;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: rgba(59, 130, 246, 0.8);
+      box-shadow: 0 0 20px rgba(59, 130, 246, 0.6), 0 0 40px rgba(59, 130, 246, 0.3);
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      opacity: 0;
+      transition: left 0.4s ease-out, top 0.4s ease-out, opacity 0.3s ease;
+      z-index: 9999;
+    }
+
+    #cursor.visible {
+      opacity: 1;
+    }
+
+    #cursor::after {
+      content: '';
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      background: rgba(59, 130, 246, 0.4);
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+
+    #label {
+      position: absolute;
+      transform: translate(-50%, 20px);
+      background: rgba(0, 0, 0, 0.8);
+      color: white;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-family: -apple-system, 'Segoe UI', sans-serif;
+      font-size: 13px;
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    #label.visible {
+      opacity: 1;
+    }
+
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); opacity: 0.4; }
+      50% { transform: scale(2); opacity: 0; }
+    }
+
+    /* Recording indicator */
+    #recording-indicator {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 8px 16px;
+      border-radius: 20px;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+    }
+
+    #recording-indicator.active {
+      opacity: 1;
+    }
+
+    #recording-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #ef4444;
+      animation: blink 1s ease-in-out infinite;
+    }
+
+    #recording-text {
+      color: white;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 13px;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+  </style>
+</head>
+<body>
+  <div id="cursor"></div>
+  <div id="label"></div>
+
+  <div id="recording-indicator">
+    <div id="recording-dot"></div>
+    <span id="recording-text">Listening...</span>
+  </div>
+
+  <script>
+    const cursor = document.getElementById('cursor');
+    const label = document.getElementById('label');
+    const recordingIndicator = document.getElementById('recording-indicator');
+
+    // Handle point-at animations
+    window.clicky.onPoint((tags) => {
+      if (tags.length === 0) return;
+
+      let i = 0;
+      function pointNext() {
+        if (i >= tags.length) {
+          // Hide after last point
+          setTimeout(() => {
+            cursor.classList.remove('visible');
+            label.classList.remove('visible');
+          }, 2000);
+          return;
+        }
+
+        const tag = tags[i];
+        cursor.style.left = tag.x + 'px';
+        cursor.style.top = tag.y + 'px';
+        cursor.classList.add('visible');
+
+        label.style.left = tag.x + 'px';
+        label.style.top = tag.y + 'px';
+        label.textContent = tag.label;
+        label.classList.add('visible');
+
+        i++;
+        setTimeout(pointNext, 1500);
+      }
+
+      pointNext();
+    });
+
+    // Handle recording state
+    window.clicky.onRecordingChanged((isRecording) => {
+      if (isRecording) {
+        recordingIndicator.classList.add('active');
+      } else {
+        recordingIndicator.classList.remove('active');
+      }
+    });
+  </script>
+</body>
+</html>

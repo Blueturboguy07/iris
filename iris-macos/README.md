@@ -1,28 +1,16 @@
-# Clicky
+# Hi, this is Clicky.
 
 ![Clicky — an ai buddy that lives on your mac](clicky-hero.png)
 
-I built this thing called Clicky.
+This is [Clicky](https://www.clicky.so/). 
 
 It's an AI teacher that lives as a buddy next to your cursor. It can see your screen, talk to you, and even point at stuff — kinda like having a real teacher next to you.
 
-I've been using it the past few days to learn Davinci Resolve, 10/10.
+Here's the [original tweet](https://x.com/FarzaTV/status/2041314633978659092) that kinda blew up for a demo for more context.
 
-Here's the [original tweet](https://x.com/FarzaTV/status/2041314633978659092) that kinda blew up.
-
-This is the open-source version of Clicky. If you just want to use it and don't want to mess with code, grab the latest build from [releases](https://github.com/farzaa/clicky/releases).
+This is the open-source version of Clicky. If you just want to use it and don't want to mess with code, grab the latest build from the main site [here](https://www.clicky.so/).
 
 If you want to hack on it, build your own features, or just see how it works under the hood — keep reading.
-
-## How it works
-
-1. You press **Control + Option** (push-to-talk)
-2. Your voice streams in real-time to **AssemblyAI** for transcription
-3. When you let go, Clicky screenshots your screen and sends it + your transcript to **Claude**
-4. Claude's response streams back and plays out loud via **ElevenLabs** TTS
-5. If Claude references something on your screen, the blue cursor flies over and points at it
-
-That's it. No background recording. No saving screenshots. Clicky only looks at your screen the moment you press the hotkey.
 
 ## Get started with Claude Code
 

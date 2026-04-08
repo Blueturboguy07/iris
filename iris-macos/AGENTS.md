@@ -1,84 +1,112 @@
-# Learning Buddy - Agent Instructions
+# Clicky - Agent Instructions
 
 <!-- This is the single source of truth for all AI coding agents. CLAUDE.md is a symlink to this file. -->
 <!-- AGENTS.md spec: https://github.com/agentsmd/agents.md — supported by Claude Code, Cursor, Copilot, Gemini CLI, and others. -->
 
 ## Overview
 
-macOS menu bar companion app. Lives entirely in the macOS status bar (no dock icon, no main window). Clicking the menu bar icon opens a custom floating panel with companion voice controls. Uses push-to-talk (ctrl+option) to capture voice input, transcribes it, and sends it to an AI model along with a screenshot of the user's screen. The companion is always-on and persists context across sessions via soul.md.
+macOS menu bar companion app. Lives entirely in the macOS status bar (no dock icon, no main window). Clicking the menu bar icon opens a custom floating panel with companion voice controls. Uses push-to-talk (ctrl+option) to capture voice input, transcribes it via AssemblyAI streaming, and sends the transcript + a screenshot of the user's screen to Claude. Claude responds with text (streamed via SSE) and voice (ElevenLabs TTS). A blue cursor overlay can fly to and point at UI elements Claude references on any connected monitor.
+
+All API keys live on a Cloudflare Worker proxy — nothing sensitive ships in the app.
 
 ## Architecture
 
 - **App Type**: Menu bar-only (`LSUIElement=true`), no dock icon or main window
-- **Framework**: SwiftUI (macOS native) with AppKit bridging for menu bar panel
+- **Framework**: SwiftUI (macOS native) with AppKit bridging for menu bar panel and cursor overlay
 - **Pattern**: MVVM with `@StateObject` / `@Published` state management
-- **AI Integration**: Dual provider support (OpenAI GPT, Claude) for companion voice responses plus provider-based voice transcription (OpenAI audio transcription, AssemblyAI streaming, Apple Speech fallback)
-- **Screen Capture**: ScreenCaptureKit (macOS 14.2+)
-- **Voice Input**: Push-to-talk voice input via `AVAudioEngine` + a pluggable transcription-provider layer. Supports OpenAI audio transcription by default, AssemblyAI streaming when configured, and Apple Speech as the fallback. System-wide keyboard shortcut via listen-only CGEvent tap, hidden partial transcripts, waveform-only bottom overlay during recording.
+- **AI Chat**: Claude (Sonnet 4.6 default, Opus 4.6 optional) via Cloudflare Worker proxy with SSE streaming
+- **Speech-to-Text**: AssemblyAI real-time streaming (`u3-rt-pro` model) via websocket, with OpenAI and Apple Speech as fallbacks
+- **Text-to-Speech**: ElevenLabs (`eleven_flash_v2_5` model) via Cloudflare Worker proxy
+- **Screen Capture**: ScreenCaptureKit (macOS 14.2+), multi-monitor support
+- **Voice Input**: Push-to-talk via `AVAudioEngine` + pluggable transcription-provider layer. System-wide keyboard shortcut via listen-only CGEvent tap.
+- **Element Pointing**: Claude embeds `[POINT:x,y:label:screenN]` tags in responses. The overlay parses these, maps coordinates to the correct monitor, and animates the blue cursor along a bezier arc to the target.
 - **Concurrency**: `@MainActor` isolation, async/await throughout
-- **Persistence**: soul.md for long-lived companion memory across sessions
+- **Analytics**: PostHog via `ClickyAnalytics.swift`
+
+### API Proxy (Cloudflare Worker)
+
+The app never calls external APIs directly. All requests go through a Cloudflare Worker (`worker/src/index.ts`) that holds the real API keys as secrets.
+
+| Route | Upstream | Purpose |
+|-------|----------|---------|
+| `POST /chat` | `api.anthropic.com/v1/messages` | Claude vision + streaming chat |
+| `POST /tts` | `api.elevenlabs.io/v1/text-to-speech/{voiceId}` | ElevenLabs TTS audio |
+| `POST /transcribe-token` | `streaming.assemblyai.com/v3/token` | Fetches a short-lived (480s) AssemblyAI websocket token |
+
+Worker secrets: `ANTHROPIC_API_KEY`, `ASSEMBLYAI_API_KEY`, `ELEVENLABS_API_KEY`
+Worker vars: `ELEVENLABS_VOICE_ID`
 
 ### Key Architecture Decisions
 
 **Menu Bar Panel Pattern**: The companion panel uses `NSStatusItem` for the menu bar icon and a custom borderless `NSPanel` for the floating control panel. This gives full control over appearance (dark, rounded corners, custom shadow) and avoids the standard macOS menu/popover chrome. The panel is non-activating so it doesn't steal focus. A global event monitor auto-dismisses it on outside clicks.
 
-**Global Push-To-Talk Overlay**: The system-wide dictation feedback UI uses a borderless `NSPanel` rather than a SwiftUI overlay so it can remain visible while other apps are focused. The panel is non-activating, joins all Spaces, sits near the bottom of the active screen, and hosts a SwiftUI waveform view through `NSHostingView`.
+**Cursor Overlay**: A full-screen transparent `NSPanel` hosts the blue cursor companion. It's non-activating, joins all Spaces, and never steals focus. The cursor position, response text, waveform, and pointing animations all render in this overlay via SwiftUI through `NSHostingView`.
 
 **Global Push-To-Talk Shortcut**: Background push-to-talk uses a listen-only `CGEvent` tap instead of an AppKit global monitor so modifier-based shortcuts like `ctrl + option` are detected more reliably while the app is running in the background.
+
+**Shared URLSession for AssemblyAI**: A single long-lived `URLSession` is shared across all AssemblyAI streaming sessions (owned by the provider, not the session). Creating and invalidating a URLSession per session corrupts the OS connection pool and causes "Socket is not connected" errors after a few rapid reconnections.
+
+**Transient Cursor Mode**: When "Show Clicky" is off, pressing the hotkey fades in the cursor overlay for the duration of the interaction (recording → response → TTS → optional pointing), then fades it out automatically after 1 second of inactivity.
 
 ## Key Files
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `leanring_buddyApp.swift` | ~65 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
-| `CompanionManager.swift` | ~130 | Central state for companion voice mode. Owns `BuddyDictationManager`, `GlobalPushToTalkShortcutMonitor`, and `GlobalPushToTalkOverlayManager`. Tracks voice state (idle/listening/processing), handles shortcut transitions, polls accessibility permission. |
-| `MenuBarPanelManager.swift` | ~150 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), installs click-outside-to-dismiss monitor. |
-| `CompanionPanelView.swift` | ~310 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk card with shortcut keys, voice state indicator with waveform, settings rows, and quit button. Dark aesthetic using `DS` design system. |
-| `ContentView.swift` | ~3805 | (Legacy) Course mode UI — retained in codebase but no longer referenced from the app entry point. |
-| `ScreenshotManager.swift` | ~3071 | (Legacy) Course session logic — retained in codebase but no longer referenced from the app entry point. |
-| `BuddyDictationManager.swift` | ~740 | Shared push-to-talk voice pipeline. Handles microphone capture, provider-aware permission checks, keyboard/button dictation sessions, transcript finalization, shortcut parsing, contextual keyterms, and live audio-level reporting for waveform feedback. |
-| `AppBundleConfiguration.swift` | ~28 | Shared runtime configuration reader for keys stored in the app bundle `Info.plist`. Used by AI/transcription providers and other services that need bundle-level configuration. |
-| `BuddyTranscriptionProvider.swift` | ~85 | Shared protocol surface and provider factory for voice transcription backends. Chooses between AssemblyAI, OpenAI, and Apple Speech based on configuration. |
-| `BuddyAudioConversionSupport.swift` | ~108 | Shared audio conversion helpers for voice transcription. Converts live mic buffers to PCM16 mono audio and builds WAV payloads for upload-based providers. |
-| `AppleSpeechTranscriptionProvider.swift` | ~145 | Local fallback transcription provider backed by Apple's Speech framework. Preserves the existing on-device/native path when cloud AI transcription is unavailable. |
-| `AssemblyAIStreamingTranscriptionProvider.swift` | ~428 | Streaming AI transcription provider for push-to-talk. Opens an AssemblyAI websocket, streams PCM audio, keeps partials internal, and finalizes formatted transcript text on key-up. |
-| `OpenAIAudioTranscriptionProvider.swift` | ~311 | AI transcription provider backed by OpenAI's audio transcription API. Buffers push-to-talk audio locally, uploads it as WAV on release, and returns the finalized transcript into the shared chat flow. |
-| `AuthenticationView.swift` | ~130 | Sign-in UI: Google button with logo + staggered fade-in animation. Dark minimal aesthetic. |
-| `UserMemoryStore.swift` | ~210 | Local JSON file persistence for user profile, step progress, and session state. |
-| `UserMemoryModels.swift` | ~91 | Local data models: `UserProfile`, `UserMemory`, `StepProgressData`, `SessionState`. |
-| `CourseModels.swift` | ~395 | Data models: `CourseStep` (goal, verification, embedded elements), `EmbeddedElement` enum, legacy `UIPlaceholder` types. |
-| `CourseDefinition.swift` | ~624 | 21 bite-sized step definitions organized by section (welcome, getting started, setup, build, ship, completion). |
-| `Prompts.swift` | ~674 | All AI prompts: system prompt, content generation, verification, brainstorm buddy, profile extraction. |
-| `FloatingSessionButton.swift` | ~179 | Floating `NSPanel` lifecycle (create/show/hide/destroy) + SwiftUI button view with gradient circle. |
-| `GlobalPushToTalkOverlay.swift` | ~226 | Bottom-of-screen dictation overlay shown during keyboard-triggered push-to-talk. Manages the non-activating `NSPanel` and waveform-only UI that can stay visible while the app is in the background. |
-| `GlobalPushToTalkShortcutMonitor.swift` | ~120 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap and publishes press/release transitions for the shared global shortcut flow. |
-| `OverlayWindow.swift` | ~366 | Advanced window positioning and overlay management. |
-| `WindowPositionManager.swift` | ~255 | Window placement logic, Screen Recording permission flow, and auto-shrink helpers. |
-| `PermissionsView.swift` | ~238 | macOS permissions onboarding UI for Screen Recording, Accessibility, ScreenCaptureKit warm-up, and Downloads folder access. |
-| `AppPermissionManager.swift` | ~69 | Tracks app-level permission state for Downloads folder access and ScreenCaptureKit warm-up that do not have a simple preflight API. |
-| `ClaudeAPI.swift` | ~269 | Claude vision API client. |
+| `leanring_buddyApp.swift` | ~89 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
+| `CompanionManager.swift` | ~1026 | Central state machine. Owns dictation, shortcut monitoring, screen capture, Claude API, ElevenLabs TTS, and overlay management. Tracks voice state (idle/listening/processing/responding), conversation history, model selection, and cursor visibility. Coordinates the full push-to-talk → screenshot → Claude → TTS → pointing pipeline. |
+| `MenuBarPanelManager.swift` | ~243 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), installs click-outside-to-dismiss monitor. |
+| `CompanionPanelView.swift` | ~761 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker (Sonnet/Opus), permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
+| `OverlayWindow.swift` | ~881 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor animation, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. |
+| `CompanionResponseOverlay.swift` | ~217 | SwiftUI view for the response text bubble and waveform displayed next to the cursor in the overlay. |
+| `CompanionScreenCaptureUtility.swift` | ~132 | Multi-monitor screenshot capture using ScreenCaptureKit. Returns labeled image data for each connected display. |
+| `BuddyDictationManager.swift` | ~866 | Push-to-talk voice pipeline. Handles microphone capture via `AVAudioEngine`, provider-aware permission checks, keyboard/button dictation sessions, transcript finalization, shortcut parsing, contextual keyterms, and live audio-level reporting for waveform feedback. |
+| `BuddyTranscriptionProvider.swift` | ~100 | Protocol surface and provider factory for voice transcription backends. Resolves provider based on `VoiceTranscriptionProvider` in Info.plist — AssemblyAI, OpenAI, or Apple Speech. |
+| `AssemblyAIStreamingTranscriptionProvider.swift` | ~478 | Streaming transcription provider. Fetches temp tokens from the Cloudflare Worker, opens an AssemblyAI v3 websocket, streams PCM16 audio, tracks turn-based transcripts, and delivers finalized text on key-up. Shares a single URLSession across all sessions. |
+| `OpenAIAudioTranscriptionProvider.swift` | ~317 | Upload-based transcription provider. Buffers push-to-talk audio locally, uploads as WAV on release, returns finalized transcript. |
+| `AppleSpeechTranscriptionProvider.swift` | ~147 | Local fallback transcription provider backed by Apple's Speech framework. |
+| `BuddyAudioConversionSupport.swift` | ~108 | Audio conversion helpers. Converts live mic buffers to PCM16 mono audio and builds WAV payloads for upload-based providers. |
+| `GlobalPushToTalkShortcutMonitor.swift` | ~132 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap and publishes press/release transitions. |
+| `ClaudeAPI.swift` | ~291 | Claude vision API client with streaming (SSE) and non-streaming modes. TLS warmup optimization, image MIME detection, conversation history support. |
 | `OpenAIAPI.swift` | ~142 | OpenAI GPT vision API client. |
+| `ElevenLabsTTSClient.swift` | ~81 | ElevenLabs TTS client. Sends text to the Worker proxy, plays back audio via `AVAudioPlayer`. Exposes `isPlaying` for transient cursor scheduling. |
+| `ElementLocationDetector.swift` | ~335 | Detects UI element locations in screenshots for cursor pointing. |
+| `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
+| `ClickyAnalytics.swift` | ~121 | PostHog analytics integration for usage tracking. |
+| `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
+| `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
+| `worker/src/index.ts` | ~142 | Cloudflare Worker proxy. Three routes: `/chat` (Claude), `/tts` (ElevenLabs), `/transcribe-token` (AssemblyAI temp token). |
 
 ## Build & Run
 
 ```bash
-# Build (requires Xcode with signing certificate, or use CODE_SIGNING_ALLOWED=NO)
-xcodebuild -scheme leanring-buddy -configuration Debug build
+# Open in Xcode
+open leanring-buddy.xcodeproj
 
-# Known non-blocking warnings: Swift 6 concurrency warnings in ScreenshotManager.swift,
+# Select the leanring-buddy scheme, set signing team, Cmd+R to build and run
+
+# Known non-blocking warnings: Swift 6 concurrency warnings,
 # deprecated onChange warning in OverlayWindow.swift. Do NOT attempt to fix these.
 ```
 
-## Floating Session Button
+**Do NOT run `xcodebuild` from the terminal** — it invalidates TCC (Transparency, Consent, and Control) permissions and the app will need to re-request screen recording, accessibility, etc.
 
-The floating button is an always-on-top circular gradient button (28px) in the top-right corner:
-- Appears when a learning session is running AND the main window is not focused
-- Hides when the main window is focused/visible
-- Is destroyed when the session stops
-- Is excluded from screen captures sent to the AI
-- Clicking it brings the main app window to the front
+## Cloudflare Worker
 
-Visibility logic: `shouldShowFloatingButton = isSessionCurrentlyRunning && !isMainWindowCurrentlyFocused`
+```bash
+cd worker
+npm install
+
+# Add secrets
+npx wrangler secret put ANTHROPIC_API_KEY
+npx wrangler secret put ASSEMBLYAI_API_KEY
+npx wrangler secret put ELEVENLABS_API_KEY
+
+# Deploy
+npx wrangler deploy
+
+# Local dev (create worker/.dev.vars with your keys)
+npx wrangler dev
+```
 
 ## Code Style & Conventions
 
@@ -115,6 +143,7 @@ IMPORTANT: Follow these naming rules strictly. Clarity is the top priority.
 - Do not add docstrings, comments, or type annotations to code you did not change
 - Do not try to fix the known non-blocking warnings (Swift 6 concurrency, deprecated onChange)
 - Do not rename the project directory or scheme (the "leanring" typo is intentional/legacy)
+- Do not run `xcodebuild` from the terminal — it invalidates TCC permissions
 
 ## Git Workflow
 

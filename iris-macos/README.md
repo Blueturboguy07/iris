@@ -100,7 +100,7 @@ Then update the proxy URLs in the Swift code to point to `http://localhost:8787`
 
 ### 3. Update the proxy URLs in the app
 
-The app has the Worker URL hardcoded in a few places. Search for `clicky-proxy.farza-0cb.workers.dev` and replace it with your Worker URL:
+The app has the Worker URL hardcoded in a few places. Search for `your-worker-name.your-subdomain.workers.dev` and replace it with your Worker URL:
 
 ```bash
 grep -r "clicky-proxy" leanring-buddy/

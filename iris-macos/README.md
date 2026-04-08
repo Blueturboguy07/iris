@@ -1,5 +1,7 @@
 # Clicky
 
+![Clicky — an ai buddy that lives on your mac](clicky-hero.png)
+
 I built this thing called Clicky.
 
 It's an AI teacher that lives as a buddy next to your cursor. It can see your screen, talk to you, and even point at stuff — kinda like having a real teacher next to you.

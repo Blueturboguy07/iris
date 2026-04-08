@@ -26,22 +26,10 @@ That's it. No background recording. No saving screenshots. Clicky only looks at 
 
 ## Get started with Claude Code
 
-The fastest way to get this running and start hacking on it is with [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Clone the repo and hand it off:
+The fastest way to get this running and start hacking on it is with [Claude Code](https://docs.anthropic.com/en/docs/claude-code). One prompt:
 
 ```bash
-git clone https://github.com/farzaa/clicky.git
-cd clicky
-claude
-```
-
-Then paste this into Claude:
-
-```
-Read the CLAUDE.md and get me set up. I want to:
-1. Set up the Cloudflare Worker with my own API keys
-2. Build and run the app locally in Xcode
-
-Walk me through it step by step.
+git clone https://github.com/farzaa/clicky.git && cd clicky && claude "Read the CLAUDE.md and get me fully set up. Set up the Cloudflare Worker with my own API keys, update the proxy URLs in the Swift code, and get the app building in Xcode. Walk me through it step by step."
 ```
 
 Claude will read the codebase, understand the architecture, and walk you through everything. It knows the whole project. You can also just start asking it to build features, fix bugs, whatever. Go crazy.

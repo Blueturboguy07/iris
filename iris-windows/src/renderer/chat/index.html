@@ -432,6 +432,99 @@
       font-family: inherit;
       color: var(--text-secondary);
     }
+
+    /* ── Help Links ── */
+    .help-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 12px;
+      justify-content: center;
+    }
+
+    .help-link {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 6px 12px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text-secondary);
+      font-size: 11px;
+      text-decoration: none;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .help-link:hover {
+      background: var(--bg-hover);
+      border-color: rgba(255, 255, 255, 0.12);
+      color: var(--text-primary);
+    }
+
+    .help-link svg {
+      width: 12px;
+      height: 12px;
+      opacity: 0.5;
+      flex-shrink: 0;
+    }
+
+    .help-link:hover svg { opacity: 0.8; }
+
+    /* ── Help Dropdown ── */
+    #help-menu {
+      position: absolute;
+      top: 48px;
+      right: 12px;
+      background: #161620;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 6px;
+      min-width: 200px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+      z-index: 100;
+      display: none;
+      animation: menuIn 0.15s ease;
+    }
+
+    #help-menu.visible { display: block; }
+
+    @keyframes menuIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    #help-menu a {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      color: var(--text-secondary);
+      text-decoration: none;
+      font-size: 12px;
+      border-radius: 6px;
+      transition: all 0.15s ease;
+      cursor: pointer;
+    }
+
+    #help-menu a:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    #help-menu a svg {
+      width: 14px;
+      height: 14px;
+      opacity: 0.5;
+      flex-shrink: 0;
+    }
+
+    #help-menu .divider {
+      height: 1px;
+      background: var(--border);
+      margin: 4px 0;
+    }
   </style>
 </head>
 <body>
@@ -443,6 +536,38 @@
     <button class="gear-btn" id="toggle-setup" title="API Keys">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
     </button>
+    <button class="gear-btn" id="help-btn" title="Help & Docs">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    </button>
+  </div>
+
+  <!-- Help Menu Dropdown -->
+  <div id="help-menu">
+    <a data-href="https://github.com/tekram/clicky-windows/blob/master/docs/getting-started.md">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z"/><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg>
+      Getting Started
+    </a>
+    <a data-href="https://github.com/tekram/clicky-windows/blob/master/docs/voice-and-tts.md">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
+      Voice & TTS Setup
+    </a>
+    <a data-href="https://github.com/tekram/clicky-windows/blob/master/docs/hipaa-mode.md">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      HIPAA Mode
+    </a>
+    <a data-href="https://github.com/tekram/clicky-windows/blob/master/docs/proxy-setup.md">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+      Proxy Setup
+    </a>
+    <div class="divider"></div>
+    <a data-href="https://github.com/tekram/clicky-windows/blob/master/docs/troubleshooting.md">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      Troubleshooting
+    </a>
+    <a data-href="https://github.com/tekram/clicky-windows/issues">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/></svg>
+      Report an Issue
+    </a>
   </div>
 
   <!-- Setup Panel -->
@@ -480,6 +605,25 @@
       <p>I can see your screen and answer questions about what's on it. Just type below.</p>
       <div class="shortcuts">
         <kbd>Enter</kbd><span style="color:var(--text-tertiary);font-size:11px">to send</span>
+      </div>
+
+      <div class="help-links">
+        <a class="help-link" data-href="https://github.com/tekram/clicky-windows/blob/master/docs/getting-started.md">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z"/><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg>
+          Docs
+        </a>
+        <a class="help-link" data-href="https://github.com/tekram/clicky-windows/blob/master/docs/voice-and-tts.md">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/></svg>
+          Voice
+        </a>
+        <a class="help-link" data-href="https://github.com/tekram/clicky-windows/blob/master/docs/hipaa-mode.md">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          HIPAA
+        </a>
+        <a class="help-link" data-href="https://github.com/tekram/clicky-windows/blob/master/docs/troubleshooting.md">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          Help
+        </a>
       </div>
     </div>
   </div>
@@ -622,6 +766,33 @@
         e.preventDefault();
         send();
       }
+    });
+
+    // Help menu
+    const helpBtn = document.getElementById('help-btn');
+    const helpMenu = document.getElementById('help-menu');
+
+    helpBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      helpMenu.classList.toggle('visible');
+    });
+
+    document.addEventListener('click', () => {
+      helpMenu.classList.remove('visible');
+    });
+
+    helpMenu.addEventListener('click', (e) => {
+      e.stopPropagation();
+    });
+
+    // Open all data-href links in default browser
+    document.querySelectorAll('[data-href]').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        e.preventDefault();
+        const url = el.getAttribute('data-href');
+        if (url) window.clicky.openExternal(url);
+        helpMenu.classList.remove('visible');
+      });
     });
   </script>
 </body>

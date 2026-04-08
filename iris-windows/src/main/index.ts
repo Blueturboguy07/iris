@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain } from "electron";
+import { app, BrowserWindow, globalShortcut, ipcMain, shell } from "electron";
 import { createTray } from "./tray";
 import { HotkeyManager } from "./hotkey";
 import { SettingsStore } from "./settings";
@@ -86,6 +86,13 @@ function setupIPC(): void {
   ipcMain.handle("settings:getAll", () => settings.getAll());
   ipcMain.handle("settings:set", (_event, key: string, value: unknown) => {
     settings.set(key as keyof ReturnType<typeof settings.getAll>, value as never);
+  });
+
+  // Open URL in default browser
+  ipcMain.handle("shell:openExternal", (_event, url: string) => {
+    if (url.startsWith("https://")) {
+      shell.openExternal(url);
+    }
   });
 }
 

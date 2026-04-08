@@ -35,6 +35,11 @@ contextBridge.exposeInMainWorld("clicky", {
   sendQuery: (text: string): Promise<string> =>
     ipcRenderer.invoke("chat:query", text),
 
+  // Open URL in default browser
+  openExternal: (url: string) => {
+    ipcRenderer.invoke("shell:openExternal", url);
+  },
+
   // Audio
   sendTranscript: (transcript: string) => {
     ipcRenderer.send("audio:transcript-ready", transcript);

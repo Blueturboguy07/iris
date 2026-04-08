@@ -1,6 +1,6 @@
 # Hi, this is Clicky.
 
-![Clicky — an ai buddy that lives on your mac](clicky-hero.png)
+![Clicky — an ai buddy that lives on your mac](clicky-demo.gif)
 
 This is [Clicky](https://www.clicky.so/). 
 

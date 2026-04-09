@@ -50,7 +50,20 @@ function createChatWindow(): BrowserWindow {
   });
 
   win.loadFile(path.join(__dirname, "..", "..", "src", "renderer", "chat", "index.html"));
-  win.once("ready-to-show", () => win.show());
+  win.once("ready-to-show", () => {
+    win.show();
+    // setAlwaysOnTop after show — more reliable on Windows than constructor option
+    if (settings.get("alwaysOnTop")) {
+      win.setAlwaysOnTop(true, "screen-saver");
+      // Re-apply after a short delay — Windows can reset it
+      setTimeout(() => {
+        if (!win.isDestroyed()) {
+          win.setAlwaysOnTop(true, "screen-saver");
+          console.log("alwaysOnTop applied:", win.isAlwaysOnTop());
+        }
+      }, 500);
+    }
+  });
   return win;
 }
 
@@ -91,7 +104,7 @@ function setupIPC(): void {
 
     // Apply alwaysOnTop immediately
     if (key === "alwaysOnTop" && chatWindow && !chatWindow.isDestroyed()) {
-      chatWindow.setAlwaysOnTop(!!value);
+      chatWindow.setAlwaysOnTop(!!value, "screen-saver");
     }
   });
 

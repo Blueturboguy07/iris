@@ -544,6 +544,59 @@
       to { opacity: 1; }
     }
 
+    /* ── Status Bar ── */
+    .status-bar {
+      padding: 8px 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      border-top: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.02);
+      animation: statusIn 0.2s ease;
+    }
+
+    .status-bar.hidden { display: none; }
+
+    .status-bar.recording {
+      color: #ef4444;
+      background: rgba(239, 68, 68, 0.05);
+      border-top-color: rgba(239, 68, 68, 0.15);
+    }
+
+    .status-bar.thinking {
+      color: var(--accent);
+      background: rgba(99, 140, 255, 0.05);
+      border-top-color: rgba(99, 140, 255, 0.15);
+    }
+
+    .status-bar.speaking {
+      color: var(--success);
+      background: rgba(52, 211, 153, 0.05);
+      border-top-color: rgba(52, 211, 153, 0.15);
+    }
+
+    @keyframes statusIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .status-dot-anim {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      animation: statusPulse 1.2s ease-in-out infinite;
+      flex-shrink: 0;
+    }
+
+    @keyframes statusPulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.8); }
+    }
+
     .tts-btn {
       height: 36px;
       padding: 0 10px;
@@ -864,6 +917,12 @@
     </div>
   </div>
 
+  <!-- Status Bar -->
+  <div id="status-bar" class="status-bar hidden">
+    <div class="status-dot-anim"></div>
+    <span id="status-text"></span>
+  </div>
+
   <!-- Input -->
   <div id="input-area">
     <button id="tts-toggle" class="tts-btn" title="Voice: Off">
@@ -1116,6 +1175,7 @@
 
       addMessage(text, 'user');
       addLoading();
+      showStatus('Thinking...', 'thinking');
 
       try {
         const response = await window.clicky.sendQuery(text);
@@ -1127,6 +1187,7 @@
         addMessage('Error: ' + (err.message || err), 'system');
       }
 
+      hideStatus();
       input.focus();
     }
 
@@ -1137,6 +1198,19 @@
         send();
       }
     });
+
+    // ── Status bar ──
+    const statusBar = document.getElementById('status-bar');
+    const statusText = document.getElementById('status-text');
+
+    function showStatus(text, state) {
+      statusBar.className = 'status-bar ' + state;
+      statusText.textContent = text;
+    }
+
+    function hideStatus() {
+      statusBar.className = 'status-bar hidden';
+    }
 
     // ── Push-to-talk mic recording ──
     const micBtn = document.getElementById('mic-btn');
@@ -1173,6 +1247,7 @@
           // Show processing state
           micBtn.className = 'mic-btn processing';
           micBtn.title = 'Transcribing...';
+          showStatus('Transcribing your voice...', 'thinking');
 
           addMessage('(voice message)', 'user');
           addLoading();
@@ -1184,7 +1259,9 @@
 
             if (result.error) {
               addMessage('Voice error: ' + result.error, 'system');
+              hideStatus();
             } else {
+              showStatus('Thinking...', 'thinking');
               // Replace the "(voice message)" with actual transcript
               const userMsgs = messages.querySelectorAll('.msg.user');
               const lastUser = userMsgs[userMsgs.length - 1];
@@ -1202,14 +1279,16 @@
             addMessage('Voice error: ' + (err.message || err), 'system');
           }
 
+          hideStatus();
           micBtn.className = 'mic-btn';
-          micBtn.title = 'Push to talk (or Ctrl+Alt+Space)';
+          micBtn.title = 'Push to talk (or Ctrl+Shift+Space)';
         };
 
         mediaRecorder.start(250); // collect chunks every 250ms
         isRecording = true;
         micBtn.className = 'mic-btn recording';
         micBtn.title = 'Recording... click to stop';
+        showStatus('Listening...', 'recording');
 
       } catch (err) {
         addMessage('Mic error: ' + (err.message || err), 'system');

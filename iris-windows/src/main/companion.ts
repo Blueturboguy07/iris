@@ -93,11 +93,9 @@ export class CompanionManager {
     const spokenText = response.text.replace(/\[POINT:[^\]]+\]/g, "").trim();
     const ttsOn = this.settings.get("ttsEnabled");
     const ttsProv = this.settings.get("ttsProvider");
-    console.log(`TTS check: enabled=${ttsOn}, provider=${ttsProv}, textLen=${spokenText.length}`);
     if (ttsOn && spokenText) {
       try {
         const tts = createTTSProvider(this.settings);
-        console.log("TTS: speaking with", ttsProv);
         tts.speak(spokenText).catch((err) => {
           console.warn("TTS failed (non-fatal):", err.message);
         });

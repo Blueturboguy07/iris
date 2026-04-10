@@ -35,7 +35,7 @@ export class AudioCapture {
             return { error: "No speech detected" };
           }
 
-          console.log("Transcript:", transcript);
+          console.log("Transcript received, length:", transcript.length);
 
           // Send transcript to chat UI immediately
           this.notifyChat("voice:transcript", transcript);

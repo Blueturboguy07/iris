@@ -59,7 +59,7 @@ function createChatWindow(): BrowserWindow {
       setTimeout(() => {
         if (!win.isDestroyed()) {
           win.setAlwaysOnTop(true, "screen-saver");
-          console.log("alwaysOnTop applied:", win.isAlwaysOnTop());
+          // alwaysOnTop applied
         }
       }, 500);
     }

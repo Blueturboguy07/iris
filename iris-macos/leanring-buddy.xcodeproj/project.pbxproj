@@ -419,9 +419,6 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "leanring-buddy/Info.plist";
-				INFOPLIST_KEY_AnthropicAPIKey = "UPSTREAM-KEY-SCRUBBED";
-				INFOPLIST_KEY_AnthropicAPIURL = "https://api.anthropic.com/v1/messages";
-				INFOPLIST_KEY_AnthropicModel = "claude-sonnet-4-6";
 				INFOPLIST_KEY_CFBundleDisplayName = Clicky;
 				INFOPLIST_KEY_CFBundleName = Clicky;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -460,9 +457,6 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "leanring-buddy/Info.plist";
-				INFOPLIST_KEY_AnthropicAPIKey = "UPSTREAM-KEY-SCRUBBED";
-				INFOPLIST_KEY_AnthropicAPIURL = "https://api.anthropic.com/v1/messages";
-				INFOPLIST_KEY_AnthropicModel = "claude-sonnet-4-6";
 				INFOPLIST_KEY_CFBundleDisplayName = Clicky;
 				INFOPLIST_KEY_CFBundleName = Clicky;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";

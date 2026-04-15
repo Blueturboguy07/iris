@@ -24,8 +24,11 @@ You'll need at minimum an [Anthropic API key](https://console.anthropic.com/). O
 git clone https://github.com/tekram/clicky-windows.git
 cd clicky-windows
 npm install
+npx tsc
 npm run dev
 ```
+
+> **Note:** `npm run dev` does not compile TypeScript for you. You must run `npx tsc` before the first launch and after every source change, or run `npx tsc --watch` in a second terminal.
 
 Open Settings from the tray icon and enter your API keys.
 
@@ -67,7 +70,7 @@ This is a Windows-native reimplementation of [farzaa/clicky](https://github.com/
 
 ## Contributing
 
-PRs welcome. See the plan in `PLAN-clicky-windows.md` for what's in progress.
+PRs welcome. See `docs/plans/` for what's in progress.
 
 ## License
 

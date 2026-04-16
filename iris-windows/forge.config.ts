@@ -1,4 +1,5 @@
 import type { ForgeConfig } from "@electron-forge/shared-types";
+import { MakerSquirrel } from "@electron-forge/maker-squirrel";
 import { MakerZIP } from "@electron-forge/maker-zip";
 
 const config: ForgeConfig = {
@@ -9,6 +10,12 @@ const config: ForgeConfig = {
     executableName: "clicky",
   },
   makers: [
+    new MakerSquirrel({
+      name: "Clicky",
+      setupExe: "Clicky-Setup.exe",
+      setupIcon: "assets/icon.ico",
+      noMsi: true,
+    }),
     new MakerZIP({}, ["win32"]),
   ],
   plugins: [

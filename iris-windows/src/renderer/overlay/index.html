@@ -66,6 +66,40 @@
       50% { transform: scale(2); opacity: 0; }
     }
 
+    /* Cursor buddy — always-on glow that follows mouse */
+    #cursor-buddy {
+      position: absolute;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: rgba(59, 130, 246, 0.6);
+      box-shadow: 0 0 16px rgba(59, 130, 246, 0.5), 0 0 32px rgba(59, 130, 246, 0.2);
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      z-index: 9998;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    #cursor-buddy.visible {
+      opacity: 1;
+    }
+
+    #cursor-buddy::after {
+      content: '';
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      background: rgba(59, 130, 246, 0.3);
+      animation: buddy-pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes buddy-pulse {
+      0%, 100% { transform: scale(1); opacity: 0.3; }
+      50% { transform: scale(1.8); opacity: 0; }
+    }
+
     /* Recording indicator */
     #recording-indicator {
       position: fixed;
@@ -106,6 +140,7 @@
   </style>
 </head>
 <body>
+  <div id="cursor-buddy"></div>
   <div id="cursor"></div>
   <div id="label"></div>
 
@@ -149,6 +184,25 @@
       }
 
       pointNext();
+    });
+
+    // Handle cursor buddy tracking
+    const cursorBuddy = document.getElementById('cursor-buddy');
+
+    window.clicky.onCursorBuddy((x, y) => {
+      cursorBuddy.style.left = x + 'px';
+      cursorBuddy.style.top = y + 'px';
+      if (!cursorBuddy.classList.contains('visible')) {
+        cursorBuddy.classList.add('visible');
+      }
+    });
+
+    window.clicky.onCursorBuddyVisible((visible) => {
+      if (visible) {
+        cursorBuddy.classList.add('visible');
+      } else {
+        cursorBuddy.classList.remove('visible');
+      }
     });
 
     // Handle recording state

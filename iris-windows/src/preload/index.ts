@@ -33,6 +33,19 @@ contextBridge.exposeInMainWorld("clicky", {
     });
   },
 
+  // Cursor buddy
+  onCursorBuddy: (callback: (x: number, y: number) => void) => {
+    ipcRenderer.on("overlay:cursor-buddy", (_event, x, y) => {
+      callback(x, y);
+    });
+  },
+
+  onCursorBuddyVisible: (callback: (visible: boolean) => void) => {
+    ipcRenderer.on("overlay:cursor-buddy-visible", (_event, visible) => {
+      callback(visible);
+    });
+  },
+
   // Settings
   getSettings: () => ipcRenderer.invoke("settings:getAll"),
   setSetting: (key: string, value: unknown) =>

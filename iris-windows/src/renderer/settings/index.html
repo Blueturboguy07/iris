@@ -318,6 +318,14 @@
     </label>
   </div>
 
+  <div class="toggle-row">
+    <label>Cursor buddy (blue glow follows mouse)</label>
+    <label class="toggle">
+      <input type="checkbox" id="cursorBuddyEnabled">
+      <span class="slider"></span>
+    </label>
+  </div>
+
   <div class="section-label">Compliance</div>
 
   <div class="toggle-row">
@@ -340,7 +348,7 @@
       'anthropicApiKey', 'openaiApiKey', 'openrouterApiKey', 'assemblyaiApiKey', 'elevenlabsApiKey',
       'proxyUrl', 'useProxy', 'pushToTalkHotkey', 'transcriptionProvider',
       'aiProvider', 'claudeModel', 'openaiModel', 'openrouterModel',
-      'alwaysOnTop', 'hipaaMode'
+      'alwaysOnTop', 'cursorBuddyEnabled', 'hipaaMode'
     ];
 
     window.clicky.getSettings().then((settings) => {

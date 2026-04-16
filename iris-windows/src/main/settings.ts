@@ -34,6 +34,7 @@ interface SettingsSchema {
 
   // UI
   alwaysOnTop: boolean;
+  cursorBuddyEnabled: boolean;
 
   // HIPAA
   hipaaMode: boolean;
@@ -54,6 +55,7 @@ const defaults: SettingsSchema = {
   openaiTtsVoice: "alloy",
   pushToTalkHotkey: "Ctrl+Shift",
   alwaysOnTop: false,
+  cursorBuddyEnabled: true,
   aiProvider: "anthropic",
   claudeModel: "claude-sonnet-4-5-20250929",
   openaiModel: "gpt-4o",

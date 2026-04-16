@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, shell } from "electron";
+import { app, BrowserWindow, globalShortcut, ipcMain, screen, shell } from "electron";
 import { createTray } from "./tray";
 import { HotkeyManager } from "./hotkey";
 import { AudioCapture } from "./audio";
@@ -12,6 +12,26 @@ let overlayWindow: BrowserWindow | null = null;
 
 const settings = new SettingsStore();
 let companion: CompanionManager;
+let cursorBuddyInterval: ReturnType<typeof setInterval> | null = null;
+
+function startCursorBuddy(): void {
+  if (cursorBuddyInterval) return;
+  cursorBuddyInterval = setInterval(() => {
+    if (!overlayWindow || overlayWindow.isDestroyed()) return;
+    const point = screen.getCursorScreenPoint();
+    overlayWindow.webContents.send("overlay:cursor-buddy", point.x, point.y);
+  }, 16);
+}
+
+function stopCursorBuddy(): void {
+  if (cursorBuddyInterval) {
+    clearInterval(cursorBuddyInterval);
+    cursorBuddyInterval = null;
+  }
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.webContents.send("overlay:cursor-buddy-visible", false);
+  }
+}
 
 function createOverlayWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -106,6 +126,12 @@ function setupIPC(): void {
     if (key === "alwaysOnTop" && chatWindow && !chatWindow.isDestroyed()) {
       chatWindow.setAlwaysOnTop(!!value, "screen-saver");
     }
+
+    // Toggle cursor buddy
+    if (key === "cursorBuddyEnabled") {
+      if (value) startCursorBuddy();
+      else stopCursorBuddy();
+    }
   });
 
   // Open URL in default browser
@@ -169,6 +195,11 @@ app.whenReady().then(() => {
   chatWindow.on("closed", () => {
     chatWindow = null;
   });
+
+  // Start cursor buddy if enabled
+  if (settings.get("cursorBuddyEnabled")) {
+    startCursorBuddy();
+  }
 
   console.log("Clicky Windows started — running in system tray");
 });

@@ -137,6 +137,39 @@
       0%, 100% { opacity: 1; }
       50% { opacity: 0.3; }
     }
+
+    /* Processing indicator */
+    #processing-indicator {
+      position: fixed;
+      top: 20px;
+      left: 20px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 8px 16px;
+      border-radius: 20px;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+    }
+
+    #processing-indicator.active {
+      opacity: 1;
+    }
+
+    #processing-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #638cff;
+      animation: blink 1s ease-in-out infinite;
+    }
+
+    #processing-text {
+      color: white;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 13px;
+    }
   </style>
 </head>
 <body>
@@ -147,6 +180,11 @@
   <div id="recording-indicator">
     <div id="recording-dot"></div>
     <span id="recording-text">Listening...</span>
+  </div>
+
+  <div id="processing-indicator">
+    <div id="processing-dot"></div>
+    <span id="processing-text">Reading screen...</span>
   </div>
 
   <script>
@@ -212,6 +250,21 @@
         cursorBuddy.classList.remove('visible');
       }
     });
+
+    // Handle processing stages
+    const processingIndicator = document.getElementById('processing-indicator');
+    const processingText = document.getElementById('processing-text');
+
+    if (window.clicky && window.clicky.onStage) {
+      window.clicky.onStage(({ stage, label }) => {
+        if (stage === 'done' || stage === 'speaking') {
+          processingIndicator.classList.remove('active');
+        } else {
+          processingText.textContent = label;
+          processingIndicator.classList.add('active');
+        }
+      });
+    }
 
     // Handle recording state
     if (window.clicky && window.clicky.onRecordingChanged) {

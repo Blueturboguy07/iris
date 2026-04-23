@@ -46,6 +46,13 @@ contextBridge.exposeInMainWorld("clicky", {
     });
   },
 
+  // Processing stage updates from companion pipeline
+  onStage: (callback: (data: { stage: string; label: string }) => void) => {
+    ipcRenderer.on("companion:stage", (_event, data) => {
+      callback(data);
+    });
+  },
+
   // Settings
   getSettings: () => ipcRenderer.invoke("settings:getAll"),
   setSetting: (key: string, value: unknown) =>

@@ -56,17 +56,28 @@ export class CompanionManager {
     return new ClaudeService(this.settings);
   }
 
+  private broadcastStage(stage: string, label: string): void {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) {
+        win.webContents.send("companion:stage", { stage, label });
+      }
+    }
+  }
+
   /**
    * Process a user query: capture screen, send to AI, speak response.
    */
   async processQuery(transcript: string): Promise<string> {
+    try {
     // 1. Capture screenshots
+    this.broadcastStage("capturing", "Reading screen...");
     const screenshots = await this.screenCapture.captureAllScreens();
     const cursorPos = this.screenCapture.getCursorPosition();
 
     // 2. Send to AI provider with conversation history
     this.conversationHistory.push({ role: "user", content: transcript });
 
+    this.broadcastStage("querying", "Analyzing...");
     const ai = this.getAIProvider();
     const response = await ai.query({
       transcript,
@@ -94,6 +105,7 @@ export class CompanionManager {
     const aiProviderName = this.settings.get("aiProvider");
     let refinedTags = rawTags;
     if (aiProviderName === "anthropic" && rawTags.length > 0) {
+      this.broadcastStage("refining", "Refining points...");
       const claude = new ClaudeService(this.settings);
       refinedTags = await Promise.all(
         rawTags.map(async (tag) => {
@@ -175,6 +187,7 @@ export class CompanionManager {
     const ttsOn = this.settings.get("ttsEnabled");
     const ttsProv = this.settings.get("ttsProvider");
     if (ttsOn && spokenText) {
+      this.broadcastStage("speaking", "Speaking...");
       try {
         const tts = createTTSProvider(this.settings);
         tts.speak(spokenText).catch((err) => {
@@ -186,6 +199,9 @@ export class CompanionManager {
     }
 
     return response.text;
+    } finally {
+      this.broadcastStage("done", "");
+    }
   }
 
   private parseRawPointTags(

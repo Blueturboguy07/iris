@@ -1178,7 +1178,6 @@
 
       addMessage(text, 'user');
       addLoading();
-      showStatus('Thinking...', 'thinking');
 
       try {
         const response = await window.clicky.sendQuery(text);
@@ -1230,6 +1229,19 @@
 
     function hideStatus() {
       statusBar.className = 'status-bar hidden';
+    }
+
+    // Stage events from companion pipeline drive status bar text
+    if (window.clicky.onStage) {
+      window.clicky.onStage(({ stage, label }) => {
+        if (stage === 'done') {
+          hideStatus();
+        } else if (stage === 'speaking') {
+          showStatus(label, 'speaking');
+        } else {
+          showStatus(label, 'thinking');
+        }
+      });
     }
 
     // ── Push-to-talk mic recording ──
@@ -1307,7 +1319,6 @@
               addMessage('Voice error: ' + result.error, 'system');
               hideStatus();
             } else {
-              showStatus('Thinking...', 'thinking');
               // Replace the "(voice message)" with actual transcript
               const userMsgs = messages.querySelectorAll('.msg.user');
               const lastUser = userMsgs[userMsgs.length - 1];

@@ -65,9 +65,20 @@ gh secret set APPLE_APP_SPECIFIC_PASSWORD --repo Blueturboguy07/publik
 gh secret set APPLE_TEAM_ID --repo Blueturboguy07/publik   # R5R3ZS54LV
 ```
 
-`CSC_LINK` is the base64 of the Developer ID `.p12`. The app-specific password
-comes from appleid.apple.com → Sign-In and Security → App-Specific Passwords; it
-is not the Apple ID password.
+`CSC_LINK` is the base64 of the Developer ID `.p12` — export it from Keychain
+Access, the certificate is already installed. The app-specific password comes
+from appleid.apple.com → Sign-In and Security → App-Specific Passwords; it is
+not the Apple ID password.
+
+**Or an App Store Connect API key instead.** `notarytool` accepts
+`--key <p8> --key-id <id> --issuer <uuid>` in place of the Apple ID pair, and
+Tauri reads the same three as `APPLE_API_KEY_PATH`, `APPLE_API_KEY` and
+`APPLE_API_ISSUER`. There are already four `AuthKey_*.p8` files in `~/Downloads`;
+none of them authenticate as an *individual* key, so they are team keys and need
+the Issuer ID from App Store Connect → Users and Access → Integrations, shown at
+the top of that page. That value identifies the team rather than authenticating
+anyone, so it is the cheaper thing to hand over — but the key also has to hold a
+role that permits notarization, which is worth confirming before relying on it.
 
 Once they are set, `gh workflow run iris-release.yml` builds signed, notarized
 and stapled, and the verify step runs with `--require-notarized`, so a release
@@ -75,17 +86,74 @@ that would not open cannot pass.
 
 ## Windows
 
-**Unsigned. Needs a certificate that has to be bought.**
+**Unsigned. There is a free path to zero warnings, and it is not a certificate.**
 
-### Why there is no .pfx path
+### How normal Windows apps actually avoid the warning
 
-Since June 2023 the CA/Browser Forum baseline requires code-signing private keys
-to live on hardware meeting FIPS 140-2 Level 2 or equivalent. A certificate file
-you can hold and hand to a CI runner no longer exists for new certificates. So
-the options are a physical USB token (unusable in CI) or a cloud signing service
-that holds the key in an HSM and signs on request.
+Two ways, and only one of them is available to a new app.
 
-### The recommendation: Azure Artifact Signing
+**The Microsoft Store.** Store apps are re-signed by Microsoft and carry full
+reputation, so a Store install never shows SmartScreen at all. Microsoft's own
+guidance leads with this: *"The simplest way to avoid SmartScreen warnings is to
+publish through the Microsoft Store."* This is how a brand-new app gets a clean
+first install on day one.
+
+**Volume, over months.** Everything downloaded directly — Chrome, Zoom, Discord —
+is warning-free because its signing certificate has years of clean installs
+behind it. Microsoft is explicit that there is no shortcut: reputation *"can take
+several weeks and hundreds of clean installs from a wide audience"*, and for
+consumer endpoints there is **no mechanism to submit a file for review** to speed
+it up. (An earlier draft of this document claimed otherwise. The malware-analysis
+submission portal exists, but Microsoft scopes it to enterprise and managed
+deployments, not to consumer SmartScreen reputation.)
+
+So the honest ranking for someone arriving from a link with no patience:
+
+| Route | First install | Cost |
+| --- | --- | --- |
+| Microsoft Store (MSIX) | **No warning, ever** | Free |
+| Signed direct download | Warning until reputation builds, publisher name shown | ~$10/mo |
+| Unsigned direct download (today) | Warning every release, forever | Free |
+
+The gap between rows two and three is bigger than it looks: an unsigned file
+builds reputation **per file hash**, so every release starts at zero and the
+warning never goes away. A signed one builds reputation on the certificate, which
+carries across releases. And on Windows 11, Smart App Control blocks unsigned
+executables outright rather than offering a "Run anyway".
+
+### The recommendation: Store first, signed download second
+
+**Microsoft Store developer registration is now free** — the $19 individual and
+$99 company fees were both removed in 2026, replaced by an identity check
+(government ID plus a selfie). **Microsoft signs the MSIX during certification**,
+so the Store route needs no certificate purchase at all.
+
+Microsoft ships an official CLI with a Tauri-specific guide, updated 2026-07-23:
+
+```powershell
+winget install microsoft.winappcli --source winget
+winapp init                    # writes Package.appxmanifest + Assets
+winapp pack .\dist --cert .\devcert.pfx   # local testing only
+```
+
+Three things to know before committing to it:
+
+1. **Tauri does not emit MSIX.** It builds NSIS and MSI only. `winapp pack` (or
+   the community `@choochmeque/tauri-windows-bundle`) wraps the release exe.
+2. **The `iris://` protocol has to move into `Package.appxmanifest`.** Tauri's
+   deep-link plugin registers the scheme through the NSIS installer's registry
+   writes; an MSIX declares protocol activation in its manifest instead. Without
+   that, the handoff from the website silently stops working — which is the whole
+   reason the desktop app exists.
+3. **Store certification adds latency** to every release, and a separate package
+   per architecture (x64, Arm64).
+
+A direct download still has to exist — publikhq.com's whole pitch is a download
+button, and sending someone to the Store is a detour. So the intended end state
+is both: a Store listing as the frictionless Windows route, and a signed direct
+download for everyone who will not use the Store.
+
+### For the direct download: Azure Artifact Signing
 
 Formerly Trusted Signing. **~$9.99/month** on the Basic tier (up to 5,000
 signatures). Keys stay in Microsoft's HSM, so it works from a GitHub runner with
@@ -97,55 +165,18 @@ the individual route is the relevant one here.
 **Check availability first.** Microsoft capped new subscriptions during the
 public preview, so eligibility is worth confirming before planning around it.
 
-### On SmartScreen — the "frictionless for a consumer" question
+#### Why there is no .pfx path
 
-There is no option that buys an instant clean install on Windows. Microsoft
-removed EV's automatic SmartScreen bypass in 2024, so an EV certificate at
-$300–700/year now behaves like an OV one for reputation purposes. What actually
-removes the warning is accumulated reputation, and the important detail is
-**what the reputation attaches to**:
+Since June 2023 the CA/Browser Forum baseline requires code-signing private keys
+to live on hardware meeting FIPS 140-2 Level 2 or equivalent. A certificate file
+you can hold and hand to a CI runner no longer exists for new certificates. So
+the options are a physical USB token (unusable in CI) or a cloud signing service
+that holds the key in an HSM and signs on request.
 
-- **Unsigned** — reputation accrues per file hash. Every release starts from
-  zero, so the warning never goes away. This is the worst outcome, and it is
-  where Iris is today.
-- **Signed with any stable certificate** — reputation accrues to the signing
-  identity and carries across releases. The warning fades as downloads
-  accumulate and does not come back with each new version.
-
-So the least-friction path is not the most expensive certificate; it is *any*
-certificate, used consistently, as early as possible, because the clock starts
-when signing starts. Azure Artifact Signing is the cheapest way to start that
-clock and the only one that signs cleanly from CI. Submitting the app through
-Microsoft's malware-analysis form once it is signed can shorten the wait.
-
-An OV certificate from Sectigo or DigiCert (~$100–300/year) is a valid fallback
-if Azure eligibility does not work out, but the key still has to live on their
-cloud HSM or a shipped USB token, which means either extra per-signature cost or
-no CI signing at all.
-
-### The workflow is already wired
-
-`.github/workflows/iris-release.yml` installs `trusted-signing-cli` and layers a
-`signCommand` onto the Tauri config with `--config` when the Azure secrets are
-present, and builds unsigned when they are not — so nothing breaks while this is
-still unpurchased. When ready:
-
-```
-gh secret set AZURE_CLIENT_ID --repo Blueturboguy07/publik
-gh secret set AZURE_CLIENT_SECRET --repo Blueturboguy07/publik
-gh secret set AZURE_TENANT_ID --repo Blueturboguy07/publik
-gh secret set AZURE_SIGNING_ENDPOINT --repo Blueturboguy07/publik   # e.g. https://wus2.codesigning.azure.net
-gh secret set AZURE_SIGNING_ACCOUNT --repo Blueturboguy07/publik
-gh secret set AZURE_SIGNING_PROFILE --repo Blueturboguy07/publik
-```
-
-The client ID, secret and tenant come from an Entra ID app registration granted
-the Trusted Signing Certificate Profile Signer role on the signing account.
-
-`scripts/verify-iris-windows.ps1` then runs with `-RequireSigned`, which checks
-the installer's signature, that the payload *inside* it is signed too, and that
-the signature carries a trusted timestamp — without one, every copy already
-downloaded stops validating the day the certificate expires.
+EV certificates are worth naming only to rule them out: signing files with one
+used to grant positive SmartScreen reputation by default, and that behaviour was
+removed in 2024. Microsoft's current wording is that paying a premium for EV
+solely to avoid SmartScreen warnings is no longer justified.
 
 ## The other apps
 

@@ -18,13 +18,17 @@ cd "$(dirname "$0")/.."
 BUNDLE_DIR="iris-desktop/src-tauri/target"
 DMG=""
 APP=""
+REQUIRE_SIGNED=0
 REQUIRE_NOTARIZED=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dmg) DMG="$2"; shift 2 ;;
     --app) APP="$2"; shift 2 ;;
-    --require-notarized) REQUIRE_NOTARIZED=1; shift ;;
+    --require-signed) REQUIRE_SIGNED=1; shift ;;
+    # Nothing can be notarized without being signed first, so asking for one
+    # asks for the other.
+    --require-notarized) REQUIRE_NOTARIZED=1; REQUIRE_SIGNED=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -53,29 +57,41 @@ else
   fail "codesign --verify rejected the bundle"
 fi
 
+# A build with no certificate configured is ad-hoc on purpose — that is the
+# fallback path, and it is what a fork or a secret-less CI run produces. Only
+# a run that asked for a real signature treats it as a failure; otherwise the
+# distribution checks are reported and skipped.
 SIGN_INFO="$(codesign --display --verbose=4 "$APP" 2>&1)"
 AUTHORITY="$(printf '%s\n' "$SIGN_INFO" | awk -F'=' '/^Authority=/ {print $2; exit}')"
+ADHOC=0
 if printf '%s' "$AUTHORITY" | grep -q "^Developer ID Application"; then
   pass "signed by $AUTHORITY"
 elif printf '%s\n' "$SIGN_INFO" | grep -q "Signature=adhoc"; then
-  fail "ad-hoc signed — this build cannot be distributed"
+  ADHOC=1
+  if [ "$REQUIRE_SIGNED" = "1" ]; then
+    fail "ad-hoc signed — this build cannot be distributed"
+  else
+    note "ad-hoc signed (no certificate configured); distribution checks skipped"
+  fi
 else
   fail "unexpected signing authority: ${AUTHORITY:-none}"
 fi
 
-# The runtime flag is what notarization checks for; a signature without it is
-# accepted locally and then rejected by Apple at submission time.
-if printf '%s\n' "$SIGN_INFO" | grep -q "flags=.*runtime"; then
-  pass "hardened runtime is enabled"
-else
-  fail "hardened runtime is missing"
-fi
+if [ "$ADHOC" = "0" ]; then
+  # The runtime flag is what notarization checks for; a signature without it is
+  # accepted locally and then rejected by Apple at submission time.
+  if printf '%s\n' "$SIGN_INFO" | grep -q "flags=.*runtime"; then
+    pass "hardened runtime is enabled"
+  else
+    fail "hardened runtime is missing"
+  fi
 
-TEAM="$(printf '%s\n' "$SIGN_INFO" | awk -F'=' '/^TeamIdentifier=/ {print $2; exit}')"
-if [ -n "$TEAM" ] && [ "$TEAM" != "not set" ]; then
-  pass "team identifier is $TEAM"
-else
-  fail "no team identifier — Gatekeeper cannot attribute this build"
+  TEAM="$(printf '%s\n' "$SIGN_INFO" | awk -F'=' '/^TeamIdentifier=/ {print $2; exit}')"
+  if [ -n "$TEAM" ] && [ "$TEAM" != "not set" ]; then
+    pass "team identifier is $TEAM"
+  else
+    fail "no team identifier — Gatekeeper cannot attribute this build"
+  fi
 fi
 
 echo
@@ -185,6 +201,8 @@ echo
 if [ "$FAILURES" -eq 0 ]; then
   if [ "${GATEKEEPER_OK:-0}" = "1" ]; then
     echo "Ready to distribute: a downloaded copy opens with no warning."
+  elif [ "$ADHOC" = "1" ]; then
+    echo "Builds and runs. Not signed, so this build is for local use only."
   else
     echo "Builds and runs, but is not distributable until it is notarized."
   fi

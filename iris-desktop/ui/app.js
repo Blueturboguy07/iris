@@ -106,6 +106,8 @@
     platform: "macos",
     branch: null,
     requestedVersion: null,
+    // Set by an iris:// handoff and consumed once by the next loadGuide().
+    resume: null,
     stepIndex: 0,
     completed: false,
     actionReady: false,
@@ -580,7 +582,7 @@
     return state.branch.steps[state.stepIndex] || null;
   }
 
-  function setPlatform(platform, { restore = true, key = null } = {}) {
+  function setPlatform(platform, { restore = true, key = null, step = null } = {}) {
     if (!PLATFORM_VALUES.has(platform) || !state.guide) return;
     const nextBranch =
       (key ? state.guide.branches.find((branch) => branchKey(branch) === key) : null) ||
@@ -597,6 +599,17 @@
     state.missingTools = [];
     localStorage.setItem(STORAGE.lastPlatform, state.platform);
     if (restore) loadProgress();
+    if (Number.isInteger(step)) {
+      // A handoff carries the reader's place with it. The website is where they
+      // just were, so its position wins over anything this app had stored for
+      // the same branch.
+      state.stepIndex = Math.min(
+        Math.max(0, step),
+        Math.max(0, nextBranch.steps.length - 1)
+      );
+      state.completed = false;
+      saveProgress();
+    }
     renderPlatformSwitch();
     if (state.completed) {
       renderComplete();
@@ -944,10 +957,27 @@
       if (state.guide.branches.length === 0) {
         throw new Error("This guide has no reviewed desktop steps.");
       }
-      const preferred = state.guide.branches.some((branch) => branch.platform === state.platform)
-        ? state.platform
-        : state.guide.branches[0].platform;
-      setPlatform(preferred);
+      // A handoff names the exact branch the reader was on. Falling back to the
+      // detected platform would drop a "Mac + Android" reader into the iPhone
+      // steps, which is a different toolchain from the first command onwards.
+      const resume = state.resume;
+      state.resume = null;
+      const resumeBranch = resume
+        ? state.guide.branches.find((branch) => branchKey(branch) === resume.branch)
+        : null;
+      if (resumeBranch) {
+        setPlatform(resumeBranch.platform, {
+          key: resume.branch,
+          step: resume.step,
+        });
+      } else {
+        const preferred = state.guide.branches.some(
+          (branch) => branch.platform === state.platform
+        )
+          ? state.platform
+          : state.guide.branches[0].platform;
+        setPlatform(preferred);
+      }
     } catch (error) {
       if (error?.name === "AbortError") return;
       renderError(
@@ -1284,6 +1314,19 @@
     showToast("Quit is available in the desktop build.");
   }
 
+  /** `computer:phone`, matching branchKey() and the shell's own validation. */
+  function normalizeBranchKey(value) {
+    return typeof value === "string" && /^(macos|windows):(ios|android|desktop)$/.test(value)
+      ? value
+      : null;
+  }
+
+  /** Step 0 is the first step, so absent and zero must not be conflated. */
+  function normalizeStep(value) {
+    const step = Number(value);
+    return Number.isInteger(step) && step >= 0 && step <= 500 ? step : null;
+  }
+
   function parseDeepLink(input) {
     const raw = input?.payload ?? input?.detail ?? input;
     if (Array.isArray(raw)) return parseDeepLink(raw[0]);
@@ -1296,9 +1339,13 @@
           Number.isInteger(Number(raw.version)) && Number(raw.version) > 0
             ? Number(raw.version)
             : null,
+        branch: normalizeBranchKey(raw.branch),
+        step: normalizeStep(raw.step),
       };
     }
-    if (typeof raw !== "string") return { slug: null, platform: null, version: null };
+    if (typeof raw !== "string") {
+      return { slug: null, platform: null, version: null, branch: null, step: null };
+    }
     try {
       const url = new URL(raw);
       const parts = url.pathname.split("/").filter(Boolean);
@@ -1311,9 +1358,15 @@
         : null;
       const rawVersion = Number(url.searchParams.get("version"));
       const version = Number.isInteger(rawVersion) && rawVersion > 0 ? rawVersion : null;
-      return { slug, platform, version };
+      return {
+        slug,
+        platform,
+        version,
+        branch: normalizeBranchKey(url.searchParams.get("branch")),
+        step: normalizeStep(url.searchParams.get("step")),
+      };
     } catch {
-      return { slug: normalizeSlug(raw), platform: null, version: null };
+      return { slug: normalizeSlug(raw), platform: null, version: null, branch: null, step: null };
     }
   }
 
@@ -1325,8 +1378,21 @@
     }
     if (parsed.platform) state.platform = parsed.platform;
     state.requestedVersion = parsed.version;
+    // A step without a branch is meaningless — step 6 of which toolchain? —
+    // so the pair is only honoured together.
+    state.resume = parsed.branch ? { branch: parsed.branch, step: parsed.step } : null;
     await loadGuide(parsed.slug);
-    showToast(`Opened ${parsed.slug} guide.`);
+    // Say "picked up" only if the branch actually matched. A link built against
+    // a guide that has since changed shape should not claim to have resumed.
+    const resumed =
+      Boolean(parsed.branch) &&
+      Boolean(state.branch) &&
+      branchKey(state.branch) === parsed.branch;
+    showToast(
+      resumed
+        ? `Picked up ${parsed.slug} where you left off.`
+        : `Opened ${parsed.slug} guide.`
+    );
   }
 
   async function openExternalUrl(value) {

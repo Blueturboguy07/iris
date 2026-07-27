@@ -8,7 +8,8 @@ runs independently from Iris.
 ## Current prototype
 
 - macOS 12+ and Windows shell code
-- `iris://guide/<slug>?version=<number>` handoff from Publik
+- `iris://guide/<slug>?version=<n>&branch=<computer>:<phone>&step=<n>` handoff
+  from Publik, which resumes at the reader's place rather than restarting them
 - one active macOS/Windows guide branch at a time
 - tray Show, Hide, and Quit controls
 - always-on-top animated guide window
@@ -32,29 +33,44 @@ pnpm iris:check
 pnpm iris:dev
 ```
 
-Build a locally usable, ad-hoc-signed Apple Silicon app:
+Build a macOS app. With no certificate this is ad-hoc signed and only usable
+locally; with `APPLE_SIGNING_IDENTITY` set it is a real Developer ID build:
 
 ```bash
 pnpm iris:build:mac
-open iris-desktop/src-tauri/target/release/bundle/macos/Iris.app
+pnpm iris:verify:mac
 ```
 
-On Windows, build the NSIS installer with:
+`iris:verify:mac` is the one that matters. It mounts the dmg, marks the copy
+quarantined the way a browser download would, and asks Gatekeeper the same
+question it asks at double-click time — a bundle can be perfectly signed and
+still be refused the moment it arrives with a download flag on it.
+
+On Windows, build the NSIS installer and check it the same way:
 
 ```powershell
 pnpm iris:build:windows
+pwsh scripts/verify-iris-windows.ps1
 ```
 
-The Windows implementation is compile-gated in this repository but must still be
-built and exercised on a Windows machine before distribution.
+The Windows path is exercised on a `windows-latest` runner by
+`.github/workflows/iris-release.yml`, which installs what it built and launches
+it. See `docs/code-signing.md` for what each build path needs.
 
 ## Security boundary
 
 The Tauri shell has no shell plugin or arbitrary executable/argument command.
-Guide links are parsed as one lowercase slug plus one positive version. The
+Guide links are parsed as one lowercase slug, one positive version, and an
+optional resume point whose branch and step are both validated here and again
+against the guide once it is fetched. Unrecognised parameters are rejected
+rather than ignored. Accepting a resume point is safe only because Iris never
+executes a step — the worst a crafted link can do is display one out of order.
+The
 desktop client accepts guide APIs only from Publik’s HTTPS domains or localhost
 for development. External navigation is restricted to reviewed HTTPS hosts and
 local loopback URLs.
 
-Production distribution still needs Apple Developer signing/notarization and a
-Windows signing certificate. Local source builds do not need those credentials.
+macOS builds are signed with a Developer ID under the hardened runtime and
+notarize in CI when the Apple secrets are present. Windows is still unsigned and
+needs a purchased certificate — `docs/code-signing.md` has the options and the
+remaining steps. Local source builds need neither.

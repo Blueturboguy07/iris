@@ -26,11 +26,17 @@ const GUIDE_EVENT: &str = "iris-guide-opened";
 const REJECTED_LINK_EVENT: &str = "iris-deep-link-rejected";
 const MAX_COMMAND_OUTPUT: usize = 512;
 
+/// A handoff from the website. `branch` and `step` are what make it a handoff
+/// rather than a bookmark: without them the desktop app reopens the guide at
+/// step one, on whichever branch it happened to use last, which for a mobile
+/// guide is frequently the wrong phone entirely.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GuideDeepLink {
     slug: String,
     version: u32,
+    branch: Option<String>,
+    step: Option<u32>,
 }
 
 #[derive(Default)]
@@ -205,25 +211,66 @@ fn parse_guide_deep_link(url: &Url) -> Result<GuideDeepLink, &'static str> {
         return Err("invalid Iris guide slug");
     }
 
+    // Every parameter is named, known, and allowed at most once. Anything else
+    // is rejected outright rather than ignored, so a crafted link cannot smuggle
+    // in a field a later version of the app might start reading.
     let mut version = None;
+    let mut branch = None;
+    let mut step = None;
     for (key, value) in url.query_pairs() {
-        if key != "version" || version.is_some() {
-            return Err("Iris guide links accept only one version parameter");
+        match key.as_ref() {
+            "version" => {
+                if version.is_some() {
+                    return Err("Iris guide links accept only one version parameter");
+                }
+                let parsed = value
+                    .parse::<u32>()
+                    .map_err(|_| "invalid Iris guide version")?;
+                if parsed == 0 {
+                    return Err("invalid Iris guide version");
+                }
+                version = Some(parsed);
+            }
+            "branch" => {
+                if branch.is_some() {
+                    return Err("Iris guide links accept only one branch parameter");
+                }
+                if !valid_branch_key(&value) {
+                    return Err("invalid Iris guide branch");
+                }
+                branch = Some(value.into_owned());
+            }
+            "step" => {
+                if step.is_some() {
+                    return Err("Iris guide links accept only one step parameter");
+                }
+                // The web panel can be many steps ahead, but nothing sane is
+                // past a hundred; the UI clamps to the real count anyway.
+                let parsed = value.parse::<u32>().map_err(|_| "invalid Iris guide step")?;
+                if parsed > 500 {
+                    return Err("invalid Iris guide step");
+                }
+                step = Some(parsed);
+            }
+            _ => return Err("unsupported Iris guide parameter"),
         }
-
-        let parsed = value
-            .parse::<u32>()
-            .map_err(|_| "invalid Iris guide version")?;
-        if parsed == 0 {
-            return Err("invalid Iris guide version");
-        }
-        version = Some(parsed);
     }
 
     Ok(GuideDeepLink {
         slug: slug.to_owned(),
         version: version.ok_or("missing Iris guide version")?,
+        branch,
+        step,
     })
+}
+
+/// `computer:phone` exactly as the guide library writes it, so the desktop app
+/// selects the same branch the reader was already following.
+fn valid_branch_key(value: &str) -> bool {
+    let Some((platform, target)) = value.split_once(':') else {
+        return false;
+    };
+    matches!(platform, "macos" | "windows") && matches!(target, "ios" | "android" | "desktop")
 }
 
 fn valid_slug(slug: &str) -> bool {
@@ -839,6 +886,25 @@ mod tests {
             parse_guide_deep_link(&Url::parse("iris://guide/cue?version=7").unwrap()).unwrap();
         assert_eq!(parsed.slug, "cue");
         assert_eq!(parsed.version, 7);
+        assert_eq!(parsed.branch, None);
+        assert_eq!(parsed.step, None);
+    }
+
+    #[test]
+    fn carries_the_reader_s_place_across_the_handoff() {
+        let parsed = parse_guide_deep_link(
+            &Url::parse("iris://guide/lunara?version=1&branch=macos:android&step=6").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parsed.slug, "lunara");
+        assert_eq!(parsed.branch.as_deref(), Some("macos:android"));
+        assert_eq!(parsed.step, Some(6));
+
+        // Step zero is the first step, not a missing one.
+        let first =
+            parse_guide_deep_link(&Url::parse("iris://guide/cue?version=3&step=0").unwrap())
+                .unwrap();
+        assert_eq!(first.step, Some(0));
     }
 
     #[test]
@@ -851,8 +917,20 @@ mod tests {
             "iris://guide/cue?version=1&version=2",
             "iris://guide/cue?version=1&platform=macos",
             "https://publikhq.com/cue?version=1",
+            // A resume point still has to be one of the shapes the guide
+            // library can actually produce.
+            "iris://guide/cue?version=1&branch=linux:desktop",
+            "iris://guide/cue?version=1&branch=macos",
+            "iris://guide/cue?version=1&branch=macos:watch",
+            "iris://guide/cue?version=1&branch=macos:desktop&branch=windows:desktop",
+            "iris://guide/cue?version=1&step=-1",
+            "iris://guide/cue?version=1&step=9000",
+            "iris://guide/cue?version=1&step=2&step=3",
         ] {
-            assert!(parse_guide_deep_link(&Url::parse(value).unwrap()).is_err());
+            assert!(
+                parse_guide_deep_link(&Url::parse(value).unwrap()).is_err(),
+                "should have rejected {value}"
+            );
         }
     }
 

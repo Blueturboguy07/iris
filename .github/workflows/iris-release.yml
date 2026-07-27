@@ -112,7 +112,11 @@ jobs:
         run: |
           if [ "$SIGNED" = "true" ] && [ -n "$NOTARY_ID" ]; then
             scripts/verify-iris-macos.sh --require-notarized
+          elif [ "$SIGNED" = "true" ]; then
+            scripts/verify-iris-macos.sh --require-signed
           else
+            # No certificate configured: still prove the thing builds and opens,
+            # just do not claim it is distributable.
             scripts/verify-iris-macos.sh
           fi
 

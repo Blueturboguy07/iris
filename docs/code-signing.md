@@ -7,7 +7,7 @@ because the reader concludes the site ships malware.
 
 ## macOS
 
-**Working, except notarization.**
+**Done. A downloaded copy opens with no warning.**
 
 `scripts/build-iris-macos.sh` picks one of two paths, the same way NitroAI's
 `electron-builder.cjs` does:
@@ -26,7 +26,8 @@ double-click time. Finally it launches the binary and confirms it stays up —
 passing assessment and actually starting are different failures.
 
 Verified locally on 2026-07-27 against
-`Developer ID Application: Mann Bellani (R5R3ZS54LV)`:
+`Developer ID Application: Mann Bellani (R5R3ZS54LV)`, Apple ID
+`the Apple ID used for signing`:
 
 ```
 Signature
@@ -34,14 +35,28 @@ Signature
   PASS  signed by Developer ID Application: Mann Bellani (R5R3ZS54LV)
   PASS  hardened runtime is enabled
   PASS  team identifier is R5R3ZS54LV
+Notarization
+  PASS  a notarization ticket is stapled to the app
+  PASS  the dmg carries its own ticket
 Install and open
   PASS  the dmg mounts
-  ----  Gatekeeper rejects a quarantined copy: source=Unnotarized Developer ID
+  PASS  Gatekeeper accepts a quarantined copy
   PASS  the app starts and stays running (10s)
+
+Ready to distribute: a downloaded copy opens with no warning.
 ```
 
-That one remaining line is the whole gap. Signing alone is not enough on any
-current macOS: without a notarization ticket a downloaded copy is refused.
+### Tauri does not staple the dmg
+
+Worth knowing, because it is invisible until someone is offline. Tauri notarizes
+and staples the `.app`, then wraps it in a dmg which it signs but never submits.
+A dmg with no ticket of its own has to be checked against Apple over the
+network, so the download fails on a machine that is offline or behind a filter,
+and the failure looks like a corrupt file rather than a policy decision.
+
+`build-iris-macos.sh` submits and staples the dmg itself after the bundler
+finishes. The verify script checks for both tickets separately, which is how
+this was found in the first place — the app passed and the dmg did not.
 
 ### Entitlements
 
@@ -51,11 +66,12 @@ and the web content runs in Apple's own out-of-process service — so it needs
 none of the JIT or unsigned-memory holes an Electron app does. This was checked,
 not assumed: the signed build launches and runs with an empty entitlements file.
 
-### What is left
+### What is left: the same thing, in CI
 
-Five secrets on `Blueturboguy07/publik`. They are the same five values NitroAI
-already has, and the workflow deliberately reuses NitroAI's secret names so they
-can be copied across:
+Local builds notarize. The release workflow cannot yet, because the repository
+has no secrets. Five of them, the same five values NitroAI already has — the
+workflow deliberately reuses NitroAI's secret names so they copy straight
+across:
 
 ```
 gh secret set CSC_LINK --repo Blueturboguy07/publik

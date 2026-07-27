@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Iris runs under the hardened runtime, which notarization requires.
+
+  This file is deliberately empty. Iris is a Rust binary plus a WKWebView: the
+  web content runs in Apple's own out-of-process WebContent service, so the host
+  app needs no JIT or unsigned-memory exception the way an Electron app does.
+  It links only system frameworks, loads no third-party dylibs, and reads no
+  DYLD_* variables, so library validation and the DYLD restrictions can stay on.
+
+  `git` and `node` are launched as ordinary child processes, which the hardened
+  runtime allows without an entitlement — they inherit nothing from Iris.
+
+  Add an entitlement here only with a note saying which call needs it. Every one
+  of these is a hole in the runtime protections that notarization is checking.
+-->
+<plist version="1.0">
+<dict>
+</dict>
+</plist>

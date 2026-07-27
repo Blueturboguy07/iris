@@ -1,0 +1,35 @@
+[package]
+name = "iris-desktop"
+version = "0.1.3"
+description = "Iris's guide-only desktop overlay"
+authors = ["Publik"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+dirs = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
+tauri-plugin-deep-link = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+url = "2"
+which = "8"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", features = [
+  "NSRunningApplication",
+  "NSWorkspace",
+] }
+objc2-foundation = { version = "0.3.2", features = ["NSString", "NSURL"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.60", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
+] }

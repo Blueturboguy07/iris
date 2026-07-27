@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b0b0d" />
+    <meta name="iris-api-base" content="https://publikhq.com" />
+    <title>Iris</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell" id="app-shell">
+      <header class="titlebar" data-tauri-drag-region>
+        <span class="drag-grip" data-tauri-drag-region aria-hidden="true">
+          <i></i><i></i><i></i><i></i><i></i><i></i>
+        </span>
+
+        <div class="titlebar__identity" data-tauri-drag-region>
+          <div class="iris-eye" id="iris-eye" data-mood="idle" aria-hidden="true">
+            <span class="iris-eye__progress">
+              <span class="iris-eye__shell">
+                <span class="iris-eye__lid">
+                  <span class="iris-eye__iris">
+                    <span class="iris-eye__pupil"><span class="iris-eye__glint"></span></span>
+                  </span>
+                </span>
+              </span>
+            </span>
+            <span class="iris-eye__satellite"></span>
+          </div>
+          <span class="titlebar__guide" id="guide-title">Iris</span>
+          <button class="titlebar__step" id="step-counter" type="button" disabled>
+            Loading
+          </button>
+        </div>
+
+        <div class="titlebar__actions">
+          <button
+            class="icon-button"
+            id="settings-button"
+            type="button"
+            aria-label="Open Iris menu"
+            aria-controls="settings-panel"
+            aria-expanded="false"
+            title="More"
+          >
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <circle cx="4" cy="10" r="1.35"></circle>
+              <circle cx="10" cy="10" r="1.35"></circle>
+              <circle cx="16" cy="10" r="1.35"></circle>
+            </svg>
+          </button>
+
+          <button
+            class="icon-button"
+            id="tray-button"
+            type="button"
+            aria-label="Hide Iris"
+            title="Hide Iris"
+          >
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <path d="m6 6 8 8M14 6l-8 8"></path>
+            </svg>
+          </button>
+        </div>
+
+      </header>
+
+      <main>
+        <section class="simple-state" id="loading-state" aria-live="polite">
+          <div class="loading-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+          <h1>Loading guide…</h1>
+          <p id="loading-detail">Connecting to Publik</p>
+        </section>
+
+        <section class="simple-state simple-state--error" id="error-state" hidden aria-live="assertive">
+          <h1 id="error-title">Couldn’t load this guide.</h1>
+          <p id="error-detail">Check your connection and try again.</p>
+          <button class="primary-action" id="retry-button" type="button">Try again</button>
+        </section>
+
+        <section class="simple-state" id="review-state" hidden>
+          <span class="state-dot" aria-hidden="true"></span>
+          <h1 id="review-title">Guide in review.</h1>
+          <p id="review-note"></p>
+        </section>
+
+        <section class="guide-workspace" id="guide-state" hidden>
+          <article class="step-card" id="step-card" aria-labelledby="step-title">
+            <h1 id="step-title">Check your tools</h1>
+            <p class="step-body" id="step-body"></p>
+
+            <div class="command-block" id="command-block" hidden>
+              <span class="sr-only" id="shell-label">Terminal</span>
+              <pre><code id="command-text"></code></pre>
+            </div>
+
+            <div class="verify-panel" id="verify-panel" hidden>
+              <div class="tool-results" id="tool-results" aria-live="polite"></div>
+            </div>
+          </article>
+
+          <div class="guide-actions">
+            <button class="primary-action" id="next-button" type="button">
+              Continue <span aria-hidden="true">→</span>
+            </button>
+          </div>
+        </section>
+
+        <section class="simple-state simple-state--complete" id="complete-state" hidden aria-live="polite">
+          <h1 id="complete-title">Done.</h1>
+          <button class="primary-action" id="complete-tray-button" type="button">Done</button>
+        </section>
+      </main>
+
+      <aside
+        class="settings-panel"
+        id="settings-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-hidden="true"
+        aria-labelledby="settings-title"
+        inert
+      >
+        <button
+          class="settings-panel__scrim"
+          id="settings-scrim"
+          type="button"
+          aria-label="Close menu"
+          tabindex="-1"
+        ></button>
+
+        <div class="settings-panel__sheet">
+          <div class="settings-panel__header">
+            <h1 id="settings-title">Iris</h1>
+            <button
+              class="icon-button"
+              id="settings-close-button"
+              type="button"
+              aria-label="Close menu"
+            >
+              <svg viewBox="0 0 20 20" aria-hidden="true">
+                <path d="m6 6 8 8M14 6l-8 8"></path>
+              </svg>
+            </button>
+          </div>
+
+          <div class="settings-row settings-row--meta">
+            <div>
+              <strong id="guide-kicker">Guide</strong>
+              <span>
+                <span class="status-badge" id="guide-status-badge" data-status="loading">
+                  <span></span> Loading
+                </span>
+                <span id="guide-version-badge">v—</span>
+              </span>
+            </div>
+          </div>
+
+          <div class="settings-row settings-row--stack">
+            <div class="settings-row__heading">
+              <div>
+                <strong>Platform</strong>
+                <span id="footer-platform">Detecting…</span>
+              </div>
+            </div>
+            <div class="platform-switch" id="platform-switch" aria-label="Choose operating system"></div>
+          </div>
+
+          <div class="settings-row" id="watch-strip" data-state="paused">
+            <div>
+              <strong>Awareness</strong>
+              <span id="watch-detail">App name only. Nothing saved.</span>
+              <span class="sr-only" id="watch-title">Paused</span>
+            </div>
+            <button class="tiny-button" id="settings-watch-button" type="button">Start</button>
+          </div>
+
+          <details class="advanced-settings" id="success-marker" hidden>
+            <summary>Expected result</summary>
+            <p id="verifier-label"></p>
+          </details>
+
+          <div class="settings-actions">
+            <a
+              class="text-button"
+              id="review-source-link"
+              target="_blank"
+              rel="noopener noreferrer"
+              hidden
+            >
+              View source
+            </a>
+            <button class="text-button" id="previous-button" type="button">Previous step</button>
+            <button class="text-button" id="restart-button" type="button">Restart guide</button>
+            <button class="text-button" id="clear-progress-button" type="button">Clear progress</button>
+            <button class="text-button text-button--danger" id="quit-button" type="button">Quit Iris</button>
+          </div>
+        </div>
+      </aside>
+
+      <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+      <div class="sr-only" id="live-region" aria-live="polite" aria-atomic="true"></div>
+    </div>
+  </body>
+</html>

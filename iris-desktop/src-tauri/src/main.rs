@@ -524,6 +524,11 @@ fn allowed_external_host(host: &str) -> bool {
             | "visualstudio.microsoft.com"
             | "cmake.org"
             | "www.cmake.org"
+            // Astro's Windows route. Missing here, "Install BrowserOS" — step 2
+            // of that branch — opened nothing at all in the desktop app, which
+            // reads as a dead button rather than a blocked host.
+            | "files.browseros.com"
+            | "go.dev"
     )
 }
 

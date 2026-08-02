@@ -51,6 +51,10 @@ enum IrisStepKind: String, Codable, Equatable, Sendable {
     case open
     case permission
     case verify
+    /// Do something on a web page — sign in, click a button, copy a value.
+    case web
+    /// Move a secret from where it was created into where it is used.
+    case paste
 }
 
 enum IrisGuideShell: String, Codable, Equatable, Sendable {
@@ -62,6 +66,11 @@ enum IrisGuideOutputType: String, Codable, Equatable, Sendable {
     case desktopApp = "desktop_app"
     case localWeb = "local_web"
     case mobileApp = "mobile_app"
+    /// A flow that produces a credential rather than an installed app — see
+    /// `IRIS_FLOWS` in `lib/iris-guides.ts`. Decoding is strict here, so a
+    /// value missing from this enum does not degrade: the whole flow fails to
+    /// load and the reader gets nothing.
+    case credential
 }
 
 /// The only two tools a step can ask Iris to verify for the reader.

@@ -9,28 +9,34 @@ Iris — the desktop assistant for publik. A text-first fork of Clicky by Farza 
 
 Voice features (AssemblyAI/OpenAI/Apple Speech transcription, ElevenLabs TTS) and PostHog analytics were removed in the fork.
 
-All API keys live on a Cloudflare Worker proxy — nothing sensitive ships in the app.
+Nothing sensitive ships in the app binary. The assistant reaches a model by exactly one of two routes: publik's funded endpoint (a Supabase-authenticated passthrough, where publik holds the Anthropic key) or the user's own Anthropic key stored in their Keychain. See "Assistant transports" below.
 
 ## Architecture
 
 - **App Type**: Menu bar-only (`LSUIElement=true`), no dock icon or main window
 - **Framework**: SwiftUI (macOS native) with AppKit bridging for menu bar panel and cursor overlay
 - **Pattern**: MVVM with `@StateObject` / `@Published` state management
-- **AI Chat**: Claude (Sonnet 4.6 default, Opus 4.6 optional) via Cloudflare Worker proxy with SSE streaming
+- **AI Chat**: Claude with SSE streaming, over one of two transports (funded via publik, or the user's own Anthropic key)
+- **Identity**: Supabase PKCE OAuth in the system browser (`ASWebAuthenticationSession`) or email+password; no Supabase SDK, no SPM dependencies
 - **Screen Capture**: ScreenCaptureKit (macOS 14.2+), multi-monitor support
 - **Text Input**: TextField in the menu bar panel, wired to `CompanionManager.sendUserMessage` — the same pipeline that previously received the final dictation transcript. System-wide summon hotkey via listen-only CGEvent tap toggles the panel.
 - **Element Pointing**: Claude embeds `[POINT:x,y:label:screenN]` tags in responses. The overlay parses these, maps coordinates to the correct monitor, and animates the blue cursor along a bezier arc to the target.
 - **Concurrency**: `@MainActor` isolation, async/await throughout
 
-### API Proxy (Cloudflare Worker)
+### Assistant transports
 
-The app never calls external APIs directly. Requests go through a Cloudflare Worker (`worker/src/index.ts`) that holds the real API keys as secrets. The app only uses `/chat`; the worker directory is kept as a wire-format reference and still documents the upstream `/tts` and `/transcribe-token` routes, which the app no longer calls.
+`docs/iris-assistant-protocol.md` in the publik repo is the authoritative contract. There are exactly two routes, and they speak the identical wire format (the Anthropic Messages API, streaming SSE), so one SSE parser serves both:
 
-| Route | Upstream | Purpose |
-|-------|----------|---------|
-| `POST /chat` | `api.anthropic.com/v1/messages` | Claude vision + streaming chat |
+| Tier | Endpoint | Auth | Model |
+|------|----------|------|-------|
+| Funded | `POST {publik}/api/assistant/chat` | `Authorization: Bearer <supabase access token>` | pinned server-side; the client's `model` is ignored and therefore not sent |
+| BYO | `POST https://api.anthropic.com/v1/messages` | the user's own `x-api-key`, stored in the Keychain | the client's choice |
 
-Worker secrets: `ANTHROPIC_API_KEY`
+**THE BYO KEY IS NEVER SENT TO ANY PUBLIK HOST.** `AssistantTransport.swift` enforces this structurally (the only function that writes an `x-api-key` header takes no URL — the destination is a constant), by assertion (`validatedRequest`), and by test (`AssistantTransportTests`). Do not add a code path that accepts both a key and a destination.
+
+The funded tier's error codes map to fixed user-visible states: `sign_in_required` (401) → prompt re-sign-in, `rate_limited` / `daily_budget_exhausted` (429 + `Retry-After`) → quota message, `assistant_unconfigured` (503) → outage, anything else → generic failure. A raw server body is never shown to the user.
+
+The `worker/` directory is dead — a leftover from the upstream Clicky fork, kept only as a wire-format reference. The app no longer calls it.
 
 ### Key Architecture Decisions
 
@@ -47,14 +53,17 @@ Worker secrets: `ANTHROPIC_API_KEY`
 | File | Lines | Purpose |
 |------|-------|---------|
 | `leanring_buddyApp.swift` | ~86 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
-| `CompanionManager.swift` | ~804 | Central state machine. Owns summon hotkey monitoring, screen capture, Claude API, and overlay management. Tracks assistant state (idle/capturing/thinking/pointing), conversation history, model selection, and cursor visibility. Coordinates the typed message → screenshot → Claude → text response → pointing pipeline via `sendUserMessage`. |
+| `CompanionManager.swift` | ~864 | Central state machine. Owns summon hotkey monitoring, screen capture, the `AccountService`, the Claude API, and overlay management. Tracks assistant state (idle/capturing/thinking/pointing), conversation history, model selection, and cursor visibility. Coordinates the typed message → screenshot → Claude → text response → pointing pipeline via `sendUserMessage`, and maps transport failures to user-visible text. |
 | `MenuBarPanelManager.swift` | ~265 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/toggle/position), installs click-outside-to-dismiss monitor. Observes `.clickyTogglePanel` posted on summon hotkey press. |
-| `CompanionPanelView.swift` | ~593 | SwiftUI panel content for the menu bar dropdown. Shows assistant status, the "Ask Iris" text input + response area, model picker (Sonnet/Opus), permissions UI, and quit button. Dark aesthetic using `DS` design system. |
+| `CompanionPanelView.swift` | ~923 | SwiftUI panel content for the menu bar dropdown. Shows assistant status, the "Ask Iris" text input + response area, model picker (Sonnet/Opus), the account section (sign in with Google/GitHub, email+password, or your own Anthropic key), permissions UI, and quit button. Dark aesthetic using `DS` design system. |
 | `OverlayWindow.swift` | ~833 | Full-screen transparent overlay hosting the blue cursor and spinner. Handles cursor animation, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. |
 | `CompanionResponseOverlay.swift` | ~217 | SwiftUI view for a cursor-following response text bubble. Currently unused by the pipeline (responses render in the panel) but kept compiling. |
 | `CompanionScreenCaptureUtility.swift` | ~132 | Multi-monitor screenshot capture using ScreenCaptureKit. Returns labeled image data for each connected display. |
 | `GlobalSummonHotkeyMonitor.swift` | ~167 | System-wide summon hotkey monitor (ctrl + option). Owns the listen-only `CGEvent` tap and publishes press/release transitions; a press toggles the companion panel. |
-| `ClaudeAPI.swift` | ~291 | Claude vision API client with streaming (SSE) and non-streaming modes. TLS warmup optimization, image MIME detection, conversation history support. |
+| `ClaudeAPI.swift` | ~360 | Claude vision API client with streaming (SSE) and non-streaming modes. Transport-driven: asks `AssistantTransport` for the URL and headers on every request, omits `model` on the funded route, maps non-2xx responses to `AssistantTransportError`. Per-host TLS warmup, image MIME detection, conversation history support. |
+| `AssistantTransport.swift` | ~364 | Chooses between the funded and BYO routes and builds the request for each. The only place credentials are attached, and the enforcement point for "the BYO key never reaches a publik host". Also owns the funded tier's error-code → user-visible-state mapping. |
+| `AccountService.swift` | ~797 | Supabase auth with no SDK: PKCE OAuth in the system browser (`ASWebAuthenticationSession`), email+password, and refresh-token rotation. Publishes signed-in state; owns the user's BYO key, validated on entry with a `count_tokens` call. Reuses `DeepLinkParser` for the `iris://auth/callback` case. |
+| `KeychainStore.swift` | ~144 | The only code that touches the Keychain. Stores exactly two secrets under service `com.publikhq.iris`: the BYO Anthropic key and the Supabase refresh token. Never logs either. |
 | `ElementLocationDetector.swift` | ~335 | Detects UI element locations in screenshots for cursor pointing. |
 | `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
@@ -75,7 +84,9 @@ open leanring-buddy.xcodeproj
 
 **Do NOT run `xcodebuild` from the terminal** — it invalidates TCC (Transparency, Consent, and Control) permissions and the app will need to re-request screen recording, accessibility, etc.
 
-## Cloudflare Worker
+## Cloudflare Worker (dead — reference only)
+
+The app no longer calls this. It is inherited from the upstream Clicky fork and kept as a wire-format reference; the commands below are historical.
 
 ```bash
 cd worker

@@ -2,20 +2,37 @@
 //  ClaudeAPI.swift
 //  Claude API Implementation with streaming support
 //
+//  The SSE parsing here is route-agnostic on purpose: publik's funded endpoint
+//  is a passthrough of the Anthropic Messages API, so the same parser serves a
+//  signed-in user and a bring-your-own-key user without a branch. What differs
+//  is only the URL and the headers, and deciding those is `AssistantTransport`'s
+//  job — this file never constructs a credential of its own.
+//
 
 import Foundation
 
 /// Claude API helper with streaming for progressive text display.
 class ClaudeAPI {
     private static let tlsWarmupLock = NSLock()
-    private static var hasStartedTLSWarmup = false
+    private static var hostsAlreadyWarmedUp: Set<String> = []
 
-    private let apiURL: URL
+    /// Asked for a transport at the start of every request rather than once at
+    /// init, because the answer changes underneath us: the user can sign in,
+    /// sign out, or paste a key while the app is running, and an access token
+    /// can need refreshing between two messages.
+    private let resolveTransport: @Sendable () async -> Result<AssistantTransport, AssistantTransportError>
+
+    /// The model the user picked. Honored on the bring-your-own-key route and
+    /// deliberately omitted on the funded route, where the server pins its own.
     var model: String
+
     private let session: URLSession
 
-    init(proxyURL: String, model: String = "claude-sonnet-4-6") {
-        self.apiURL = URL(string: proxyURL)!
+    init(
+        resolveTransport: @escaping @Sendable () async -> Result<AssistantTransport, AssistantTransportError>,
+        model: String = "claude-sonnet-4-6"
+    ) {
+        self.resolveTransport = resolveTransport
         self.model = model
 
         // Use .default instead of .ephemeral so TLS session tickets are cached.
@@ -29,19 +46,6 @@ class ClaudeAPI {
         config.urlCache = nil
         config.httpCookieStorage = nil
         self.session = URLSession(configuration: config)
-
-        // Fire a lightweight HEAD request in the background to pre-establish the TLS
-        // connection. This caches the TLS session ticket so the first real API call
-        // (which carries a large image payload) doesn't need a cold TLS handshake.
-        warmUpTLSConnectionIfNeeded()
-    }
-
-    private func makeAPIRequest() -> URLRequest {
-        var request = URLRequest(url: apiURL)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 120
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        return request
     }
 
     /// Detects the MIME type of image data by inspecting the first bytes.
@@ -61,32 +65,34 @@ class ClaudeAPI {
         return "image/jpeg"
     }
 
-    /// Sends a no-op HEAD request to the API host to establish and cache a TLS session.
-    /// Failures are silently ignored — this is purely an optimization.
-    private func warmUpTLSConnectionIfNeeded() {
+    /// Sends a no-op HEAD request to whichever host the current transport uses,
+    /// to establish and cache a TLS session before the first real (large,
+    /// image-bearing) request pays for a cold handshake.
+    ///
+    /// This is called explicitly by `CompanionManager` at startup rather than
+    /// from `init`, because the host is now a property of the chosen route and
+    /// is not knowable until a transport has been resolved. Failures are
+    /// silently ignored — this is purely an optimization.
+    func warmUpTLSConnectionIfNeeded() async {
+        guard case .success(let transport) = await resolveTransport(),
+              let requestToWarmFor = try? await transport.makeChatRequest(),
+              let hostToWarm = requestToWarmFor.url?.host else {
+            return
+        }
+
         Self.tlsWarmupLock.lock()
-        let shouldStartTLSWarmup = !Self.hasStartedTLSWarmup
-        if shouldStartTLSWarmup {
-            Self.hasStartedTLSWarmup = true
+        let shouldWarmThisHost = !Self.hostsAlreadyWarmedUp.contains(hostToWarm)
+        if shouldWarmThisHost {
+            Self.hostsAlreadyWarmedUp.insert(hostToWarm)
         }
         Self.tlsWarmupLock.unlock()
 
-        guard shouldStartTLSWarmup else { return }
+        guard shouldWarmThisHost else { return }
 
-        guard var warmupURLComponents = URLComponents(url: apiURL, resolvingAgainstBaseURL: false) else {
-            return
-        }
-
-        // The TLS session ticket is host-scoped, so warming the root host is enough.
-        // Hitting the host instead of `/v1/messages` avoids extra endpoint-specific noise.
-        warmupURLComponents.path = "/"
-        warmupURLComponents.query = nil
-        warmupURLComponents.fragment = nil
-
-        guard let warmupURL = warmupURLComponents.url else {
-            return
-        }
-
+        // The TLS session ticket is host-scoped, so warming the root path is
+        // enough, and it deliberately carries none of the request's headers —
+        // there is no reason for a credential to ride along on a warmup.
+        guard let warmupURL = URL(string: "https://\(hostToWarm)/") else { return }
         var warmupRequest = URLRequest(url: warmupURL)
         warmupRequest.httpMethod = "HEAD"
         warmupRequest.timeoutInterval = 10
@@ -95,21 +101,14 @@ class ClaudeAPI {
         }.resume()
     }
 
-    /// Send a vision request to Claude with streaming.
-    /// Calls `onTextChunk` on the main actor each time new text arrives so the UI updates progressively.
-    /// Returns the full accumulated text and total duration when the stream completes.
-    func analyzeImageStreaming(
+    // MARK: - Request assembly
+
+    /// Builds the message list both routes share.
+    private func buildMessages(
         images: [(data: Data, label: String)],
-        systemPrompt: String,
-        conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
-        userPrompt: String,
-        onTextChunk: @MainActor @Sendable (String) -> Void
-    ) async throws -> (text: String, duration: TimeInterval) {
-        let startTime = Date()
-
-        var request = makeAPIRequest()
-
-        // Build messages array
+        conversationHistory: [(userPlaceholder: String, assistantResponse: String)],
+        userPrompt: String
+    ) -> [[String: Any]] {
         var messages: [[String: Any]] = []
 
         for (userPlaceholder, assistantResponse) in conversationHistory {
@@ -139,41 +138,128 @@ class ClaudeAPI {
         ])
         messages.append(["role": "user", "content": contentBlocks])
 
-        let body: [String: Any] = [
-            "model": model,
-            "max_tokens": 1024,
-            "stream": true,
+        return messages
+    }
+
+    /// Assembles the request body for a route.
+    ///
+    /// The `model` field is included only where it is actually honored. The
+    /// funded route pins the model server-side and ignores whatever the client
+    /// sends, and a field the server throws away is worse than absent: the next
+    /// person to read this would reasonably conclude the picker controls it.
+    private func buildRequestBody(
+        for transport: AssistantTransport,
+        systemPrompt: String,
+        messages: [[String: Any]],
+        maximumOutputTokens: Int,
+        shouldStream: Bool
+    ) -> [String: Any] {
+        var requestBody: [String: Any] = [
+            "max_tokens": maximumOutputTokens,
             "system": systemPrompt,
-            "messages": messages
+            "messages": messages,
         ]
+        if shouldStream {
+            requestBody["stream"] = true
+        }
+        if transport.shouldSendModelInRequestBody {
+            requestBody["model"] = model
+        }
+        return requestBody
+    }
+
+    /// Turns a non-2xx response into the user-visible state for that route.
+    /// The body is read only far enough to find the funded tier's `error` code;
+    /// it is never carried into the thrown error, because that error's message
+    /// is shown to the user and a raw server body is not fit for that.
+    private func failure(
+        forStatusCode statusCode: Int,
+        failureBodyData: Data,
+        retryAfterHeaderValue: String?,
+        transport: AssistantTransport
+    ) -> AssistantTransportError {
+        let isFundedTier: Bool
+        if case .funded = transport {
+            isFundedTier = true
+        } else {
+            isFundedTier = false
+        }
+
+        let serverErrorCode = AssistantTransportError.serverErrorCode(inFailureBody: failureBodyData)
+        // The code and status are worth a console line for whoever is debugging
+        // a build; the body itself is not logged, so a model's own words about a
+        // user's screen never land in a log file.
+        print("⚠️ Assistant request failed — status \(statusCode), code: \(serverErrorCode ?? "none")")
+
+        return AssistantTransportError.failure(
+            forStatusCode: statusCode,
+            serverErrorCode: serverErrorCode,
+            retryAfterHeaderValue: retryAfterHeaderValue,
+            isFundedTier: isFundedTier
+        )
+    }
+
+    // MARK: - Streaming
+
+    /// Send a vision request to Claude with streaming.
+    /// Calls `onTextChunk` on the main actor each time new text arrives so the UI updates progressively.
+    /// Returns the full accumulated text and total duration when the stream completes.
+    func analyzeImageStreaming(
+        images: [(data: Data, label: String)],
+        systemPrompt: String,
+        conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
+        userPrompt: String,
+        onTextChunk: @MainActor @Sendable (String) -> Void
+    ) async throws -> (text: String, duration: TimeInterval) {
+        let startTime = Date()
+
+        let transport = try await resolveTransport().get()
+        var request = try await transport.makeChatRequest()
+
+        let messages = buildMessages(
+            images: images,
+            conversationHistory: conversationHistory,
+            userPrompt: userPrompt
+        )
+        let body = buildRequestBody(
+            for: transport,
+            systemPrompt: systemPrompt,
+            messages: messages,
+            maximumOutputTokens: 1024,
+            shouldStream: true
+        )
 
         let bodyData = try JSONSerialization.data(withJSONObject: body)
         request.httpBody = bodyData
         let payloadMB = Double(bodyData.count) / 1_048_576.0
-        print("🌐 Claude streaming request: \(String(format: "%.1f", payloadMB))MB, \(images.count) image(s)")
+        print("🌐 Claude streaming request via \(transport.tierDescription): \(String(format: "%.1f", payloadMB))MB, \(images.count) image(s)")
 
         // Use bytes streaming for SSE (Server-Sent Events)
-        let (byteStream, response) = try await session.bytes(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw NSError(
-                domain: "ClaudeAPI",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid HTTP response"]
-            )
+        let byteStream: URLSession.AsyncBytes
+        let response: URLResponse
+        do {
+            (byteStream, response) = try await session.bytes(for: request)
+        } catch {
+            throw AssistantTransportError.transportFailure(reason: error.localizedDescription)
         }
 
-        // If non-2xx status, read the full body as error text
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw AssistantTransportError.requestFailed(statusCode: -1)
+        }
+
+        // If non-2xx status, drain the body only to find the machine-readable
+        // error code, then discard it.
         guard (200...299).contains(httpResponse.statusCode) else {
-            var errorBodyChunks: [String] = []
+            var failureBodyChunks: [String] = []
             for try await line in byteStream.lines {
-                errorBodyChunks.append(line)
+                failureBodyChunks.append(line)
             }
-            let errorBody = errorBodyChunks.joined(separator: "\n")
-            throw NSError(
-                domain: "ClaudeAPI",
-                code: httpResponse.statusCode,
-                userInfo: [NSLocalizedDescriptionKey: "API Error (\(httpResponse.statusCode)): \(errorBody)"]
+            let failureBodyData = Data(failureBodyChunks.joined(separator: "\n").utf8)
+            throw failure(
+                forStatusCode: httpResponse.statusCode,
+                failureBodyData: failureBodyData,
+                retryAfterHeaderValue: httpResponse.value(forHTTPHeaderField: "Retry-After"),
+                transport: transport
             )
         }
 
@@ -220,57 +306,44 @@ class ClaudeAPI {
     ) async throws -> (text: String, duration: TimeInterval) {
         let startTime = Date()
 
-        var request = makeAPIRequest()
+        let transport = try await resolveTransport().get()
+        var request = try await transport.makeChatRequest()
 
-        var messages: [[String: Any]] = []
-        for (userPlaceholder, assistantResponse) in conversationHistory {
-            messages.append(["role": "user", "content": userPlaceholder])
-            messages.append(["role": "assistant", "content": assistantResponse])
-        }
-
-        // Build current message with all labeled images + prompt
-        var contentBlocks: [[String: Any]] = []
-        for image in images {
-            contentBlocks.append([
-                "type": "image",
-                "source": [
-                    "type": "base64",
-                    "media_type": detectImageMediaType(for: image.data),
-                    "data": image.data.base64EncodedString()
-                ]
-            ])
-            contentBlocks.append([
-                "type": "text",
-                "text": image.label
-            ])
-        }
-        contentBlocks.append([
-            "type": "text",
-            "text": userPrompt
-        ])
-        messages.append(["role": "user", "content": contentBlocks])
-
-        let body: [String: Any] = [
-            "model": model,
-            "max_tokens": 256,
-            "system": systemPrompt,
-            "messages": messages
-        ]
+        let messages = buildMessages(
+            images: images,
+            conversationHistory: conversationHistory,
+            userPrompt: userPrompt
+        )
+        let body = buildRequestBody(
+            for: transport,
+            systemPrompt: systemPrompt,
+            messages: messages,
+            maximumOutputTokens: 256,
+            shouldStream: false
+        )
 
         let bodyData = try JSONSerialization.data(withJSONObject: body)
         request.httpBody = bodyData
         let payloadMB = Double(bodyData.count) / 1_048_576.0
-        print("🌐 Claude request: \(String(format: "%.1f", payloadMB))MB, \(images.count) image(s)")
+        print("🌐 Claude request via \(transport.tierDescription): \(String(format: "%.1f", payloadMB))MB, \(images.count) image(s)")
 
-        let (data, response) = try await session.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw AssistantTransportError.transportFailure(reason: error.localizedDescription)
+        }
 
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
-            let responseString = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw NSError(
-                domain: "ClaudeAPI",
-                code: (response as? HTTPURLResponse)?.statusCode ?? -1,
-                userInfo: [NSLocalizedDescriptionKey: "API Error: \(responseString)"]
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw AssistantTransportError.requestFailed(statusCode: -1)
+        }
+        guard (200...299).contains(httpResponse.statusCode) else {
+            throw failure(
+                forStatusCode: httpResponse.statusCode,
+                failureBodyData: data,
+                retryAfterHeaderValue: httpResponse.value(forHTTPHeaderField: "Retry-After"),
+                transport: transport
             )
         }
 
@@ -278,11 +351,7 @@ class ClaudeAPI {
         guard let content = json?["content"] as? [[String: Any]],
               let textBlock = content.first(where: { ($0["type"] as? String) == "text" }),
               let text = textBlock["text"] as? String else {
-            throw NSError(
-                domain: "ClaudeAPI",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid response format"]
-            )
+            throw AssistantTransportError.requestFailed(statusCode: httpResponse.statusCode)
         }
 
         let duration = Date().timeIntervalSince(startTime)

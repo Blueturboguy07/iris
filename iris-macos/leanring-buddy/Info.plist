@@ -10,5 +10,37 @@
 	<string>/l3d2rw5ZZFRU3AadP/w2Zf8FHfhA6bKv16BQOV5OSk=</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>Iris needs screen recording access to see your screen and help you.</string>
+	<!-- Claims the iris:// scheme so the OAuth redirect and the website's guide
+	     handoff links reach this app. Every accepted shape is defined in
+	     DeepLinkParser.swift; anything else is refused there. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.publikhq.iris.deeplink</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>iris</string>
+			</array>
+		</dict>
+	</array>
+	<!-- Where the funded assistant tier and the guide API live. Overridable so
+	     the publik site can be developed against this app on localhost; the
+	     value is checked against GuideService's origin allowlist at runtime, so
+	     editing it cannot point signed-in traffic at an arbitrary server. -->
+	<key>PublikAPIBaseURL</key>
+	<string>https://publikhq.com</string>
+	<key>PublikSupabaseURL</key>
+	<string>https://gcbxnxwwuuqsypwevfgi.supabase.co</string>
+	<!-- PUBLIC VALUE, NOT A SECRET. This is the Supabase anonymous (publishable)
+	     key: publikhq.com already ships this exact string in its JavaScript
+	     bundle, where any visitor can read it. It names the project and nothing
+	     more — every row it can reach is gated by row-level-security policies on
+	     the server. Do not "fix" this by moving it to the Keychain or a proxy.
+	     The service-role key, which IS a secret, never comes near this app. -->
+	<key>PublikSupabaseAnonKey</key>
+	<string>sb_publishable_NMoK8uAeTxAnguysrcEJSQ_bLW4X21K</string>
 </dict>
 </plist>

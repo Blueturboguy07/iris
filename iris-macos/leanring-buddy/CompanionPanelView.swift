@@ -11,7 +11,24 @@ import SwiftUI
 
 struct CompanionPanelView: View {
     @ObservedObject var companionManager: CompanionManager
+    /// Observed separately from the companion manager so the account rows
+    /// redraw the instant a sign-in finishes, rather than on the next thing
+    /// that happens to change assistant state.
+    @ObservedObject var accountService: AccountService
+
     @State private var messageInput: String = ""
+
+    /// The BYO key while the user is typing it. Cleared the moment it is saved
+    /// and never repopulated — a saved key is never echoed back into the UI.
+    @State private var anthropicAPIKeyInput: String = ""
+    @State private var isShowingEmailAndPasswordSignIn: Bool = false
+    @State private var emailAddressInput: String = ""
+    @State private var passwordInput: String = ""
+
+    init(companionManager: CompanionManager) {
+        self.companionManager = companionManager
+        _accountService = ObservedObject(wrappedValue: companionManager.accountService)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -35,6 +52,12 @@ struct CompanionPanelView: View {
                     .frame(height: 12)
 
                 modelPickerRow
+                    .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 14)
+
+                accountSection
                     .padding(.horizontal, 16)
             }
 
@@ -229,8 +252,17 @@ struct CompanionPanelView: View {
         case .thinking:
             return "Thinking…"
         case .idle, .pointing:
-            return companionManager.latestAssistantResponseText
-                ?? "Iris sees your screen when you ask, and answers here."
+            if let latestAssistantResponseText = companionManager.latestAssistantResponseText {
+                return latestAssistantResponseText
+            }
+            // Said before the user types rather than after: with no account and
+            // no key there is nothing behind the text field, and finding that
+            // out by asking a question and getting an error is a worse way to
+            // learn it.
+            guard accountService.activeTierDescription != nil else {
+                return AssistantTransportError.noCredentialsAvailable.userFacingMessage
+            }
+            return "Iris sees your screen when you ask, and answers here."
         }
     }
 
@@ -510,6 +542,304 @@ struct CompanionPanelView: View {
         }
         .buttonStyle(.plain)
         .pointerCursor()
+    }
+
+    // MARK: - Account
+
+    /// Sign-in, sign-out, and the bring-your-own-key field.
+    ///
+    /// The shape of this section is the whole assistant-funding model made
+    /// visible: signed in, Iris pays for the model; signed out with a key
+    /// stored, the user does; neither, and the assistant cannot answer at all —
+    /// which is stated here rather than being discovered as an error message
+    /// after typing a question.
+    private var accountSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("ACCOUNT")
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundColor(DS.Colors.textTertiary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if accountService.signedInAccount != nil {
+                signedInAccountRow
+            } else {
+                signedOutAccountRows
+            }
+        }
+    }
+
+    // MARK: Signed in
+
+    @ViewBuilder
+    private var signedInAccountRow: some View {
+        if let signedInAccount = accountService.signedInAccount {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(DS.Colors.success)
+                        .frame(width: 6, height: 6)
+
+                    Text(signedInAccount.displayName)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    Spacer()
+
+                    Button(action: {
+                        accountService.signOut()
+                    }) {
+                        Text("Sign out")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(DS.Colors.textSecondary)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(
+                                Capsule()
+                                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.8)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .pointerCursor()
+                }
+
+                Text("Answers are on publik while you're signed in.")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    // MARK: Signed out
+
+    private var signedOutAccountRows: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                signInProviderButton(provider: .google)
+                signInProviderButton(provider: .github)
+            }
+
+            Button(action: {
+                isShowingEmailAndPasswordSignIn.toggle()
+            }) {
+                Text(isShowingEmailAndPasswordSignIn
+                     ? "Use a provider instead"
+                     : "Sign in with an email and password")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(DS.Colors.accentText)
+            }
+            .buttonStyle(.plain)
+            .pointerCursor()
+
+            if isShowingEmailAndPasswordSignIn {
+                emailAndPasswordSignInFields
+            }
+
+            if let signInFailureMessage = accountService.signInFailureMessage {
+                Text(signInFailureMessage)
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.destructiveText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+                .background(DS.Colors.borderSubtle)
+
+            bringYourOwnKeyRows
+        }
+    }
+
+    private func signInProviderButton(provider: AccountSignInProvider) -> some View {
+        Button(action: {
+            Task {
+                await accountService.signIn(withProvider: provider)
+            }
+        }) {
+            Text("Sign in with \(provider.displayName)")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(DS.Colors.textOnAccent)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 7)
+                .background(
+                    RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                        .fill(DS.Colors.accent)
+                )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor(isEnabled: !accountService.isSignInInProgress)
+        .disabled(accountService.isSignInInProgress)
+        .opacity(accountService.isSignInInProgress ? 0.5 : 1.0)
+    }
+
+    private var emailAndPasswordSignInFields: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextField("you@example.com", text: $emailAddressInput)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundColor(DS.Colors.textPrimary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                        .fill(Color.white.opacity(0.08))
+                )
+
+            HStack(spacing: 8) {
+                SecureField("Password", text: $passwordInput)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                            .fill(Color.white.opacity(0.08))
+                    )
+                    .onSubmit {
+                        submitEmailAndPasswordSignIn()
+                    }
+
+                Button(action: {
+                    submitEmailAndPasswordSignIn()
+                }) {
+                    Text("Sign in")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(DS.Colors.textOnAccent)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(DS.Colors.accent)
+                        )
+                }
+                .buttonStyle(.plain)
+                .pointerCursor(isEnabled: !accountService.isSignInInProgress)
+                .disabled(accountService.isSignInInProgress)
+            }
+        }
+    }
+
+    private func submitEmailAndPasswordSignIn() {
+        let trimmedEmailAddress = emailAddressInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedEmailAddress.isEmpty, !passwordInput.isEmpty else { return }
+        let passwordToSubmit = passwordInput
+        // Dropped from view state before the request even starts — the panel
+        // has no reason to keep holding a password while the network works.
+        passwordInput = ""
+        Task {
+            await accountService.signIn(withEmailAddress: trimmedEmailAddress, password: passwordToSubmit)
+        }
+    }
+
+    // MARK: Bring your own key
+
+    @ViewBuilder
+    private var bringYourOwnKeyRows: some View {
+        if accountService.hasStoredAnthropicAPIKey {
+            HStack(spacing: 8) {
+                Image(systemName: "key.fill")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(DS.Colors.textTertiary)
+
+                Text("Using your Anthropic key")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+
+                Spacer()
+
+                Button(action: {
+                    accountService.forgetAnthropicAPIKey()
+                }) {
+                    Text("Remove")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(DS.Colors.destructiveText)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule()
+                                .stroke(DS.Colors.borderSubtle, lineWidth: 0.8)
+                        )
+                }
+                .buttonStyle(.plain)
+                .pointerCursor()
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Or use your own Anthropic key")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+
+                HStack(spacing: 8) {
+                    // Secure, because this is a credential and because a key
+                    // pasted in plain text on a screen Iris can screenshot is
+                    // exactly the thing this app should not photograph.
+                    SecureField("sk-ant-…", text: $anthropicAPIKeyInput)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12))
+                        .foregroundColor(DS.Colors.textPrimary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                                .fill(Color.white.opacity(0.08))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                        )
+                        .onSubmit {
+                            submitAnthropicAPIKey()
+                        }
+
+                    Button(action: {
+                        submitAnthropicAPIKey()
+                    }) {
+                        Text(accountService.isValidatingAnthropicAPIKey ? "Checking…" : "Save")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(DS.Colors.textOnAccent)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(
+                                Capsule()
+                                    .fill(DS.Colors.accent)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .pointerCursor(isEnabled: !accountService.isValidatingAnthropicAPIKey)
+                    .disabled(accountService.isValidatingAnthropicAPIKey
+                              || anthropicAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+
+                if let anthropicAPIKeyFailureMessage = accountService.anthropicAPIKeyFailureMessage {
+                    Text(anthropicAPIKeyFailureMessage)
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.destructiveText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Text("Stored in your Keychain and sent only to api.anthropic.com — never to publik.")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// Validates the pasted key against Anthropic before storing it, so a typo
+    /// is caught here instead of at the bottom of the next screenshot request.
+    private func submitAnthropicAPIKey() {
+        let candidateAPIKey = anthropicAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidateAPIKey.isEmpty else { return }
+        Task {
+            let wasSaved = await accountService.validateAndSaveAnthropicAPIKey(candidateAPIKey)
+            if wasSaved {
+                // Never repopulated afterwards: once saved, the key exists only
+                // in the Keychain and in the request that uses it.
+                anthropicAPIKeyInput = ""
+            }
+        }
     }
 
     // MARK: - Footer

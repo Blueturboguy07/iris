@@ -62,13 +62,45 @@ final class CompanionManager: ObservableObject {
     let globalSummonHotkeyMonitor = GlobalSummonHotkeyMonitor()
     let overlayWindowManager = OverlayWindowManager()
 
-    /// Base URL for the Cloudflare Worker proxy. All API requests route
-    /// through this so keys never ship in the app binary.
-    private static let workerBaseURL = "https://your-worker-name.your-subdomain.workers.dev"
+    /// Owns sign-in and the user's own Anthropic key. The panel observes it
+    /// directly, and the request pipeline below asks it which route to take.
+    let accountService = AccountService()
+
+    /// Where the funded tier lives — publik in a shipped build, and a localhost
+    /// origin when a developer's Info.plist says so.
+    private let publikBaseURL = AssistantTransport.configuredPublikBaseURL()
 
     private lazy var claudeAPI: ClaudeAPI = {
-        return ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
+        // The transport is resolved per request rather than captured once,
+        // because the user can sign in, sign out, or paste a key between two
+        // messages and the very next request has to respect that.
+        let accountService = self.accountService
+        let publikBaseURL = self.publikBaseURL
+        return ClaudeAPI(
+            resolveTransport: {
+                await accountService.currentAssistantTransport(publikBaseURL: publikBaseURL)
+            },
+            model: selectedModel
+        )
     }()
+
+    /// Turns a failed request into what the panel says, and — when the funded
+    /// tier reports the session is gone — into a refresh-or-sign-out on the
+    /// account service, so the user is shown sign-in buttons rather than the
+    /// same error over and over.
+    private func describeAndHandle(assistantError: Error) async -> String {
+        guard let transportError = assistantError as? AssistantTransportError else {
+            print("⚠️ Companion response error: \(assistantError)")
+            return AssistantTransportError.transportFailure(
+                reason: assistantError.localizedDescription
+            ).userFacingMessage
+        }
+
+        if transportError.requiresReSignIn {
+            await accountService.handleAccessTokenRejectedByServer()
+        }
+        return transportError.userFacingMessage
+    }
 
     /// Conversation history so Claude remembers prior exchanges within a session.
     /// Each entry is the user's message and Claude's response.
@@ -79,6 +111,7 @@ final class CompanionManager: ObservableObject {
     private var currentResponseTask: Task<Void, Never>?
 
     private var summonHotkeyTransitionCancellable: AnyCancellable?
+    private var accountStateChangeCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
     /// Scheduled hide for transient cursor mode — cancelled if the user
     /// asks something else before the delay elapses.
@@ -138,9 +171,15 @@ final class CompanionManager: ObservableObject {
         print("🔑 Iris start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()
         bindSummonHotkeyTransitions()
-        // Eagerly touch the Claude API so its TLS warmup handshake completes
-        // well before the first user message.
-        _ = claudeAPI
+        bindAccountStateChanges()
+
+        // Trade the stored refresh token for a live access token, then warm the
+        // TLS connection to whichever host that leaves us talking to. Both are
+        // best-effort and neither blocks the panel from appearing.
+        Task {
+            await accountService.restorePreviousSessionIfPossible()
+            await claudeAPI.warmUpTLSConnectionIfNeeded()
+        }
 
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
@@ -198,6 +237,7 @@ final class CompanionManager: ObservableObject {
         currentResponseTask?.cancel()
         currentResponseTask = nil
         summonHotkeyTransitionCancellable?.cancel()
+        accountStateChangeCancellable?.cancel()
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
     }
@@ -285,6 +325,20 @@ final class CompanionManager: ObservableObject {
                 self?.refreshAllPermissions()
             }
         }
+    }
+
+    /// Republishes the account service's changes as our own.
+    ///
+    /// The panel observes both objects, but anything that observes only the
+    /// companion manager — the status line, future menu bar state — still needs
+    /// to redraw when the user signs in or out, and forwarding once here is
+    /// cheaper than making every such view observe two objects.
+    private func bindAccountStateChanges() {
+        accountStateChangeCancellable = accountService.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
     }
 
     private func bindSummonHotkeyTransitions() {
@@ -506,8 +560,11 @@ final class CompanionManager: ObservableObject {
             } catch is CancellationError {
                 // User asked something else — response was interrupted
             } catch {
-                print("⚠️ Companion response error: \(error)")
-                latestAssistantResponseText = "hm, something went wrong reaching the assistant. check your connection and try again."
+                // Never the raw server body: `describeAndHandle` maps the
+                // failure to one of a fixed set of sentences, and takes care of
+                // signing the user out when the funded tier says the session
+                // is gone.
+                latestAssistantResponseText = await describeAndHandle(assistantError: error)
             }
 
             if !Task.isCancelled {
@@ -797,7 +854,10 @@ final class CompanionManager: ObservableObject {
                 detectedElementDisplayFrame = displayFrame
                 print("🎯 Onboarding demo: pointing at \"\(parseResult.elementLabel ?? "element")\" — \"\(parseResult.responseText)\"")
             } catch {
-                print("⚠️ Onboarding demo error: \(error)")
+                // The demo is a flourish, not a feature — a signed-out user
+                // simply doesn't see the cursor fly anywhere, and telling them
+                // to sign in in the middle of an intro video would be noise.
+                print("⚠️ Onboarding demo skipped: \(error)")
             }
         }
     }

@@ -19,6 +19,14 @@ extension Notification.Name {
     /// Posted by CompanionManager when the global summon hotkey (ctrl + option)
     /// is pressed — toggles the companion panel open/closed.
     static let clickyTogglePanel = Notification.Name("clickyTogglePanel")
+    /// Posted when the panel's SwiftUI content changes height on its own — the
+    /// guide opening, closing, or moving to a longer step. The panel only
+    /// measures its content when it is shown, so without this the new content
+    /// renders clipped inside a panel still shaped for the old content.
+    static let clickyResizePanelToContent = Notification.Name("clickyResizePanelToContent")
+    /// Posted when an `iris://guide/…` link arrives and the panel has to come
+    /// forward to show it, whether or not it was already open.
+    static let clickyShowPanel = Notification.Name("clickyShowPanel")
 }
 
 /// Custom NSPanel subclass that can become the key window even with
@@ -34,6 +42,8 @@ final class MenuBarPanelManager: NSObject {
     private var clickOutsideMonitor: Any?
     private var dismissPanelObserver: NSObjectProtocol?
     private var togglePanelObserver: NSObjectProtocol?
+    private var resizePanelToContentObserver: NSObjectProtocol?
+    private var showPanelObserver: NSObjectProtocol?
 
     private let companionManager: CompanionManager
     private let panelWidth: CGFloat = 320
@@ -59,6 +69,27 @@ final class MenuBarPanelManager: NSObject {
         ) { [weak self] _ in
             self?.togglePanel()
         }
+
+        resizePanelToContentObserver = NotificationCenter.default.addObserver(
+            forName: .clickyResizePanelToContent,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            // SwiftUI has not laid the new content out yet at the moment the
+            // state changes, so the re-measure waits for the next runloop turn.
+            DispatchQueue.main.async {
+                guard let self, self.panel?.isVisible == true else { return }
+                self.positionPanelBelowStatusItem()
+            }
+        }
+
+        showPanelObserver = NotificationCenter.default.addObserver(
+            forName: .clickyShowPanel,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.showPanel()
+        }
     }
 
     deinit {
@@ -69,6 +100,12 @@ final class MenuBarPanelManager: NSObject {
             NotificationCenter.default.removeObserver(observer)
         }
         if let observer = togglePanelObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = resizePanelToContentObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = showPanelObserver {
             NotificationCenter.default.removeObserver(observer)
         }
     }

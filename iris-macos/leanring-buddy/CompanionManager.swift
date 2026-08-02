@@ -66,6 +66,12 @@ final class CompanionManager: ObservableObject {
     /// directly, and the request pipeline below asks it which route to take.
     let accountService = AccountService()
 
+    /// Owns the install guide the reader is currently following, if any. It
+    /// lives here rather than in the panel view because an `iris://guide/…`
+    /// link can arrive while the panel has never been opened, and the guide has
+    /// to survive the panel being closed and reopened.
+    let guideSessionController = GuideSessionController()
+
     /// Where the funded tier lives — publik in a shipped build, and a localhost
     /// origin when a developer's Info.plist says so.
     private let publikBaseURL = AssistantTransport.configuredPublikBaseURL()

@@ -33,6 +33,12 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private let companionManager = CompanionManager()
     private var sparkleUpdaterController: SPUStandardUpdaterController?
 
+    /// A guide link that arrived before the panel existed. macOS can deliver
+    /// the URL that launched the app before `applicationDidFinishLaunching`
+    /// runs, and opening a guide into a panel that has not been created yet
+    /// would drop the link on the floor.
+    private var guideDeepLinkWaitingForLaunchToFinish: GuideDeepLink?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("🎯 Iris: Starting...")
         print("🎯 Iris: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
@@ -48,10 +54,75 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         }
         registerAsLoginItemIfNeeded()
         // startSparkleUpdater()
+
+        if let guideDeepLinkWaitingForLaunchToFinish {
+            self.guideDeepLinkWaitingForLaunchToFinish = nil
+            openGuide(fromDeepLink: guideDeepLinkWaitingForLaunchToFinish)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         companionManager.stop()
+    }
+
+    // MARK: - Deep links
+
+    /// Every `iris://` link the OS hands this app. The link is parsed by
+    /// `IrisDeepLinkParser` before any of it is applied, so a malformed link
+    /// can never partially take effect.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for incomingURL in urls {
+            handleIncomingDeepLink(incomingURL)
+        }
+    }
+
+    private func handleIncomingDeepLink(_ incomingURL: URL) {
+        switch IrisDeepLinkParser.parse(incomingURL) {
+        case .success(.guide(let guideDeepLink)):
+            print("🎯 Iris: accepted guide deep link — slug \(guideDeepLink.slug), "
+                  + "version \(guideDeepLink.version), "
+                  + "branch \(guideDeepLink.branchKey ?? "none"), "
+                  + "step \(guideDeepLink.stepIndex.map(String.init) ?? "none")")
+            guard menuBarPanelManager != nil else {
+                guideDeepLinkWaitingForLaunchToFinish = guideDeepLink
+                return
+            }
+            openGuide(fromDeepLink: guideDeepLink)
+
+        case .success(.authCallback):
+            // Sign-in callbacks are delivered privately to the
+            // `ASWebAuthenticationSession` that started the sign-in, which is
+            // where `AccountService` already handles them. One arriving here
+            // means no session is waiting for it, and exchanging the code a
+            // second time would burn a single-use code for nobody.
+            print("🎯 Iris: ignoring a sign-in callback with no sign-in waiting for it")
+
+        case .failure(let rejection):
+            print("⚠️ Iris: rejected deep link — \(rejection.rejectionMessage)")
+        }
+    }
+
+    private func openGuide(fromDeepLink guideDeepLink: GuideDeepLink) {
+        // The panel comes forward first so the reader sees the guide loading
+        // rather than watching nothing happen after clicking a link.
+        NotificationCenter.default.post(name: .clickyShowPanel, object: nil)
+        Task {
+            let guideSessionController = companionManager.guideSessionController
+            await guideSessionController.openGuide(fromDeepLink: guideDeepLink)
+            // Logged because a link that parses can still fail to open — a
+            // retired version, a guide still in review — and the reason lives
+            // only in the panel otherwise.
+            switch guideSessionController.loadState {
+            case .guideIsOpen:
+                print("🎯 Iris: opened guide \(guideDeepLink.slug) at "
+                      + "step \(guideSessionController.currentStepIndex + 1) of "
+                      + "\(guideSessionController.numberOfStepsInTheSelectedBranch)")
+            case .guideCouldNotBeLoaded(_, let userFacingMessage):
+                print("⚠️ Iris: guide \(guideDeepLink.slug) did not open — \(userFacingMessage)")
+            case .noGuideIsOpen, .guideIsLoading:
+                break
+            }
+        }
     }
 
     /// Registers the app as a login item so it launches automatically on

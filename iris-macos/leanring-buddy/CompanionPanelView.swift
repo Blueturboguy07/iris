@@ -15,6 +15,10 @@ struct CompanionPanelView: View {
     /// redraw the instant a sign-in finishes, rather than on the next thing
     /// that happens to change assistant state.
     @ObservedObject var accountService: AccountService
+    /// Observed separately for the same reason as the account service: the panel
+    /// has to redraw the moment a guide arrives over an `iris://` link, which
+    /// happens without the assistant state changing at all.
+    @ObservedObject var guideSessionController: GuideSessionController
 
     @State private var messageInput: String = ""
 
@@ -28,6 +32,7 @@ struct CompanionPanelView: View {
     init(companionManager: CompanionManager) {
         self.companionManager = companionManager
         _accountService = ObservedObject(wrappedValue: companionManager.accountService)
+        _guideSessionController = ObservedObject(wrappedValue: companionManager.guideSessionController)
     }
 
     var body: some View {
@@ -37,6 +42,47 @@ struct CompanionPanelView: View {
                 .background(DS.Colors.borderSubtle)
                 .padding(.horizontal, 16)
 
+            // A guide takes over the panel while one is open: the reader is
+            // following instructions, and leaving the chat box and account rows
+            // underneath them would be two conversations at once.
+            if guideSessionController.loadState.isShowingSomethingAboutAGuide {
+                GuidePanelView(guideSessionController: guideSessionController)
+                    .padding(.top, 14)
+                    .padding(.horizontal, 16)
+            } else {
+                chatAndAccountContent
+            }
+
+            Spacer()
+                .frame(height: 12)
+
+            Divider()
+                .background(DS.Colors.borderSubtle)
+                .padding(.horizontal, 16)
+
+            footerSection
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+        }
+        .frame(width: 320)
+        .background(panelBackground)
+        // The floating panel measures its content only when it is shown, so
+        // swapping the chat view for a guide — or moving between steps of
+        // different lengths — has to ask for a re-fit, or the new content
+        // renders inside a panel still shaped for the old content.
+        .onChange(of: guideSessionController.loadState) { _, _ in
+            NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+        }
+        .onChange(of: guideSessionController.currentStepIndex) { _, _ in
+            NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+        }
+    }
+
+    /// Everything the panel shows when no guide is open: the assistant chat
+    /// box, the model picker, the account rows, and the permissions flow.
+    @ViewBuilder
+    private var chatAndAccountContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
             permissionsCopySection
                 .padding(.top, 16)
                 .padding(.horizontal, 16)
@@ -52,6 +98,12 @@ struct CompanionPanelView: View {
                     .frame(height: 12)
 
                 modelPickerRow
+                    .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 14)
+
+                GuideSlugEntryView(guideSessionController: guideSessionController)
                     .padding(.horizontal, 16)
 
                 Spacer()
@@ -76,20 +128,7 @@ struct CompanionPanelView: View {
                 startButton
                     .padding(.horizontal, 16)
             }
-
-            Spacer()
-                .frame(height: 12)
-
-            Divider()
-                .background(DS.Colors.borderSubtle)
-                .padding(.horizontal, 16)
-
-            footerSection
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
         }
-        .frame(width: 320)
-        .background(panelBackground)
     }
 
     // MARK: - Header

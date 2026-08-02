@@ -2,18 +2,20 @@
   "compilerOptions": {
     "target": "ES2022",
     "module": "commonjs",
+    "moduleResolution": "node",
     "lib": ["ES2022"],
+    "types": ["node"],
     "outDir": "dist",
-    "rootDir": "src",
+    "rootDir": ".",
     "strict": true,
+    "noUncheckedIndexedAccess": false,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
-    "declaration": true,
-    "declarationMap": true,
     "sourceMap": true
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "//": "The checking config: covers the app AND the suite, so `npm run typecheck` sees both. Emitting is done by tsconfig.build.json.",
+  "include": ["src/**/*", "tests/**/*", "forge.config.ts", "vitest.config.ts"],
+  "exclude": ["node_modules", "dist", "out"]
 }

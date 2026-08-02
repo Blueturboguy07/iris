@@ -1,39 +1,142 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, screen, shell } from "electron";
+import { app, BrowserWindow, ipcMain, screen, shell } from "electron";
+import { execFile } from "node:child_process";
+import path from "node:path";
 import { createTray } from "./tray";
-import { HotkeyManager } from "./hotkey";
-import { AudioCapture } from "./audio";
 import { SettingsStore } from "./settings";
 import { CompanionManager } from "./companion";
-import path from "path";
+import { AccountSession, configuredSupabaseProject } from "./account-session";
+import {
+  GuideDeepLink,
+  IRIS_URL_SCHEME,
+  parseIrisDeepLink,
+} from "../services/deep-link-parser";
+import { classifyExternalLink, refusalMessage } from "../services/external-links";
+import { boundedCommandOutput, toolSpecFor } from "../services/tool-versions";
+import { secretStorageIsAvailable } from "./secrets";
+
+/**
+ * index.ts
+ *
+ * Windows shell for Iris: windows, tray, IPC, and the `iris://` scheme.
+ *
+ * The command names handled here (`check_tool_version`, `take_pending_guide`,
+ * `open_external`, ...) are the ones `src/renderer/guide/app.js` already
+ * invokes — that file is the Tauri panel transplanted verbatim, so this process
+ * answers the same vocabulary its Rust counterpart does.
+ */
 
 let chatWindow: BrowserWindow | null = null;
 let settingsWindow: BrowserWindow | null = null;
 let overlayWindows: BrowserWindow[] = [];
 
 const settings = new SettingsStore();
+const account = new AccountSession(settings);
 let companion: CompanionManager;
 let cursorBuddyInterval: ReturnType<typeof setInterval> | null = null;
+
+/** A guide link that arrived before the panel was ready to receive it. */
+let pendingGuideDeepLink: GuideDeepLink | null = null;
+
+// MARK: - Deep links
+
+/**
+ * Windows delivers a custom-scheme link by launching the app again with the URL
+ * in argv, so a single-instance lock is what turns that second launch into a
+ * message to the running app rather than a second Iris.
+ */
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", (_event, argv) => {
+    receiveDeepLinksFromArgv(argv);
+    focusExistingWindow();
+  });
+  // macOS/Linux dev convenience; on Windows the argv path above is the real one.
+  app.on("open-url", (event, url) => {
+    event.preventDefault();
+    receiveDeepLink(url);
+  });
+}
+
+function registerIrisScheme(): void {
+  if (process.defaultApp && process.argv.length >= 2) {
+    // In development the executable is Electron itself, so the registration has
+    // to name the script too or Windows launches a bare Electron.
+    app.setAsDefaultProtocolClient(IRIS_URL_SCHEME, process.execPath, [
+      path.resolve(process.argv[1]),
+    ]);
+  } else {
+    app.setAsDefaultProtocolClient(IRIS_URL_SCHEME);
+  }
+}
+
+function receiveDeepLinksFromArgv(argv: string[]): void {
+  for (const argument of argv) {
+    if (argument.startsWith(`${IRIS_URL_SCHEME}://`)) receiveDeepLink(argument);
+  }
+}
+
+function receiveDeepLink(url: string): void {
+  const result = parseIrisDeepLink(url);
+  if (!result.ok) {
+    broadcast("iris-deep-link-rejected", result.rejection);
+    return;
+  }
+
+  if (result.link.kind === "guide") {
+    pendingGuideDeepLink = result.link.guide;
+    openGuideWindow();
+    broadcast("iris-guide-opened", result.link.guide);
+    return;
+  }
+
+  account
+    .completeSignIn(result.link.authCallback)
+    .then(() => broadcast("iris-account-changed", { signedIn: true }))
+    .catch((error: unknown) => {
+      broadcast("iris-account-error", error instanceof Error ? error.message : String(error));
+    });
+}
+
+function broadcast(channel: string, payload: unknown): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send(channel, payload);
+  }
+}
+
+function focusExistingWindow(): void {
+  const window = chatWindow ?? BrowserWindow.getAllWindows().find((each) => !each.isDestroyed());
+  if (!window || window.isDestroyed()) return;
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
+}
+
+// MARK: - Cursor buddy
 
 function startCursorBuddy(): void {
   if (cursorBuddyInterval) return;
   cursorBuddyInterval = setInterval(() => {
     if (overlayWindows.length === 0) return;
     const point = screen.getCursorScreenPoint();
-    // Route the buddy to the overlay for the display that contains the
-    // cursor; hide it on every other overlay. Coordinates are translated
-    // into that display's local CSS space (matches how POINT tags work).
-    const target = screen.getDisplayNearestPoint(point);
+    // Route the buddy to the overlay for the display that contains the cursor and
+    // hide it on every other one. Coordinates are translated into that display's
+    // local space, exactly as POINT tags are.
+    const targetDisplay = screen.getDisplayNearestPoint(point);
     const displays = screen.getAllDisplays();
-    const targetIndex = displays.findIndex((d) => d.id === target.id);
-    for (let i = 0; i < overlayWindows.length; i++) {
-      const win = overlayWindows[i];
-      if (!win || win.isDestroyed()) continue;
-      if (i === targetIndex) {
-        const localX = point.x - target.bounds.x;
-        const localY = point.y - target.bounds.y;
-        win.webContents.send("overlay:cursor-buddy", localX, localY);
+    const targetIndex = displays.findIndex((display) => display.id === targetDisplay.id);
+    for (let index = 0; index < overlayWindows.length; index++) {
+      const window = overlayWindows[index];
+      if (!window || window.isDestroyed()) continue;
+      if (index === targetIndex) {
+        window.webContents.send(
+          "overlay:cursor-buddy",
+          point.x - targetDisplay.bounds.x,
+          point.y - targetDisplay.bounds.y
+        );
       } else {
-        win.webContents.send("overlay:cursor-buddy-visible", false);
+        window.webContents.send("overlay:cursor-buddy-visible", false);
       }
     }
   }, 16);
@@ -44,27 +147,32 @@ function stopCursorBuddy(): void {
     clearInterval(cursorBuddyInterval);
     cursorBuddyInterval = null;
   }
-  for (const win of overlayWindows) {
-    if (win && !win.isDestroyed()) {
-      win.webContents.send("overlay:cursor-buddy-visible", false);
+  for (const window of overlayWindows) {
+    if (window && !window.isDestroyed()) {
+      window.webContents.send("overlay:cursor-buddy-visible", false);
     }
   }
 }
 
+// MARK: - Windows
+
+const preloadPath = () => path.join(__dirname, "..", "preload", "index.js");
+const rendererPath = (...segments: string[]) =>
+  path.join(__dirname, "..", "..", "src", "renderer", ...segments);
+
 /**
- * Create one transparent click-through overlay window per display. The
- * array index matches `screen.getAllDisplays()` order, which is also the
- * order used by `ScreenCapture.captureAllScreens`, so a POINT tag's
- * `screen` field directly indexes into this array.
+ * One transparent click-through overlay per display. The array index matches
+ * `screen.getAllDisplays()`, which is also the order `ScreenCapture` uses, so a
+ * POINT tag's `screen` field indexes into this array directly.
  */
 function createOverlayWindows(): BrowserWindow[] {
-  return screen.getAllDisplays().map((display, i) => createOverlayWindow(display, i));
+  return screen.getAllDisplays().map((display, index) => createOverlayWindow(display, index));
 }
 
 function createOverlayWindow(display: Electron.Display, displayIndex: number): BrowserWindow {
   const { x, y, width, height } = display.bounds;
 
-  const win = new BrowserWindow({
+  const window = new BrowserWindow({
     x,
     y,
     width,
@@ -82,207 +190,328 @@ function createOverlayWindow(display: Electron.Display, displayIndex: number): B
     hasShadow: false,
     show: false,
     webPreferences: {
-      preload: path.join(__dirname, "..", "preload", "index.js"),
+      preload: preloadPath(),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
 
-  win.setIgnoreMouseEvents(true, { forward: true });
-  win.setAlwaysOnTop(true, "screen-saver");
-  win.loadFile(path.join(__dirname, "..", "..", "src", "renderer", "overlay", "index.html"));
+  window.setIgnoreMouseEvents(true, { forward: true });
+  window.setAlwaysOnTop(true, "screen-saver");
+  void window.loadFile(rendererPath("overlay", "index.html"));
 
-  // Forward overlay renderer console messages to main process so we can see
-  // them in PowerShell during dev. Prefixed with the display index for
-  // multi-monitor clarity.
-  win.webContents.on("console-message", (_event, level, message, line) => {
+  // Windows sometimes drops always-on-top at show time, and `ready-to-show` does
+  // not always fire for transparent windows — hence both paths.
+  window.once("ready-to-show", () => {
+    window.showInactive();
+    window.setAlwaysOnTop(true, "screen-saver");
+  });
+  window.webContents.once("did-finish-load", () => {
+    if (!window.isVisible()) {
+      window.showInactive();
+      window.setAlwaysOnTop(true, "screen-saver");
+    }
+  });
+  window.webContents.on("console-message", (_event, level, message, line) => {
     console.log(`[overlay${displayIndex}:${level}] ${message} (line ${line})`);
   });
 
-  // Open DevTools only for the primary display in dev mode — opening one
-  // detached DevTools window per monitor is too noisy.
-  if (!app.isPackaged && displayIndex === 0) {
-    win.webContents.once("did-finish-load", () => {
-      win.webContents.openDevTools({ mode: "detach" });
-    });
-  }
-
-  // Show after load is ready (transparent + show:false avoids a black flash on Windows)
-  win.once("ready-to-show", () => {
-    win.showInactive();
-    win.setAlwaysOnTop(true, "screen-saver");
-    console.log(`[Clicky] Overlay ${displayIndex} shown:`, win.getBounds(), "isVisible:", win.isVisible());
-  });
-
-  // Fallback: if ready-to-show never fires (transparent windows can be tricky),
-  // force-show after the load completes.
-  win.webContents.once("did-finish-load", () => {
-    if (!win.isVisible()) {
-      win.showInactive();
-      win.setAlwaysOnTop(true, "screen-saver");
-      console.log(`[Clicky] Overlay ${displayIndex} forced-shown after did-finish-load:`, win.getBounds());
-    }
-  });
-
-  return win;
+  return window;
 }
 
 function createChatWindow(): BrowserWindow {
-  const win = new BrowserWindow({
+  const window = new BrowserWindow({
     width: 420,
     height: 550,
     resizable: true,
     show: false,
     frame: false,
-    transparent: false,
     alwaysOnTop: settings.get("alwaysOnTop"),
     webPreferences: {
-      preload: path.join(__dirname, "..", "preload", "index.js"),
+      preload: preloadPath(),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
 
-  win.loadFile(path.join(__dirname, "..", "..", "src", "renderer", "chat", "index.html"));
-  win.once("ready-to-show", () => {
-    win.show();
-    // setAlwaysOnTop after show — more reliable on Windows than constructor option
+  void window.loadFile(rendererPath("chat", "index.html"));
+  window.once("ready-to-show", () => {
+    window.show();
     if (settings.get("alwaysOnTop")) {
-      win.setAlwaysOnTop(true, "screen-saver");
-      // Re-apply after a short delay — Windows can reset it
+      // More reliable after show than as a constructor option, and Windows can
+      // still reset it a moment later.
+      window.setAlwaysOnTop(true, "screen-saver");
       setTimeout(() => {
-        if (!win.isDestroyed()) {
-          win.setAlwaysOnTop(true, "screen-saver");
-          // alwaysOnTop applied
-        }
+        if (!window.isDestroyed()) window.setAlwaysOnTop(true, "screen-saver");
       }, 500);
     }
   });
-  return win;
+  return window;
+}
+
+let guideWindow: BrowserWindow | null = null;
+
+function openGuideWindow(): BrowserWindow {
+  if (guideWindow && !guideWindow.isDestroyed()) {
+    guideWindow.show();
+    guideWindow.focus();
+    return guideWindow;
+  }
+
+  guideWindow = new BrowserWindow({
+    width: 420,
+    height: 620,
+    resizable: true,
+    show: false,
+    frame: false,
+    webPreferences: {
+      preload: preloadPath(),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  void guideWindow.loadFile(rendererPath("guide", "index.html"));
+  guideWindow.once("ready-to-show", () => guideWindow?.show());
+  guideWindow.on("closed", () => {
+    guideWindow = null;
+  });
+  return guideWindow;
 }
 
 function createSettingsWindow(): BrowserWindow {
-  const win = new BrowserWindow({
+  const window = new BrowserWindow({
     width: 500,
     height: 600,
     resizable: false,
     show: false,
     webPreferences: {
-      preload: path.join(__dirname, "..", "preload", "index.js"),
+      preload: preloadPath(),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
-
-  win.loadFile(path.join(__dirname, "..", "..", "src", "renderer", "settings", "index.html"));
-  win.once("ready-to-show", () => win.show());
-  return win;
+  void window.loadFile(rendererPath("settings", "index.html"));
+  window.once("ready-to-show", () => window.show());
+  return window;
 }
 
-function setupIPC(): void {
-  // Chat query — captures screen + sends to Claude
-  ipcMain.handle("chat:query", async (_event, text: string) => {
-    try {
-      const response = await companion.processQuery(text);
-      return response;
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new Error(msg);
-    }
+// MARK: - The guide panel's native commands
+
+async function checkToolVersion(tool: string): Promise<{
+  tool: string;
+  available: boolean;
+  version: string;
+}> {
+  const spec = toolSpecFor(tool);
+  if (!spec) throw new Error(`tool '${tool}' is not allowlisted`);
+  const [executable, args] = spec;
+
+  return new Promise((resolve) => {
+    execFile(
+      executable,
+      [...args],
+      { windowsHide: true, timeout: 10_000, shell: false },
+      (error, stdout, stderr) => {
+        const version = boundedCommandOutput(String(stdout), String(stderr));
+        if (error && !version) {
+          resolve({ tool, available: false, version: "" });
+          return;
+        }
+        resolve({ tool, available: !error, version });
+      }
+    );
   });
+}
 
-  // Settings
-  ipcMain.handle("settings:getAll", () => settings.getAll());
-  ipcMain.handle("settings:set", (_event, key: string, value: unknown) => {
-    settings.set(key as keyof ReturnType<typeof settings.getAll>, value as never);
-
-    // Apply alwaysOnTop immediately
-    if (key === "alwaysOnTop" && chatWindow && !chatWindow.isDestroyed()) {
-      chatWindow.setAlwaysOnTop(!!value, "screen-saver");
+function handleGuideCommand(command: string, args: Record<string, unknown>): unknown {
+  switch (command) {
+    case "take_pending_guide": {
+      // Taken, not read: a pending link is delivered exactly once, so reopening
+      // the panel later does not silently reset the reader's place.
+      const guide = pendingGuideDeepLink;
+      pendingGuideDeepLink = null;
+      return guide;
     }
 
-    // Toggle cursor buddy
+    case "check_tool_version":
+      return checkToolVersion(String(args.tool ?? ""));
+
+    case "open_external": {
+      const classification = classifyExternalLink(args.url);
+      if (!classification.allowed) {
+        // Refuse loudly. The panel turns this into a disabled control naming the
+        // host rather than a button that appears to do nothing.
+        throw new Error(refusalMessage(classification) ?? "Iris blocked that link.");
+      }
+      return shell.openExternal(classification.url);
+    }
+
+    case "quit_iris":
+      app.quit();
+      return null;
+
+    case "hide_iris":
+      guideWindow?.hide();
+      return null;
+
+    case "resize_iris": {
+      const presetSizes: Record<string, { width: number; height: number }> = {
+        collapsed: { width: 420, height: 220 },
+        menu: { width: 420, height: 520 },
+        guide: { width: 420, height: 620 },
+      };
+      const size = presetSizes[String(args.preset ?? "guide")] ?? presetSizes.guide;
+      if (guideWindow && !guideWindow.isDestroyed()) {
+        guideWindow.setSize(size.width, size.height, true);
+      }
+      return null;
+    }
+
+    case "glide_iris": {
+      if (!guideWindow || guideWindow.isDestroyed()) return null;
+      const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+      const [windowWidth, windowHeight] = guideWindow.getSize();
+      const margin = 24;
+      const anchor = String(args.anchor ?? "bottom-right");
+      const isRight = anchor.includes("right");
+      const isBottom = anchor.includes("bottom");
+      guideWindow.setPosition(
+        isRight
+          ? display.bounds.x + display.bounds.width - windowWidth - margin
+          : display.bounds.x + margin,
+        isBottom
+          ? display.bounds.y + display.bounds.height - windowHeight - margin
+          : display.bounds.y + margin,
+        true
+      );
+      return null;
+    }
+
+    case "foreground_app_identity":
+      // Windows has no cross-process foreground-app API without a native module.
+      // Returning null keeps the guide panel's watch strip honest instead of
+      // inventing an answer; `app.js` already renders that case.
+      return null;
+
+    default:
+      throw new Error(`unknown Iris command '${command}'`);
+  }
+}
+
+// MARK: - IPC
+
+function setupIPC(): void {
+  ipcMain.handle("chat:query", async (_event, text: string) => companion.processQuery(text));
+
+  ipcMain.handle("settings:getAll", () => ({
+    ...settings.getAll(),
+    // Never the key itself — only whether one is stored.
+    hasAnthropicApiKey: Boolean(settings.getAnthropicApiKey()),
+    secretStorageAvailable: secretStorageIsAvailable(),
+    signedIn: account.isSignedIn(),
+    signedInEmail: account.signedInEmail(),
+    supabaseConfigured: configuredSupabaseProject() !== null,
+  }));
+
+  ipcMain.handle("settings:set", (_event, key: string, value: unknown) => {
+    if (key === "anthropicApiKey") {
+      return settings.setAnthropicApiKey(String(value ?? ""));
+    }
+    settings.set(key as never, value as never);
+    if (key === "alwaysOnTop" && chatWindow && !chatWindow.isDestroyed()) {
+      chatWindow.setAlwaysOnTop(Boolean(value), "screen-saver");
+    }
     if (key === "cursorBuddyEnabled") {
       if (value) startCursorBuddy();
       else stopCursorBuddy();
     }
+    return true;
   });
 
-  // Open URL in default browser
+  ipcMain.handle("account:signIn", (_event, provider: string) =>
+    account.beginSignIn(provider === "github" ? "github" : "google")
+  );
+  ipcMain.handle("account:signOut", () => {
+    account.signOut();
+    broadcast("iris-account-changed", { signedIn: false });
+  });
+
+  ipcMain.handle("guide:open", () => {
+    openGuideWindow();
+  });
+
+  // The single entry point the transplanted guide panel uses.
+  ipcMain.handle("iris:invoke", (_event, command: string, args: Record<string, unknown>) =>
+    handleGuideCommand(command, args ?? {})
+  );
+
   ipcMain.handle("shell:openExternal", (_event, url: string) => {
-    if (url.startsWith("https://")) {
-      shell.openExternal(url);
+    const classification = classifyExternalLink(url);
+    if (!classification.allowed) {
+      throw new Error(refusalMessage(classification) ?? "Iris blocked that link.");
     }
+    return shell.openExternal(classification.url);
   });
 
-  // Window controls
   ipcMain.handle("window:minimize", (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize();
   });
-
   ipcMain.handle("window:close", (event) => {
     BrowserWindow.fromWebContents(event.sender)?.close();
   });
 }
 
-app.whenReady().then(() => {
-  // Hide from taskbar — tray only
-  app.dock?.hide?.();
+// MARK: - Bootstrap
 
-  overlayWindows = createOverlayWindows();
-  companion = new CompanionManager(settings, overlayWindows);
+if (gotSingleInstanceLock) {
+  void app.whenReady().then(() => {
+    registerIrisScheme();
 
-  const audioCapture = new AudioCapture(settings);
-  audioCapture.setCompanion(companion);
+    overlayWindows = createOverlayWindows();
+    companion = new CompanionManager(settings, account, overlayWindows);
 
-  setupIPC();
+    setupIPC();
 
-  const tray = createTray({
-    onChat: () => {
-      if (chatWindow && !chatWindow.isDestroyed()) {
-        chatWindow.focus();
-      } else {
-        chatWindow = createChatWindow();
-        chatWindow.on("closed", () => {
-          chatWindow = null;
-        });
-      }
-    },
-    onSettings: () => {
-      if (settingsWindow && !settingsWindow.isDestroyed()) {
-        settingsWindow.focus();
-      } else {
-        settingsWindow = createSettingsWindow();
-        settingsWindow.on("closed", () => {
-          settingsWindow = null;
-        });
-      }
-    },
-    onQuit: () => app.quit(),
+    createTray({
+      onChat: () => {
+        if (chatWindow && !chatWindow.isDestroyed()) {
+          chatWindow.focus();
+        } else {
+          chatWindow = createChatWindow();
+          chatWindow.on("closed", () => {
+            chatWindow = null;
+          });
+        }
+      },
+      onGuide: () => openGuideWindow(),
+      onSettings: () => {
+        if (settingsWindow && !settingsWindow.isDestroyed()) {
+          settingsWindow.focus();
+        } else {
+          settingsWindow = createSettingsWindow();
+          settingsWindow.on("closed", () => {
+            settingsWindow = null;
+          });
+        }
+      },
+      onQuit: () => app.quit(),
+    });
+
+    chatWindow = createChatWindow();
+    chatWindow.on("closed", () => {
+      chatWindow = null;
+    });
+
+    if (settings.get("cursorBuddyEnabled")) startCursorBuddy();
+
+    // A link that launched the app is sitting in this process's own argv.
+    receiveDeepLinksFromArgv(process.argv);
+
+    console.log("Iris for Windows started — running in the system tray");
   });
+}
 
-  const hotkeyManager = new HotkeyManager(settings);
-  hotkeyManager.register();
-
-  // Open chat on launch so there's something visible
-  chatWindow = createChatWindow();
-  chatWindow.on("closed", () => {
-    chatWindow = null;
-  });
-
-  // Start cursor buddy if enabled
-  if (settings.get("cursorBuddyEnabled")) {
-    startCursorBuddy();
-  }
-
-  console.log("Clicky Windows started — running in system tray");
-});
-
-app.on("will-quit", () => {
-  globalShortcut.unregisterAll();
-});
-
-// Prevent app from closing when all windows are closed (tray app)
+// Tray app: closing every window must not quit.
 app.on("window-all-closed", () => {
-  // Do nothing — keep app running in tray
+  // Deliberately empty.
 });

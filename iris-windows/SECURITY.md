@@ -1,87 +1,117 @@
 # Security Model
 
-## Architecture
+## Two ways to reach a model, and nothing else
 
-Clicky Windows uses a **BYOK (Bring Your Own Keys)** model. All API keys are stored locally on your machine and sent directly to providers — there is no intermediary proxy server by default.
+Iris has exactly two transports, defined by
+[`docs/iris-assistant-protocol.md`](../docs/iris-assistant-protocol.md) §1:
 
-```
-Your Machine                          Cloud APIs
-┌─────────────────┐                  ┌──────────────┐
-│ Clicky App      │ ──── HTTPS ───→  │ Anthropic    │
-│                 │ ──── HTTPS ───→  │ OpenAI       │
-│ settings.json   │ ──── HTTPS ───→  │ OpenRouter   │
-│ (local keys)    │ ──── HTTPS ───→  │ AssemblyAI   │
-│                 │ ──── HTTPS ───→  │ ElevenLabs   │
-└─────────────────┘                  └──────────────┘
-```
+| Tier | Endpoint | Credential |
+|---|---|---|
+| Funded | `POST {publik}/api/assistant/chat` | a Supabase access token (publik holds the Anthropic key server-side) |
+| BYO | `POST https://api.anthropic.com/v1/messages` | the user's own `x-api-key` |
 
-## Key Storage
+There is no third route, no user-configurable proxy URL, and no other provider.
+The generic proxy setting upstream shipped was removed precisely because an
+arbitrary destination plus a credential is the shape of the mistake the rule
+below exists to prevent.
 
-- API keys are stored in `%APPDATA%/clicky-windows/settings.json`
-- The file is readable only by the current user (standard Windows APPDATA permissions)
-- Keys are **not** encrypted at rest (improvement planned for HIPAA mode)
-- Keys are **never** sent to any server other than the intended API provider
-- Keys are **never** logged or included in error messages
+## The key-isolation property
 
-## Data Flow
+**A user's own Anthropic key is never sent to any publik host.**
 
-| Data | Where it goes | Stored locally? |
-|------|--------------|-----------------|
-| Screenshots | AI provider (Anthropic/OpenAI/OpenRouter) | No — in-memory only |
-| Audio recordings | OpenAI Whisper API | No — temp file deleted after transcription |
-| Transcripts | AI provider | No — in-memory, cleared on app close |
-| AI responses | Displayed in chat | No — in-memory, cleared on app close |
-| TTS audio | Temp MP3 file → playback → deleted | Temp only, auto-cleaned |
-| Conversation history | Last 10 exchanges in memory | No — cleared on app close |
-| Settings/keys | `%APPDATA%/clicky-windows/settings.json` | Yes |
+Enforced three ways in `src/services/assistant-transport.ts`:
 
-## What We Don't Do
+1. **Structurally.** The only function that writes an `x-api-key` header takes
+   no URL — its destination is a compile-time constant. There is no function
+   anywhere that accepts both a key and a destination, so "send the key
+   somewhere else" is not something the code can express.
+2. **By assertion.** Every request leaves through `validatedRequest`, which
+   refuses an `x-api-key` bound for any host but `api.anthropic.com`, and —
+   stated from the other side — refuses to let a publik host see that header at
+   all. The check is case-insensitive, so a refactor spelling it `X-API-Key`
+   trips it too.
+3. **By test.** `tests/assistant-transport.test.ts` asserts it in both
+   directions; `tests/claude-service.test.ts` asserts it again at the point the
+   request actually reaches the wire, including that the funded request does not
+   contain the key anywhere in its serialised form.
 
-- **No proxy server** — BYOK means your keys go directly to providers, not through us
-- **No analytics/telemetry** — no PostHog, no tracking, no usage data sent anywhere
-- **No auto-updates phoning home** — update checks are not yet implemented
-- **No admin privileges** — the app runs as a standard user process (`asInvoker`)
-- **No persistent data** — screenshots, audio, transcripts are never written to disk (except temp TTS files which are immediately deleted)
-- **No background data collection** — the app only captures screen/audio when you explicitly trigger it (send button, mic button, or hotkey)
+## Secret storage
 
-## Optional Proxy
+Secrets are held with Electron `safeStorage`, which is **DPAPI** on Windows: the
+ciphertext is bound to the Windows user account and is useless if the file is
+copied to another machine.
 
-If you configure a proxy URL in settings, API calls route through that proxy instead of directly to providers. This is intended for team deployments where keys are centralized. The proxy is **your own infrastructure** — we don't provide or host one.
+| Secret | Where | Notes |
+|---|---|---|
+| BYO Anthropic key | `%APPDATA%/iris/secrets.json`, DPAPI-encrypted | never logged, never synced |
+| Supabase refresh token | same | rotated on use |
+| Supabase access token | memory only | never written to disk (protocol §4) |
 
-If using a proxy:
-- Add authentication (bearer token, IP allowlist, or SSO)
-- Use HTTPS
-- Don't log request bodies (they contain screenshots and transcripts)
-- See [proxy setup docs](docs/proxy-setup.md)
+`settings.json` contains **no secrets** and is safe to attach to a bug report.
 
-## HIPAA Mode
+If Windows will not provide encryption, Iris says so and **refuses to store the
+key** rather than falling back to plaintext.
 
-Toggle in settings. Forces:
-- Local-only transcription (Whisper, no audio leaves device)
-- Local-only TTS (Windows SAPI, no text leaves device)
-- Screenshots still go to AI provider — requires BAA with that provider
+### Upgrading from clicky-windows
 
-See [HIPAA docs](docs/hipaa-mode.md) for full compliance checklist.
+Upstream stored every API key in `%APPDATA%/clicky-windows/settings.json` in
+plain text. On first run Iris migrates the Anthropic key into `safeStorage` and
+removes the plaintext keys — including the ones for providers this fork dropped —
+so upgrading strictly improves the user's position.
+
+## Data flow
+
+| Data | Where it goes | Persisted? |
+|---|---|---|
+| Screenshots | memory, then the active transport only | **No** — never written to disk |
+| Typed messages | the active transport only | No |
+| Conversation history | memory, last 10 turns | No |
+| Settings | `%APPDATA%/iris/settings.json` | Yes, no secrets |
+| Secrets | `%APPDATA%/iris/secrets.json` | Yes, DPAPI-encrypted |
+
+Iris does not capture audio. Voice input and text-to-speech were removed in this
+fork; there is no microphone code left in the tree.
+
+## What runs on your machine
+
+A guide is server-served content — it changes without a client release, and no
+reviewer of this binary saw it. So:
+
+- **Programs.** A guide can only trigger a version check for a tool on the fixed
+  allowlist in `src/services/tool-versions.ts`, and no part of the command is
+  built from guide text. Commands run with `shell: false`.
+- **Links.** A guide can only open a host on the 22-entry allowlist in
+  `src/services/external-links.ts`, which matches `allowed_external_host` in
+  `iris-desktop/src-tauri/src/main.rs`. A blocked host renders a **disabled
+  control naming it** — never a button that silently does nothing.
+- **Deep links.** `iris://` links are validated against the rules ported from
+  `main.rs` lines 188–285, where an unknown query parameter is rejected outright
+  rather than ignored.
+
+## Renderer isolation
+
+Every window runs with `contextIsolation: true` and `nodeIntegration: false`.
+`src/preload/index.ts` is the complete list of what a renderer can do — and it
+has no function that returns a stored secret. A renderer can ask *whether* a key
+exists and can set one; it can never read one back.
+
+The chat and settings windows declare a CSP that blocks all remote loads. They
+have no CDN scripts and no remote fonts.
+
+## Sign-in
+
+PKCE OAuth in the **system browser** via `shell.openExternal` — never a webview.
+Google refuses to complete OAuth inside embedded browser views, and protocol §4
+requires the real browser regardless. The state token is checked on the way back;
+a callback the app did not initiate is discarded.
 
 ## Logging
 
-Production logging is minimal:
-- App lifecycle events (start, stop)
-- Error messages (no sensitive data included)
-- Transcript length (not content)
-- TTS provider selection (not the text being spoken)
+Iris logs pipeline stages and multi-monitor warnings. Screenshots, message
+content, response content, API keys, and tokens are **never logged**.
 
-Transcripts, screenshots, API keys, and response content are **never logged**.
+Funded-tier server-side logging is token counts only, never content (protocol §5).
 
-## Reporting Security Issues
+## Reporting security issues
 
-If you find a security issue, please open an issue at [github.com/tekram/clicky-windows/issues](https://github.com/tekram/clicky-windows/issues) or email the maintainer directly.
-
-## Comparison with Original macOS Clicky
-
-The original [farzaa/clicky](https://github.com/farzaa/clicky) uses a different model:
-- Cloudflare Worker proxy holds all API keys (users don't need their own)
-- Worker is public/unauthenticated
-- PostHog analytics enabled
-
-Our Windows version intentionally avoids these patterns by using BYOK and zero telemetry.
+Open a security advisory on the publik repository rather than a public issue.

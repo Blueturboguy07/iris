@@ -1,0 +1,142 @@
+name: iris-windows
+
+# The dev machine for this app is a Mac that cannot run Windows, so this
+# workflow is the only place Iris for Windows is ever built, packaged, or
+# started. It has to be thorough enough to stand in for a human running it.
+
+on:
+  push:
+    branches: [main, iris-assistant]
+    paths:
+      - "iris-windows/**"
+      - ".github/workflows/iris-windows.yml"
+  pull_request:
+    paths:
+      - "iris-windows/**"
+      - ".github/workflows/iris-windows.yml"
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: iris-windows
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: iris-windows/package-lock.json
+
+      # electron-forge pulls @electron/node-gyp straight from git. npm sometimes
+      # writes that into the lockfile as `git+ssh://git@github.com/...`, which a
+      # runner with no SSH key cannot clone. The lockfile is checked in with an
+      # https URL; this makes a future `npm install` that rewrites it harmless.
+      - name: Prefer https for git dependencies
+        run: git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+
+      - name: Install
+        run: npm ci
+
+      # ── Static checks ────────────────────────────────────────────────
+      # These cover the app and the suite; see tsconfig.json vs
+      # tsconfig.build.json for why there are two configs.
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      # ── The suite ────────────────────────────────────────────────────
+      # Pure logic: no network, no display, no Windows-only API. It passes
+      # identically on the developer's Mac, which is the point — but running it
+      # here first means a Windows-specific Node or path difference cannot hide.
+
+      - name: Unit tests
+        run: npm test
+
+      # ── Build ────────────────────────────────────────────────────────
+
+      - name: Package the app
+        run: npm run package
+
+      - name: Make the installer
+        run: npm run make
+
+      # ── Launch smoke test ────────────────────────────────────────────
+      # A build that cannot start is worse than no build: it packages, it
+      # uploads, and it fails on a user's machine instead of here. So the
+      # packaged binary is actually started and has to survive.
+      #
+      # Iris is a tray app with a chat window, and windows-latest runners do
+      # have a desktop session, so no virtual display is needed. What IS needed
+      # is somewhere to write settings — hence a scratch userData directory —
+      # and no publik credentials, so the app must come up in its signed-out
+      # state rather than crashing on a missing account.
+
+      - name: Launch smoke test
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path out -Recurse -Filter iris.exe |
+                 Where-Object { $_.FullName -notmatch 'node_modules' } |
+                 Select-Object -First 1
+
+          if (-not $exe) {
+            Write-Error "No packaged iris.exe was produced — nothing to smoke test."
+            exit 1
+          }
+          Write-Host "Starting $($exe.FullName)"
+
+          $scratch = Join-Path $env:RUNNER_TEMP "iris-smoke-userdata"
+          New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+
+          $stdout = Join-Path $env:RUNNER_TEMP "iris-stdout.log"
+          $stderr = Join-Path $env:RUNNER_TEMP "iris-stderr.log"
+
+          $process = Start-Process -FilePath $exe.FullName `
+            -ArgumentList "--user-data-dir=$scratch" `
+            -PassThru `
+            -RedirectStandardOutput $stdout `
+            -RedirectStandardError $stderr
+
+          # Ten seconds is well past the point where a bad main-process import,
+          # a missing renderer file, or a failed preload would have taken it
+          # down. A tray app that is still alive here really did start.
+          Start-Sleep -Seconds 10
+
+          if ($process.HasExited) {
+            Write-Host "--- stdout ---"; Get-Content $stdout -ErrorAction SilentlyContinue
+            Write-Host "--- stderr ---"; Get-Content $stderr -ErrorAction SilentlyContinue
+            Write-Error "Iris exited on its own after $($process.ExitCode) — the packaged app does not start."
+            exit 1
+          }
+
+          Write-Host "Iris survived 10s. Startup log:"
+          Get-Content $stdout -ErrorAction SilentlyContinue
+
+          Stop-Process -Id $process.Id -Force
+          Write-Host "Launch smoke test passed."
+
+      # ── Artifacts ────────────────────────────────────────────────────
+      # The installer is the thing a human on Windows would actually try, so it
+      # is uploaded whether or not the smoke test passed — a broken build is
+      # exactly the one worth downloading and inspecting.
+
+      - name: Upload installer
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iris-windows-installer
+          path: |
+            iris-windows/out/make/**/*.exe
+            iris-windows/out/make/**/*.nupkg
+            iris-windows/out/make/**/*.zip
+          if-no-files-found: warn
+          retention-days: 14

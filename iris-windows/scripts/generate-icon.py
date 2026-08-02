@@ -1,4 +1,4 @@
-"""Generate Clicky Windows app icon — blue glowing cursor on dark background."""
+"""Generate the Iris for Windows app icon — blue glowing cursor on dark background."""
 
 from PIL import Image, ImageDraw, ImageFilter
 import math

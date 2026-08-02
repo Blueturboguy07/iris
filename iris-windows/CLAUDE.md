@@ -1,174 +1,143 @@
 # CLAUDE.md
 
-Notes for Claude Code (and future contributors) working in this repo.
-High-level architecture first, then the tricky bits that are easy to get
-wrong.
+Notes for Claude Code (and future contributors) working in `iris-windows/`.
+Read `README.md` first — it covers what is ported, what is absent, and what has
+not been verified. This file is the architecture and the traps.
 
-## What this is
+## The one rule
 
-Clicky Windows is an Electron + TypeScript port of
-[farzaa/clicky](https://github.com/farzaa/clicky). It's a tray-resident AI
-screen companion: the user speaks or types, Clicky captures a screenshot,
-sends it to a vision LLM, and **points at UI elements with an animated
-cursor overlay** based on POINT tags the model emits inline in its reply.
+**The user's own Anthropic key must never reach a publik host.** Losing that is
+a ship-blocker, not a bug. It is enforced structurally, by assertion, and by test
+in `src/services/assistant-transport.ts` — read the header comment there before
+touching anything in that file.
 
-See `README.md` for user-facing docs and `docs/` for feature docs.
+Do not add a code path that accepts both a credential and a destination. The
+whole design is that no such function exists.
+
+## Testing is CI, not local
+
+The dev machine is a Mac that cannot run Windows. `.github/workflows/iris-windows.yml`
+on `windows-latest` is the only place this app is built, packaged, or started —
+including a launch smoke test that requires the packaged `iris.exe` to survive
+ten seconds. Treat a red workflow as a broken build, because there is no other
+signal.
+
+The unit suite must therefore stay free of network, display, and Windows-only
+APIs, so it runs identically on both. Anything needing real I/O takes it as an
+injected function (`fetchImplementation`, and so on). If a change cannot be
+tested that way, say so in the PR rather than adding a test that only passes on
+one OS.
 
 ## Architecture
 
 ```
-src/
-├── main/                  # Electron main process (Node)
-│   ├── index.ts           # Window creation, IPC wiring, app bootstrap
-│   ├── companion.ts       # Central orchestrator:
-│   │                      #   transcript → screen capture → AI query →
-│   │                      #   POINT tag pipeline → overlay → TTS
-│   ├── screenshot.ts      # desktopCapturer wrapper + crop helper
-│   ├── audio.ts           # PCM coming from renderer → transcription provider
-│   ├── hotkey.ts          # Global push-to-talk hotkey
-│   ├── tray.ts            # System tray icon/menu
-│   └── settings.ts        # Persistent settings store
-├── services/              # External service clients (main process only)
-│   ├── claude.ts          # Anthropic — pass-1 query + pass-2 refinePoint
-│   ├── openai-chat.ts     # OpenAI chat completion (vision)
-│   ├── openrouter-chat.ts # OpenRouter (routes to various models)
-│   ├── transcription/     # AssemblyAI / OpenAI Whisper / whisper.cpp local
-│   └── tts/               # ElevenLabs / OpenAI TTS / Windows SAPI
-├── preload/               # contextBridge between main and renderer
-└── renderer/              # HTML/CSS/JS for each window
-    ├── chat/              # Chat window (text + push-to-talk mic)
-    ├── overlay/           # Transparent fullscreen click-through cursor
-    └── settings/          # Settings panel
+src/main/       Electron main process — Node APIs, Electron APIs, side effects
+src/services/   Pure logic — no Electron import, injectable I/O, fully tested
+src/preload/    The complete list of what a renderer may do
+src/renderer/   chat · guide (transplanted) · overlay · settings
+tests/          vitest; 8 files
 ```
 
-### End-to-end query flow (what happens when the user asks something)
+The `main` / `services` split is load-bearing: `services/` is what the suite can
+reach. When adding behaviour, put the decision in `services/` and leave `main/`
+carrying pixels and window handles around. `screenshot.ts` is the model for this
+— it talks to `desktopCapturer` and delegates every coordinate decision to
+`services/coordinates.ts`.
 
-1. `renderer/chat` sends either a typed question via `chat:query` IPC, or
-   after push-to-talk captures and decodes the mic blob to 16-bit PCM and
-   sends it via `audio:recording-complete`.
-2. `main/audio.ts` routes PCM to the configured transcription provider
-   (`whisper-local` locally via whisper.cpp, or `openai` via the Whisper
-   API). The transcript is passed to `CompanionManager.processQuery`.
-3. `main/companion.ts` captures all screens (`ScreenCapture.captureAllScreens`),
-   picks the current `AIProvider` (Claude / OpenAI / OpenRouter) and calls
-   `query()` with the transcript, screenshots, cursor position, and trimmed
-   conversation history.
-4. The LLM responds with free-form text containing inline POINT tags in the
-   format `[POINT:x,y:label:screenN]`.
-5. `companion.ts` parses the raw tags, runs a **second-pass refinement**
-   (see below), scales the resulting image-space coordinates to display
-   pixels, and pushes them to the overlay via `overlay:point` IPC.
-6. In parallel, the response text (with POINT tags stripped) is sent to the
-   TTS provider and the raw text is returned to the chat window.
+### Query flow
 
-## Pointing pipeline — three coordinate spaces
+1. `renderer/chat` → `chat:query` IPC.
+2. `main/companion.ts` captures all screens, picks a transport for the *current*
+   credentials (the user can sign in or paste a key between messages), and calls
+   `services/claude.ts`.
+3. The model replies with text containing `[POINT:x,y:label:screenN]` tags.
+4. Each tag gets a second-pass refinement crop, then IMAGE → DISPLAY conversion,
+   then goes to the overlay for its own display.
+5. The tag-stripped text is returned to the chat window.
 
-**This is the easiest part of the codebase to break.** There are three
-coordinate spaces in play and every transformation must be explicit:
+### The three coordinate spaces
 
-1. **imageDimensions** — pixel space of the downsampled JPEG sent to the
-   model in pass 1. Capped at `MAX_DIMENSION = 1568` because going higher
-   triggers Anthropic's API-side downscaling, which silently invalidates
-   model-emitted coordinates.
-2. **native crop pixels** — pixel space of a high-DPI crop made from the
-   original full-resolution `_source` NativeImage and sent to the model in
-   pass 2 (refinement). This has a different ratio than imageDimensions.
-3. **display pixels** — CSS coordinates for the overlay window, which is
-   sized to `display.bounds.{width,height}`.
+NATIVE (device pixels) → IMAGE (the downsampled JPEG the model saw, ≤ 1568 long
+edge) → DISPLAY (device-independent pixels, what the overlay is sized in).
 
-### Pass 1 → pass 2 refinement
+Model coordinates are always IMAGE space. Refinement answers are in the crop's
+own native-pixel space. The overlay needs DISPLAY space.
 
-A single LLM call gives roughly-right coordinates (±30 px on a 1568-wide
-image is typical). On dense UI with adjacent similar elements (like/dislike,
-tabs, toolbar buttons) that's not enough. The second pass:
+**All of this lives in `services/coordinates.ts` and nowhere else.** Do not
+reintroduce inline arithmetic in `companion.ts` — that is where it was, and
+extracting it is what made it testable. The failure mode is applying one space's
+factor to another space's number, which on a 2× display is off by exactly 2× and
+looks like a mediocre model rather than a unit error.
 
-1. For each POINT tag from pass 1, `cropScreenshotRegion` crops a ~300 px
-   window (imageDimensions space) around the estimate. Internally it crops
-   from the **full-resolution `_source` NativeImage**, not from the
-   downsampled JPEG, so the model sees a genuinely higher-DPI patch.
-2. `ClaudeService.refinePoint` sends this crop with a minimal, strict
-   system prompt ("return only `x,y`, ignore visually similar neighbors")
-   and `max_tokens: 32`.
-3. Refined coords come back in native-crop pixels and must be translated:
-   `imageX = origin.x + refined.x / pxPerImageDim`, then scaled to display
-   pixels via `bounds.width / imageDimensions.width`.
-4. All refinement calls run in `Promise.all`, so latency ≈ one extra API
-   round-trip regardless of how many POINT tags the first pass emitted.
+Other footguns, inherited from upstream and still true:
 
-### Coordinate-space footguns
+- Never send a pass-1 image with a long edge over 1568. Anthropic downsamples it
+  server-side and the coordinates come back in a space you cannot predict.
+- Never scale coordinates before refinement — refinement operates on raw
+  IMAGE-space coordinates.
+- `_source` on `ScreenshotResult` is a `NativeImage`. **Never send it over IPC.**
 
-- **Never** send a pass-1 image larger than `MAX_DIMENSION`. Anthropic will
-  downsample it server-side and the coords you get back will be in some
-  third space you can't predict.
-- **Never** scale coordinates before the refinement pass — refinement
-  operates on raw image-space coordinates from the model.
-- `_source` on `ScreenshotResult` is an Electron `NativeImage`. **Do not
-  send it over IPC** to the renderer; it won't serialize correctly.
-- POINT tags must be stripped from the spoken text before TTS, otherwise
-  the TTS provider will read coordinates out loud. The regex lives in
-  `companion.ts`.
+### The guide panel is transplanted, not written
 
-## Overlay window
+`src/renderer/guide/app.js` is a copy of `iris-desktop/ui/app.js`. Keep it that
+way. It reaches the shell through `window.__TAURI__`, and
+`src/renderer/guide/iris-bridge.js` synthesises that object from the Electron
+preload bridge — the bridge is the entire Windows-specific delta, which is what
+keeps the two panels diffable.
 
-The overlay is a transparent, click-through, always-on-top BrowserWindow
-sized to the primary display. Windows is finicky about this combination —
-notable constraints encoded in `createOverlayWindow`:
+Exactly one behavioural change was made to `app.js`: `blockedExternalHost` plus
+the disabled branch at the top of `updatePrimaryAction`, so a step pointing at a
+non-allowlisted host renders a **disabled control naming the host** instead of a
+button that does nothing. If you port a fix from `iris-desktop`, re-apply that
+change rather than dropping it.
 
-- Use explicit `display.bounds` instead of `fullscreen: true`. The combo of
-  `transparent: true` + `fullscreen: true` frequently renders nothing on
-  Windows.
-- Call `setIgnoreMouseEvents(true, { forward: true })` so mouse events pass
-  through to whatever is underneath while the window still receives them
-  for forwarding.
-- Reapply `setAlwaysOnTop(true, "screen-saver")` **after** `showInactive()`
-  — Windows sometimes drops the flag at show time.
-- Keep the `did-finish-load` fallback `showInactive()`; on rare occasions
-  `ready-to-show` never fires for transparent windows.
+The main process answers the command names `app.js` already invokes
+(`take_pending_guide`, `check_tool_version`, `open_external`, `quit_iris`,
+`hide_iris`, `resize_iris`, `glide_iris`, `foreground_app_identity`) in
+`handleGuideCommand`. `foreground_app_identity` returns null on Windows — there
+is no cross-process foreground-app API without a native module, and `app.js`
+already renders that case honestly.
 
-## Dev workflow
+### Secrets
 
-```sh
-npm install            # once
-npx tsc                # compile TS → dist/ — REQUIRED before first run and
-                       # after every source change
-npm run dev            # launch electron-forge
-```
+`src/main/secrets.ts` is the only code that touches a secret at rest, and there
+are exactly two: the BYO Anthropic key and the Supabase refresh token. Both go
+through `safeStorage` (DPAPI). The access token is memory-only, per protocol §4.
 
-The `dev` script does **not** run `tsc` for you. A common mistake is
-editing a `.ts` file and running `npm run dev` immediately — Electron will
-load the previously-compiled `dist/main/index.js` and your change will
-seem to have no effect. Either re-run `tsc` manually or run
-`npx tsc --watch` in a second terminal.
+`settings.json` must stay free of secrets — it is plain text and users paste it
+into bug reports. If `safeStorage.isEncryptionAvailable()` is false, refuse to
+store the key and say so. Never fall back to plaintext.
 
-Overlay debugging:
-- In dev, overlay DevTools auto-open detached on load.
-- Overlay renderer `console.*` messages are forwarded to the main process
-  console via a `console-message` listener, so you can see them in the
-  terminal you launched `npm run dev` from.
-- A transparent window that renders nothing looks identical to a window
-  that failed to open. Check the terminal for `[Clicky] Overlay window
-  shown:` logs and the overlay DevTools for layout issues.
+### Deep links
 
-## External binaries (local Whisper)
+`services/deep-link-parser.ts` is a port of `parse_guide_deep_link` in
+`iris-desktop/src-tauri/src/main.rs` (lines 188–285), which remains the
+behavioural spec. The governing rule is that an **unknown query parameter is
+rejected, not ignored**. If you add a parameter, add it to the parser, the
+allowlist of names, and the test table — in that order.
 
-`WhisperLocalProvider` expects `whisper.cpp` binaries and a GGML model at:
+## Style
 
-```
-bin/Release/whisper-cli.exe (+ whisper.dll, ggml*.dll)
-models/ggml-base.bin
-```
+Follow the publik house style, which is `iris-macos/CLAUDE.md`'s:
 
-Both are gitignored and must be downloaded separately. See
-`docs/voice-and-tts.md` for the download and install steps. The model
-filename is currently hard-coded to `ggml-base.bin` in
-`src/services/transcription/whisper-local.ts`.
+- **Optimise for clarity over concision.** Long, specific names. No
+  single-character variables. `refinedPointInCropSpace`, not `p`.
+- Pass arguments under the same name they had at the call site.
+- Comments explain *why*, especially for the coordinate conversions, the
+  key-isolation gate, and anything that looks redundant but is a safety net.
+- Clear is better than clever; more lines are fine if they read better.
 
-## Security notes
+## Do NOT
 
-- API keys (Anthropic, OpenAI, ElevenLabs, AssemblyAI) live in
-  `%APPDATA%/clicky-windows/settings.json` in plain text. Acceptable for a
-  local personal tool; not appropriate for distributed binaries without
-  encryption.
-- `whisper-local` + local TTS + optional proxy means no audio or response
-  text ever leaves the machine (see `docs/hipaa-mode.md`).
-- See `SECURITY.md` for the project's disclosure policy.
+- Do not add a function that takes both an API key and a URL.
+- Do not reintroduce voice, TTS, audio, or a non-Anthropic provider.
+- Do not add a second test runner. It is vitest.
+- Do not rewrite `renderer/guide/app.js` to Windows conventions.
+- Do not download Electron's Windows binaries on a dev machine — cross-building
+  is CI's job.
+
+## Self-update
+
+When a change affects the architecture, the file layout, the coordinate
+pipeline, the deep-link rules, or the key-isolation property, update this file
+and `README.md` in the same commit. Do not update either for a minor fix.

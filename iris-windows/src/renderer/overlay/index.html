@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>Clicky Overlay</title>
+  <title>Iris Overlay</title>
   <style>
     * { margin: 0; padding: 0; }
     html, body {
@@ -100,44 +100,6 @@
       50% { transform: scale(1.8); opacity: 0; }
     }
 
-    /* Recording indicator */
-    #recording-indicator {
-      position: fixed;
-      top: 20px;
-      right: 20px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      background: rgba(0, 0, 0, 0.7);
-      padding: 8px 16px;
-      border-radius: 20px;
-      opacity: 0;
-      transition: opacity 0.2s ease;
-    }
-
-    #recording-indicator.active {
-      opacity: 1;
-    }
-
-    #recording-dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      background: #ef4444;
-      animation: blink 1s ease-in-out infinite;
-    }
-
-    #recording-text {
-      color: white;
-      font-family: 'Segoe UI', sans-serif;
-      font-size: 13px;
-    }
-
-    @keyframes blink {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.3; }
-    }
-
     /* Processing indicator */
     #processing-indicator {
       position: fixed;
@@ -177,11 +139,6 @@
   <div id="cursor"></div>
   <div id="label"></div>
 
-  <div id="recording-indicator">
-    <div id="recording-dot"></div>
-    <span id="recording-text">Listening...</span>
-  </div>
-
   <div id="processing-indicator">
     <div id="processing-dot"></div>
     <span id="processing-text">Reading screen...</span>
@@ -190,14 +147,13 @@
   <script>
     const cursor = document.getElementById('cursor');
     const label = document.getElementById('label');
-    const recordingIndicator = document.getElementById('recording-indicator');
 
-    console.log('[Clicky overlay] script loaded, window.clicky =', !!window.clicky);
+    console.log('[iris overlay] script loaded, window.iris =', !!window.iris);
 
     // Handle point-at animations
-    if (window.clicky && window.clicky.onPoint) {
-      window.clicky.onPoint((tags) => {
-        console.log('[Clicky overlay] onPoint received tags:', JSON.stringify(tags));
+    if (window.iris && window.iris.onPoint) {
+      window.iris.onPoint((tags) => {
+        console.log('[iris overlay] onPoint received tags:', JSON.stringify(tags));
         if (tags.length === 0) return;
 
         let i = 0;
@@ -212,7 +168,7 @@
           }
 
           const tag = tags[i];
-          console.log('[Clicky overlay] pointing at', tag.x, tag.y, tag.label);
+          console.log('[iris overlay] pointing at', tag.x, tag.y, tag.label);
           cursor.style.left = tag.x + 'px';
           cursor.style.top = tag.y + 'px';
           cursor.classList.add('visible');
@@ -229,13 +185,13 @@
         pointNext();
       });
     } else {
-      console.error('[Clicky overlay] window.clicky.onPoint is not available!');
+      console.error('[iris overlay] window.iris.onPoint is not available!');
     }
 
     // Handle cursor buddy tracking
     const cursorBuddy = document.getElementById('cursor-buddy');
 
-    window.clicky.onCursorBuddy((x, y) => {
+    window.iris.onCursorBuddy((x, y) => {
       cursorBuddy.style.left = x + 'px';
       cursorBuddy.style.top = y + 'px';
       if (!cursorBuddy.classList.contains('visible')) {
@@ -243,7 +199,7 @@
       }
     });
 
-    window.clicky.onCursorBuddyVisible((visible) => {
+    window.iris.onCursorBuddyVisible((visible) => {
       if (visible) {
         cursorBuddy.classList.add('visible');
       } else {
@@ -255,8 +211,8 @@
     const processingIndicator = document.getElementById('processing-indicator');
     const processingText = document.getElementById('processing-text');
 
-    if (window.clicky && window.clicky.onStage) {
-      window.clicky.onStage(({ stage, label }) => {
+    if (window.iris && window.iris.onStage) {
+      window.iris.onStage(({ stage, label }) => {
         if (stage === 'done' || stage === 'speaking') {
           processingIndicator.classList.remove('active');
         } else {
@@ -266,18 +222,6 @@
       });
     }
 
-    // Handle recording state
-    if (window.clicky && window.clicky.onRecordingChanged) {
-      window.clicky.onRecordingChanged((isRecording) => {
-        if (isRecording) {
-          recordingIndicator.classList.add('active');
-        } else {
-          recordingIndicator.classList.remove('active');
-        }
-      });
-    } else {
-      console.error('[Clicky overlay] window.clicky.onRecordingChanged is not available!');
-    }
   </script>
 </body>
 </html>

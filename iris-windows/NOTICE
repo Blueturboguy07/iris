@@ -1,0 +1,30 @@
+NOTICE
+======
+
+Iris for Windows is the desktop assistant for publik (publikhq.com) — a
+text-first companion that lives in the system tray. You type a question, it
+answers with the context of what is on your screen, and it can fly a small
+cursor to point at the UI element it is talking about. It also opens publik's
+install guides from `iris://guide/...` links.
+
+Iris for Windows is a fork of clicky-windows by tekram
+(https://github.com/tekram/clicky-windows), which is itself a Windows port of
+Clicky by Farza (https://github.com/farzaa/clicky). Both are licensed under the
+MIT License. The upstream MIT license text is preserved in this directory as
+LICENSE.upstream, and that license continues to apply to the portions of this
+codebase derived from either project.
+
+Changes in this fork:
+- Voice features were removed: AssemblyAI / OpenAI / local-Whisper
+  transcription, ElevenLabs / OpenAI / Windows-SAPI text-to-speech, audio
+  capture, and push-to-talk. Iris is text-first.
+- The OpenAI and OpenRouter chat providers were removed. Iris is
+  Anthropic-only, reached over exactly two transports (see README.md).
+- The BYOK-plaintext-JSON settings store was replaced with Electron
+  `safeStorage` (DPAPI) for every secret.
+- publik integration was added: a funded assistant transport behind Supabase
+  sign-in, `iris://` deep links, publik install guides, and a canonical
+  external-host allowlist.
+- The app was rebranded from Clicky to Iris.
+
+Based on clicky-windows by tekram (MIT), and on Clicky by Farza (MIT).

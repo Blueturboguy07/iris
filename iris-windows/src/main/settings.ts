@@ -1,70 +1,44 @@
 import { app } from "electron";
-import * as fs from "fs";
-import * as path from "path";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import {
+  LEGACY_PLAINTEXT_KEY_NAMES,
+  deleteSecret,
+  readSecret,
+  writeSecret,
+} from "./secrets";
 
-interface SettingsSchema {
-  // API Keys (BYOK)
-  anthropicApiKey: string;
-  openaiApiKey: string;
-  openrouterApiKey: string;
-  assemblyaiApiKey: string;
-  elevenlabsApiKey: string;
+/**
+ * Everything Iris remembers between launches — and nothing secret. Secrets live
+ * in `secrets.ts` behind `safeStorage`; this file is plain JSON and is safe to
+ * paste into a bug report.
+ */
+export interface SettingsSchema {
+  /** Where publik lives. Overridable for local development only. */
+  publikBaseUrl: string;
 
-  // Optional proxy (for non-BYOK / org deployments)
-  proxyUrl: string;
-  useProxy: boolean;
-
-  // Transcription
-  transcriptionProvider: "assemblyai" | "openai" | "whisper-local";
-
-  // TTS
-  ttsEnabled: boolean;
-  ttsProvider: "elevenlabs" | "openai" | "local";
-  elevenlabsVoiceId: string;
-  openaiTtsVoice: string;
-
-  // Hotkey
-  pushToTalkHotkey: string;
-
-  // AI Provider
-  aiProvider: "anthropic" | "openai" | "openrouter";
+  /** The model used on the BYO route. The funded route pins its own. */
   claudeModel: string;
-  openaiModel: string;
-  openrouterModel: string;
 
   // UI
   alwaysOnTop: boolean;
   cursorBuddyEnabled: boolean;
 
-  // HIPAA
-  hipaaMode: boolean;
+  /** The last guide the user opened, so the panel can offer to resume it. */
+  lastGuideSlug: string;
 }
 
 const defaults: SettingsSchema = {
-  anthropicApiKey: "",
-  openaiApiKey: "",
-  openrouterApiKey: "",
-  assemblyaiApiKey: "",
-  elevenlabsApiKey: "",
-  proxyUrl: "",
-  useProxy: false,
-  transcriptionProvider: "assemblyai",
-  ttsEnabled: true,
-  ttsProvider: "local",
-  elevenlabsVoiceId: "kPzsL2i3teMYv0FxEYQ6",
-  openaiTtsVoice: "alloy",
-  pushToTalkHotkey: "Ctrl+Shift",
+  publikBaseUrl: "https://publikhq.com",
+  claudeModel: "claude-sonnet-4-5-20250929",
   alwaysOnTop: false,
   cursorBuddyEnabled: true,
-  aiProvider: "anthropic",
-  claudeModel: "claude-sonnet-4-5-20250929",
-  openaiModel: "gpt-4o",
-  openrouterModel: "anthropic/claude-sonnet-4-5",
-  hipaaMode: false,
+  lastGuideSlug: "",
 };
 
 /**
- * Simple JSON file settings store. Avoids electron-store ESM issues.
+ * Simple JSON file settings store. Avoids electron-store's ESM issues, and keeps
+ * the file readable so a user can see exactly what Iris remembers.
  */
 export class SettingsStore {
   private data: SettingsSchema;
@@ -73,38 +47,59 @@ export class SettingsStore {
   constructor() {
     const userDataPath = app.isReady()
       ? app.getPath("userData")
-      : path.join(
-          process.env.APPDATA || process.env.HOME || ".",
-          "clicky-windows"
-        );
+      : path.join(process.env.APPDATA || process.env.HOME || ".", "iris");
 
     this.filePath = path.join(userDataPath, "settings.json");
     this.data = { ...defaults };
 
+    let rawParsed: Record<string, unknown> = {};
     try {
       if (fs.existsSync(this.filePath)) {
-        const raw = fs.readFileSync(this.filePath, "utf-8");
-        const parsed = JSON.parse(raw) as Partial<SettingsSchema>;
-        this.data = { ...defaults, ...parsed };
+        rawParsed = JSON.parse(fs.readFileSync(this.filePath, "utf-8")) as Record<string, unknown>;
+        this.data = { ...defaults, ...(rawParsed as Partial<SettingsSchema>) };
       }
     } catch {
-      // Use defaults on any read error
+      // Use defaults on any read error.
     }
+
+    this.migrateLegacyPlaintextSecrets(rawParsed);
   }
 
-  get<K extends keyof SettingsSchema>(
-    key: K,
-    fallback?: SettingsSchema[K]
-  ): SettingsSchema[K] {
-    const val = this.data[key];
-    if (val === undefined && fallback !== undefined) return fallback;
-    return val;
+  /**
+   * A pre-fork install has API keys sitting in settings.json in the clear. Move
+   * the one Iris still uses into safeStorage and drop the rest, so upgrading
+   * actually improves the user's position instead of leaving a plaintext key on
+   * disk forever.
+   */
+  private migrateLegacyPlaintextSecrets(rawParsed: Record<string, unknown>): void {
+    let foundAnythingToRewrite = false;
+
+    for (const legacyKeyName of LEGACY_PLAINTEXT_KEY_NAMES) {
+      const legacyValue = rawParsed[legacyKeyName];
+      if (typeof legacyValue !== "string" || legacyValue.length === 0) continue;
+      if (legacyKeyName === "anthropicApiKey" && !readSecret("anthropicApiKey")) {
+        writeSecret("anthropicApiKey", legacyValue);
+      }
+      foundAnythingToRewrite = true;
+    }
+
+    // Also drop settings this fork no longer honours, so a stale
+    // `aiProvider: "openai"` cannot be mistaken for a live option.
+    for (const storedKeyName of Object.keys(rawParsed)) {
+      if (!(storedKeyName in defaults)) foundAnythingToRewrite = true;
+    }
+
+    // `this.data` was built from `defaults` plus known keys only, so saving it
+    // is what actually removes the legacy fields from the file.
+    if (foundAnythingToRewrite) this.save();
   }
 
-  set<K extends keyof SettingsSchema>(
-    key: K,
-    value: SettingsSchema[K]
-  ): void {
+  get<K extends keyof SettingsSchema>(key: K): SettingsSchema[K] {
+    const value = this.data[key];
+    return value === undefined ? defaults[key] : value;
+  }
+
+  set<K extends keyof SettingsSchema>(key: K, value: SettingsSchema[K]): void {
     this.data[key] = value;
     this.save();
   }
@@ -113,26 +108,40 @@ export class SettingsStore {
     return { ...this.data };
   }
 
-  isConfigured(): boolean {
-    if (this.get("useProxy") && this.get("proxyUrl")) {
-      return true;
-    }
-    return !!this.get("anthropicApiKey");
+  // MARK: - Secrets (never stored in this file)
+
+  getAnthropicApiKey(): string | null {
+    return readSecret("anthropicApiKey");
   }
 
-  isHipaaMode(): boolean {
-    return this.get("hipaaMode");
+  setAnthropicApiKey(apiKey: string): boolean {
+    if (!apiKey) {
+      deleteSecret("anthropicApiKey");
+      return true;
+    }
+    return writeSecret("anthropicApiKey", apiKey);
+  }
+
+  getSupabaseRefreshToken(): string | null {
+    return readSecret("supabaseRefreshToken");
+  }
+
+  setSupabaseRefreshToken(refreshToken: string | null): void {
+    if (refreshToken) writeSecret("supabaseRefreshToken", refreshToken);
+    else deleteSecret("supabaseRefreshToken");
+  }
+
+  /** True when Iris has some way to reach a model — either tier. */
+  isConfigured(isSignedIn: boolean): boolean {
+    return isSignedIn || Boolean(this.getAnthropicApiKey());
   }
 
   private save(): void {
     try {
-      const dir = path.dirname(this.filePath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
+      fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
       fs.writeFileSync(this.filePath, JSON.stringify(this.data, null, 2));
     } catch {
-      // Silent fail on write error
+      // Silent fail on write error — a settings write is never worth a crash.
     }
   }
 }

@@ -1,22 +1,57 @@
-import { SettingsStore } from "../main/settings";
-import { ScreenshotResult } from "../main/screenshot";
+/**
+ * claude.ts
+ *
+ * The Anthropic Messages API client. It never decides where a request goes or
+ * what credential it carries — `assistant-transport.ts` owns both — so this file
+ * can be read as "what Iris says to the model" and nothing else.
+ *
+ * Both tiers speak the identical wire format, so one client serves both. The
+ * only difference in the body is `model`, which the funded route pins
+ * server-side and therefore is not sent.
+ */
 
-interface ClaudeQueryParams {
-  transcript: string;
-  screenshots: ScreenshotResult[];
+import {
+  AssistantTransport,
+  AssistantTransportFailure,
+  ANTHROPIC_API_VERSION,
+  failureForStatusCode,
+  makeChatRequest,
+  serverErrorCodeInFailureBody,
+  shouldSendModelInRequestBody,
+} from "./assistant-transport";
+
+/** Protocol section 1: at most 50 messages per request. */
+const MAX_MESSAGES_PER_REQUEST = 50;
+
+/** Protocol section 1: the funded tier caps `max_tokens` at 2048. */
+const MAX_TOKENS = 2048;
+
+export interface ConversationEntry {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface CapturedScreen {
+  /** Base64 JPEG, long edge already clamped to the model's max input edge. */
+  data: string;
+  imageDimensions: { width: number; height: number };
+  bounds: { x: number; y: number; width: number; height: number };
+}
+
+export interface ChatQueryParams {
+  userMessage: string;
+  screenshots: CapturedScreen[];
   cursorPosition: { x: number; y: number };
-  conversationHistory: Array<{ role: "user" | "assistant"; content: string }>;
+  conversationHistory: ConversationEntry[];
+  /** Extra system content appended after any server-owned block. */
+  additionalSystemContext?: string;
 }
 
-interface ClaudeResponse {
-  text: string;
-}
-
-const SYSTEM_PROMPT = `You are Clicky, a helpful AI screen companion. You can see the user's screen via screenshots (one per display) and hear or read their voice/text input.
+const SYSTEM_PROMPT = `You are Iris, publik's desktop companion. You can see the user's screen via screenshots (one per display) and read what they type.
 
 ## CRITICAL: Visual pointing protocol
 
-You are NOT a regular chat assistant. Your defining feature is that you POINT at things on the user's screen with an animated cursor overlay. Whenever the user asks "where", "how do I", "show me", "click", "find", "comment", "où", "montre", or otherwise asks for visual guidance, you MUST emit at least one POINT tag for every UI element you reference.
+You are NOT a regular chat assistant. Your defining feature is that you POINT at things on the user's screen with an animated cursor overlay. Whenever the user asks "where", "how do I", "show me", "click", "find", or otherwise asks for visual guidance, you MUST emit at least one POINT tag for every UI element you reference.
 
 POINT tag format (embed inline in your text):
 [POINT:x,y:label:screenN]
@@ -26,7 +61,7 @@ POINT tag format (embed inline in your text):
 - y ranges from 0 (top edge) to imageHeight-1 (bottom edge)
 - label = a 2-5 word description of what you're pointing at
 - screenN = the screen index from the "Screens:" list (screen0, screen1, ...)
-- The system will automatically scale your image coordinates to the user's actual screen pixels, so just use what you see.
+- The system automatically scales your image coordinates to the user's actual screen pixels, so just use what you see.
 
 ## How to find accurate coordinates
 
@@ -46,27 +81,23 @@ User says: "Where's the back button?"
 (Screens: screen0 image is 1568x882)
 You: "Here [POINT:30,75:Back arrow:screen0]."
 
-User says: "montre-le"
-(Screens: screen0 image is 1280x720)
-You: "Voilà [POINT:680,600:Bouton Enregistrer:screen0]."
-
 ## Multi-monitor
 
 When the user has more than one screen, you receive one image per display (screen0, screen1, ...). Before you answer:
 
 1. Scan ALL provided screenshots, not just screen0. The element the user is asking about may be on any of them.
-2. If the user hints at a specific screen ("my other monitor", "l'autre écran", "on the left screen", "à droite"), use that screen.
+2. If the user hints at a specific screen ("my other monitor", "on the left screen"), use that screen.
 3. If no hint is given and the element appears on only one screen, use that screen.
 4. If the element is visible on multiple screens, prefer the one where it's clearest/largest.
-5. The screenN index in your POINT tag MUST match the screen where you actually found the element (screen0 for the first image, screen1 for the second, etc.).
+5. The screenN index in your POINT tag MUST match the screen where you actually found the element.
 
 ## Disambiguating visually similar elements
 
-Many UI layouts contain rows or columns of visually similar elements (video thumbnails in a sidebar, list rows, tabs, toolbar buttons, like/dislike pairs). When the user references one specific item in such a group:
+Many UI layouts contain rows or columns of visually similar elements (list rows, tabs, toolbar buttons, like/dislike pairs). When the user references one specific item in such a group:
 
-1. Read the user's description carefully (title, channel name, position, adjacent text, icon type).
-2. Match against the VISIBLE text, thumbnail, or unique marker of each candidate — do NOT just pick the first or geometrically nearest one.
-3. If the description is ambiguous and multiple items could match, pick the one whose visible text/label matches most literally, and mention the chosen title in your reply so the user can confirm.
+1. Read the user's description carefully (title, position, adjacent text, icon type).
+2. Match against the VISIBLE text or unique marker of each candidate — do NOT just pick the first or geometrically nearest one.
+3. If the description is ambiguous, pick the one whose visible text matches most literally, and mention the chosen title so the user can confirm.
 4. For vertical lists, double-check that your y coordinate lands on the intended ROW, not the one above or below.
 
 ## Rules
@@ -76,180 +107,201 @@ Many UI layouts contain rows or columns of visually similar elements (video thum
 3. One POINT tag per UI element you reference. Multiple steps → multiple tags.
 4. Tags can appear inline anywhere in the text. The cursor overlay reads them and animates.
 5. Be concise — short sentences, real-time conversation.
-6. Match the user's language (French if they write/speak French, English if English, etc.).
-7. Only skip POINT tags if the user is asking a non-visual question (e.g., "what is the meaning of life", "tell me a joke").
+6. Match the user's language.
+7. Only skip POINT tags if the user is asking a non-visual question.
 
 ## PRE-SEND CHECKLIST (verify before every response)
-
-Before you finish your response, silently check:
 
 - [ ] Does my response mention a UI element the user should click, press, look at, find, or interact with?
 - [ ] For each such element, is there a \`[POINT:x,y:label:screenN]\` tag in my message?
 - [ ] Do the screenN values match the screen where I actually located each element?
 
-**If the answer to 1 is YES and any tag is missing, REWRITE your response with the tags before sending.** A response that says "clique sur le bouton X" or "click the Y button" or "voilà le bouton Z" or ends with ":" or "!" as if about to point — but contains zero POINT tags — is a BUG. Every mention of a clickable element MUST have its tag. No exceptions.
+**If the answer to 1 is YES and any tag is missing, REWRITE your response with the tags before sending.** A response that says "click the Y button" but contains zero POINT tags is a BUG.`;
 
-Counter-example (WRONG — forgot the tag):
-> "Clique sur le bouton pause en bas de l'écran !"
+const REFINEMENT_SYSTEM_PROMPT =
+  "You are a precise UI pointing tool. You receive a zoomed crop of a screenshot and a description of a UI element. " +
+  'Return ONLY "x,y" — integer pixel coordinates of the exact visual center of the element matching the description. ' +
+  "CRITICAL: the crop may contain visually similar neighboring elements (e.g. a Like button next to a Dislike button, " +
+  "or several tabs side by side). Return the EXACT element described, NOT an adjacent look-alike. " +
+  "Aim for the center of the element's icon or main hit target. " +
+  'If the element is not visible in the crop, return "none". No other text, no prose, no units.';
 
-Correct version:
-> "Clique sur le bouton pause [POINT:512,892:Bouton Pause:screen1] en bas de l'écran !"`;
+/** Injected so the client is testable without a network. */
+export type FetchLike = (
+  url: string,
+  init: { method: string; headers: Record<string, string>; body: string }
+) => Promise<{
+  ok: boolean;
+  status: number;
+  text: () => Promise<string>;
+  headers: { get: (name: string) => string | null };
+}>;
 
 export class ClaudeService {
-  private settings: SettingsStore;
+  private readonly transport: AssistantTransport;
+  private readonly model: string;
+  private readonly fetchImplementation: FetchLike;
 
-  constructor(settings: SettingsStore) {
-    this.settings = settings;
+  constructor(options: {
+    transport: AssistantTransport;
+    model: string;
+    fetchImplementation?: FetchLike;
+  }) {
+    this.transport = options.transport;
+    this.model = options.model;
+    this.fetchImplementation =
+      options.fetchImplementation ?? (globalThis.fetch as unknown as FetchLike);
   }
 
-  async query(params: ClaudeQueryParams): Promise<ClaudeResponse> {
-    const apiKey = this.settings.get("anthropicApiKey");
-    const useProxy = this.settings.get("useProxy");
-    const proxyUrl = this.settings.get("proxyUrl");
-    const model = this.settings.get("claudeModel");
-
-    const baseUrl = useProxy && proxyUrl
-      ? proxyUrl
-      : "https://api.anthropic.com";
-
-    // Build message content with images
+  async query(params: ChatQueryParams): Promise<{ text: string }> {
     const userContent: Array<Record<string, unknown>> = [];
 
-    // Add screenshots as images
     for (const screenshot of params.screenshots) {
       userContent.push({
         type: "image",
-        source: {
-          type: "base64",
-          media_type: "image/jpeg",
-          data: screenshot.data,
-        },
+        source: { type: "base64", media_type: "image/jpeg", data: screenshot.data },
       });
     }
 
-    // Add screen context
     userContent.push({
       type: "text",
       text: [
-        `User says: "${params.transcript}"`,
+        `User says: "${params.userMessage}"`,
         `Cursor position: (${params.cursorPosition.x}, ${params.cursorPosition.y})`,
-        `Screens (give POINT coordinates in IMAGE pixels — use the image dimensions below, NOT the actual screen resolution):`,
-        ...params.screenshots.map((s, i) =>
-          `  screen${i}: image is ${s.imageDimensions.width}x${s.imageDimensions.height} px (actual display ${s.bounds.width}x${s.bounds.height} at ${s.bounds.x},${s.bounds.y})`
+        "Screens (give POINT coordinates in IMAGE pixels — use the image dimensions below, NOT the actual screen resolution):",
+        ...params.screenshots.map(
+          (screen, index) =>
+            `  screen${index}: image is ${screen.imageDimensions.width}x${screen.imageDimensions.height} px ` +
+            `(actual display ${screen.bounds.width}x${screen.bounds.height} at ${screen.bounds.x},${screen.bounds.y})`
         ),
       ].join("\n"),
     });
 
-    // Build messages array from conversation history
-    const messages = params.conversationHistory.map((entry) => ({
+    const trimmedHistory = params.conversationHistory.slice(-MAX_MESSAGES_PER_REQUEST);
+    const messages = trimmedHistory.map((entry, index) => ({
       role: entry.role,
-      content: entry.role === "user" && entry.content === params.transcript
-        ? userContent  // Latest user message gets the screenshots
-        : entry.content,
+      content:
+        index === trimmedHistory.length - 1 && entry.role === "user" ? userContent : entry.content,
     }));
 
-    const response = await fetch(`${baseUrl}/v1/messages`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: 1024,
-        system: SYSTEM_PROMPT,
-        messages,
-      }),
+    // The stable prompt goes first so prompt caching has something to hold on
+    // to; the funded route prepends its own block ahead of all of it.
+    const systemContent = params.additionalSystemContext
+      ? `${SYSTEM_PROMPT}\n\n${params.additionalSystemContext}`
+      : SYSTEM_PROMPT;
+
+    const responseText = await this.send({
+      system: systemContent,
+      messages,
+      maxTokens: MAX_TOKENS,
     });
-
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`Claude API error (${response.status}): ${error}`);
-    }
-
-    const data = await response.json() as {
-      content: Array<{ type: string; text?: string }>;
-    };
-    const text = data.content
-      .filter((block) => block.type === "text")
-      .map((block) => block.text)
-      .join("");
-
-    return { text };
+    return { text: responseText };
   }
 
   /**
-   * Second-pass pointing refinement. Given a cropped patch of the original
-   * screenshot and a label, ask Claude to return the exact pixel center of
-   * the element within that crop. Returns null if Claude can't find it.
+   * Second-pass pointing refinement. Given a cropped patch and a label, ask the
+   * model for the precise pixel center within that crop. Returns null if it
+   * cannot find the element — the caller then keeps the first-pass estimate,
+   * which is less precise but never wrong in a new way.
    */
-  async refinePoint(
-    cropBase64: string,
-    cropWidth: number,
-    cropHeight: number,
-    label: string
-  ): Promise<{ x: number; y: number } | null> {
-    const apiKey = this.settings.get("anthropicApiKey");
-    const useProxy = this.settings.get("useProxy");
-    const proxyUrl = this.settings.get("proxyUrl");
-    const model = this.settings.get("claudeModel");
-    const baseUrl = useProxy && proxyUrl ? proxyUrl : "https://api.anthropic.com";
-
-    const system =
-      `You are a precise UI pointing tool. You receive a zoomed crop of a screenshot and a description of a UI element. ` +
-      `Return ONLY "x,y" — integer pixel coordinates of the exact visual center of the element matching the description. ` +
-      `CRITICAL: the crop may contain visually similar neighboring elements (e.g. a Like button next to a Dislike button, ` +
-      `or several tabs side by side). Return the EXACT element described, NOT an adjacent look-alike. ` +
-      `Aim for the center of the element's icon or main hit target. ` +
-      `If the element is not visible in the crop, return "none". No other text, no prose, no units.`;
-
-    const userContent = [
-      {
-        type: "image",
-        source: { type: "base64", media_type: "image/jpeg", data: cropBase64 },
-      },
-      {
-        type: "text",
-        text:
-          `Crop image size: ${cropWidth}x${cropHeight} pixels (origin 0,0 = top-left).\n` +
-          `Target element: "${label}"\n` +
-          `Return the pixel center as "x,y" only.`,
-      },
-    ];
-
+  async refinePoint(options: {
+    cropBase64: string;
+    cropWidth: number;
+    cropHeight: number;
+    label: string;
+  }): Promise<{ x: number; y: number } | null> {
     try {
-      const response = await fetch(`${baseUrl}/v1/messages`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({
-          model,
-          max_tokens: 32,
-          system,
-          messages: [{ role: "user", content: userContent }],
-        }),
+      const responseText = await this.send({
+        system: REFINEMENT_SYSTEM_PROMPT,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image",
+                source: { type: "base64", media_type: "image/jpeg", data: options.cropBase64 },
+              },
+              {
+                type: "text",
+                text:
+                  `Crop image size: ${options.cropWidth}x${options.cropHeight} pixels (origin 0,0 = top-left).\n` +
+                  `Target element: "${options.label}"\n` +
+                  `Return the pixel center as "x,y" only.`,
+              },
+            ],
+          },
+        ],
+        maxTokens: 32,
       });
 
-      if (!response.ok) return null;
-
-      const data = (await response.json()) as {
-        content: Array<{ type: string; text?: string }>;
-      };
-      const text = data.content
-        .filter((b) => b.type === "text")
-        .map((b) => b.text || "")
-        .join("")
-        .trim();
-
-      const match = text.match(/(\d+)\s*,\s*(\d+)/);
+      const match = responseText.match(/(\d+)\s*,\s*(\d+)/);
       if (!match) return null;
-      return { x: parseInt(match[1], 10), y: parseInt(match[2], 10) };
+      return { x: Number.parseInt(match[1], 10), y: Number.parseInt(match[2], 10) };
     } catch {
       return null;
     }
+  }
+
+  /** The one place a request actually leaves. */
+  private async send(options: {
+    system: string;
+    messages: Array<{ role: string; content: unknown }>;
+    maxTokens: number;
+  }): Promise<string> {
+    const preparedRequest = await makeChatRequest(this.transport);
+
+    const body: Record<string, unknown> = {
+      max_tokens: options.maxTokens,
+      system: options.system,
+      messages: options.messages,
+    };
+    if (shouldSendModelInRequestBody(this.transport)) {
+      body.model = this.model;
+    }
+    if (this.transport.tier === "byo" && !preparedRequest.headers["anthropic-version"]) {
+      preparedRequest.headers["anthropic-version"] = ANTHROPIC_API_VERSION;
+    }
+
+    let response: Awaited<ReturnType<FetchLike>>;
+    try {
+      response = await this.fetchImplementation(preparedRequest.url, {
+        method: preparedRequest.method,
+        headers: preparedRequest.headers,
+        body: JSON.stringify(body),
+      });
+    } catch (error) {
+      throw new AssistantTransportFailure({
+        kind: "transportFailure",
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    const rawBody = await response.text();
+
+    if (!response.ok) {
+      throw new AssistantTransportFailure(
+        failureForStatusCode({
+          statusCode: response.status,
+          serverErrorCode: serverErrorCodeInFailureBody(rawBody),
+          retryAfterHeaderValue: response.headers.get("Retry-After"),
+          isFundedTier: this.transport.tier === "funded",
+        })
+      );
+    }
+
+    let parsed: { content?: Array<{ type: string; text?: string }> };
+    try {
+      parsed = JSON.parse(rawBody);
+    } catch {
+      throw new AssistantTransportFailure({
+        kind: "transportFailure",
+        reason: "the assistant returned something Iris could not read",
+      });
+    }
+
+    return (parsed.content ?? [])
+      .filter((block) => block.type === "text")
+      .map((block) => block.text ?? "")
+      .join("");
   }
 }

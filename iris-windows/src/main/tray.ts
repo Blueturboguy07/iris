@@ -1,8 +1,9 @@
 import { Tray, Menu, nativeImage } from "electron";
-import path from "path";
+import path from "node:path";
 
 interface TrayCallbacks {
   onChat: () => void;
+  onGuide: () => void;
   onSettings: () => void;
   onQuit: () => void;
 }
@@ -16,33 +17,20 @@ export function createTray(callbacks: TrayCallbacks): Tray {
   tray = new Tray(icon);
 
   const contextMenu = Menu.buildFromTemplate([
-    {
-      label: "Clicky",
-      enabled: false,
-    },
+    { label: "Iris", enabled: false },
     { type: "separator" },
-    {
-      label: "Chat",
-      click: callbacks.onChat,
-    },
-    {
-      label: "Settings",
-      click: callbacks.onSettings,
-    },
+    { label: "Ask Iris", click: callbacks.onChat },
+    { label: "Install guide", click: callbacks.onGuide },
+    { label: "Settings", click: callbacks.onSettings },
     { type: "separator" },
-    {
-      label: "Quit",
-      click: callbacks.onQuit,
-    },
+    { label: "Quit", click: callbacks.onQuit },
   ]);
 
-  tray.setToolTip("Clicky — AI Screen Companion");
+  tray.setToolTip("Iris — publik's desktop companion");
   tray.setContextMenu(contextMenu);
 
-  // Left-click opens chat directly
-  tray.on("click", () => {
-    callbacks.onChat();
-  });
+  // Left-click opens the chat window directly.
+  tray.on("click", () => callbacks.onChat());
 
   return tray;
 }

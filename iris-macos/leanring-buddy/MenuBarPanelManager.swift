@@ -12,6 +12,7 @@
 //
 
 import AppKit
+import QuartzCore
 import SwiftUI
 
 extension Notification.Name {
@@ -124,37 +125,34 @@ final class MenuBarPanelManager: NSObject {
         button.target = self
     }
 
-    /// Draws the Iris triangle as a menu bar icon. Uses the same shape
-    /// and rotation as the in-app cursor so the menu bar icon matches.
+    /// Draws the Iris eye as a template menu bar icon: the almond lid with a
+    /// filled iris — the same mark the panel header animates, tilted the same
+    /// 7 degrees the stylesheet tilts it.
     private func makeIrisMenuBarIcon() -> NSImage {
         let iconSize: CGFloat = 18
         let image = NSImage(size: NSSize(width: iconSize, height: iconSize))
         image.lockFocus()
 
-        let triangleSize = iconSize * 0.7
-        let cx = iconSize * 0.50
-        let cy = iconSize * 0.50
-        let height = triangleSize * sqrt(3.0) / 2.0
+        let rotation = NSAffineTransform()
+        rotation.translateX(by: iconSize / 2, yBy: iconSize / 2)
+        // AppKit's Y axis points up, so +7° here is the stylesheet's -7° tilt.
+        rotation.rotate(byDegrees: 7)
+        rotation.translateX(by: -iconSize / 2, yBy: -iconSize / 2)
 
-        let top = CGPoint(x: cx, y: cy + height / 1.5)
-        let bottomLeft = CGPoint(x: cx - triangleSize / 2, y: cy - height / 3)
-        let bottomRight = CGPoint(x: cx + triangleSize / 2, y: cy - height / 3)
+        let lidPath = NSBezierPath(ovalIn: NSRect(x: 1.75, y: 4.75, width: 14.5, height: 8.5))
+        lidPath.lineWidth = 1.5
+        lidPath.transform(using: rotation as AffineTransform)
+        NSColor.black.setStroke()
+        lidPath.stroke()
 
-        let angle = 35.0 * .pi / 180.0
-        func rotate(_ point: CGPoint) -> CGPoint {
-            let dx = point.x - cx, dy = point.y - cy
-            let cosA = CGFloat(cos(angle)), sinA = CGFloat(sin(angle))
-            return CGPoint(x: cx + cosA * dx - sinA * dy, y: cy + sinA * dx + cosA * dy)
-        }
-
-        let path = NSBezierPath()
-        path.move(to: rotate(top))
-        path.line(to: rotate(bottomLeft))
-        path.line(to: rotate(bottomRight))
-        path.close()
-
+        let irisPath = NSBezierPath(ovalIn: NSRect(
+            x: iconSize / 2 - 2.4,
+            y: iconSize / 2 - 2.4,
+            width: 4.8,
+            height: 4.8
+        ))
         NSColor.black.setFill()
-        path.fill()
+        irisPath.fill()
 
         image.unlockFocus()
         return image
@@ -250,10 +248,26 @@ final class MenuBarPanelManager: NSObject {
         let panelOriginX = statusItemFrame.midX - (panelWidth / 2)
         let panelOriginY = statusItemFrame.minY - actualPanelHeight - gapBelowMenuBar
 
-        panel.setFrame(
-            NSRect(x: panelOriginX, y: panelOriginY, width: panelWidth, height: actualPanelHeight),
-            display: true
+        let targetPanelFrame = NSRect(
+            x: panelOriginX,
+            y: panelOriginY,
+            width: panelWidth,
+            height: actualPanelHeight
         )
+
+        if panel.isVisible && panel.frame != targetPanelFrame {
+            // The content changed shape while the panel is up — a guide opening,
+            // a longer step. Glide to the new frame with the same ease-out cubic
+            // the Tauri pill used for its `glide_iris` movement (24 frames at
+            // 12ms, eased 1-(1-t)^3), instead of snapping.
+            NSAnimationContext.runAnimationGroup { animationContext in
+                animationContext.duration = 0.28
+                animationContext.timingFunction = CAMediaTimingFunction(controlPoints: 0.33, 1.0, 0.68, 1.0)
+                panel.animator().setFrame(targetPanelFrame, display: true)
+            }
+        } else {
+            panel.setFrame(targetPanelFrame, display: true)
+        }
     }
 
     // MARK: - Click Outside Dismissal

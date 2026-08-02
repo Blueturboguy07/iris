@@ -55,16 +55,16 @@ if [ ! -d "$BUILT_APP" ]; then
   exit 1
 fi
 
-echo "Stopping any running copy…"
+echo "Stopping any running copy..."
 osascript -e 'tell application "Iris" to quit' 2>/dev/null || true
 pkill -x Iris 2>/dev/null || true
 sleep 2
 
-echo "Installing to $INSTALL_PATH…"
+echo "Installing to $INSTALL_PATH..."
 rm -rf "$INSTALL_PATH"
 cp -R "$BUILT_APP" "$INSTALL_PATH"
 
-echo "Signing with $SIGNING_IDENTITY…"
+echo "Signing with $SIGNING_IDENTITY..."
 codesign --force --deep --options runtime --sign "$SIGNING_IDENTITY" "$INSTALL_PATH"
 xattr -dr com.apple.quarantine "$INSTALL_PATH" 2>/dev/null || true
 

@@ -68,6 +68,22 @@ Everything here was exercised against the live project, not just unit-tested.
 | Setup recovery | a missing prerequisite diverts into `setupSteps`; re-check advances to the saved step; skipping is possible; detour progress cannot overwrite guide progress |
 | Mods and interviews | demand accumulated 1-2-3 on one row, phrasing variants collapsed onto it, anon refused both RPC and direct insert while still reading the public list |
 
+## The face is Iris's now, not Clicky's
+
+The Swift app used to wear Clicky's skin (Tailwind-blue capsule buttons on
+green-grey surfaces). It now wears the Tauri pill's, transcribed token-for-token
+from `iris-desktop/ui/styles.css`: the `rgba(14,14,16,.94)` glass shell with the
+periwinkle glow, border and backdrop blur; `#6f8cff` as the only accent;
+ink-filled primary pills with near-black text; 9–12pt type with the 18pt/650
+step heading; and the `cubic-bezier(0.16,1,0.3,1)` content/step entrances. The
+animated eye (blink, pointer-following iris, mood satellite, progress ring
+while a guide is open) lives in the panel header, the menu bar icon is its
+static twin, and the panel now glides when its content changes size, with the
+same ease-out cubic the pill's `glide_iris` used. The screen-pointing cursor is
+tinted the same accent. Still to come from the plan's UI section: the collapsed
+292×48 eye-pill state and corner anchoring — the panel still hangs from the
+status item.
+
 ## What is built but not yet reachable by a user
 
 - **App awareness and updates.** `AppAwarenessService` and

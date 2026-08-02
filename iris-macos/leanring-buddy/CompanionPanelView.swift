@@ -26,6 +26,10 @@ struct CompanionPanelView: View {
 
     @State private var messageInput: String = ""
 
+    /// Where the pointer is inside the panel, so the eye can glance toward it.
+    /// Zero (looking straight ahead) whenever the pointer is elsewhere.
+    @State private var eyeLook: CGSize = .zero
+
     /// The BYO key while the user is typing it. Cleared the moment it is saved
     /// and never repopulated — a saved key is never echoed back into the UI.
     @State private var anthropicAPIKeyInput: String = ""
@@ -44,33 +48,51 @@ struct CompanionPanelView: View {
         VStack(alignment: .leading, spacing: 0) {
             panelHeader
             Divider()
-                .background(DS.Colors.borderSubtle)
-                .padding(.horizontal, 16)
+                .background(DS.Colors.line)
 
             // A guide takes over the panel while one is open: the reader is
             // following instructions, and leaving the chat box and account rows
-            // underneath them would be two conversations at once.
-            if guideSessionController.loadState.isShowingSomethingAboutAGuide {
-                GuidePanelView(guideSessionController: guideSessionController)
-                    .padding(.top, 14)
-                    .padding(.horizontal, 16)
-            } else {
-                chatAndAccountContent
+            // underneath them would be two conversations at once. The swap
+            // animates the way the pill's content does: fade up 5pt.
+            Group {
+                if guideSessionController.loadState.isShowingSomethingAboutAGuide {
+                    GuidePanelView(guideSessionController: guideSessionController)
+                        .padding(.top, 14)
+                        .padding(.horizontal, 16)
+                        .transition(DS.Motion.contentTransition)
+                } else {
+                    chatAndAccountContent
+                        .transition(DS.Motion.contentTransition)
+                }
             }
+            .animation(DS.Motion.contentIn, value: guideSessionController.loadState.isShowingSomethingAboutAGuide)
 
             Spacer()
                 .frame(height: 12)
 
             Divider()
-                .background(DS.Colors.borderSubtle)
-                .padding(.horizontal, 16)
+                .background(DS.Colors.line)
 
             footerSection
                 .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .padding(.vertical, 10)
         }
         .frame(width: 320)
         .background(panelBackground)
+        // The eye follows the pointer around the panel, the way the pill's
+        // `--look-x/--look-y` did. Straight ahead when the pointer leaves.
+        .onContinuousHover { hoverPhase in
+            switch hoverPhase {
+            case .active(let pointerLocation):
+                let eyeCenter = CGPoint(x: 26.5, y: 22)
+                let deltaX = pointerLocation.x - eyeCenter.x
+                let deltaY = pointerLocation.y - eyeCenter.y
+                let distance = max(1, (deltaX * deltaX + deltaY * deltaY).squareRoot())
+                eyeLook = CGSize(width: deltaX / distance * 2, height: deltaY / distance * 2)
+            case .ended:
+                eyeLook = .zero
+            }
+        }
         // The floating panel measures its content only when it is shown, so
         // swapping the chat view for a guide — or moving between steps of
         // different lengths — has to ask for a re-fit, or the new content
@@ -149,43 +171,37 @@ struct CompanionPanelView: View {
 
     // MARK: - Header
 
+    /// The 44pt titlebar from the pill: the eye, the wordmark, a quiet
+    /// "· status" the way the pill writes its step counter, and one icon button.
     private var panelHeader: some View {
-        HStack {
-            HStack(spacing: 8) {
-                // Animated status dot
-                Circle()
-                    .fill(statusDotColor)
-                    .frame(width: 8, height: 8)
-                    .shadow(color: statusDotColor.opacity(0.6), radius: 4)
+        HStack(spacing: 8) {
+            IrisEyeView(mood: eyeMood, look: eyeLook, progress: eyeProgressRing)
 
-                Text("Iris")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(DS.Colors.textPrimary)
-            }
+            Text("Iris")
+                .font(.system(size: 12, weight: .bold))
+                .tracking(-0.2)
+                .foregroundColor(DS.Colors.ink)
+
+            Text("·")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(DS.Colors.quiet)
+            Text(statusText)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(DS.Colors.quiet)
+                .lineLimit(1)
 
             Spacer()
-
-            Text(statusText)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(DS.Colors.textTertiary)
 
             Button(action: {
                 NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
             }) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(DS.Colors.textTertiary)
-                    .frame(width: 20, height: 20)
-                    .background(
-                        Circle()
-                            .fill(Color.white.opacity(0.08))
-                    )
             }
-            .buttonStyle(.plain)
-            .pointerCursor()
+            .irisIconButton(size: 26)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
+        .padding(.leading, 14)
+        .padding(.trailing, 8)
+        .frame(height: 44)
     }
 
     // MARK: - Permissions Copy
@@ -244,17 +260,17 @@ struct CompanionPanelView: View {
             HStack(spacing: 8) {
                 TextField("Ask Iris anything…", text: $messageInput)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 13))
-                    .foregroundColor(DS.Colors.textPrimary)
-                    .padding(.horizontal, 12)
+                    .font(.system(size: 12))
+                    .foregroundColor(DS.Colors.ink)
+                    .padding(.horizontal, 11)
                     .padding(.vertical, 8)
                     .background(
-                        RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                            .fill(Color.white.opacity(0.08))
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(DS.Colors.surfaceRaised)
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                            .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(DS.Colors.line, lineWidth: 1)
                     )
                     .onSubmit {
                         submitCurrentMessage()
@@ -266,7 +282,7 @@ struct CompanionPanelView: View {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.system(size: 22, weight: .medium))
                         .foregroundColor(messageInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                         ? DS.Colors.textTertiary
+                                         ? DS.Colors.quiet
                                          : DS.Colors.accent)
                 }
                 .buttonStyle(.plain)
@@ -282,21 +298,21 @@ struct CompanionPanelView: View {
     private var responseArea: some View {
         ScrollView {
             Text(responseAreaText)
-                .font(.system(size: 12))
-                .foregroundColor(responseAreaIsPlaceholder ? DS.Colors.textTertiary : DS.Colors.textSecondary)
-                .lineSpacing(3)
+                .font(.system(size: 11.5))
+                .foregroundColor(responseAreaIsPlaceholder ? DS.Colors.quiet : DS.Colors.muted)
+                .lineSpacing(2.5)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(10)
         }
         .frame(height: 140)
         .background(
-            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+            RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
                 .fill(Color.white.opacity(0.04))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
+                .strokeBorder(DS.Colors.line, lineWidth: 1)
         )
     }
 
@@ -346,17 +362,8 @@ struct CompanionPanelView: View {
                 companionManager.triggerOnboarding()
             }) {
                 Text("Start")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(DS.Colors.textOnAccent)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
-                            .fill(DS.Colors.accent)
-                    )
             }
-            .buttonStyle(.plain)
-            .pointerCursor()
+            .irisPrimaryPill()
         }
     }
 
@@ -365,8 +372,9 @@ struct CompanionPanelView: View {
     private var settingsSection: some View {
         VStack(spacing: 2) {
             Text("PERMISSIONS")
-                .font(.system(size: 10, weight: .semibold, design: .rounded))
-                .foregroundColor(DS.Colors.textTertiary)
+                .font(.system(size: 9, weight: .semibold))
+                .tracking(0.8)
+                .foregroundColor(DS.Colors.quiet)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.bottom, 6)
 
@@ -414,17 +422,8 @@ struct CompanionPanelView: View {
                         WindowPositionManager.requestAccessibilityPermission()
                     }) {
                         Text("Grant")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(DS.Colors.textOnAccent)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(
-                                Capsule()
-                                    .fill(DS.Colors.accent)
-                            )
                     }
-                    .buttonStyle(.plain)
-                    .pointerCursor()
+                    .irisPrimaryPill(isFullWidth: false, isCompact: true)
 
                     Button(action: {
                         // Reveals the app in Finder so the user can drag it into
@@ -434,17 +433,8 @@ struct CompanionPanelView: View {
                         WindowPositionManager.openAccessibilitySettings()
                     }) {
                         Text("Find App")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(DS.Colors.textSecondary)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(
-                                Capsule()
-                                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.8)
-                            )
                     }
-                    .buttonStyle(.plain)
-                    .pointerCursor()
+                    .irisTinyButton()
                 }
             }
         }
@@ -504,17 +494,8 @@ struct CompanionPanelView: View {
                     }
                 }) {
                     Text(awaitingRestart ? "Restart Iris" : "Grant")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(DS.Colors.textOnAccent)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule()
-                                .fill(DS.Colors.accent)
-                        )
                 }
-                .buttonStyle(.plain)
-                .pointerCursor()
+                .irisPrimaryPill(isFullWidth: false, isCompact: true)
             }
         }
         .padding(.vertical, 6)
@@ -550,17 +531,8 @@ struct CompanionPanelView: View {
                     companionManager.requestScreenContentPermission()
                 }) {
                     Text("Grant")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(DS.Colors.textOnAccent)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule()
-                                .fill(DS.Colors.accent)
-                        )
                 }
-                .buttonStyle(.plain)
-                .pointerCursor()
+                .irisPrimaryPill(isFullWidth: false, isCompact: true)
             }
         }
         .padding(.vertical, 6)
@@ -568,25 +540,24 @@ struct CompanionPanelView: View {
 
     // MARK: - Model Picker
 
+    /// The `.platform-switch` control from the pill: a soft trough holding
+    /// equal-width segments, the chosen one lit with a white overlay.
     private var modelPickerRow: some View {
         HStack {
             Text("Model")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundColor(DS.Colors.textSecondary)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(DS.Colors.muted)
 
             Spacer()
 
-            HStack(spacing: 0) {
+            HStack(spacing: 3) {
                 modelOptionButton(label: "Sonnet", modelID: "claude-sonnet-4-6")
                 modelOptionButton(label: "Opus", modelID: "claude-opus-4-6")
             }
+            .padding(3)
             .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.white.opacity(0.06))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.white.opacity(0.055))
             )
         }
         .padding(.vertical, 4)
@@ -598,13 +569,13 @@ struct CompanionPanelView: View {
             companionManager.setSelectedModel(modelID)
         }) {
             Text(label)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundColor(isSelected ? DS.Colors.ink : DS.Colors.muted)
                 .padding(.horizontal, 10)
-                .padding(.vertical, 5)
+                .frame(minHeight: 22)
                 .background(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(isSelected ? Color.white.opacity(0.1) : Color.clear)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(isSelected ? Color.white.opacity(0.12) : Color.clear)
                 )
         }
         .buttonStyle(.plain)
@@ -623,8 +594,9 @@ struct CompanionPanelView: View {
     private var accountSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("ACCOUNT")
-                .font(.system(size: 10, weight: .semibold, design: .rounded))
-                .foregroundColor(DS.Colors.textTertiary)
+                .font(.system(size: 9, weight: .semibold))
+                .tracking(0.8)
+                .foregroundColor(DS.Colors.quiet)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             if accountService.signedInAccount != nil {
@@ -658,17 +630,8 @@ struct CompanionPanelView: View {
                         accountService.signOut()
                     }) {
                         Text("Sign out")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(DS.Colors.textSecondary)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(
-                                Capsule()
-                                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.8)
-                            )
                     }
-                    .buttonStyle(.plain)
-                    .pointerCursor()
+                    .irisTinyButton()
                 }
 
                 Text("Answers are on publik while you're signed in.")
@@ -694,11 +657,8 @@ struct CompanionPanelView: View {
                 Text(isShowingEmailAndPasswordSignIn
                      ? "Use a provider instead"
                      : "Sign in with an email and password")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(DS.Colors.accentText)
             }
-            .buttonStyle(.plain)
-            .pointerCursor()
+            .irisTextButton(fontSize: 10)
 
             if isShowingEmailAndPasswordSignIn {
                 emailAndPasswordSignInFields
@@ -725,19 +685,10 @@ struct CompanionPanelView: View {
             }
         }) {
             Text("Sign in with \(provider.displayName)")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(DS.Colors.textOnAccent)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 7)
-                .background(
-                    RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                        .fill(DS.Colors.accent)
-                )
         }
-        .buttonStyle(.plain)
-        .pointerCursor(isEnabled: !accountService.isSignInInProgress)
+        .irisPrimaryPill()
         .disabled(accountService.isSignInInProgress)
-        .opacity(accountService.isSignInInProgress ? 0.5 : 1.0)
+        .opacity(accountService.isSignInInProgress ? 0.55 : 1.0)
     }
 
     private var emailAndPasswordSignInFields: some View {
@@ -745,24 +696,32 @@ struct CompanionPanelView: View {
             TextField("you@example.com", text: $emailAddressInput)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
-                .foregroundColor(DS.Colors.textPrimary)
+                .foregroundColor(DS.Colors.ink)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
                 .background(
-                    RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                        .fill(Color.white.opacity(0.08))
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(DS.Colors.surfaceRaised)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(DS.Colors.line, lineWidth: 1)
                 )
 
             HStack(spacing: 8) {
                 SecureField("Password", text: $passwordInput)
                     .textFieldStyle(.plain)
                     .font(.system(size: 12))
-                    .foregroundColor(DS.Colors.textPrimary)
+                    .foregroundColor(DS.Colors.ink)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                     .background(
-                        RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                            .fill(Color.white.opacity(0.08))
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(DS.Colors.surfaceRaised)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(DS.Colors.line, lineWidth: 1)
                     )
                     .onSubmit {
                         submitEmailAndPasswordSignIn()
@@ -772,17 +731,8 @@ struct CompanionPanelView: View {
                     submitEmailAndPasswordSignIn()
                 }) {
                     Text("Sign in")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(DS.Colors.textOnAccent)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(
-                            Capsule()
-                                .fill(DS.Colors.accent)
-                        )
                 }
-                .buttonStyle(.plain)
-                .pointerCursor(isEnabled: !accountService.isSignInInProgress)
+                .irisPrimaryPill(isFullWidth: false, isCompact: true)
                 .disabled(accountService.isSignInInProgress)
             }
         }
@@ -820,17 +770,8 @@ struct CompanionPanelView: View {
                     accountService.forgetAnthropicAPIKey()
                 }) {
                     Text("Remove")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(DS.Colors.destructiveText)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule()
-                                .stroke(DS.Colors.borderSubtle, lineWidth: 0.8)
-                        )
                 }
-                .buttonStyle(.plain)
-                .pointerCursor()
+                .irisTextButton(fontSize: 10, isDanger: true)
             }
         } else {
             VStack(alignment: .leading, spacing: 6) {
@@ -845,16 +786,16 @@ struct CompanionPanelView: View {
                     SecureField("sk-ant-…", text: $anthropicAPIKeyInput)
                         .textFieldStyle(.plain)
                         .font(.system(size: 12))
-                        .foregroundColor(DS.Colors.textPrimary)
+                        .foregroundColor(DS.Colors.ink)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
                         .background(
-                            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                                .fill(Color.white.opacity(0.08))
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(DS.Colors.surfaceRaised)
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .strokeBorder(DS.Colors.line, lineWidth: 1)
                         )
                         .onSubmit {
                             submitAnthropicAPIKey()
@@ -864,17 +805,8 @@ struct CompanionPanelView: View {
                         submitAnthropicAPIKey()
                     }) {
                         Text(accountService.isValidatingAnthropicAPIKey ? "Checking…" : "Save")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(DS.Colors.textOnAccent)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(
-                                Capsule()
-                                    .fill(DS.Colors.accent)
-                            )
                     }
-                    .buttonStyle(.plain)
-                    .pointerCursor(isEnabled: !accountService.isValidatingAnthropicAPIKey)
+                    .irisPrimaryPill(isFullWidth: false, isCompact: true)
                     .disabled(accountService.isValidatingAnthropicAPIKey
                               || anthropicAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
@@ -916,16 +848,13 @@ struct CompanionPanelView: View {
             Button(action: {
                 NSApp.terminate(nil)
             }) {
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     Image(systemName: "power")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: 9, weight: .medium))
                     Text("Quit Iris")
-                        .font(.system(size: 12, weight: .medium))
                 }
-                .foregroundColor(DS.Colors.textTertiary)
             }
-            .buttonStyle(.plain)
-            .pointerCursor()
+            .irisTextButton(fontSize: 10)
 
             if companionManager.hasCompletedOnboarding {
                 Spacer()
@@ -933,16 +862,13 @@ struct CompanionPanelView: View {
                 Button(action: {
                     companionManager.replayOnboarding()
                 }) {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 5) {
                         Image(systemName: "play.circle")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(.system(size: 9, weight: .medium))
                         Text("Watch Onboarding Again")
-                            .font(.system(size: 12, weight: .medium))
                     }
-                    .foregroundColor(DS.Colors.textTertiary)
                 }
-                .buttonStyle(.plain)
-                .pointerCursor()
+                .irisTextButton(fontSize: 10)
             }
         }
     }
@@ -950,22 +876,28 @@ struct CompanionPanelView: View {
     // MARK: - Visual Helpers
 
     private var panelBackground: some View {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(DS.Colors.background)
-            .shadow(color: Color.black.opacity(0.5), radius: 20, x: 0, y: 10)
-            .shadow(color: Color.black.opacity(0.3), radius: 4, x: 0, y: 2)
+        IrisShellBackground()
     }
 
-    private var statusDotColor: Color {
-        if !companionManager.isOverlayVisible {
-            return DS.Colors.textTertiary
-        }
+    /// The eye reports what Iris is doing the way the pill's moods did:
+    /// thinking while a question is in flight, watching while pointing,
+    /// green-and-done only ever from the guide side.
+    private var eyeMood: IrisEyeView.Mood {
         switch companionManager.assistantState {
+        case .capturing, .thinking:
+            return .thinking
+        case .pointing:
+            return .watching
         case .idle:
-            return DS.Colors.success
-        case .capturing, .thinking, .pointing:
-            return DS.Colors.blue400
+            return .idle
         }
+    }
+
+    /// While a guide is open, the eye's halo becomes the guide's progress
+    /// ring — the same job `.iris-eye__progress` does in the pill.
+    private var eyeProgressRing: Double? {
+        guard guideSessionController.loadState.isShowingSomethingAboutAGuide else { return nil }
+        return guideSessionController.fractionOfTheGuideCompleted
     }
 
     private var statusText: String {

@@ -51,33 +51,35 @@ struct GuidePanelView: View {
 
     // MARK: - Header
 
+    /// The pill's titlebar identity row: guide name at 12/650 with the quiet
+    /// "· step" counter beside it, exactly like `.titlebar__guide` and
+    /// `.titlebar__step`.
     private var guideHeaderRow: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 7) {
             Text(guideSessionController.guideBeingFollowed?.appName ?? "Guide")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(DS.Colors.textPrimary)
+                .font(.system(size: 12, weight: .bold))
+                .tracking(-0.18)
+                .foregroundColor(DS.Colors.ink)
                 .lineLimit(1)
 
-            Spacer()
-
             if !guideSessionController.stepCounterText.isEmpty {
+                Text("·")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.quiet)
                 Text(guideSessionController.stepCounterText)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(DS.Colors.textTertiary)
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.quiet)
                     .monospacedDigit()
             }
+
+            Spacer()
 
             Button(action: {
                 guideSessionController.closeTheGuide()
             }) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundColor(DS.Colors.textTertiary)
-                    .frame(width: 18, height: 18)
-                    .background(Circle().fill(Color.white.opacity(0.08)))
             }
-            .buttonStyle(.plain)
-            .pointerCursor()
+            .irisIconButton(size: 22)
             .nativeTooltip("Close this guide")
         }
     }
@@ -107,32 +109,20 @@ struct GuidePanelView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            HStack(spacing: 8) {
+            HStack(spacing: 12) {
                 Button(action: {
                     Task { await guideSessionController.openLatestVersionOfGuide(slug: slug) }
                 }) {
                     Text("Try again")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(DS.Colors.textOnAccent)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 7)
-                        .background(
-                            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                                .fill(DS.Colors.accent)
-                        )
                 }
-                .buttonStyle(.plain)
-                .pointerCursor()
+                .irisPrimaryPill(isFullWidth: false, isCompact: true)
 
                 Button(action: {
                     guideSessionController.closeTheGuide()
                 }) {
                     Text("Close")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(DS.Colors.textTertiary)
                 }
-                .buttonStyle(.plain)
-                .pointerCursor()
+                .irisTextButton(fontSize: 10)
             }
         }
     }
@@ -160,7 +150,12 @@ struct GuidePanelView: View {
                     } else if guideSessionController.readerHasFinishedTheGuide {
                         completionCard
                     } else if guideSessionController.currentStep != nil {
+                        // Each step slides in from the right the way the pill's
+                        // `step-in` keyframes do; the id() makes SwiftUI treat
+                        // every step as a fresh card so the transition runs.
                         stepCard
+                            .id(guideSessionController.currentStepIndex)
+                            .transition(DS.Motion.stepTransition)
                     } else {
                         Text("Publik needs to review this platform branch.")
                             .font(.system(size: 11))
@@ -170,6 +165,7 @@ struct GuidePanelView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.trailing, 2)
+                .animation(DS.Motion.stepIn, value: guideSessionController.currentStepIndex)
             }
             .frame(height: scrollableStepAreaHeight)
 
@@ -188,6 +184,7 @@ struct GuidePanelView: View {
                         width: geometryProxy.size.width
                             * guideSessionController.fractionOfTheGuideCompleted
                     )
+                    .animation(DS.Motion.contentIn, value: guideSessionController.fractionOfTheGuideCompleted)
             }
         }
         .frame(height: 3)
@@ -222,17 +219,8 @@ struct GuidePanelView: View {
                 watchLoop.setReaderPausedWatching(!watchLoop.readerPausedWatching)
             }) {
                 Text(watchLoop.readerPausedWatching ? "Resume" : "Pause")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(DS.Colors.textSecondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(
-                        RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
-                            .fill(Color.white.opacity(0.10))
-                    )
             }
-            .buttonStyle(.plain)
-            .pointerCursor()
+            .irisTinyButton()
             .nativeTooltip(
                 watchLoop.readerPausedWatching
                     ? "Let Iris watch this step again."
@@ -288,10 +276,12 @@ struct GuidePanelView: View {
     /// it ("Mac + iPhone", "Windows + Android"). The pairs are a flat list
     /// rather than a computer picker and a phone picker, because that is how the
     /// guide library authors them and how the Tauri panel presents them.
+    /// `.platform-switch`: a soft trough of equal segments; the chosen pair
+    /// is lit with a white overlay rather than an outline.
     private var devicePairPicker: some View {
         LazyVGrid(
-            columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)],
-            spacing: 6
+            columns: [GridItem(.flexible(), spacing: 3), GridItem(.flexible(), spacing: 3)],
+            spacing: 3
         ) {
             ForEach(guideSessionController.branchesTheReaderCanChooseBetween, id: \.branchKey) { branch in
                 let thisBranchIsSelected = guideSessionController.selectedBranch?.branchKey == branch.branchKey
@@ -299,29 +289,27 @@ struct GuidePanelView: View {
                     Task { await guideSessionController.selectBranch(withBranchKey: branch.branchKey) }
                 }) {
                     Text(branch.label)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: 9, weight: .medium))
                         .foregroundColor(
-                            thisBranchIsSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary
+                            thisBranchIsSelected ? DS.Colors.ink : DS.Colors.muted
                         )
                         .lineLimit(1)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 5)
+                        .frame(minHeight: 26)
                         .background(
-                            RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
-                                .fill(thisBranchIsSelected ? DS.Colors.accentSubtle : Color.white.opacity(0.04))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
-                                .stroke(
-                                    thisBranchIsSelected ? DS.Colors.accent : DS.Colors.borderSubtle,
-                                    lineWidth: 0.5
-                                )
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(thisBranchIsSelected ? Color.white.opacity(0.12) : Color.clear)
                         )
                 }
                 .buttonStyle(.plain)
                 .pointerCursor()
             }
         }
+        .padding(3)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.white.opacity(0.055))
+        )
     }
 
     // MARK: - Unsupported pair
@@ -337,14 +325,15 @@ struct GuidePanelView: View {
     private func unsupportedPairExplanation(_ unsupportedPair: IrisUnsupportedPair) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(unsupportedPair.headline)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(DS.Colors.textPrimary)
+                .font(.system(size: 18, weight: .bold))
+                .tracking(-0.6)
+                .foregroundColor(DS.Colors.ink)
                 .fixedSize(horizontal: false, vertical: true)
 
             Text(unsupportedPair.reason)
-                .font(.system(size: 11))
-                .foregroundColor(DS.Colors.textSecondary)
-                .lineSpacing(2)
+                .font(.system(size: 11.5))
+                .foregroundColor(DS.Colors.muted)
+                .lineSpacing(2.5)
                 .fixedSize(horizontal: false, vertical: true)
 
             if !unsupportedPair.alternatives.isEmpty {
@@ -374,24 +363,23 @@ struct GuidePanelView: View {
     private var completionCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(guideSessionController.completionHeadline)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundColor(DS.Colors.textPrimary)
+                .font(.system(size: 18, weight: .bold))
+                .tracking(-0.6)
+                .foregroundColor(DS.Colors.ink)
                 .fixedSize(horizontal: false, vertical: true)
 
             Text("Every step in this branch is done. Iris will stay out of your way now.")
-                .font(.system(size: 11))
-                .foregroundColor(DS.Colors.textTertiary)
+                .font(.system(size: 11.5))
+                .foregroundColor(DS.Colors.muted)
+                .lineSpacing(2.5)
                 .fixedSize(horizontal: false, vertical: true)
 
             Button(action: {
                 guideSessionController.restartTheGuide()
             }) {
                 Text("Start over")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(DS.Colors.textTertiary)
             }
-            .buttonStyle(.plain)
-            .pointerCursor()
+            .irisTextButton(fontSize: 10)
             .padding(.top, 2)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -403,17 +391,20 @@ struct GuidePanelView: View {
     private var stepCard: some View {
         if let step = guideSessionController.currentStep {
             VStack(alignment: .leading, spacing: 10) {
+                // `.step-card h1`: 18/650 with tight tracking. The step title
+                // is the loudest thing on the panel, exactly like the pill.
                 Text(step.title)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(DS.Colors.textPrimary)
+                    .font(.system(size: 18, weight: .bold))
+                    .tracking(-0.6)
+                    .foregroundColor(DS.Colors.ink)
                     .fixedSize(horizontal: false, vertical: true)
 
                 let bodyText = guideSessionController.bodyTextForTheCurrentStep
                 if !bodyText.isEmpty {
                     Text(bodyText)
-                        .font(.system(size: 11))
-                        .foregroundColor(DS.Colors.textSecondary)
-                        .lineSpacing(2)
+                        .font(.system(size: 11.5))
+                        .foregroundColor(DS.Colors.muted)
+                        .lineSpacing(2.5)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
@@ -453,12 +444,15 @@ struct GuidePanelView: View {
     /// The command with its own Copy button. The confirmation is transient and
     /// says where the command is meant to go, because "Copied" alone leaves the
     /// reader to work out what to do with it.
+    /// `.command-block`: a sunken near-black well with 10pt mono text and the
+    /// Copy chip riding in its corner.
     private func commandBlock(command: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top, spacing: 8) {
                 Text(command)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(DS.Colors.codeText)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(DS.Colors.commandText)
+                    .lineSpacing(2)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -467,32 +461,24 @@ struct GuidePanelView: View {
                     guideSessionController.copyCommandToClipboard(command)
                 }) {
                     Text(guideSessionController.transientCopyConfirmationText == nil ? "Copy" : "Copied")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(DS.Colors.textSecondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(
-                            RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
-                                .fill(Color.white.opacity(0.10))
-                        )
                 }
-                .buttonStyle(.plain)
-                .pointerCursor()
+                .irisTinyButton()
             }
-            .padding(10)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 8)
             .background(
-                RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                    .fill(Color.black.opacity(0.30))
+                RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
+                    .fill(Color.black.opacity(0.24))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
+                    .strokeBorder(DS.Colors.line, lineWidth: 1)
             )
 
             if let transientCopyConfirmationText = guideSessionController.transientCopyConfirmationText {
                 Text(transientCopyConfirmationText)
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(DS.Colors.success)
+                    .foregroundColor(DS.Colors.green)
                     .transition(.opacity)
             }
         }
@@ -704,38 +690,25 @@ struct GuidePanelView: View {
     @ViewBuilder
     private var navigationRow: some View {
         if guideSessionController.unsupportedPairForTheSelectedBranch == nil {
-            HStack(spacing: 8) {
-                Button(action: {
-                    guideSessionController.returnToThePreviousStep()
-                }) {
-                    Text("Back")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(
-                            guideSessionController.canReturnToThePreviousStep
-                                ? DS.Colors.textSecondary
-                                : DS.Colors.textTertiary.opacity(0.5)
-                        )
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
-                        .background(
-                            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                                .fill(Color.white.opacity(0.06))
-                        )
-                }
-                .buttonStyle(.plain)
-                .disabled(!guideSessionController.canReturnToThePreviousStep)
-                .pointerCursor(isEnabled: guideSessionController.canReturnToThePreviousStep)
-
-                Spacer()
-
+            VStack(alignment: .leading, spacing: 6) {
                 if let primaryAction = guideSessionController.primaryActionForTheCurrentStep {
                     primaryActionButton(primaryAction)
+                }
+
+                if guideSessionController.canReturnToThePreviousStep {
+                    Button(action: {
+                        guideSessionController.returnToThePreviousStep()
+                    }) {
+                        Text("Back")
+                    }
+                    .irisTextButton(fontSize: 10)
                 }
             }
         }
     }
 
-    /// The one button that drives the step. A blocked link renders it visibly
+    /// The one button that drives the step: the full-width ink pill from
+    /// `.guide-actions .primary-action`. A blocked link renders it visibly
     /// disabled rather than pressable-but-inert: the reason is already on the
     /// card above, and a button that looks live and does nothing is the exact
     /// failure `iris-desktop 0.1.4` was released to fix.
@@ -744,20 +717,10 @@ struct GuidePanelView: View {
             guideSessionController.performPrimaryAction()
         }) {
             Text(primaryAction.buttonLabel)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(
-                    primaryAction.isPressable ? DS.Colors.textOnAccent : DS.Colors.textTertiary
-                )
-                .padding(.horizontal, 16)
-                .padding(.vertical, 7)
-                .background(
-                    RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                        .fill(primaryAction.isPressable ? DS.Colors.accent : Color.white.opacity(0.06))
-                )
         }
-        .buttonStyle(.plain)
+        .irisPrimaryPill()
         .disabled(!primaryAction.isPressable)
-        .pointerCursor(isEnabled: primaryAction.isPressable)
+        .opacity(primaryAction.isPressable ? 1.0 : 0.55)
         .nativeTooltip(
             primaryAction.isPressable
                 ? nil
@@ -779,22 +742,22 @@ struct GuideSlugEntryView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Follow an install guide")
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(DS.Colors.textSecondary)
+                .foregroundColor(DS.Colors.muted)
 
             HStack(spacing: 8) {
                 TextField("App name, e.g. cue", text: $slugInput)
                     .textFieldStyle(.plain)
                     .font(.system(size: 12))
-                    .foregroundColor(DS.Colors.textPrimary)
+                    .foregroundColor(DS.Colors.ink)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                     .background(
-                        RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                            .fill(Color.white.opacity(0.08))
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(DS.Colors.surfaceRaised)
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                            .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(DS.Colors.line, lineWidth: 1)
                     )
                     .onSubmit {
                         openTheTypedGuide()
@@ -804,20 +767,10 @@ struct GuideSlugEntryView: View {
                     openTheTypedGuide()
                 }) {
                     Text("Open")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(
-                            trimmedSlugInput.isEmpty ? DS.Colors.textTertiary : DS.Colors.textOnAccent
-                        )
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(
-                            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                                .fill(trimmedSlugInput.isEmpty ? Color.white.opacity(0.06) : DS.Colors.accent)
-                        )
                 }
-                .buttonStyle(.plain)
+                .irisPrimaryPill(isFullWidth: false, isCompact: true)
                 .disabled(trimmedSlugInput.isEmpty)
-                .pointerCursor(isEnabled: !trimmedSlugInput.isEmpty)
+                .opacity(trimmedSlugInput.isEmpty ? 0.55 : 1.0)
             }
         }
     }

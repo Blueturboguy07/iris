@@ -103,17 +103,8 @@ struct AppInventorySectionView: View {
                     appInventoryService.openPublikPageForUpdating(slug: installedEntry.slug)
                 }) {
                     Text("Update to \(latestReleaseTag)")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(DS.Colors.textOnAccent)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(
-                            RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
-                                .fill(DS.Colors.accent)
-                        )
                 }
-                .buttonStyle(.plain)
-                .pointerCursor()
+                .irisPrimaryPill(isFullWidth: false, isCompact: true)
                 .help("Opens \(installedEntry.name) on publik. Iris never installs anything itself.")
             }
         }
@@ -121,8 +112,8 @@ struct AppInventorySectionView: View {
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                .fill(Color.white.opacity(0.05))
+            RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
+                .fill(Color.white.opacity(0.045))
         )
     }
 

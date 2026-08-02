@@ -102,7 +102,20 @@ for the OAuth redirect. Nothing else.
    pause toggle always works.
 5. Funded-tier serverside logging is token counts only, never content.
 
-## 6. Watch loop budget
+## 6. Server environment
+
+`.env.example` is gitignored here, so the variables the assistant adds are
+listed instead:
+
+| Variable | Needed by | Without it |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | `/api/assistant/chat` | funded tier returns `assistant_unconfigured` |
+| `UPSTASH_REDIS_REST_URL` / `_TOKEN` | rate limits, token budgets | the funded proxy declines in production (fail-closed); other routes fail open |
+| `CRON_SECRET` | `/api/sync`, `/api/cron/rollup` | both refuse to run |
+| `GITHUB_DISPATCH_TOKEN` | `/api/admin/patch/dispatch` | dispatch returns 503; needs repo + workflow scope |
+| `GITHUB_WEBHOOK_SECRET` | `/api/github/webhook` | webhook refuses every delivery |
+
+## 7. Watch loop budget
 
 While a step with a `watch` block is active: capture ~every 2 s, local
 perceptual diff first, model evaluation only on meaningful change with ≥ 10 s

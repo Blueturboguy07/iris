@@ -6,8 +6,11 @@
 //
 
 import Testing
-@testable import leanring_buddy
+// The module follows PRODUCT_NAME, which the fork renamed to Iris.
+@testable import Iris
 
+// The helpers under test are main-actor isolated, so the suite has to be too.
+@MainActor
 struct leanring_buddyTests {
 
     @Test func firstPermissionRequestUsesSystemPromptOnly() async throws {

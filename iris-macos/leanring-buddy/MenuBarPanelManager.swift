@@ -16,6 +16,9 @@ import SwiftUI
 
 extension Notification.Name {
     static let clickyDismissPanel = Notification.Name("clickyDismissPanel")
+    /// Posted by CompanionManager when the global summon hotkey (ctrl + option)
+    /// is pressed — toggles the companion panel open/closed.
+    static let clickyTogglePanel = Notification.Name("clickyTogglePanel")
 }
 
 /// Custom NSPanel subclass that can become the key window even with
@@ -30,6 +33,7 @@ final class MenuBarPanelManager: NSObject {
     private var panel: NSPanel?
     private var clickOutsideMonitor: Any?
     private var dismissPanelObserver: NSObjectProtocol?
+    private var togglePanelObserver: NSObjectProtocol?
 
     private let companionManager: CompanionManager
     private let panelWidth: CGFloat = 320
@@ -47,6 +51,14 @@ final class MenuBarPanelManager: NSObject {
         ) { [weak self] _ in
             self?.hidePanel()
         }
+
+        togglePanelObserver = NotificationCenter.default.addObserver(
+            forName: .clickyTogglePanel,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.togglePanel()
+        }
     }
 
     deinit {
@@ -54,6 +66,9 @@ final class MenuBarPanelManager: NSObject {
             NSEvent.removeMonitor(monitor)
         }
         if let observer = dismissPanelObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = togglePanelObserver {
             NotificationCenter.default.removeObserver(observer)
         }
     }
@@ -65,15 +80,16 @@ final class MenuBarPanelManager: NSObject {
 
         guard let button = statusItem?.button else { return }
 
-        button.image = makeClickyMenuBarIcon()
+        button.image = makeIrisMenuBarIcon()
         button.image?.isTemplate = true
+        button.toolTip = "Iris — press ctrl + option to toggle"
         button.action = #selector(statusItemClicked)
         button.target = self
     }
 
-    /// Draws the clicky triangle as a menu bar icon. Uses the same shape
+    /// Draws the Iris triangle as a menu bar icon. Uses the same shape
     /// and rotation as the in-app cursor so the menu bar icon matches.
-    private func makeClickyMenuBarIcon() -> NSImage {
+    private func makeIrisMenuBarIcon() -> NSImage {
         let iconSize: CGFloat = 18
         let image = NSImage(size: NSSize(width: iconSize, height: iconSize))
         image.lockFocus()
@@ -117,6 +133,12 @@ final class MenuBarPanelManager: NSObject {
     }
 
     @objc private func statusItemClicked() {
+        togglePanel()
+    }
+
+    /// Toggles the panel open/closed. Used by both the status item click
+    /// and the global summon hotkey.
+    private func togglePanel() {
         if let panel, panel.isVisible {
             hidePanel()
         } else {

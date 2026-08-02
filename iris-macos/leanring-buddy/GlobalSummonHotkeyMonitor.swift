@@ -1,10 +1,11 @@
 //
-//  GlobalPushToTalkShortcutMonitor.swift
+//  GlobalSummonHotkeyMonitor.swift
 //  leanring-buddy
 //
-//  Captures push-to-talk keyboard shortcuts while makesomething is running in the
-//  background. Uses a listen-only CGEvent tap so modifier-only shortcuts like
-//  ctrl + option behave more like a real system-wide voice tool.
+//  Captures the global summon hotkey (ctrl + option) while the app is running
+//  in the background. Uses a listen-only CGEvent tap so modifier-only shortcuts
+//  are detected reliably system-wide. Pressing the hotkey toggles the
+//  companion panel so the user can type a question from anywhere.
 //
 
 import AppKit
@@ -12,15 +13,51 @@ import Combine
 import CoreGraphics
 import Foundation
 
-final class GlobalPushToTalkShortcutMonitor: ObservableObject {
-    let shortcutTransitionPublisher = PassthroughSubject<BuddyPushToTalkShortcut.ShortcutTransition, Never>()
+/// The keyboard shortcut that summons the companion panel, plus the logic
+/// for turning raw CGEvent modifier changes into pressed/released transitions.
+enum SummonHotkeyShortcut {
+    enum ShortcutTransition {
+        case none
+        case pressed
+        case released
+    }
+
+    /// The modifier combination that acts as the summon hotkey.
+    static let summonModifierFlags: NSEvent.ModifierFlags = [.control, .option]
+    static let displayText = "ctrl + option"
+    static let keyCapsuleLabels = ["ctrl", "option"]
+
+    static func shortcutTransition(
+        for eventType: CGEventType,
+        modifierFlagsRawValue: UInt64,
+        wasShortcutPreviouslyPressed: Bool
+    ) -> ShortcutTransition {
+        // The summon hotkey is modifier-only, so only flagsChanged events matter.
+        guard eventType == .flagsChanged else { return .none }
+
+        let modifierFlags = NSEvent.ModifierFlags(rawValue: UInt(modifierFlagsRawValue))
+            .intersection(.deviceIndependentFlagsMask)
+        let isShortcutCurrentlyPressed = modifierFlags.contains(summonModifierFlags)
+
+        if isShortcutCurrentlyPressed && !wasShortcutPreviouslyPressed {
+            return .pressed
+        }
+
+        if !isShortcutCurrentlyPressed && wasShortcutPreviouslyPressed {
+            return .released
+        }
+
+        return .none
+    }
+}
+
+final class GlobalSummonHotkeyMonitor: ObservableObject {
+    let shortcutTransitionPublisher = PassthroughSubject<SummonHotkeyShortcut.ShortcutTransition, Never>()
 
     private var globalEventTap: CFMachPort?
     private var globalEventTapRunLoopSource: CFRunLoopSource?
     /// Mutated exclusively from the CGEvent tap callback, which runs on
     /// `CFRunLoopGetMain()` and therefore always executes on the main thread.
-    /// Published so the overlay can hide immediately on key release without
-    /// waiting for the async dictation state pipeline to catch up.
     @Published private(set) var isShortcutCurrentlyPressed = false
 
     deinit {
@@ -29,12 +66,12 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
 
     func start() {
         // If the event tap is already running, don't restart it.
-        // Restarting resets isShortcutCurrentlyPressed, which would kill
-        // the waveform overlay mid-press when the permission poller calls
+        // Restarting resets isShortcutCurrentlyPressed, which would misfire
+        // a transition when the permission poller calls
         // refreshAllPermissions → start() every few seconds.
         guard globalEventTap == nil else { return }
 
-        let monitoredEventTypes: [CGEventType] = [.flagsChanged, .keyDown, .keyUp]
+        let monitoredEventTypes: [CGEventType] = [.flagsChanged]
         let eventMask = monitoredEventTypes.reduce(CGEventMask(0)) { currentMask, eventType in
             currentMask | (CGEventMask(1) << eventType.rawValue)
         }
@@ -44,11 +81,11 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
                 return Unmanaged.passUnretained(event)
             }
 
-            let globalPushToTalkShortcutMonitor = Unmanaged<GlobalPushToTalkShortcutMonitor>
+            let globalSummonHotkeyMonitor = Unmanaged<GlobalSummonHotkeyMonitor>
                 .fromOpaque(userInfo)
                 .takeUnretainedValue()
 
-            return globalPushToTalkShortcutMonitor.handleGlobalEventTap(
+            return globalSummonHotkeyMonitor.handleGlobalEventTap(
                 eventType: eventType,
                 event: event
             )
@@ -62,7 +99,7 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
             callback: eventTapCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            print("⚠️ Global push-to-talk: couldn't create CGEvent tap")
+            print("⚠️ Global summon hotkey: couldn't create CGEvent tap")
             return
         }
 
@@ -72,7 +109,7 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
             0
         ) else {
             CFMachPortInvalidate(globalEventTap)
-            print("⚠️ Global push-to-talk: couldn't create event tap run loop source")
+            print("⚠️ Global summon hotkey: couldn't create event tap run loop source")
             return
         }
 
@@ -108,10 +145,8 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
             return Unmanaged.passUnretained(event)
         }
 
-        let eventKeyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
-        let shortcutTransition = BuddyPushToTalkShortcut.shortcutTransition(
+        let shortcutTransition = SummonHotkeyShortcut.shortcutTransition(
             for: eventType,
-            keyCode: eventKeyCode,
             modifierFlagsRawValue: event.flags.rawValue,
             wasShortcutPreviouslyPressed: isShortcutCurrentlyPressed
         )

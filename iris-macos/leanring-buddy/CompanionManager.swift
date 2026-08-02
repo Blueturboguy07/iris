@@ -72,6 +72,12 @@ final class CompanionManager: ObservableObject {
     /// to survive the panel being closed and reopened.
     let guideSessionController = GuideSessionController()
 
+    /// Knows which publik catalog apps are installed on this Mac and which of
+    /// them has a newer release. It lives here rather than in the panel view so
+    /// the scan it did survives the panel being closed and reopened — the
+    /// alternative is a Spotlight query every time somebody glances at Iris.
+    let appInventoryService = AppInventoryService()
+
     /// Where the funded tier lives — publik in a shipped build, and a localhost
     /// origin when a developer's Info.plist says so.
     private let publikBaseURL = AssistantTransport.configuredPublikBaseURL()

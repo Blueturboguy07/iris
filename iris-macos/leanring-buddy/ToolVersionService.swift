@@ -56,7 +56,11 @@ enum ToolExecutableLookupOutcome: Equatable, Sendable {
 /// Somewhere for the two pipe-reading queues to put what they read. It is a
 /// reference type on purpose: each field is written by exactly one queue and
 /// read only after `DispatchGroup.wait()` has ordered both writes before it.
-private final class CollectedProcessOutput {
+/// `@unchecked Sendable` rather than actor-isolated: the ordering argument above
+/// is the safety argument, and it is one the compiler cannot check. Isolating it
+/// to an actor instead would mean the two pipe-reading queues could not write to
+/// it at all, which is the entire job.
+private nonisolated final class CollectedProcessOutput: @unchecked Sendable {
     var standardOutput = Data()
     var standardError = Data()
 }
@@ -277,7 +281,11 @@ enum ToolVersionService {
     /// Launches an executable by explicit path with an argument array. There is
     /// no shell anywhere in this call, so no part of a guide's input is ever
     /// parsed as a command.
-    static func runCommand(
+    ///
+    /// `nonisolated` because it touches no shared state and is deliberately
+    /// blocking: every caller runs it off the main actor, and `AppInventoryService`
+    /// calls it from a detached task while scanning for installed apps.
+    nonisolated static func runCommand(
         executablePath: String,
         arguments: [String],
         environment: [String: String]?,

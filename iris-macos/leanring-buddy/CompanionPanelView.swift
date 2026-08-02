@@ -19,6 +19,10 @@ struct CompanionPanelView: View {
     /// has to redraw the moment a guide arrives over an `iris://` link, which
     /// happens without the assistant state changing at all.
     @ObservedObject var guideSessionController: GuideSessionController
+    /// Observed separately for the same reason again: the inventory finishes
+    /// scanning on its own schedule, and the app list has to appear when it
+    /// does rather than on the next unrelated state change.
+    @ObservedObject var appInventoryService: AppInventoryService
 
     @State private var messageInput: String = ""
 
@@ -33,6 +37,7 @@ struct CompanionPanelView: View {
         self.companionManager = companionManager
         _accountService = ObservedObject(wrappedValue: companionManager.accountService)
         _guideSessionController = ObservedObject(wrappedValue: companionManager.guideSessionController)
+        _appInventoryService = ObservedObject(wrappedValue: companionManager.appInventoryService)
     }
 
     var body: some View {
@@ -76,6 +81,11 @@ struct CompanionPanelView: View {
         .onChange(of: guideSessionController.currentStepIndex) { _, _ in
             NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
         }
+        // The inventory finishes scanning after the panel has already been
+        // measured, so the rows it adds need the same re-fit a guide does.
+        .onChange(of: appInventoryService.installedEntriesForDisplay.count) { _, _ in
+            NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+        }
     }
 
     /// Everything the panel shows when no guide is open: the assistant chat
@@ -104,6 +114,12 @@ struct CompanionPanelView: View {
                     .frame(height: 14)
 
                 GuideSlugEntryView(guideSessionController: guideSessionController)
+                    .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 14)
+
+                AppInventorySectionView(appInventoryService: appInventoryService)
                     .padding(.horizontal, 16)
 
                 Spacer()

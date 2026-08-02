@@ -19,9 +19,20 @@ import Foundation
 /// Anthropic-recommended resolution closest to the display's actual aspect ratio. Most
 /// Macs are 16:10 → 1280x800. This avoids distorting the image Claude sees, which
 /// significantly improves X-axis coordinate accuracy.
+///
+/// **Credentials**: this type does not hold one. It inherited a direct
+/// `apiKey` from upstream Clicky, which was a second way to attach a
+/// credential that the transport layer could not see or check. Grounding is
+/// about to become a real feature, so the bypass is closed before anything
+/// depends on it: the caller supplies a request already built and validated
+/// by `AssistantTransport`, which is the single place credentials are
+/// attached and the only thing that knows which route the user is on.
 class ElementLocationDetector {
-    private let apiKey: String
-    private let apiURL: URL
+    /// Builds the credentialed, transport-validated request this detector
+    /// sends. Supplied by the caller so grounding automatically follows the
+    /// user's tier — funded or bring-your-own-key — instead of needing a key
+    /// of its own.
+    private let makeValidatedRequest: () async throws -> URLRequest
     private let model: String
     private let session: URLSession
 
@@ -35,9 +46,11 @@ class ElementLocationDetector {
         (1366, 768,  1366.0 / 768.0)   // ~16:9  = 1.779 (external monitors, ultrawide fallback)
     ]
 
-    init(apiKey: String, model: String = "claude-sonnet-4-6") {
-        self.apiKey = apiKey
-        self.apiURL = URL(string: "https://api.anthropic.com/v1/messages")!
+    init(
+        makeValidatedRequest: @escaping () async throws -> URLRequest,
+        model: String = "claude-sonnet-4-6"
+    ) {
+        self.makeValidatedRequest = makeValidatedRequest
         self.model = model
 
         let config = URLSessionConfiguration.default
@@ -152,12 +165,16 @@ class ElementLocationDetector {
         declaredDisplayWidth: Int,
         declaredDisplayHeight: Int
     ) async -> CGPoint? {
-        var request = URLRequest(url: apiURL)
+        var request: URLRequest
+        do {
+            // Arrives with its credentials already attached and checked. This
+            // detector never learns which route it is on, and never sees a key.
+            request = try await makeValidatedRequest()
+        } catch {
+            return nil
+        }
         request.httpMethod = "POST"
         request.timeoutInterval = 15
-        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         // The beta header activates Computer Use capabilities and the specialized
         // pixel-counting training that makes coordinate detection accurate.
         request.setValue("computer-use-2025-11-24", forHTTPHeaderField: "anthropic-beta")

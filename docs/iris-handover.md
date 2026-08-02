@@ -93,32 +93,46 @@ the Windows port.
   the unsigned runner. Pre-existing and unrelated; confirmed by removing all
   new files and reproducing. Use `-only-testing:leanring-buddyTests`.
 
-## Grounding lab — first real numbers, and why the gate is not called yet
+## Grounding lab — the Phase 0 answer
 
 `iris-macos/tools/grounding-lab` measures how accurately a model can point at
 real macOS UI, using the accessibility tree as automatically generated ground
 truth. No hand-labelling. `swift build` in that directory; see its README.
 
-Two live runs against Finder with `claude-haiku-4-5` disagreed sharply — 90%
-coverage / 100% hit on one capture, 50% / 40% on another. The per-role
-breakdown explains it and is the actual finding:
+Measured on a Safari page whose 53 targets are 22 links + 19 buttons — the
+same kind of control the key-minting flow has to point at. Same screenshot,
+same instructions, 20 targets per model arm:
 
-| element type | hit rate |
-|---|---|
-| menu bar items | 2/2 |
-| buttons | 0/2 |
-| text fields (rows of similar filenames) | 0/6 |
+| arm | coverage | hit | median error | p95 error | cost / 20 |
+|---|---|---|---|---|---|
+| `ax` | 77% | **100%** | 0pt | 0pt | $0 |
+| `claude-haiku-4-5` | 90% | 83% | 2pt | 123pt | $0.070 |
+| `claude-sonnet-5` | 100% | 90% | 1pt | 32pt | $0.259 |
 
-**A single headline number is misleading.** Chrome and menu items are easy;
-rows of near-identical list items are not. Do not call Phase 0 from either run:
-the surfaces that matter for the flagship flow are buttons and links on web
-pages like console.anthropic.com, and neither capture has enough of those to
-support a decision. The next run should target those surfaces specifically,
-with enough samples per role to be worth anything.
+**Haiku can ground.** That was the load-bearing unknown: the funded tier pays
+for a Haiku-class model, and if it could not point, grounding would have had
+to move behind bring-your-own-key and change the product. At 83% hit and 2pt
+median error on web controls, it can.
 
-The `ax` arm scored 100% coverage and 100% hit with 0pt median error on
-Finder, measured back-to-back with capture. That is the number to beat, and it
-is free — but it only exists where AX sees, which is not where vision matters.
+**The hybrid the plan predicted is the right shape.** Accessibility is free,
+instant and exact where it reaches; it reached 77% here and 100% on Finder.
+Sending only what AX misses to Haiku gives roughly 94% end-to-end
+(0.77 + 0.23 x 0.90 x 0.83) at about $0.0008 per grounding, because most
+lookups never leave the machine. Sonnet is meaningfully better — and 3.7x the
+price — which makes it the right default for the bring-your-own-key tier
+rather than the funded one.
+
+**Read the p95, not just the median.** Haiku's 123pt p95 means that when it is
+wrong it is wrong by a long way. A cursor flying confidently to the wrong
+control is worse than an assistant saying it is unsure, so the pointing UI
+needs a confidence path — prefer AX when it has an answer, and be willing to
+describe the target in words instead of pointing at it.
+
+Caveat on strength of evidence: n=20 per arm on one page of one app. Enough to
+choose an architecture, not enough to quote as a benchmark. An earlier Finder
+capture full of near-identical filename rows scored 0/6 on that role, so
+per-surface variation is large and the harness should be re-run against each
+new flow rather than trusted once.
 
 ### Bugs the harness found in shipping code
 

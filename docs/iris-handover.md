@@ -58,7 +58,7 @@ Everything here was exercised against the live project, not just unit-tested.
 | Telemetry privacy | anon refused raw rows and the rollup (`42501`); consent withdrawal deletes an install's history |
 | Fix recipe promotion | 2 successes → still candidate; 3rd → validated; 3 failures → demoted |
 | BYO key isolation | exactly one function in the app writes `x-api-key`, it takes no URL, and a final gate rejects that header on any host but `api.anthropic.com` |
-| Swift app | 72 tests; host allowlist byte-identical to `main.rs` |
+| Swift app | 99 tests; host allowlist byte-identical to `main.rs` |
 | Guides in the desktop app | live `iris://` link fetched cue v3 from publikhq.com and opened it at step 1 of 11; malformed and hostile links each rejected distinctly without crashing |
 | Setup recovery | a missing prerequisite diverts into `setupSteps`; re-check advances to the saved step; skipping is possible; detour progress cannot overwrite guide progress |
 | Mods and interviews | demand accumulated 1-2-3 on one row, phrasing variants collapsed onto it, anon refused both RPC and direct insert while still reading the public list |
@@ -81,9 +81,31 @@ Everything here was exercised against the live project, not just unit-tested.
 
 ## Not started
 
-Grounding bake-off (Phase 0 — the decision gate for how Iris points at
-things), the watch loop and its privacy guardrails, key-minting flows, and
-the Windows port.
+The Windows port, and milestone 2 of the grounding lab (click-and-observe
+verification, plus the VM that would let it run unattended).
+
+## Watch loop — what it does and refuses to do
+
+Iris now notices when a step is actually done. The ladder is cost-ordered and
+stops at the first rung that answers: an unchanged screen (perceptual hash of a
+256px greyscale frame) costs nothing at all; a changed screen consults
+frontmost app, window title, tool version, git head and the accessibility tree;
+only a step that declares a `visual` expectation, and only when everything
+cheaper was inconclusive, reaches a model. At least 10s between model calls and
+at most 8 per step, enforced in code and tested — after the ceiling the loop
+keeps working on local signals.
+
+The privacy rules are constraints, not features, and each is tested: frames
+live in memory for the length of one call and are never written down; capture
+suspends while secure input is active; a step marked `sensitive` is never
+captured at all and completes from side signals only; an excluded app in front
+(seeded with five password managers) suppresses capture; the indicator is on
+for exactly as long as the loop is, and pause takes effect immediately.
+
+That `sensitive` flag is what makes the key-minting flow honest. The two steps
+where an Anthropic key is on screen take no screenshot whatsoever, and a test
+refuses any step that is both `sensitive` and `visual`, since pairing them
+would hand a model the exact frame the flag exists to withhold.
 
 ## Two things to know before touching the Swift app
 

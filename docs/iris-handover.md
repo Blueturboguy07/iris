@@ -7,17 +7,20 @@ Working notes for the `iris-assistant` branch. The plan this follows is
 
 Ordered by what unblocks the most.
 
-1. **Supabase redirect allow list — wildcard, not exact match.**
-   Add `iris://auth/callback*` (with the trailing wildcard) under
-   Authentication → URL Configuration. The CSRF state token rides inside
-   `redirect_to`, so an exact-match entry fails at the authorize step and
-   desktop sign-in never completes. This blocks the funded tier on desktop.
+1. ~~Supabase redirect allow list~~ — **done**. `iris://auth/callback**` is
+   in the allow list. The glob matters: the CSRF state token rides inside
+   `redirect_to`, so an exact-match entry would fail at the authorize step.
 
-2. **Provision Upstash Redis** and set `UPSTASH_REDIS_REST_URL` /
-   `UPSTASH_REDIS_REST_TOKEN` in Vercel. The assistant proxy fails *closed*
-   without it in production — deliberately, since cost safety beats
-   availability there — so the funded tier stays dark until this exists.
-   Requires creating an account and accepting terms, which is why it is here.
+2. **Confirm the rate limiter on first deploy.** Upstash is provisioned
+   (`iris-ratelimit`, Free, `iad1`) and connected to the project, injecting
+   `UPSTASH_REDIS_REST_KV_REST_API_URL` / `..._TOKEN`. Those names are what
+   `lib/ratelimit.ts` resolves, and the resolver is unit-tested against every
+   naming variant — but the credentials themselves could not be exercised
+   locally, because Vercel marks Marketplace values Sensitive and `vercel env
+   pull` returns `[SENSITIVE]` placeholders. After the first deploy, send the
+   assistant endpoint 21 requests in five minutes: the 21st should come back
+   `429 rate_limited`. If instead everything is allowed, the limiter is
+   failing open and the credentials did not resolve.
 
 3. **Re-grant Screen Recording to Iris.** Terminal `xcodebuild` runs
    invalidate the app's TCC grants, and there were many. macOS will re-ask on

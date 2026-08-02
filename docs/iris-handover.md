@@ -84,10 +84,31 @@ Everything here was exercised against the live project, not just unit-tested.
 - **`/api/telemetry` has no producers.** The convention is written
   (`docs/publik-sdk-convention.md`); no catalog app emits logs yet.
 
+## Windows
+
+`iris-windows/` is a fork of tekram/clicky-windows (Electron, MIT), stripped of
+voice and the non-Anthropic providers, pointed at publik's transports, and
+given the same deep-link, host-allowlist and guide behaviour as the Mac app.
+The guide panel is a byte-for-byte copy of `iris-desktop/ui/app.js` with a
+60-line bridge that synthesises the Tauri API from Electron's preload, so the
+two stay in step by construction rather than by discipline.
+
+**Testing happens in CI, not here.** This machine cannot run Windows: Apple's
+Virtualization.framework does not support Windows guests on Apple Silicon, and
+a Windows 11 ARM VM needs roughly 70 GB against the ~6 GB free when this was
+written. `.github/workflows/iris-windows.yml` runs on `windows-latest` —
+install, typecheck, lint, 230 tests, package, make the installer, and a launch
+smoke test that requires the packaged exe to survive 10 seconds.
+
+What CI still cannot prove, and a person on Windows must: the DPAPI round
+trip, `iris://` delivery by the OS (parsing is heavily tested, delivery is
+not), a real OAuth round trip, screen capture and pointing accuracy, and
+whether `localStorage` works on the guide window's `file://` origin.
+
 ## Not started
 
-The Windows port, and milestone 2 of the grounding lab (click-and-observe
-verification, plus the VM that would let it run unattended).
+Milestone 2 of the grounding lab: click-and-observe verification, and the VM
+that would let it run unattended.
 
 ## Watch loop — what it does and refuses to do
 

@@ -141,6 +141,8 @@ struct GuidePanelView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     if let unsupportedPair = guideSessionController.unsupportedPairForTheSelectedBranch {
                         unsupportedPairExplanation(unsupportedPair)
+                    } else if let setupRecoveryState = guideSessionController.setupRecoveryState {
+                        setupRecoveryCard(setupRecoveryState)
                     } else if guideSessionController.readerHasFinishedTheGuide {
                         completionCard
                     } else if guideSessionController.currentStep != nil {
@@ -391,8 +393,12 @@ struct GuidePanelView: View {
     }
 
     private var toolCheckRowsSection: some View {
+        toolCheckRowsList(guideSessionController.toolCheckRows)
+    }
+
+    private func toolCheckRowsList(_ toolCheckRows: [GuideToolCheckRow]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(guideSessionController.toolCheckRows) { toolCheckRow in
+            ForEach(toolCheckRows) { toolCheckRow in
                 HStack(spacing: 6) {
                     Text(markForToolCheckState(toolCheckRow.state))
                         .font(.system(size: 11, weight: .bold, design: .monospaced))
@@ -425,6 +431,139 @@ struct GuidePanelView: View {
         case .readyToCheck, .checking: return DS.Colors.textTertiary
         case .installedWithVersion: return DS.Colors.success
         case .notInstalled, .couldNotBeChecked: return DS.Colors.destructiveText
+        }
+    }
+
+    // MARK: - Setup recovery
+
+    /// The detour shown when the branch needs a tool this computer does not
+    /// have. It deliberately does not look like a step of the guide: a tinted
+    /// card, a "Setup" badge, and an explanation of what is missing and why come
+    /// before anything the reader is asked to do — otherwise "Install Node"
+    /// reads as step one of the install and the count that follows makes no
+    /// sense against the website they came from.
+    private func setupRecoveryCard(_ setupRecoveryState: GuideSetupRecoveryState) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Text("SETUP")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(DS.Colors.warningText)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        Capsule().fill(DS.Colors.warning.opacity(0.16))
+                    )
+                Text("Before the guide can start")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(DS.Colors.textTertiary)
+            }
+
+            Text(guideSessionController.headlineForTheSetupRecoveryCard)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(DS.Colors.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            let explanation = guideSessionController.explanationForTheSetupRecoveryCard
+            if !explanation.isEmpty {
+                Text(explanation)
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.textSecondary)
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            toolCheckRowsList(setupRecoveryState.prerequisiteCheckRows)
+
+            if let messageFromTheMostRecentRecheck = setupRecoveryState.messageFromTheMostRecentRecheck {
+                // Pressing "Check again" and seeing nothing change is the exact
+                // moment a reader decides the app is broken, so the result of
+                // every re-check is spelled out even when it is bad news.
+                Text(messageFromTheMostRecentRecheck)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(DS.Colors.warningText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+                .overlay(DS.Colors.borderSubtle)
+                .padding(.vertical, 2)
+
+            setupRecoveryStepBody(setupRecoveryState)
+
+            Button(action: {
+                guideSessionController.skipSetupRecoveryAndContinueToTheGuide()
+            }) {
+                Text("Skip this and open the guide anyway")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .underline()
+            }
+            .buttonStyle(.plain)
+            .pointerCursor()
+            .nativeTooltip("Use this if you already have it installed under a name Iris cannot see.")
+            .padding(.top, 2)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .fill(DS.Colors.warning.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .stroke(DS.Colors.warning.opacity(0.24), lineWidth: 0.5)
+        )
+    }
+
+    /// The one setup step the reader is on, with the same affordances a guide
+    /// step has: the command with its Copy button, or the download link, and the
+    /// line telling them what "done" will look like.
+    @ViewBuilder
+    private func setupRecoveryStepBody(_ setupRecoveryState: GuideSetupRecoveryState) -> some View {
+        if let setupStep = setupRecoveryState.currentSetupStep {
+            VStack(alignment: .leading, spacing: 8) {
+                if setupRecoveryState.setupStepsToWalk.count > 1 {
+                    Text("Step \(setupRecoveryState.currentSetupStepIndex + 1) of \(setupRecoveryState.setupStepsToWalk.count) to fix this")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(DS.Colors.textTertiary)
+                }
+
+                Text(setupStep.title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                let bodyText = guideSessionController.bodyTextForTheCurrentStep
+                if !bodyText.isEmpty {
+                    Text(bodyText)
+                        .font(.system(size: 11))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if let command = guideSessionController.commandBlockTextForTheCurrentStep {
+                    commandBlock(command: command)
+                }
+
+                if case .openLinkIsUnavailable(let linkURLString, let reason) =
+                    guideSessionController.primaryActionForTheCurrentStep {
+                    blockedLinkNotice(linkURLString: linkURLString, reason: reason)
+                }
+
+                if let verifierLabel = setupStep.verifierLabel, !verifierLabel.isEmpty {
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "checkmark.circle")
+                            .font(.system(size: 10))
+                            .foregroundColor(DS.Colors.textTertiary)
+                        Text(verifierLabel)
+                            .font(.system(size: 10))
+                            .foregroundColor(DS.Colors.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 

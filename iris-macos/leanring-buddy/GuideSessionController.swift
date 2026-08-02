@@ -99,6 +99,56 @@ struct GuideToolCheckRow: Identifiable, Equatable, Sendable {
     }
 }
 
+/// The detour a reader is put on when the branch they opened needs a tool their
+/// computer does not have. It is deliberately a separate value from everything
+/// describing the main guide: the reader's place in the guide itself must
+/// survive the detour untouched, and the surest way to guarantee that is for the
+/// detour to have nowhere to write it.
+struct GuideSetupRecoveryState: Equatable, Sendable {
+    /// One row per prerequisite the branch declares, as of the most recent
+    /// check. Tools that were found keep their row on purpose — "git ✓ /
+    /// node ×" tells the reader exactly what is still in their way.
+    var prerequisiteCheckRows: [GuideToolCheckRow]
+
+    /// The branch's own setup steps for whatever is still missing, in the order
+    /// the branch lists them.
+    var setupStepsToWalk: [IrisGuideStep]
+
+    var currentSetupStepIndex: Int
+
+    /// True while a re-check is in flight, so the button can say so instead of
+    /// looking like it did nothing.
+    var aRecheckIsRunning: Bool
+
+    /// One sentence about what the last re-check found. Nil until the reader has
+    /// pressed it, because the arrival state already explains itself.
+    var messageFromTheMostRecentRecheck: String?
+
+    var currentSetupStep: IrisGuideStep? {
+        guard currentSetupStepIndex >= 0, currentSetupStepIndex < setupStepsToWalk.count else {
+            return nil
+        }
+        return setupStepsToWalk[currentSetupStepIndex]
+    }
+
+    var isOnTheLastSetupStep: Bool {
+        currentSetupStepIndex >= setupStepsToWalk.count - 1
+    }
+
+    /// The tools this detour exists to install, in row order.
+    var toolNamesStillMissing: [String] {
+        prerequisiteCheckRows
+            .filter { row in row.state == .notInstalled }
+            .map(\.toolName)
+    }
+}
+
+/// How the controller asks whether a tool is installed. It is a closure rather
+/// than a direct call to `ToolVersionService` so a test can answer "node is
+/// missing" without a machine that actually lacks Node, and so no test ever
+/// spawns a process. Production always passes the real service.
+typealias GuideToolVersionChecker = @Sendable (String) async throws -> ToolVersion
+
 @MainActor
 final class GuideSessionController: ObservableObject {
     // MARK: - Published state
@@ -123,9 +173,22 @@ final class GuideSessionController: ObservableObject {
     /// step, which is what relabels the button to "Check again".
     @Published private(set) var toolChecksHaveBeenRunForThisStep: Bool = false
 
+    /// Non-nil while the reader is being walked through a missing prerequisite
+    /// instead of through the guide itself. The Tauri panel keeps the same idea
+    /// in `state.setupTool` (`iris-desktop/ui/app.js`).
+    @Published private(set) var setupRecoveryState: GuideSetupRecoveryState?
+
+    var readerIsInSetupRecovery: Bool {
+        setupRecoveryState != nil
+    }
+
     // MARK: - Collaborators
 
     private let guideService: GuideService
+
+    /// How this controller finds out whether a tool is installed. See
+    /// `GuideToolVersionChecker`.
+    private let checkToolVersion: GuideToolVersionChecker
 
     /// The computer this app is running on. It only ever has one value in a
     /// shipped build — this is a Mac-only app — but it is injectable so the
@@ -134,6 +197,11 @@ final class GuideSessionController: ObservableObject {
 
     private var copyConfirmationDismissalTask: Task<Void, Never>?
     private var toolCheckTask: Task<Void, Never>?
+
+    /// The re-check the reader started from inside the setup detour. Kept apart
+    /// from `toolCheckTask` because the two write to different rows and a stale
+    /// result landing in the wrong one is exactly the bug this avoids.
+    private var setupRecheckTask: Task<Void, Never>?
 
     /// The most recent progress write. Pressing Next must not wait on storage,
     /// so the write is started and left to finish on its own; anything that
@@ -148,10 +216,14 @@ final class GuideSessionController: ObservableObject {
         guideService: GuideService = GuideService(
             apiBase: AssistantTransport.configuredPublikBaseURL().absoluteString
         ),
-        platformThisAppRunsOn: IrisPlatform = .macos
+        platformThisAppRunsOn: IrisPlatform = .macos,
+        checkToolVersion: @escaping GuideToolVersionChecker = { toolName in
+            try await ToolVersionService.checkToolVersion(tool: toolName)
+        }
     ) {
         self.guideService = guideService
         self.platformThisAppRunsOn = platformThisAppRunsOn
+        self.checkToolVersion = checkToolVersion
     }
 
     // MARK: - Opening a guide
@@ -195,6 +267,7 @@ final class GuideSessionController: ObservableObject {
         currentStepIndex = 0
         readerHasFinishedTheGuide = false
         toolCheckRows = []
+        setupRecoveryState = nil
 
         let fetchedGuide: IrisGuide
         do {
@@ -258,6 +331,12 @@ final class GuideSessionController: ObservableObject {
         }
 
         prepareToolCheckRowsForTheCurrentStep()
+
+        // The prerequisite scan runs while the panel still says "Loading", so
+        // the reader is never shown step one of an install they cannot start
+        // and then yanked out of it a moment later.
+        await enterSetupRecoveryIfAPrerequisiteIsMissing(forBranch: resolvedHandoff.branch)
+
         loadState = .guideIsOpen
     }
 
@@ -269,6 +348,7 @@ final class GuideSessionController: ObservableObject {
         currentStepIndex = 0
         readerHasFinishedTheGuide = false
         toolCheckRows = []
+        setupRecoveryState = nil
     }
 
     // MARK: - Branch selection
@@ -294,10 +374,14 @@ final class GuideSessionController: ObservableObject {
         }
         cancelAnyWorkFromThePreviousStep()
         selectedBranch = branchTheReaderPicked
+        setupRecoveryState = nil
         // Each branch remembers its own place: the same reader can be nine steps
         // into the Android build and not have started the iPhone one.
         await restoreSavedProgress(forBranch: branchTheReaderPicked)
         prepareToolCheckRowsForTheCurrentStep()
+        // Branches do not share prerequisites — the Android route needs a JDK
+        // the iPhone route never asks about — so switching re-scans.
+        await enterSetupRecoveryIfAPrerequisiteIsMissing(forBranch: branchTheReaderPicked)
     }
 
     // MARK: - What the step card renders
@@ -320,6 +404,17 @@ final class GuideSessionController: ObservableObject {
         return branch.steps[currentStepIndex]
     }
 
+    /// The step whose title, body, command, and button the panel is drawing
+    /// right now. It is the setup step during the prerequisite detour and the
+    /// guide's own step the rest of the time. `currentStep` stays the guide's
+    /// step in both cases, because that is what the reader's saved place means.
+    var stepTheReaderIsLookingAt: IrisGuideStep? {
+        if let setupRecoveryState {
+            return setupRecoveryState.currentSetupStep
+        }
+        return currentStep
+    }
+
     var numberOfStepsInTheSelectedBranch: Int {
         // Setup steps are deliberately excluded, matching the Tauri panel: they
         // are a side quest for a missing tool, so counting them would make the
@@ -329,6 +424,11 @@ final class GuideSessionController: ObservableObject {
 
     /// "3 / 12", or "Done" on the completion card.
     var stepCounterText: String {
+        if readerIsInSetupRecovery {
+            // The detour has no place in the guide's own count, so it says what
+            // it is instead of borrowing a number that would be a lie.
+            return "Setup"
+        }
         if readerHasFinishedTheGuide {
             return "Done"
         }
@@ -354,7 +454,7 @@ final class GuideSessionController: ObservableObject {
     /// rows rather than something for the reader to paste, so it is not shown
     /// as a block — the same call the Tauri panel makes.
     var commandBlockTextForTheCurrentStep: String? {
-        guard let step = currentStep, step.kind != .check else {
+        guard let step = stepTheReaderIsLookingAt, step.kind != .check else {
             return nil
         }
         guard let command = step.command, !command.isEmpty else {
@@ -367,8 +467,15 @@ final class GuideSessionController: ObservableObject {
     /// paste it, which is more useful than the authored body at that moment —
     /// the Tauri panel makes the same substitution.
     var bodyTextForTheCurrentStep: String {
-        guard let step = currentStep else {
+        guard let step = stepTheReaderIsLookingAt else {
             return ""
+        }
+        // A setup step keeps its authored body. "Apple opens a small installer."
+        // is the whole reason the reader will not be alarmed by what happens
+        // next, and "Paste in Terminal." would throw that away for something the
+        // copy confirmation already says.
+        if readerIsInSetupRecovery {
+            return step.body
         }
         if commandBlockTextForTheCurrentStep != nil {
             return "Paste in \(nameOfTheShellForTheSelectedBranch)."
@@ -392,7 +499,16 @@ final class GuideSessionController: ObservableObject {
     }
 
     var canReturnToThePreviousStep: Bool {
-        guard selectedBranch?.unsupported == nil, numberOfStepsInTheSelectedBranch > 0 else {
+        guard selectedBranch?.unsupported == nil else {
+            return false
+        }
+        // Inside the detour, Back walks the setup steps and stops at the first
+        // one. It never leaves the detour by the back door — the reader gets out
+        // by fixing the tool or by explicitly skipping.
+        if let setupRecoveryState {
+            return setupRecoveryState.currentSetupStepIndex > 0
+        }
+        guard numberOfStepsInTheSelectedBranch > 0 else {
             return false
         }
         return readerHasFinishedTheGuide || currentStepIndex > 0
@@ -404,10 +520,16 @@ final class GuideSessionController: ObservableObject {
     /// so the view never has to work out what pressing it should do.
     var primaryActionForTheCurrentStep: GuideStepPrimaryAction? {
         guard loadState == .guideIsOpen,
-              !readerHasFinishedTheGuide,
               let branch = selectedBranch,
-              branch.unsupported == nil,
-              let step = currentStep else {
+              branch.unsupported == nil else {
+            return nil
+        }
+
+        if let setupRecoveryState, let setupStep = setupRecoveryState.currentSetupStep {
+            return primaryAction(forSetupStep: setupStep, in: setupRecoveryState)
+        }
+
+        guard !readerHasFinishedTheGuide, let step = currentStep else {
             return nil
         }
 
@@ -465,6 +587,46 @@ final class GuideSessionController: ObservableObject {
         return "Iris will not open \(hostThatWasRefused) — it is not on publik's reviewed link list."
     }
 
+    /// The setup detour's button. It offers the step's own action first — copy
+    /// the installer command, open the download page — and once that has been
+    /// taken on the last setup step it becomes the re-check, which is the only
+    /// thing that can end the detour honestly. This is the same sequence the
+    /// Tauri panel runs through `state.setupTool` + `state.actionReady`.
+    private func primaryAction(
+        forSetupStep setupStep: IrisGuideStep,
+        in setupRecoveryState: GuideSetupRecoveryState
+    ) -> GuideStepPrimaryAction {
+        let labelForMovingOn = setupRecoveryState.isOnTheLastSetupStep ? "Check again" : "Continue"
+
+        if !readerHasTakenThisStepsAction {
+            if let command = setupStep.command, !command.isEmpty {
+                return .copyCommandToClipboard(command: command, buttonLabel: "Copy")
+            }
+            if let linkURLString = setupStep.href, !linkURLString.isEmpty {
+                guard ExternalLinkPolicy.isAllowedExternalURL(linkURLString) else {
+                    return .openLinkIsUnavailable(
+                        linkURLString: linkURLString,
+                        reasonTheLinkCannotBeOpened: Self.reasonALinkCannotBeOpened(
+                            linkURLString: linkURLString
+                        )
+                    )
+                }
+                return .openLinkInBrowser(
+                    linkURLString: linkURLString,
+                    buttonLabel: setupStep.actionLabel ?? "Open"
+                )
+            }
+        }
+
+        if setupRecoveryState.isOnTheLastSetupStep {
+            return .runToolChecksForThisStep(
+                buttonLabel: setupRecoveryState.aRecheckIsRunning ? "Checking…" : "Check again"
+            )
+        }
+        let labelAfterACommand = setupStep.command?.isEmpty == false ? "I ran it" : labelForMovingOn
+        return .advanceToTheNextStep(buttonLabel: labelAfterACommand)
+    }
+
     /// Runs whatever the primary button is currently offering.
     func performPrimaryAction() {
         guard let primaryAction = primaryActionForTheCurrentStep else {
@@ -480,9 +642,17 @@ final class GuideSessionController: ObservableObject {
             // with its reason showing, and is never wired to a press.
             break
         case .runToolChecksForThisStep:
-            runToolChecksForTheCurrentStep()
+            if readerIsInSetupRecovery {
+                recheckThePrerequisitesForSetupRecovery()
+            } else {
+                runToolChecksForTheCurrentStep()
+            }
         case .advanceToTheNextStep:
-            advanceToTheNextStep()
+            if readerIsInSetupRecovery {
+                advanceToTheNextSetupStep()
+            } else {
+                advanceToTheNextStep()
+            }
         }
     }
 
@@ -594,21 +764,27 @@ final class GuideSessionController: ObservableObject {
             GuideToolCheckRow(toolName: toolName, state: .checking)
         }
         toolCheckTask = Task { [weak self] in
-            var rowsAfterChecking: [GuideToolCheckRow] = []
-            for toolName in toolNamesToCheck {
-                rowsAfterChecking.append(await Self.checkOneTool(named: toolName))
-            }
+            guard let self else { return }
+            let rowsAfterChecking = await self.checkEveryTool(named: toolNamesToCheck)
             guard !Task.isCancelled else { return }
-            self?.toolCheckRows = rowsAfterChecking
+            self.toolCheckRows = rowsAfterChecking
         }
+    }
+
+    private func checkEveryTool(named toolNames: [String]) async -> [GuideToolCheckRow] {
+        var rowsAfterChecking: [GuideToolCheckRow] = []
+        for toolName in toolNames {
+            rowsAfterChecking.append(await checkOneTool(named: toolName))
+        }
+        return rowsAfterChecking
     }
 
     /// A tool that is simply absent is data — the guide exists to install it —
     /// while a lookup that broke is an error worth naming. `ToolVersionService`
     /// already draws that line; this only translates it into a row.
-    private static func checkOneTool(named toolName: String) async -> GuideToolCheckRow {
+    private func checkOneTool(named toolName: String) async -> GuideToolCheckRow {
         do {
-            let toolVersion = try await ToolVersionService.checkToolVersion(tool: toolName)
+            let toolVersion = try await checkToolVersion(toolName)
             guard toolVersion.available else {
                 return GuideToolCheckRow(toolName: toolName, state: .notInstalled)
             }
@@ -629,9 +805,285 @@ final class GuideSessionController: ObservableObject {
         }
     }
 
+    // MARK: - The setup recovery detour
+
+    /// The prerequisites a branch declares, read off its own setup steps. A
+    /// branch that ships no setup steps declares nothing, which is the whole
+    /// reason nothing is spawned for it: there would be no way to fix what the
+    /// check found, and a red row with no route out is worse than no row.
+    static func prerequisiteToolNames(declaredBy branch: IrisGuideBranch) -> [String] {
+        var toolNamesInBranchOrder: [String] = []
+        for setupStep in branch.setupSteps {
+            guard let toolThisStepInstalls = setupStep.tool?.rawValue,
+                  !toolNamesInBranchOrder.contains(toolThisStepInstalls) else {
+                continue
+            }
+            toolNamesInBranchOrder.append(toolThisStepInstalls)
+        }
+        return toolNamesInBranchOrder
+    }
+
+    /// Runs the branch's prerequisite checks once, on the way in, and diverts
+    /// the reader into the setup steps if anything they need is missing.
+    private func enterSetupRecoveryIfAPrerequisiteIsMissing(forBranch branch: IrisGuideBranch) async {
+        guard branch.unsupported == nil, !branch.setupSteps.isEmpty else {
+            return
+        }
+        let prerequisiteToolNames = Self.prerequisiteToolNames(declaredBy: branch)
+        guard !prerequisiteToolNames.isEmpty else {
+            return
+        }
+
+        let prerequisiteCheckRows = await checkEveryTool(named: prerequisiteToolNames)
+        // A tool that could not be checked is not a tool that is missing. Iris
+        // has no idea what is on the machine in that case, and marching the
+        // reader through an install they may not need is the wrong guess.
+        let setupStepsToWalk = Self.setupSteps(
+            fromBranch: branch,
+            repairingToolsNamed: prerequisiteCheckRows
+                .filter { row in row.state == .notInstalled }
+                .map(\.toolName)
+        )
+        guard !setupStepsToWalk.isEmpty else {
+            return
+        }
+
+        setupRecoveryState = GuideSetupRecoveryState(
+            prerequisiteCheckRows: prerequisiteCheckRows,
+            setupStepsToWalk: setupStepsToWalk,
+            currentSetupStepIndex: 0,
+            aRecheckIsRunning: false,
+            messageFromTheMostRecentRecheck: nil
+        )
+        readerHasTakenThisStepsAction = false
+    }
+
+    private static func setupSteps(
+        fromBranch branch: IrisGuideBranch,
+        repairingToolsNamed toolNames: [String]
+    ) -> [IrisGuideStep] {
+        branch.setupSteps.filter { setupStep in
+            guard let toolThisStepInstalls = setupStep.tool?.rawValue else {
+                return false
+            }
+            return toolNames.contains(toolThisStepInstalls)
+        }
+    }
+
+    /// Runs the prerequisite checks again. Finding everything ends the detour
+    /// and drops the reader into the guide exactly where they already were;
+    /// finding something still missing says so, because a button that reports
+    /// nothing reads as a broken button.
+    func recheckThePrerequisitesForSetupRecovery() {
+        guard let branch = selectedBranch,
+              var mutableSetupRecoveryState = setupRecoveryState else {
+            return
+        }
+        let toolNamesToCheckAgain = mutableSetupRecoveryState.prerequisiteCheckRows.map(\.toolName)
+        guard !toolNamesToCheckAgain.isEmpty else {
+            return
+        }
+
+        setupRecheckTask?.cancel()
+        mutableSetupRecoveryState.aRecheckIsRunning = true
+        mutableSetupRecoveryState.messageFromTheMostRecentRecheck = nil
+        mutableSetupRecoveryState.prerequisiteCheckRows = toolNamesToCheckAgain.map { toolName in
+            GuideToolCheckRow(toolName: toolName, state: .checking)
+        }
+        setupRecoveryState = mutableSetupRecoveryState
+
+        setupRecheckTask = Task { [weak self] in
+            guard let self else { return }
+            let rowsAfterChecking = await self.checkEveryTool(named: toolNamesToCheckAgain)
+            guard !Task.isCancelled else { return }
+            self.applyTheResultOfASetupRecheck(rowsAfterChecking, forBranch: branch)
+        }
+    }
+
+    /// Waits for the re-check the reader started, for anything that is about to
+    /// read the result back and would otherwise race it.
+    func waitUntilTheSetupRecheckHasFinished() async {
+        await setupRecheckTask?.value
+    }
+
+    private func applyTheResultOfASetupRecheck(
+        _ rowsAfterChecking: [GuideToolCheckRow],
+        forBranch branch: IrisGuideBranch
+    ) {
+        guard var mutableSetupRecoveryState = setupRecoveryState else { return }
+
+        let toolNamesStillMissing = rowsAfterChecking
+            .filter { row in row.state == .notInstalled }
+            .map(\.toolName)
+        if toolNamesStillMissing.isEmpty {
+            // Nothing is in the reader's way any more, so the detour ends. The
+            // guide's own step index was never touched while they were here,
+            // which is why this lands them back where they left off rather than
+            // at step one.
+            leaveSetupRecovery()
+            return
+        }
+
+        let setupStepsToWalkNext = Self.setupSteps(
+            fromBranch: branch,
+            repairingToolsNamed: toolNamesStillMissing
+        )
+        // Fixing Git but not Node shortens the detour to Node's step, so the
+        // reader is not walked back through work they have already done.
+        if setupStepsToWalkNext != mutableSetupRecoveryState.setupStepsToWalk {
+            mutableSetupRecoveryState.setupStepsToWalk = setupStepsToWalkNext
+            mutableSetupRecoveryState.currentSetupStepIndex = 0
+            readerHasTakenThisStepsAction = false
+        }
+        mutableSetupRecoveryState.prerequisiteCheckRows = rowsAfterChecking
+        mutableSetupRecoveryState.aRecheckIsRunning = false
+        mutableSetupRecoveryState.messageFromTheMostRecentRecheck = Self.messageDescribing(
+            rowsAfterChecking
+        )
+
+        if mutableSetupRecoveryState.setupStepsToWalk.isEmpty {
+            // The branch has no step that repairs what is still missing, so
+            // there is nothing left for the detour to show. Better to hand the
+            // reader the guide than to hold them on an empty card.
+            leaveSetupRecovery()
+            return
+        }
+        setupRecoveryState = mutableSetupRecoveryState
+    }
+
+    /// The reader's own way out. Some people have the tool under a name the
+    /// check cannot see — a shell alias, a version manager that only exports
+    /// inside an interactive shell — and Iris being wrong about that must not
+    /// be the end of their install.
+    func skipSetupRecoveryAndContinueToTheGuide() {
+        guard readerIsInSetupRecovery else { return }
+        leaveSetupRecovery()
+    }
+
+    /// Ends the detour without writing anything: the guide's step index and its
+    /// stored progress are exactly what they were before it started.
+    private func leaveSetupRecovery() {
+        setupRecheckTask?.cancel()
+        setupRecheckTask = nil
+        setupRecoveryState = nil
+        cancelAnyWorkFromThePreviousStep()
+        prepareToolCheckRowsForTheCurrentStep()
+    }
+
+    func advanceToTheNextSetupStep() {
+        guard var mutableSetupRecoveryState = setupRecoveryState else { return }
+        if mutableSetupRecoveryState.isOnTheLastSetupStep {
+            // Past the last setup step there is nothing to show, only something
+            // to verify, so the end of the detour is the re-check.
+            recheckThePrerequisitesForSetupRecovery()
+            return
+        }
+        mutableSetupRecoveryState.currentSetupStepIndex += 1
+        mutableSetupRecoveryState.messageFromTheMostRecentRecheck = nil
+        setupRecoveryState = mutableSetupRecoveryState
+        cancelAnyWorkFromThePreviousStep()
+    }
+
+    func returnToThePreviousSetupStep() {
+        guard var mutableSetupRecoveryState = setupRecoveryState,
+              mutableSetupRecoveryState.currentSetupStepIndex > 0 else {
+            return
+        }
+        mutableSetupRecoveryState.currentSetupStepIndex -= 1
+        mutableSetupRecoveryState.messageFromTheMostRecentRecheck = nil
+        setupRecoveryState = mutableSetupRecoveryState
+        cancelAnyWorkFromThePreviousStep()
+    }
+
+    // MARK: - What the setup card says
+
+    /// "Git" rather than "git" in a sentence a person reads. The names outside
+    /// this list are already spelled the way their own projects spell them.
+    static func displayNameForTool(_ toolName: String) -> String {
+        switch toolName {
+        case "git": return "Git"
+        case "node": return "Node"
+        case "python", "python3": return "Python"
+        case "java": return "Java"
+        case "docker": return "Docker"
+        case "cargo", "rustc": return "Rust"
+        default: return toolName
+        }
+    }
+
+    /// "Git", "Git and Node", "Git, Node, and Docker".
+    static func sentenceListing(_ names: [String]) -> String {
+        switch names.count {
+        case 0: return ""
+        case 1: return names[0]
+        case 2: return "\(names[0]) and \(names[1])"
+        default:
+            return "\(names.dropLast().joined(separator: ", ")), and \(names[names.count - 1])"
+        }
+    }
+
+    /// The setup card's headline: which prerequisite is in the way.
+    var headlineForTheSetupRecoveryCard: String {
+        guard let setupRecoveryState else { return "" }
+        let missingToolDisplayNames = setupRecoveryState.toolNamesStillMissing
+            .map(Self.displayNameForTool)
+        guard !missingToolDisplayNames.isEmpty else {
+            return "One thing to install first"
+        }
+        return "Iris could not find \(Self.sentenceListing(missingToolDisplayNames)) on this computer."
+    }
+
+    /// Why the guide cannot start without it. A reader told only "not installed"
+    /// has to guess whether it matters; this says what breaks.
+    var explanationForTheSetupRecoveryCard: String {
+        guard let setupRecoveryState else { return "" }
+        let reasonsEachMissingToolIsNeeded = setupRecoveryState.toolNamesStillMissing
+            .map(Self.whyTheGuideNeedsTool)
+        guard !reasonsEachMissingToolIsNeeded.isEmpty else {
+            return ""
+        }
+        return reasonsEachMissingToolIsNeeded.joined(separator: " ")
+    }
+
+    static func whyTheGuideNeedsTool(_ toolName: String) -> String {
+        switch toolName {
+        case "git":
+            return "Git is how this guide copies the app's code onto your computer, so the very first command fails without it."
+        case "node":
+            return "Node is what runs the app once its code is here, so the install stops partway through without it."
+        default:
+            return "\(displayNameForTool(toolName)) has to be installed before this guide's commands can run."
+        }
+    }
+
+    /// What a re-check found, in one sentence. Both halves matter: a tool that
+    /// is still absent and a tool Iris could not look at are different problems
+    /// and only one of them is fixed by installing something.
+    private static func messageDescribing(_ rowsAfterChecking: [GuideToolCheckRow]) -> String {
+        let toolNamesStillMissing = rowsAfterChecking
+            .filter { row in row.state == .notInstalled }
+            .map { row in displayNameForTool(row.toolName) }
+        if !toolNamesStillMissing.isEmpty {
+            return "Iris still cannot find \(sentenceListing(toolNamesStillMissing)). Finish the steps above, then check again."
+        }
+
+        let firstRowThatCouldNotBeChecked = rowsAfterChecking.first { row in
+            if case .couldNotBeChecked = row.state { return true }
+            return false
+        }
+        if let firstRowThatCouldNotBeChecked,
+           case .couldNotBeChecked(let reason) = firstRowThatCouldNotBeChecked.state {
+            return "Iris could not check \(displayNameForTool(firstRowThatCouldNotBeChecked.toolName)) — \(reason)"
+        }
+        return "Everything this guide needs is installed."
+    }
+
     // MARK: - Navigation
 
     func advanceToTheNextStep() {
+        // The detour must never move the reader's place in the guide, so this
+        // refuses outright rather than trusting every caller to check first.
+        guard !readerIsInSetupRecovery else { return }
         guard let branch = selectedBranch, branch.unsupported == nil, !branch.steps.isEmpty else {
             return
         }
@@ -650,6 +1102,12 @@ final class GuideSessionController: ObservableObject {
     }
 
     func returnToThePreviousStep() {
+        // Back means "the previous thing I was looking at", which inside the
+        // detour is the previous setup step.
+        if readerIsInSetupRecovery {
+            returnToThePreviousSetupStep()
+            return
+        }
         guard let branch = selectedBranch, branch.unsupported == nil, !branch.steps.isEmpty else {
             return
         }

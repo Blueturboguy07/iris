@@ -375,7 +375,11 @@ struct GuideSessionTests {
     /// A `GuideService` whose network is `StubbedGuideURLProtocol` and whose
     /// progress storage is a suite nothing else touches, so tests cannot see
     /// each other's saved steps or the developer's own.
-    private static func guideServiceAnsweredByTheStub() throws -> GuideService {
+    ///
+    /// Shared with `GuideSetupRecoveryTests` rather than copied: a second way of
+    /// standing up a stubbed service is a second thing to keep in step with the
+    /// real one.
+    static func guideServiceAnsweredByTheStub() throws -> GuideService {
         let stubbedSessionConfiguration = URLSessionConfiguration.ephemeral
         stubbedSessionConfiguration.protocolClasses = [StubbedGuideURLProtocol.self]
         let isolatedUserDefaults = try #require(
@@ -477,9 +481,72 @@ final class StubbedGuideURLProtocol: URLProtocol {
             return blockedLinkGuideJSON(version: version)
         case "tool-check":
             return toolCheckGuideJSON(version: version)
+        case "setup-recovery":
+            return prerequisiteGuideJSON(slug: slug, version: version, carriesSetupSteps: true)
+        case "no-setup-steps":
+            return prerequisiteGuideJSON(slug: slug, version: version, carriesSetupSteps: false)
         default:
             return mobileGuideJSON(slug: slug, version: version)
         }
+    }
+
+    /// The shape every published desktop guide has: a branch whose `setupSteps`
+    /// carry a repair for each prerequisite, and whose `steps` are the install
+    /// itself. `carriesSetupSteps: false` is the same guide with that repair
+    /// route removed, which is how a missing tool with nowhere to go is told
+    /// apart from a missing tool the guide can fix.
+    private static func prerequisiteGuideJSON(
+        slug: String,
+        version: Int,
+        carriesSetupSteps: Bool
+    ) -> String {
+        let setupStepsJSON = carriesSetupSteps
+            ? """
+              {"id": "install-git", "kind": "terminal", "tool": "git", "title": "Install Git",
+               "body": "Apple opens a small installer.", "command": "xcode-select --install",
+               "verifierLabel": "Git responds with a version number"},
+              {"id": "install-node", "kind": "open", "tool": "node", "title": "Install Node LTS",
+               "body": "Choose the macOS Installer (.pkg).",
+               "href": "https://nodejs.org/en/download", "actionLabel": "Open download",
+               "verifierLabel": "Node responds with a version number"}
+              """
+            : ""
+        return """
+        {
+          "appSlug": "\(slug)",
+          "appName": "Prerequisite",
+          "version": \(version),
+          "status": "pilot",
+          "sourceOwner": "Blueturboguy07",
+          "sourceRepo": "\(slug)",
+          "sourceCommit": null,
+          "outputType": "desktop_app",
+          "estimatedMinutes": 12,
+          "readmeSectionIds": [],
+          "branches": [
+            {
+              "platform": "macos",
+              "target": null,
+              "label": "macOS",
+              "shell": "terminal",
+              "setupSteps": [\(setupStepsJSON)],
+              "steps": [
+                {"id": "open-shell", "kind": "terminal", "title": "Open Terminal",
+                 "body": "Keep it open beside Iris.", "verifierLabel": "Terminal is open"},
+                {"id": "check-tools", "kind": "check", "title": "Check Git and Node",
+                 "body": "Git and the current Node LTS are required.",
+                 "command": "git --version\\nnode --version",
+                 "verifierLabel": "Git and Node respond with version numbers"},
+                {"id": "clone", "kind": "terminal", "title": "Copy it to this Mac",
+                 "body": "", "command": "git clone https://github.com/Blueturboguy07/\(slug).git"},
+                {"id": "run", "kind": "terminal", "title": "Run it",
+                 "body": "", "command": "npm ci\\nnpm start"}
+              ],
+              "unsupported": null
+            }
+          ]
+        }
+        """
     }
 
     /// A mobile guide with the same branch shape Lunara, NoScroll, and Nut AI

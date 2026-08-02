@@ -62,9 +62,12 @@ Everything here was exercised against the live project, not just unit-tested.
 
 ## What is built but not yet reachable by a user
 
-- **The desktop guide UI.** `GuideService`, `DeepLinkParser`, `IrisGuideModels`
-  are ported and tested but not rendered in the panel, so M1 parity with the
-  Tauri pill is not reached and the Tauri app cannot retire yet.
+- **Guide setup sub-flows.** Guides now render in the panel and `iris://`
+  links open them (verified live against publikhq.com: cue v3, 11 steps). What
+  is missing is the recovery path — a missing Git or Node shows in the
+  tool-check rows but does not walk the reader through `branch.setupSteps`.
+  The data is parsed; the flow is not built. Until then the Tauri pill still
+  does one thing Iris cannot.
 - **App awareness and updates.** `AppAwarenessService` and
   `ToolVersionService` exist; nothing polls them, and there is no installed-app
   inventory. `lib/apps-config.ts` still needs `bundleId` / `processNames`.

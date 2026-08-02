@@ -22,9 +22,14 @@ Ordered by what unblocks the most.
    `429 rate_limited`. If instead everything is allowed, the limiter is
    failing open and the credentials did not resolve.
 
-3. **Re-grant Screen Recording to Iris.** Terminal `xcodebuild` runs
-   invalidate the app's TCC grants, and there were many. macOS will re-ask on
-   next launch.
+3. ~~Re-grant Screen Recording~~ — **fixed properly**. The cause was ad-hoc
+   signing: `codesign --sign -` embeds a hash of the binary, so every rebuild
+   is a different app to macOS and the previous grant belongs to a build that
+   no longer exists. `/Applications/Iris.app` is now signed with the real
+   Developer ID certificate, whose designated requirement is bundle id + team
+   id with no hash, so a grant survives every future build. Use
+   `scripts/deploy-iris-local.sh` — it refuses to fall back to ad-hoc. Grant
+   once more (stale entries were cleared with `tccutil reset`) and it sticks.
 
 4. **Watch the Anthropic balance.** Credits are live and the funded tier is
    metered per user (20 requests / 5 min, 150k tokens / day), but the ceiling

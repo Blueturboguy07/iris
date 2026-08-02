@@ -55,6 +55,9 @@
 
   const STATUS_VALUES = new Set(["pilot", "approved", "review"]);
   const PLATFORM_VALUES = new Set(["macos", "windows"]);
+  // Must stay identical to `allowed_external_host` in src-tauri/src/main.rs: a
+  // host missing on either side nulls the step link before the other layer is
+  // consulted, and the button silently advances instead of opening anything.
   const SAFE_EXTERNAL_HOSTS = new Set([
     "publikhq.com",
     "www.publikhq.com",
@@ -70,6 +73,14 @@
     "docs.docker.com",
     "developer.apple.com",
     "learn.microsoft.com",
+    "apps.apple.com",
+    "developer.android.com",
+    "huggingface.co",
+    "visualstudio.microsoft.com",
+    "cmake.org",
+    "www.cmake.org",
+    "files.browseros.com",
+    "go.dev",
   ]);
   const SAFE_TOOL_NAMES = new Set([
     "git",
@@ -1274,11 +1285,6 @@
     localStorage.setItem(STORAGE.watching, String(state.watching));
     renderWatching();
     scheduleForegroundPolling();
-    try {
-      await nativeInvoke("set_watching", { watching: state.watching });
-    } catch {
-      // The UI preference remains useful even when an older native shell lacks this command.
-    }
     announce(state.watching ? "Iris watching enabled" : "Iris watching paused");
   }
 
@@ -1432,16 +1438,6 @@
       // Browser preview and older shells use the DOM event fallback below.
     }
     try {
-      const unlisten = await nativeListen("iris-foreground-app", (event) => {
-        if (!state.watching) return;
-        state.foreground = normalizeForeground(event);
-        renderWatching();
-      });
-      if (typeof unlisten === "function") state.unlisteners.push(unlisten);
-    } catch {
-      // Polling remains the defensive fallback.
-    }
-    try {
       const unlisten = await nativeListen("iris-deep-link-rejected", () => {
         showToast("Iris blocked an invalid guide link.");
       });
@@ -1450,11 +1446,6 @@
       // Browser preview has no native rejection event.
     }
     window.addEventListener("iris-deep-link", handleDeepLink);
-    window.addEventListener("iris-foreground-app", (event) => {
-      if (!state.watching) return;
-      state.foreground = normalizeForeground(event);
-      renderWatching();
-    });
   }
 
   function clearSavedProgress() {

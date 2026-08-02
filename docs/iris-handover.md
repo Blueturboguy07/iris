@@ -92,3 +92,48 @@ the Windows port.
 - `leanring-buddyUITests` fails under `CODE_SIGNING_ALLOWED=NO` — macOS kills
   the unsigned runner. Pre-existing and unrelated; confirmed by removing all
   new files and reproducing. Use `-only-testing:leanring-buddyTests`.
+
+## Grounding lab — first real numbers, and why the gate is not called yet
+
+`iris-macos/tools/grounding-lab` measures how accurately a model can point at
+real macOS UI, using the accessibility tree as automatically generated ground
+truth. No hand-labelling. `swift build` in that directory; see its README.
+
+Two live runs against Finder with `claude-haiku-4-5` disagreed sharply — 90%
+coverage / 100% hit on one capture, 50% / 40% on another. The per-role
+breakdown explains it and is the actual finding:
+
+| element type | hit rate |
+|---|---|
+| menu bar items | 2/2 |
+| buttons | 0/2 |
+| text fields (rows of similar filenames) | 0/6 |
+
+**A single headline number is misleading.** Chrome and menu items are easy;
+rows of near-identical list items are not. Do not call Phase 0 from either run:
+the surfaces that matter for the flagship flow are buttons and links on web
+pages like console.anthropic.com, and neither capture has enough of those to
+support a decision. The next run should target those surfaces specifically,
+with enough samples per role to be worth anything.
+
+The `ax` arm scored 100% coverage and 100% hit with 0pt median error on
+Finder, measured back-to-back with capture. That is the number to beat, and it
+is free — but it only exists where AX sees, which is not where vision matters.
+
+### Bugs the harness found in shipping code
+
+- **`ElementLocationDetector.swift` hardcodes the `computer_20251124` tool
+  version, which `claude-haiku-4-5` rejects outright.** It needs
+  `computer_20250124` with the `computer-use-2025-01-24` beta header for that
+  model. The detector is not wired to anything yet, so nothing is broken
+  today — but grounding would have failed on the cheap tier the moment it was,
+  and the failure looks like "the model cannot point" rather than a version
+  error.
+- The same file flips Y (`displayHeight - y`) to hand AppKit a bottom-left
+  point for the cursor overlay. AX rects are top-left. Copying that flip into
+  grounding scored 0/8 hits at 531pt median error versus 6/8 at 4.5pt — a
+  wrong flip does not look like a bug, it looks like a model that cannot
+  point.
+- `max_tokens: 256` truncates Haiku mid-preamble before it emits the tool call.
+- A `scroll` action carries a coordinate too; counting it as a pointing answer
+  inflates coverage with nonsense.

@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Clicky Overlay</title>
+  <style>
+    * { margin: 0; padding: 0; }
+    html, body {
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: transparent;
+      user-select: none;
+      -webkit-app-region: no-drag;
+    }
+
+    #cursor {
+      position: absolute;
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background: rgba(59, 130, 246, 0.95);
+      box-shadow: 0 0 30px rgba(59, 130, 246, 0.9), 0 0 60px rgba(59, 130, 246, 0.6), 0 0 0 4px rgba(255, 255, 255, 0.9);
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      opacity: 0;
+      transition: left 0.4s ease-out, top 0.4s ease-out, opacity 0.3s ease;
+      z-index: 9999;
+    }
+
+    #cursor.visible {
+      opacity: 1;
+    }
+
+    #cursor::after {
+      content: '';
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      background: rgba(59, 130, 246, 0.4);
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+
+    #label {
+      position: absolute;
+      transform: translate(-50%, 20px);
+      background: rgba(0, 0, 0, 0.8);
+      color: white;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-family: -apple-system, 'Segoe UI', sans-serif;
+      font-size: 13px;
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    #label.visible {
+      opacity: 1;
+    }
+
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); opacity: 0.4; }
+      50% { transform: scale(2); opacity: 0; }
+    }
+
+    /* Cursor buddy — always-on glow that follows mouse */
+    #cursor-buddy {
+      position: absolute;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: rgba(59, 130, 246, 0.6);
+      box-shadow: 0 0 16px rgba(59, 130, 246, 0.5), 0 0 32px rgba(59, 130, 246, 0.2);
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      z-index: 9998;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    #cursor-buddy.visible {
+      opacity: 1;
+    }
+
+    #cursor-buddy::after {
+      content: '';
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      background: rgba(59, 130, 246, 0.3);
+      animation: buddy-pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes buddy-pulse {
+      0%, 100% { transform: scale(1); opacity: 0.3; }
+      50% { transform: scale(1.8); opacity: 0; }
+    }
+
+    /* Recording indicator */
+    #recording-indicator {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 8px 16px;
+      border-radius: 20px;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+    }
+
+    #recording-indicator.active {
+      opacity: 1;
+    }
+
+    #recording-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #ef4444;
+      animation: blink 1s ease-in-out infinite;
+    }
+
+    #recording-text {
+      color: white;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 13px;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    /* Processing indicator */
+    #processing-indicator {
+      position: fixed;
+      top: 20px;
+      left: 20px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 8px 16px;
+      border-radius: 20px;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+    }
+
+    #processing-indicator.active {
+      opacity: 1;
+    }
+
+    #processing-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #638cff;
+      animation: blink 1s ease-in-out infinite;
+    }
+
+    #processing-text {
+      color: white;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div id="cursor-buddy"></div>
+  <div id="cursor"></div>
+  <div id="label"></div>
+
+  <div id="recording-indicator">
+    <div id="recording-dot"></div>
+    <span id="recording-text">Listening...</span>
+  </div>
+
+  <div id="processing-indicator">
+    <div id="processing-dot"></div>
+    <span id="processing-text">Reading screen...</span>
+  </div>
+
+  <script>
+    const cursor = document.getElementById('cursor');
+    const label = document.getElementById('label');
+    const recordingIndicator = document.getElementById('recording-indicator');
+
+    console.log('[Clicky overlay] script loaded, window.clicky =', !!window.clicky);
+
+    // Handle point-at animations
+    if (window.clicky && window.clicky.onPoint) {
+      window.clicky.onPoint((tags) => {
+        console.log('[Clicky overlay] onPoint received tags:', JSON.stringify(tags));
+        if (tags.length === 0) return;
+
+        let i = 0;
+        function pointNext() {
+          if (i >= tags.length) {
+            // Hide after last point
+            setTimeout(() => {
+              cursor.classList.remove('visible');
+              label.classList.remove('visible');
+            }, 3000);
+            return;
+          }
+
+          const tag = tags[i];
+          console.log('[Clicky overlay] pointing at', tag.x, tag.y, tag.label);
+          cursor.style.left = tag.x + 'px';
+          cursor.style.top = tag.y + 'px';
+          cursor.classList.add('visible');
+
+          label.style.left = tag.x + 'px';
+          label.style.top = tag.y + 'px';
+          label.textContent = tag.label;
+          label.classList.add('visible');
+
+          i++;
+          setTimeout(pointNext, 2000);
+        }
+
+        pointNext();
+      });
+    } else {
+      console.error('[Clicky overlay] window.clicky.onPoint is not available!');
+    }
+
+    // Handle cursor buddy tracking
+    const cursorBuddy = document.getElementById('cursor-buddy');
+
+    window.clicky.onCursorBuddy((x, y) => {
+      cursorBuddy.style.left = x + 'px';
+      cursorBuddy.style.top = y + 'px';
+      if (!cursorBuddy.classList.contains('visible')) {
+        cursorBuddy.classList.add('visible');
+      }
+    });
+
+    window.clicky.onCursorBuddyVisible((visible) => {
+      if (visible) {
+        cursorBuddy.classList.add('visible');
+      } else {
+        cursorBuddy.classList.remove('visible');
+      }
+    });
+
+    // Handle processing stages
+    const processingIndicator = document.getElementById('processing-indicator');
+    const processingText = document.getElementById('processing-text');
+
+    if (window.clicky && window.clicky.onStage) {
+      window.clicky.onStage(({ stage, label }) => {
+        if (stage === 'done' || stage === 'speaking') {
+          processingIndicator.classList.remove('active');
+        } else {
+          processingText.textContent = label;
+          processingIndicator.classList.add('active');
+        }
+      });
+    }
+
+    // Handle recording state
+    if (window.clicky && window.clicky.onRecordingChanged) {
+      window.clicky.onRecordingChanged((isRecording) => {
+        if (isRecording) {
+          recordingIndicator.classList.add('active');
+        } else {
+          recordingIndicator.classList.remove('active');
+        }
+      });
+    } else {
+      console.error('[Clicky overlay] window.clicky.onRecordingChanged is not available!');
+    }
+  </script>
+</body>
+</html>

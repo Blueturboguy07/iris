@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Clicky Settings</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+
+    :root {
+      --bg-primary: #0a0a0f;
+      --bg-secondary: rgba(255, 255, 255, 0.04);
+      --bg-tertiary: rgba(255, 255, 255, 0.06);
+      --bg-hover: rgba(255, 255, 255, 0.08);
+      --border: rgba(255, 255, 255, 0.08);
+      --border-focus: rgba(99, 140, 255, 0.5);
+      --text-primary: #f0f0f5;
+      --text-secondary: rgba(255, 255, 255, 0.55);
+      --text-tertiary: rgba(255, 255, 255, 0.3);
+      --accent: #638cff;
+      --accent-hover: #7da0ff;
+      --accent-glow: rgba(99, 140, 255, 0.15);
+      --success: #34d399;
+      --radius-sm: 8px;
+      --radius-md: 12px;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Inter', -apple-system, 'Segoe UI', sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      padding: 24px;
+      -webkit-font-smoothing: antialiased;
+      overflow-y: auto;
+    }
+
+    body::-webkit-scrollbar { width: 4px; }
+    body::-webkit-scrollbar-track { background: transparent; }
+    body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
+
+    h1 {
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      margin-bottom: 24px;
+    }
+
+    .section-label {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-tertiary);
+      margin: 24px 0 12px;
+    }
+
+    .section-label:first-of-type { margin-top: 0; }
+
+    .field { margin-bottom: 14px; }
+
+    label {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      margin-bottom: 6px;
+    }
+
+    input[type="text"], input[type="password"], select {
+      width: 100%;
+      padding: 9px 12px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text-primary);
+      font-size: 13px;
+      font-family: inherit;
+      outline: none;
+      transition: all 0.2s ease;
+    }
+
+    input:focus, select:focus {
+      border-color: var(--border-focus);
+      background: var(--bg-tertiary);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+
+    select { cursor: pointer; }
+    select option { background: #1a1a2e; }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 0;
+    }
+
+    .toggle-row label { margin-bottom: 0; }
+
+    .toggle {
+      position: relative;
+      width: 40px;
+      height: 22px;
+      cursor: pointer;
+    }
+
+    .toggle input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .toggle .slider {
+      position: absolute;
+      inset: 0;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 11px;
+      transition: all 0.3s ease;
+    }
+
+    .toggle .slider::after {
+      content: '';
+      position: absolute;
+      width: 16px;
+      height: 16px;
+      background: #fff;
+      border-radius: 50%;
+      top: 3px;
+      left: 3px;
+      transition: all 0.3s ease;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    }
+
+    .toggle input:checked + .slider {
+      background: var(--accent);
+    }
+
+    .toggle input:checked + .slider::after {
+      left: 21px;
+    }
+
+    .status-bar {
+      margin-top: 24px;
+      padding: 12px 14px;
+      border-radius: var(--radius-md);
+      font-size: 12px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .status-bar.ok {
+      background: rgba(52, 211, 153, 0.08);
+      border: 1px solid rgba(52, 211, 153, 0.15);
+      color: var(--success);
+    }
+
+    .status-bar.warn {
+      background: rgba(251, 191, 36, 0.08);
+      border: 1px solid rgba(251, 191, 36, 0.15);
+      color: #fbbf24;
+    }
+
+    .status-bar .dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    button.save {
+      margin-top: 20px;
+      width: 100%;
+      padding: 10px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    button.save:hover {
+      background: var(--accent-hover);
+      box-shadow: 0 2px 12px rgba(99, 140, 255, 0.3);
+    }
+
+    button.save:active { transform: scale(0.98); }
+  </style>
+</head>
+<body>
+  <h1>Settings</h1>
+
+  <div class="section-label">API Keys</div>
+
+  <div class="field">
+    <label>Anthropic API Key</label>
+    <input type="password" id="anthropicApiKey" placeholder="sk-ant-...">
+  </div>
+
+  <div class="field">
+    <label>OpenAI API Key</label>
+    <input type="password" id="openaiApiKey" placeholder="sk-... (Whisper transcription + TTS)">
+  </div>
+
+  <div class="field">
+    <label>OpenRouter API Key</label>
+    <input type="password" id="openrouterApiKey" placeholder="sk-or-... (300+ models)">
+  </div>
+
+  <div class="field">
+    <label>AssemblyAI API Key</label>
+    <input type="password" id="assemblyaiApiKey" placeholder="Voice transcription">
+  </div>
+
+  <div class="field">
+    <label>ElevenLabs API Key</label>
+    <input type="password" id="elevenlabsApiKey" placeholder="Text-to-speech">
+  </div>
+
+  <div class="section-label">Proxy</div>
+
+  <div class="toggle-row">
+    <label>Use API proxy</label>
+    <label class="toggle">
+      <input type="checkbox" id="useProxy">
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div class="field">
+    <label>Proxy URL</label>
+    <input type="text" id="proxyUrl" placeholder="https://your-worker.workers.dev">
+  </div>
+
+  <div class="section-label">Voice</div>
+
+  <div class="field">
+    <label>Push-to-Talk Hotkey</label>
+    <select id="pushToTalkHotkey">
+      <option value="Ctrl+Shift">Ctrl + Shift + Space</option>
+      <option value="Ctrl+Alt">Ctrl + Alt + Space</option>
+      <option value="Alt+Shift">Alt + Shift + Space</option>
+      <option value="Super+Shift">Win + Shift + Space</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label>Transcription Provider</label>
+    <select id="transcriptionProvider">
+      <option value="assemblyai">AssemblyAI (cloud)</option>
+      <option value="openai">OpenAI Whisper (cloud)</option>
+      <option value="whisper-local">Whisper Local (offline)</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label>Default Voice</label>
+    <select id="defaultVoice">
+      <option value="off">Off (text only)</option>
+      <option value="local">Windows Voice (offline, free)</option>
+      <option value="openai">OpenAI Voice (cloud, natural)</option>
+      <option value="elevenlabs">ElevenLabs Voice (cloud, premium)</option>
+    </select>
+  </div>
+
+  <div class="section-label">AI Provider</div>
+
+  <div class="field">
+    <label>Provider</label>
+    <select id="aiProvider">
+      <option value="anthropic">Anthropic (Claude)</option>
+      <option value="openai">OpenAI (GPT)</option>
+      <option value="openrouter">OpenRouter (300+ models)</option>
+    </select>
+  </div>
+
+  <div class="field" id="claudeModelGroup">
+    <label>Claude Model</label>
+    <select id="claudeModel">
+      <option value="claude-sonnet-4-6">Claude Sonnet 4.6 (latest)</option>
+      <option value="claude-opus-4-6">Claude Opus 4.6 (smartest)</option>
+      <option value="claude-sonnet-4-5-20250929">Claude Sonnet 4.5</option>
+      <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5 (fastest)</option>
+    </select>
+  </div>
+
+  <div class="field" id="openaiModelGroup" style="display:none">
+    <label>OpenAI Model</label>
+    <select id="openaiModel">
+      <option value="gpt-5.4">GPT-5.4 (most capable)</option>
+      <option value="gpt-5.4-mini">GPT-5.4 Mini (fast + cheap)</option>
+      <option value="gpt-5.4-nano">GPT-5.4 Nano (cheapest)</option>
+      <option value="gpt-4.1">GPT-4.1</option>
+      <option value="gpt-4.1-mini">GPT-4.1 Mini</option>
+      <option value="gpt-4.1-nano">GPT-4.1 Nano</option>
+      <option value="gpt-4o">GPT-4o</option>
+      <option value="gpt-4o-mini">GPT-4o Mini</option>
+    </select>
+  </div>
+
+  <div class="field" id="openrouterModelGroup" style="display:none">
+    <label>OpenRouter Model</label>
+    <input type="text" id="openrouterModel" placeholder="e.g. anthropic/claude-sonnet-4-5, google/gemini-2.5-pro">
+  </div>
+
+  <div class="section-label">Window</div>
+
+  <div class="toggle-row">
+    <label>Always on top (chat stays visible)</label>
+    <label class="toggle">
+      <input type="checkbox" id="alwaysOnTop">
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div class="toggle-row">
+    <label>Cursor buddy (blue glow follows mouse)</label>
+    <label class="toggle">
+      <input type="checkbox" id="cursorBuddyEnabled">
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div class="section-label">Compliance</div>
+
+  <div class="toggle-row">
+    <label>HIPAA Mode (local processing only)</label>
+    <label class="toggle">
+      <input type="checkbox" id="hipaaMode">
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div id="status" class="status-bar warn">
+    <div class="dot"></div>
+    <span>Enter your Anthropic API key to get started</span>
+  </div>
+
+  <button class="save" id="save">Save Settings</button>
+
+  <script>
+    const fields = [
+      'anthropicApiKey', 'openaiApiKey', 'openrouterApiKey', 'assemblyaiApiKey', 'elevenlabsApiKey',
+      'proxyUrl', 'useProxy', 'pushToTalkHotkey', 'transcriptionProvider',
+      'aiProvider', 'claudeModel', 'openaiModel', 'openrouterModel',
+      'alwaysOnTop', 'cursorBuddyEnabled', 'hipaaMode'
+    ];
+
+    window.clicky.getSettings().then((settings) => {
+      fields.forEach((key) => {
+        const el = document.getElementById(key);
+        if (!el) return;
+        if (el.type === 'checkbox') el.checked = !!settings[key];
+        else el.value = settings[key] || '';
+      });
+
+      // Load defaultVoice from ttsEnabled + ttsProvider
+      const voiceSelect = document.getElementById('defaultVoice');
+      if (!settings.ttsEnabled) {
+        voiceSelect.value = 'off';
+      } else {
+        voiceSelect.value = settings.ttsProvider || 'local';
+      }
+
+      updateProviderUI();
+      updateStatus(settings);
+    });
+
+    function updateProviderUI() {
+      const provider = document.getElementById('aiProvider').value;
+      document.getElementById('claudeModelGroup').style.display = provider === 'anthropic' ? '' : 'none';
+      document.getElementById('openaiModelGroup').style.display = provider === 'openai' ? '' : 'none';
+      document.getElementById('openrouterModelGroup').style.display = provider === 'openrouter' ? '' : 'none';
+    }
+
+    document.getElementById('aiProvider').addEventListener('change', updateProviderUI);
+    updateProviderUI();
+
+    document.getElementById('hipaaMode').addEventListener('change', (e) => {
+      if (e.target.checked) {
+        document.getElementById('transcriptionProvider').value = 'whisper-local';
+        document.getElementById('ttsProvider').value = 'local';
+      }
+    });
+
+    document.getElementById('save').addEventListener('click', () => {
+      const values = {};
+      fields.forEach((key) => {
+        const el = document.getElementById(key);
+        if (!el) return;
+        values[key] = el.type === 'checkbox' ? el.checked : el.value;
+        window.clicky.setSetting(key, values[key]);
+      });
+
+      // Save defaultVoice as ttsEnabled + ttsProvider
+      const voice = document.getElementById('defaultVoice').value;
+      if (voice === 'off') {
+        window.clicky.setSetting('ttsEnabled', false);
+      } else {
+        window.clicky.setSetting('ttsEnabled', true);
+        window.clicky.setSetting('ttsProvider', voice);
+      }
+      values.ttsEnabled = voice !== 'off';
+      values.ttsProvider = voice === 'off' ? 'local' : voice;
+
+      const status = document.getElementById('status');
+      status.textContent = '';
+      status.className = 'status-bar ok';
+      status.innerHTML = '<div class="dot"></div><span>Settings saved</span>';
+      setTimeout(() => updateStatus(values), 2000);
+    });
+
+    function updateStatus(settings) {
+      const status = document.getElementById('status');
+      if ((settings.useProxy && settings.proxyUrl) || settings.anthropicApiKey) {
+        status.className = 'status-bar ok';
+        status.innerHTML = '<div class="dot"></div><span>Ready</span>';
+      } else {
+        status.className = 'status-bar warn';
+        status.innerHTML = '<div class="dot"></div><span>Enter your Anthropic API key to get started</span>';
+      }
+    }
+  </script>
+</body>
+</html>

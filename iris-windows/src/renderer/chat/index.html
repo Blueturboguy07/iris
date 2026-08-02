@@ -1,0 +1,1473 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Clicky</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" defer></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+
+    :root {
+      --bg-primary: #0a0a0f;
+      --bg-secondary: rgba(255, 255, 255, 0.04);
+      --bg-tertiary: rgba(255, 255, 255, 0.06);
+      --bg-hover: rgba(255, 255, 255, 0.08);
+      --border: rgba(255, 255, 255, 0.08);
+      --border-focus: rgba(99, 140, 255, 0.5);
+      --text-primary: #f0f0f5;
+      --text-secondary: rgba(255, 255, 255, 0.55);
+      --text-tertiary: rgba(255, 255, 255, 0.3);
+      --accent: #638cff;
+      --accent-hover: #7da0ff;
+      --accent-glow: rgba(99, 140, 255, 0.15);
+      --success: #34d399;
+      --error: #f87171;
+      --msg-user: linear-gradient(135deg, #638cff 0%, #5a7af5 100%);
+      --msg-assistant: rgba(255, 255, 255, 0.05);
+      --radius-sm: 8px;
+      --radius-md: 12px;
+      --radius-lg: 16px;
+      --radius-xl: 20px;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Inter', -apple-system, 'Segoe UI', sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Title Bar ── */
+    #titlebar {
+      height: 48px;
+      padding: 0 16px;
+      background: rgba(255, 255, 255, 0.02);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      -webkit-app-region: drag;
+      flex-shrink: 0;
+      backdrop-filter: blur(40px);
+    }
+
+    #titlebar .logo {
+      width: 28px;
+      height: 28px;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      filter: drop-shadow(0 2px 6px rgba(99, 140, 255, 0.4));
+    }
+
+    #titlebar .logo svg {
+      width: 22px;
+      height: 22px;
+    }
+
+    #titlebar .title {
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+
+    #titlebar .status {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--text-tertiary);
+      margin-left: auto;
+      transition: all 0.4s ease;
+    }
+
+    #titlebar .status.connected {
+      background: var(--success);
+      box-shadow: 0 0 8px rgba(52, 211, 153, 0.5);
+    }
+
+    #titlebar .gear-btn {
+      -webkit-app-region: no-drag;
+      background: none;
+      border: none;
+      color: var(--text-secondary);
+      cursor: pointer;
+      padding: 4px;
+      border-radius: 6px;
+      font-size: 16px;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+    }
+
+    #titlebar .gear-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .window-controls {
+      display: flex;
+      gap: 2px;
+      margin-left: 4px;
+      -webkit-app-region: no-drag;
+    }
+
+    .win-btn {
+      width: 28px;
+      height: 28px;
+      background: none;
+      border: none;
+      color: var(--text-tertiary);
+      cursor: pointer;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s ease;
+    }
+
+    .win-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .win-btn.close:hover {
+      background: rgba(248, 113, 113, 0.2);
+      color: var(--error);
+    }
+
+    /* ── Setup Panel ── */
+    #setup {
+      padding: 20px;
+      background: rgba(255, 255, 255, 0.02);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      animation: slideDown 0.3s ease;
+    }
+
+    @keyframes slideDown {
+      from { opacity: 0; transform: translateY(-10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    #setup.hidden { display: none; }
+
+    #setup h3 {
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 14px;
+      color: var(--text-primary);
+      letter-spacing: -0.01em;
+    }
+
+    .key-group {
+      margin-bottom: 12px;
+    }
+
+    .key-group:last-of-type { margin-bottom: 16px; }
+
+    .key-group label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 6px;
+    }
+
+    .key-group label .badge {
+      font-size: 9px;
+      padding: 1px 5px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-weight: 600;
+    }
+
+    .badge.required { background: rgba(248, 113, 113, 0.15); color: var(--error); }
+    .badge.optional { background: rgba(255, 255, 255, 0.06); color: var(--text-tertiary); }
+
+    .key-group input {
+      width: 100%;
+      padding: 9px 12px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text-primary);
+      font-size: 12px;
+      font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+      outline: none;
+      transition: all 0.2s ease;
+    }
+
+    .key-group input::placeholder { color: var(--text-tertiary); }
+
+    .key-group input:focus {
+      border-color: var(--border-focus);
+      background: var(--bg-tertiary);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+
+    .key-group input.error {
+      border-color: rgba(248, 113, 113, 0.5);
+      box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.1);
+    }
+
+    .setup-footer {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .btn-primary {
+      padding: 8px 20px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius-sm);
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      font-family: inherit;
+    }
+
+    .btn-primary:hover {
+      background: var(--accent-hover);
+      box-shadow: 0 2px 12px rgba(99, 140, 255, 0.3);
+    }
+
+    .btn-primary:active { transform: scale(0.97); }
+
+    .setup-footer .saved {
+      font-size: 11px;
+      color: var(--success);
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    .setup-footer .saved.visible { opacity: 1; }
+
+    .setup-hint {
+      font-size: 10px;
+      color: var(--text-tertiary);
+      margin-top: 8px;
+    }
+
+    .setup-hint a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    /* ── Messages ── */
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      scroll-behavior: smooth;
+    }
+
+    #messages::-webkit-scrollbar { width: 4px; }
+    #messages::-webkit-scrollbar-track { background: transparent; }
+    #messages::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+    }
+
+    .msg {
+      max-width: 82%;
+      padding: 10px 14px;
+      font-size: 13px;
+      line-height: 1.6;
+      word-wrap: break-word;
+      white-space: pre-wrap;
+      animation: msgIn 0.25s ease;
+    }
+
+    @keyframes msgIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .msg.user {
+      align-self: flex-end;
+      background: var(--msg-user);
+      color: #fff;
+      border-radius: var(--radius-lg) var(--radius-lg) 4px var(--radius-lg);
+      box-shadow: 0 2px 8px rgba(99, 140, 255, 0.2);
+    }
+
+    .msg.assistant {
+      align-self: flex-start;
+      background: var(--msg-assistant);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg) var(--radius-lg) var(--radius-lg) 4px;
+      color: var(--text-primary);
+    }
+
+    .msg.system {
+      align-self: center;
+      color: var(--text-tertiary);
+      font-size: 12px;
+      background: none;
+      padding: 8px 0;
+    }
+
+    /* Markdown in assistant messages — compact spacing */
+    .msg.assistant p { margin: 0 0 4px; line-height: 1.5; }
+    .msg.assistant p:last-child { margin-bottom: 0; }
+    .msg.assistant p + p { margin-top: 2px; }
+    .msg.assistant br { display: block; content: ''; margin: 1px 0; }
+    .msg.assistant ul, .msg.assistant ol { margin: 2px 0 4px 16px; padding: 0; }
+    .msg.assistant li { margin: 1px 0; line-height: 1.4; }
+    .msg.assistant li p { margin: 0; display: inline; }
+    .msg.assistant ul ul, .msg.assistant ol ol, .msg.assistant ul ol, .msg.assistant ol ul {
+      margin: 1px 0 1px 14px;
+    }
+    .msg.assistant strong { color: #fff; font-weight: 600; }
+    .msg.assistant em { color: var(--text-secondary); }
+    .msg.assistant h1, .msg.assistant h2, .msg.assistant h3,
+    .msg.assistant h4, .msg.assistant h5, .msg.assistant h6 {
+      font-size: 13px;
+      font-weight: 600;
+      color: #fff;
+      margin: 6px 0 2px;
+      line-height: 1.3;
+    }
+    .msg.assistant h1:first-child, .msg.assistant h2:first-child,
+    .msg.assistant h3:first-child, .msg.assistant h4:first-child {
+      margin-top: 0;
+    }
+    .msg.assistant hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 6px 0;
+    }
+
+    .msg.assistant code {
+      background: rgba(255, 255, 255, 0.08);
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-family: 'Cascadia Code', 'Consolas', 'SF Mono', monospace;
+      font-size: 12px;
+      color: #e2b3ff;
+    }
+
+    .msg.assistant pre {
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      margin: 4px 0;
+      overflow-x: auto;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .msg.assistant pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+      color: var(--text-primary);
+    }
+
+    .msg.assistant blockquote {
+      border-left: 3px solid var(--accent);
+      padding-left: 10px;
+      margin: 4px 0;
+      color: var(--text-secondary);
+    }
+
+    .msg.assistant blockquote p { margin: 0; }
+
+    .msg.assistant a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    .msg.assistant a:hover { text-decoration: underline; }
+
+    .msg.assistant table {
+      border-collapse: collapse;
+      margin: 4px 0;
+      font-size: 12px;
+      width: 100%;
+    }
+
+    .msg.assistant th, .msg.assistant td {
+      border: 1px solid var(--border);
+      padding: 3px 8px;
+      text-align: left;
+    }
+
+    .msg.assistant th {
+      background: rgba(255, 255, 255, 0.05);
+      font-weight: 600;
+    }
+
+    /* Loading indicator */
+    .typing-indicator {
+      display: flex;
+      gap: 5px;
+      padding: 14px 18px;
+      align-items: center;
+    }
+
+    .typing-indicator span {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--text-tertiary);
+      animation: typingPulse 1.4s ease-in-out infinite;
+    }
+
+    .typing-indicator span:nth-child(2) { animation-delay: 0.15s; }
+    .typing-indicator span:nth-child(3) { animation-delay: 0.3s; }
+
+    @keyframes typingPulse {
+      0%, 60%, 100% { transform: scale(1); opacity: 0.4; }
+      30% { transform: scale(1.3); opacity: 1; }
+    }
+
+    /* ── Input Area ── */
+    #input-area {
+      padding: 14px 16px;
+      background: rgba(255, 255, 255, 0.02);
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-shrink: 0;
+      backdrop-filter: blur(40px);
+    }
+
+    #input {
+      flex: 1;
+      padding: 10px 16px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-xl);
+      color: var(--text-primary);
+      font-size: 13px;
+      font-family: inherit;
+      outline: none;
+      transition: all 0.2s ease;
+    }
+
+    #input:focus {
+      border-color: var(--border-focus);
+      background: var(--bg-tertiary);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+
+    #input::placeholder { color: var(--text-tertiary); }
+    #input:disabled { opacity: 0.35; }
+
+    #send {
+      width: 36px;
+      height: 36px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s ease;
+      flex-shrink: 0;
+    }
+
+    #send:hover {
+      background: var(--accent-hover);
+      box-shadow: 0 2px 12px rgba(99, 140, 255, 0.4);
+      transform: scale(1.05);
+    }
+
+    #send:active { transform: scale(0.95); }
+    #send:disabled { background: var(--bg-tertiary); cursor: not-allowed; transform: none; box-shadow: none; }
+
+    .mic-btn {
+      width: 36px;
+      height: 36px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s ease;
+      flex-shrink: 0;
+    }
+
+    .mic-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .mic-btn.recording {
+      background: rgba(239, 68, 68, 0.15);
+      border-color: rgba(239, 68, 68, 0.5);
+      color: #ef4444;
+      animation: micPulse 1.5s ease-in-out infinite;
+    }
+
+    .mic-btn.processing {
+      background: var(--accent-glow);
+      border-color: var(--accent);
+      color: var(--accent);
+      animation: micSpin 1s linear infinite;
+    }
+
+    @keyframes micPulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.3); }
+      50% { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); }
+    }
+
+    @keyframes micSpin {
+      from { opacity: 1; }
+      50% { opacity: 0.5; }
+      to { opacity: 1; }
+    }
+
+    /* ── Status Bar ── */
+    .status-bar {
+      padding: 8px 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      border-top: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.02);
+      animation: statusIn 0.2s ease;
+    }
+
+    .status-bar.hidden { display: none; }
+
+    .status-bar.recording {
+      color: #ef4444;
+      background: rgba(239, 68, 68, 0.05);
+      border-top-color: rgba(239, 68, 68, 0.15);
+    }
+
+    .status-bar.thinking {
+      color: var(--accent);
+      background: rgba(99, 140, 255, 0.05);
+      border-top-color: rgba(99, 140, 255, 0.15);
+    }
+
+    .status-bar.speaking {
+      color: var(--success);
+      background: rgba(52, 211, 153, 0.05);
+      border-top-color: rgba(52, 211, 153, 0.15);
+    }
+
+    @keyframes statusIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .status-dot-anim {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      animation: statusPulse 1.2s ease-in-out infinite;
+      flex-shrink: 0;
+    }
+
+    @keyframes statusPulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.8); }
+    }
+
+    .tts-btn {
+      height: 36px;
+      padding: 0 10px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      border-radius: 18px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      transition: all 0.2s ease;
+      flex-shrink: 0;
+      font-family: inherit;
+    }
+
+    .tts-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .tts-btn.active-local {
+      background: rgba(52, 211, 153, 0.1);
+      border-color: rgba(52, 211, 153, 0.4);
+      color: var(--success);
+    }
+
+    .tts-btn.active-cloud {
+      background: var(--accent-glow);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    #send svg { width: 16px; height: 16px; }
+
+    /* ── Welcome state ── */
+    .welcome {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 40px;
+      text-align: center;
+    }
+
+    .welcome .icon {
+      width: 56px;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 4px;
+      filter: drop-shadow(0 4px 20px rgba(99, 140, 255, 0.4));
+    }
+
+    .welcome .icon svg {
+      width: 48px;
+      height: 48px;
+    }
+
+    .welcome h2 {
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+
+    .welcome p {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.6;
+      max-width: 260px;
+    }
+
+    .welcome .shortcuts {
+      display: flex;
+      gap: 6px;
+      margin-top: 4px;
+    }
+
+    .welcome .shortcuts kbd {
+      padding: 3px 8px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      font-size: 10px;
+      font-family: inherit;
+      color: var(--text-secondary);
+    }
+
+    /* ── Help Links ── */
+    .help-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 12px;
+      justify-content: center;
+    }
+
+    .help-link {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 6px 12px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text-secondary);
+      font-size: 11px;
+      text-decoration: none;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .help-link:hover {
+      background: var(--bg-hover);
+      border-color: rgba(255, 255, 255, 0.12);
+      color: var(--text-primary);
+    }
+
+    .help-link svg {
+      width: 12px;
+      height: 12px;
+      opacity: 0.5;
+      flex-shrink: 0;
+    }
+
+    .help-link:hover svg { opacity: 0.8; }
+
+    /* ── Help Dropdown ── */
+    #help-menu {
+      position: absolute;
+      top: 48px;
+      right: 12px;
+      background: #161620;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 6px;
+      min-width: 200px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+      z-index: 100;
+      display: none;
+      animation: menuIn 0.15s ease;
+    }
+
+    #help-menu.visible { display: block; }
+
+    @keyframes menuIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    #help-menu a {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      color: var(--text-secondary);
+      text-decoration: none;
+      font-size: 12px;
+      border-radius: 6px;
+      transition: all 0.15s ease;
+      cursor: pointer;
+    }
+
+    #help-menu a:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    #help-menu a svg {
+      width: 14px;
+      height: 14px;
+      opacity: 0.5;
+      flex-shrink: 0;
+    }
+
+    #help-menu .divider {
+      height: 1px;
+      background: var(--border);
+      margin: 4px 0;
+    }
+  </style>
+</head>
+<body>
+  <!-- Title Bar -->
+  <div id="titlebar">
+    <div class="logo"><svg viewBox="0 0 24 24" fill="none"><defs><linearGradient id="gem" x1="0" y1="0" x2="24" y2="24"><stop offset="0%" stop-color="#638cff"/><stop offset="100%" stop-color="#a78bfa"/></linearGradient></defs><path d="M12 2L22 12L12 22L2 12Z" fill="url(#gem)"/><path d="M12 2L17 7L12 12L7 7Z" fill="rgba(255,255,255,0.25)"/><path d="M12 12L17 7L22 12L17 17Z" fill="rgba(255,255,255,0.1)"/></svg></div>
+    <span class="title">Clicky</span>
+    <div class="status" id="status-dot"></div>
+    <button class="gear-btn" id="pin-btn" title="Pin on top">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 01-1.11 1.79l-1.78.9A2 2 0 005 15.24V16a1 1 0 001 1h12a1 1 0 001-1v-.76a2 2 0 00-1.11-1.79l-1.78-.9A2 2 0 0115 10.76V7a1 1 0 011-1 1 1 0 001-1V4a1 1 0 00-1-1H8a1 1 0 00-1 1v1a1 1 0 001 1 1 1 0 011 1z"/></svg>
+    </button>
+    <button class="gear-btn" id="toggle-setup" title="API Keys">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+    </button>
+    <button class="gear-btn" id="help-btn" title="Help & Docs">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    </button>
+    <div class="window-controls">
+      <button class="win-btn" id="btn-minimize" title="Minimize">
+        <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" stroke-width="1.5"/></svg>
+      </button>
+      <button class="win-btn close" id="btn-close" title="Close">
+        <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" stroke-width="1.5"/><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" stroke-width="1.5"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Help Menu Dropdown -->
+  <div id="help-menu">
+    <a data-href="https://github.com/tekram/clicky-windows/blob/master/docs/getting-started.md">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z"/><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg>
+      Getting Started
+    </a>
+    <a data-href="https://github.com/tekram/clicky-windows/blob/master/docs/voice-and-tts.md">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
+      Voice & TTS Setup
+    </a>
+    <a data-href="https://github.com/tekram/clicky-windows/blob/master/docs/hipaa-mode.md">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      HIPAA Mode
+    </a>
+    <a data-href="https://github.com/tekram/clicky-windows/blob/master/docs/proxy-setup.md">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+      Proxy Setup
+    </a>
+    <div class="divider"></div>
+    <a data-href="https://github.com/tekram/clicky-windows/blob/master/docs/troubleshooting.md">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      Troubleshooting
+    </a>
+    <a data-href="https://github.com/tekram/clicky-windows/issues">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/></svg>
+      Report an Issue
+    </a>
+  </div>
+
+  <!-- Setup Panel -->
+  <div id="setup" class="hidden">
+    <h3>Connect your API keys</h3>
+
+    <div class="key-group">
+      <label>AI Provider</label>
+      <select id="setup-provider" style="width:100%;padding:8px 12px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px;font-family:inherit;outline:none;">
+        <option value="anthropic">Anthropic (Claude)</option>
+        <option value="openai">OpenAI (GPT)</option>
+        <option value="openrouter">OpenRouter (300+ models)</option>
+      </select>
+    </div>
+
+    <div class="key-group" id="setup-model-group">
+      <label>Model</label>
+      <select id="setup-model" style="width:100%;padding:8px 12px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:12px;font-family:inherit;outline:none;">
+      </select>
+    </div>
+
+    <div class="key-group">
+      <label>Anthropic Key <span class="badge" id="badge-anthropic">required</span></label>
+      <input type="password" id="key-anthropic" placeholder="sk-ant-api03-...">
+    </div>
+
+    <div class="key-group">
+      <label>OpenAI Key <span class="badge" id="badge-openai">optional</span></label>
+      <input type="password" id="key-openai" placeholder="sk-... (GPT, voice, TTS)">
+    </div>
+
+    <div class="key-group">
+      <label>OpenRouter Key <span class="badge" id="badge-openrouter">optional</span></label>
+      <input type="password" id="key-openrouter" placeholder="sk-or-... (300+ models)">
+    </div>
+
+    <div class="key-group">
+      <label>AssemblyAI <span class="badge optional">optional</span></label>
+      <input type="password" id="key-assemblyai" placeholder="Voice transcription key">
+    </div>
+
+    <div class="key-group">
+      <label>ElevenLabs <span class="badge optional">optional</span></label>
+      <input type="password" id="key-elevenlabs" placeholder="Text-to-speech key">
+    </div>
+
+    <div class="setup-footer">
+      <button class="btn-primary" id="save-keys">Save</button>
+      <span class="saved" id="saved-msg">Saved</span>
+    </div>
+
+    <p class="setup-hint">Pick a provider above. You need at least one AI key to get started.</p>
+  </div>
+
+  <!-- Messages -->
+  <div id="messages">
+    <div class="welcome" id="welcome">
+      <div class="icon"><svg viewBox="0 0 24 24" fill="none"><defs><linearGradient id="gem-lg" x1="0" y1="0" x2="24" y2="24"><stop offset="0%" stop-color="#638cff"/><stop offset="100%" stop-color="#a78bfa"/></linearGradient></defs><path d="M12 2L22 12L12 22L2 12Z" fill="url(#gem-lg)"/><path d="M12 2L17 7L12 12L7 7Z" fill="rgba(255,255,255,0.25)"/><path d="M12 12L17 7L22 12L17 17Z" fill="rgba(255,255,255,0.1)"/></svg></div>
+      <h2>What can I help with?</h2>
+      <p>I can see your screen and answer questions about what's on it. Just type below.</p>
+      <div class="shortcuts">
+        <kbd>Enter</kbd><span style="color:var(--text-tertiary);font-size:11px">to send</span>
+      </div>
+
+      <div class="help-links">
+        <a class="help-link" data-href="https://github.com/tekram/clicky-windows/blob/master/docs/getting-started.md">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z"/><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg>
+          Docs
+        </a>
+        <a class="help-link" data-href="https://github.com/tekram/clicky-windows/blob/master/docs/voice-and-tts.md">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/></svg>
+          Voice
+        </a>
+        <a class="help-link" data-href="https://github.com/tekram/clicky-windows/blob/master/docs/hipaa-mode.md">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          HIPAA
+        </a>
+        <a class="help-link" data-href="https://github.com/tekram/clicky-windows/blob/master/docs/troubleshooting.md">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          Help
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Status Bar -->
+  <div id="status-bar" class="status-bar hidden">
+    <div class="status-dot-anim"></div>
+    <span id="status-text"></span>
+  </div>
+
+  <!-- Input -->
+  <div id="input-area">
+    <button id="tts-toggle" class="tts-btn" title="Voice: Off">
+      <svg id="tts-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
+      <span id="tts-label" style="font-size:9px;font-weight:600;letter-spacing:0.02em;margin-left:2px;"></span>
+    </button>
+    <input type="text" id="input" placeholder="Ask about your screen..." autofocus>
+    <button id="mic-btn" class="mic-btn" title="Push to talk (or Ctrl+Alt+Space)">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+    </button>
+    <button id="send">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+    </button>
+  </div>
+
+  <script>
+    // Global error handler — shows errors visually
+    window.onerror = function(msg, src, line, col, err) {
+      const el = document.createElement('div');
+      el.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:10px;background:red;color:white;font-size:12px;z-index:99999;word-break:break-all;';
+      el.textContent = 'JS Error: ' + msg + ' (line ' + line + ')';
+      document.body.prepend(el);
+    };
+
+    const messages = document.getElementById('messages');
+    const input = document.getElementById('input');
+    const sendBtn = document.getElementById('send');
+    const welcome = document.getElementById('welcome');
+    const keyAnthropicInput = document.getElementById('key-anthropic');
+    const keyOpenaiInput = document.getElementById('key-openai');
+    const keyOpenrouterInput = document.getElementById('key-openrouter');
+    const keyAssemblyaiInput = document.getElementById('key-assemblyai');
+    const keyElevenlabsInput = document.getElementById('key-elevenlabs');
+    const setupProvider = document.getElementById('setup-provider');
+    const setupModel = document.getElementById('setup-model');
+    const badgeAnthropic = document.getElementById('badge-anthropic');
+    const badgeOpenai = document.getElementById('badge-openai');
+    const badgeOpenrouter = document.getElementById('badge-openrouter');
+
+    const modelOptions = {
+      anthropic: [
+        { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6 (latest)' },
+        { value: 'claude-opus-4-6', label: 'Claude Opus 4.6 (smartest)' },
+        { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5' },
+        { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5 (fastest)' },
+      ],
+      openai: [
+        { value: 'gpt-5.4', label: 'GPT-5.4 (most capable)' },
+        { value: 'gpt-5.4-mini', label: 'GPT-5.4 Mini (fast + cheap)' },
+        { value: 'gpt-5.4-nano', label: 'GPT-5.4 Nano (cheapest)' },
+        { value: 'gpt-4.1', label: 'GPT-4.1' },
+        { value: 'gpt-4.1-mini', label: 'GPT-4.1 Mini' },
+        { value: 'gpt-4.1-nano', label: 'GPT-4.1 Nano' },
+        { value: 'gpt-4o', label: 'GPT-4o' },
+        { value: 'gpt-4o-mini', label: 'GPT-4o Mini' },
+      ],
+      openrouter: [
+        { value: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+        { value: 'anthropic/claude-opus-4-6', label: 'Claude Opus 4.6' },
+        { value: 'openai/gpt-5.4', label: 'GPT-5.4' },
+        { value: 'openai/gpt-4o', label: 'GPT-4o' },
+        { value: 'google/gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+        { value: 'google/gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+        { value: 'meta-llama/llama-4-maverick', label: 'Llama 4 Maverick' },
+        { value: 'deepseek/deepseek-r1', label: 'DeepSeek R1' },
+        { value: 'mistralai/mistral-large', label: 'Mistral Large' },
+      ],
+    };
+
+    function updateProviderUI() {
+      const provider = setupProvider.value;
+      const options = modelOptions[provider] || [];
+      setupModel.innerHTML = options.map(o =>
+        `<option value="${o.value}">${o.label}</option>`
+      ).join('');
+
+      badgeAnthropic.className = provider === 'anthropic' ? 'badge required' : 'badge optional';
+      badgeAnthropic.textContent = provider === 'anthropic' ? 'required' : 'optional';
+      badgeOpenai.className = provider === 'openai' ? 'badge required' : 'badge optional';
+      badgeOpenai.textContent = provider === 'openai' ? 'required' : 'optional';
+      badgeOpenrouter.className = provider === 'openrouter' ? 'badge required' : 'badge optional';
+      badgeOpenrouter.textContent = provider === 'openrouter' ? 'required' : 'optional';
+    }
+
+    setupProvider.addEventListener('change', updateProviderUI);
+    const saveKeysBtn = document.getElementById('save-keys');
+    const savedMsg = document.getElementById('saved-msg');
+    const setup = document.getElementById('setup');
+    const statusDot = document.getElementById('status-dot');
+    const toggleSetupBtn = document.getElementById('toggle-setup');
+
+    let isConfigured = false;
+    let firstMessage = true;
+
+    // Load existing settings
+    window.clicky.getSettings().then((settings) => {
+      console.log('Settings loaded:', JSON.stringify(settings));
+
+      if (settings.anthropicApiKey) keyAnthropicInput.value = settings.anthropicApiKey;
+      if (settings.openaiApiKey) keyOpenaiInput.value = settings.openaiApiKey;
+      if (settings.openrouterApiKey) keyOpenrouterInput.value = settings.openrouterApiKey;
+      if (settings.assemblyaiApiKey) keyAssemblyaiInput.value = settings.assemblyaiApiKey;
+      if (settings.elevenlabsApiKey) keyElevenlabsInput.value = settings.elevenlabsApiKey;
+
+      // Set provider + model
+      setupProvider.value = settings.aiProvider || 'anthropic';
+      updateProviderUI();
+      if (settings.aiProvider === 'openai' && settings.openaiModel) {
+        setupModel.value = settings.openaiModel;
+      } else if (settings.aiProvider === 'openrouter' && settings.openrouterModel) {
+        setupModel.value = settings.openrouterModel;
+      } else if (settings.claudeModel) {
+        setupModel.value = settings.claudeModel;
+      }
+
+      // Check if we have the required key for the chosen provider
+      const hasKey = settings.anthropicApiKey || settings.openaiApiKey || settings.openrouterApiKey;
+      if (hasKey) {
+        setConfigured(true);
+      } else {
+        setup.classList.remove('hidden');
+      }
+    }).catch((err) => {
+      console.error('Failed to load settings:', err);
+      setup.classList.remove('hidden');
+    });
+
+    // Toggle setup panel
+    toggleSetupBtn.addEventListener('click', () => {
+      setup.classList.toggle('hidden');
+    });
+
+    function setConfigured(configured) {
+      isConfigured = configured;
+      statusDot.className = configured ? 'status connected' : 'status';
+
+      // Update titlebar to show active provider
+      const providerLabels = { anthropic: 'Claude', openai: 'OpenAI', openrouter: 'OpenRouter' };
+      const providerLabel = providerLabels[setupProvider.value] || setupProvider.value;
+      document.querySelector('#titlebar .title').textContent = 'Clicky · ' + providerLabel;
+
+      if (configured) {
+        setup.classList.add('hidden');
+        input.focus();
+      } else {
+        setup.classList.remove('hidden');
+      }
+    }
+
+    // Save keys
+    saveKeysBtn.addEventListener('click', () => {
+      const provider = setupProvider.value;
+      window.clicky.setSetting('aiProvider', provider);
+
+      // Save model based on provider
+      if (provider === 'openai') {
+        window.clicky.setSetting('openaiModel', setupModel.value);
+      } else if (provider === 'openrouter') {
+        window.clicky.setSetting('openrouterModel', setupModel.value);
+      } else {
+        window.clicky.setSetting('claudeModel', setupModel.value);
+      }
+
+      // Validate required key
+      const anthropicKey = keyAnthropicInput.value.trim();
+      const openaiKey = keyOpenaiInput.value.trim();
+      const openrouterKey = keyOpenrouterInput.value.trim();
+      const keyMap = { anthropic: anthropicKey, openai: openaiKey, openrouter: openrouterKey };
+      const inputMap = { anthropic: keyAnthropicInput, openai: keyOpenaiInput, openrouter: keyOpenrouterInput };
+      const requiredKey = keyMap[provider];
+      const requiredInput = inputMap[provider];
+
+      if (!requiredKey) {
+        requiredInput.classList.add('error');
+        requiredInput.addEventListener('input', () => requiredInput.classList.remove('error'), { once: true });
+        return;
+      }
+
+      if (anthropicKey) window.clicky.setSetting('anthropicApiKey', anthropicKey);
+      if (openrouterKey) window.clicky.setSetting('openrouterApiKey', openrouterKey);
+
+      if (openaiKey) {
+        window.clicky.setSetting('openaiApiKey', openaiKey);
+        // Auto-set OpenAI as transcription + TTS provider if no other keys
+        if (!keyAssemblyaiInput.value.trim()) {
+          window.clicky.setSetting('transcriptionProvider', 'openai');
+        }
+        if (!keyElevenlabsInput.value.trim()) {
+          window.clicky.setSetting('ttsProvider', 'openai');
+        }
+      }
+
+      const assemblyaiKey = keyAssemblyaiInput.value.trim();
+      if (assemblyaiKey) {
+        window.clicky.setSetting('assemblyaiApiKey', assemblyaiKey);
+        window.clicky.setSetting('transcriptionProvider', 'assemblyai');
+      }
+
+      const elevenlabsKey = keyElevenlabsInput.value.trim();
+      if (elevenlabsKey) {
+        window.clicky.setSetting('elevenlabsApiKey', elevenlabsKey);
+        window.clicky.setSetting('ttsProvider', 'elevenlabs');
+      }
+
+      savedMsg.classList.add('visible');
+      setTimeout(() => savedMsg.classList.remove('visible'), 2000);
+      setConfigured(true);
+    });
+
+    function addMessage(text, role) {
+      if (firstMessage) {
+        welcome.remove();
+        firstMessage = false;
+      }
+      const div = document.createElement('div');
+      div.className = 'msg ' + role;
+      if (role === 'assistant' && typeof marked !== 'undefined') {
+        try {
+          div.innerHTML = marked.parse(text, { breaks: true });
+        } catch (e) {
+          div.textContent = text;
+        }
+      } else {
+        div.textContent = text;
+      }
+      messages.appendChild(div);
+      messages.scrollTop = messages.scrollHeight;
+      return div;
+    }
+
+    function addLoading() {
+      if (firstMessage) {
+        welcome.remove();
+        firstMessage = false;
+      }
+      const div = document.createElement('div');
+      div.className = 'msg assistant';
+      div.id = 'loading-msg';
+      div.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
+      messages.appendChild(div);
+      messages.scrollTop = messages.scrollHeight;
+      return div;
+    }
+
+    async function send() {
+      const text = input.value.trim();
+      if (!text) return;
+
+      input.value = '';
+
+      addMessage(text, 'user');
+      addLoading();
+
+      try {
+        const response = await window.clicky.sendQuery(text);
+        document.getElementById('loading-msg')?.remove();
+        const displayText = response.replace(/\[POINT:[^\]]+\]/g, '').trim();
+        addMessage(displayText || '(no response)', 'assistant');
+      } catch (err) {
+        document.getElementById('loading-msg')?.remove();
+        addMessage('Error: ' + (err.message || err), 'system');
+      }
+
+      hideStatus();
+      input.focus();
+    }
+
+    sendBtn.addEventListener('click', send);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        send();
+      }
+    });
+
+    // ── Pin (always on top) toggle ──
+    const pinBtn = document.getElementById('pin-btn');
+    let isPinned = false;
+
+    window.clicky.getSettings().then((s) => {
+      isPinned = !!s.alwaysOnTop;
+      pinBtn.style.color = isPinned ? 'var(--accent)' : '';
+      pinBtn.title = isPinned ? 'Unpin from top' : 'Pin on top';
+    });
+
+    pinBtn.addEventListener('click', () => {
+      isPinned = !isPinned;
+      window.clicky.setSetting('alwaysOnTop', isPinned);
+      pinBtn.style.color = isPinned ? 'var(--accent)' : '';
+      pinBtn.title = isPinned ? 'Unpin from top' : 'Pin on top';
+    });
+
+    // ── Status bar ──
+    const statusBar = document.getElementById('status-bar');
+    const statusText = document.getElementById('status-text');
+
+    function showStatus(text, state) {
+      statusBar.className = 'status-bar ' + state;
+      statusText.textContent = text;
+    }
+
+    function hideStatus() {
+      statusBar.className = 'status-bar hidden';
+    }
+
+    // Stage events from companion pipeline drive status bar text
+    if (window.clicky.onStage) {
+      window.clicky.onStage(({ stage, label }) => {
+        if (stage === 'done') {
+          hideStatus();
+        } else if (stage === 'speaking') {
+          showStatus(label, 'speaking');
+        } else {
+          showStatus(label, 'thinking');
+        }
+      });
+    }
+
+    // ── Push-to-talk mic recording ──
+    const micBtn = document.getElementById('mic-btn');
+    let mediaRecorder = null;
+    let audioChunks = [];
+    let isRecording = false;
+
+    async function startRecording() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { channelCount: 1, sampleRate: 16000 }
+        });
+
+        audioChunks = [];
+        mediaRecorder = new MediaRecorder(stream, {
+          mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+            ? 'audio/webm;codecs=opus'
+            : 'audio/webm'
+        });
+
+        mediaRecorder.ondataavailable = (e) => {
+          if (e.data.size > 0) audioChunks.push(e.data);
+        };
+
+        mediaRecorder.onstop = async () => {
+          // Stop all tracks to release mic
+          stream.getTracks().forEach(t => t.stop());
+
+          if (audioChunks.length === 0) return;
+
+          const blob = new Blob(audioChunks, { type: 'audio/webm' });
+          const webmBuffer = await blob.arrayBuffer();
+
+          // Decode webm/opus → raw PCM at 16 kHz mono Int16, so the
+          // main process can write a WAV file for whisper.cpp without
+          // shipping ffmpeg. Same buffer also works for OpenAI Whisper API.
+          // Main assumes raw 16-bit PCM, so if decode fails we must surface
+          // the error — sending webm would produce garbled audio.
+          let arrayBuffer;
+          try {
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+            const decoded = await audioCtx.decodeAudioData(webmBuffer.slice(0));
+            const floatPCM = decoded.getChannelData(0);
+            const int16PCM = new Int16Array(floatPCM.length);
+            for (let i = 0; i < floatPCM.length; i++) {
+              const s = Math.max(-1, Math.min(1, floatPCM[i]));
+              int16PCM[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+            arrayBuffer = int16PCM.buffer;
+            audioCtx.close();
+          } catch (decodeErr) {
+            console.error('PCM decode failed:', decodeErr);
+            addMessage('Voice error: could not decode audio (' + (decodeErr.message || decodeErr) + ')', 'system');
+            hideStatus();
+            micBtn.className = 'mic-btn';
+            micBtn.title = 'Push to talk (or Ctrl+Shift+Space)';
+            return;
+          }
+
+          // Show processing state
+          micBtn.className = 'mic-btn processing';
+          micBtn.title = 'Transcribing...';
+          showStatus('Transcribing your voice...', 'thinking');
+
+          addMessage('(voice message)', 'user');
+          addLoading();
+
+          try {
+            const result = await window.clicky.sendAudioRecording(arrayBuffer);
+
+            document.getElementById('loading-msg')?.remove();
+
+            if (result.error) {
+              addMessage('Voice error: ' + result.error, 'system');
+              hideStatus();
+            } else {
+              // Replace the "(voice message)" with actual transcript
+              const userMsgs = messages.querySelectorAll('.msg.user');
+              const lastUser = userMsgs[userMsgs.length - 1];
+              if (lastUser && lastUser.textContent === '(voice message)') {
+                lastUser.textContent = result.transcript;
+              }
+
+              if (result.response) {
+                const displayText = result.response.replace(/\[POINT:[^\]]+\]/g, '').trim();
+                addMessage(displayText || '(no response)', 'assistant');
+              }
+            }
+          } catch (err) {
+            document.getElementById('loading-msg')?.remove();
+            addMessage('Voice error: ' + (err.message || err), 'system');
+          }
+
+          hideStatus();
+          micBtn.className = 'mic-btn';
+          micBtn.title = 'Push to talk (or Ctrl+Shift+Space)';
+        };
+
+        mediaRecorder.start(250); // collect chunks every 250ms
+        isRecording = true;
+        micBtn.className = 'mic-btn recording';
+        micBtn.title = 'Recording... click to stop';
+        showStatus('Listening...', 'recording');
+
+      } catch (err) {
+        addMessage('Mic error: ' + (err.message || err), 'system');
+      }
+    }
+
+    function stopRecording() {
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.stop();
+      }
+      isRecording = false;
+    }
+
+    // Click mic button to toggle
+    micBtn.addEventListener('click', () => {
+      if (isRecording) {
+        stopRecording();
+      } else {
+        startRecording();
+      }
+    });
+
+    // Global hotkey (Ctrl+Alt+Space) triggers from main process
+    window.clicky.onRecordingChanged((recording) => {
+      if (recording && !isRecording) {
+        startRecording();
+      } else if (!recording && isRecording) {
+        stopRecording();
+      }
+    });
+
+    // TTS 3-state toggle: off → windows → openai cloud → off
+    const ttsToggle = document.getElementById('tts-toggle');
+    const ttsIcon = document.getElementById('tts-icon');
+    const ttsLabel = document.getElementById('tts-label');
+    // States: 'off', 'local', 'openai'
+    let ttsState = 'off';
+
+    // Load saved TTS state
+    window.clicky.getSettings().then((s) => {
+      if (s.ttsEnabled && s.ttsProvider === 'openai') {
+        ttsState = 'openai';
+      } else if (s.ttsEnabled) {
+        ttsState = 'local';
+      } else {
+        ttsState = 'off';
+      }
+      updateTTSUI();
+    });
+
+    const ttsIconPaths = {
+      off: '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/>',
+      local: '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 010 7.07"/>',
+      openai: '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 010 7.07"/><path d="M19.07 4.93a10 10 0 010 14.14"/>',
+    };
+
+    function updateTTSUI() {
+      ttsIcon.innerHTML = ttsIconPaths[ttsState];
+      ttsToggle.className = 'tts-btn' + (ttsState === 'local' ? ' active-local' : ttsState === 'openai' ? ' active-cloud' : '');
+
+      if (ttsState === 'off') {
+        ttsLabel.textContent = '';
+        ttsToggle.title = 'Voice off — click for Windows voice';
+      } else if (ttsState === 'local') {
+        ttsLabel.textContent = 'WIN';
+        ttsToggle.title = 'Windows voice — click for OpenAI voice';
+      } else {
+        ttsLabel.textContent = 'AI';
+        ttsToggle.title = 'OpenAI voice — click to turn off';
+      }
+    }
+
+    ttsToggle.addEventListener('click', () => {
+      if (ttsState === 'off') {
+        ttsState = 'local';
+        window.clicky.setSetting('ttsEnabled', true);
+        window.clicky.setSetting('ttsProvider', 'local');
+      } else if (ttsState === 'local') {
+        ttsState = 'openai';
+        window.clicky.setSetting('ttsEnabled', true);
+        window.clicky.setSetting('ttsProvider', 'openai');
+      } else {
+        ttsState = 'off';
+        window.clicky.setSetting('ttsEnabled', false);
+      }
+      updateTTSUI();
+    });
+
+    // Window controls
+    document.getElementById('btn-minimize').addEventListener('click', () => {
+      window.clicky.minimizeWindow();
+    });
+    document.getElementById('btn-close').addEventListener('click', () => {
+      window.clicky.closeWindow();
+    });
+
+    // Help menu
+    const helpBtn = document.getElementById('help-btn');
+    const helpMenu = document.getElementById('help-menu');
+
+    helpBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      helpMenu.classList.toggle('visible');
+    });
+
+    document.addEventListener('click', () => {
+      helpMenu.classList.remove('visible');
+    });
+
+    helpMenu.addEventListener('click', (e) => {
+      e.stopPropagation();
+    });
+
+    // Open all data-href links in default browser
+    document.querySelectorAll('[data-href]').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        e.preventDefault();
+        const url = el.getAttribute('data-href');
+        if (url) window.clicky.openExternal(url);
+        helpMenu.classList.remove('visible');
+      });
+    });
+  </script>
+</body>
+</html>

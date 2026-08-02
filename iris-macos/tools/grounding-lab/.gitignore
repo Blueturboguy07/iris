@@ -1,0 +1,9 @@
+# SwiftPM build products
+.build/
+.swiftpm/
+Package.resolved
+
+# Datasets, screenshots and results produced by running the tool. These are
+# measurements of whatever happened to be on one machine's screen at one moment,
+# so they are reproducible by re-running `capture` and are not worth versioning.
+grounding-lab-runs/

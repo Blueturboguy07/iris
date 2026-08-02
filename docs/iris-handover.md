@@ -58,19 +58,21 @@ Everything here was exercised against the live project, not just unit-tested.
 | Telemetry privacy | anon refused raw rows and the rollup (`42501`); consent withdrawal deletes an install's history |
 | Fix recipe promotion | 2 successes → still candidate; 3rd → validated; 3 failures → demoted |
 | BYO key isolation | exactly one function in the app writes `x-api-key`, it takes no URL, and a final gate rejects that header on any host but `api.anthropic.com` |
-| Swift services | 56 tests; host allowlist byte-identical to `main.rs` |
+| Swift app | 72 tests; host allowlist byte-identical to `main.rs` |
+| Guides in the desktop app | live `iris://` link fetched cue v3 from publikhq.com and opened it at step 1 of 11; malformed and hostile links each rejected distinctly without crashing |
+| Setup recovery | a missing prerequisite diverts into `setupSteps`; re-check advances to the saved step; skipping is possible; detour progress cannot overwrite guide progress |
+| Mods and interviews | demand accumulated 1-2-3 on one row, phrasing variants collapsed onto it, anon refused both RPC and direct insert while still reading the public list |
 
 ## What is built but not yet reachable by a user
 
-- **Guide setup sub-flows.** Guides now render in the panel and `iris://`
-  links open them (verified live against publikhq.com: cue v3, 11 steps). What
-  is missing is the recovery path — a missing Git or Node shows in the
-  tool-check rows but does not walk the reader through `branch.setupSteps`.
-  The data is parsed; the flow is not built. Until then the Tauri pill still
-  does one thing Iris cannot.
 - **App awareness and updates.** `AppAwarenessService` and
-  `ToolVersionService` exist; nothing polls them, and there is no installed-app
-  inventory. `lib/apps-config.ts` still needs `bundleId` / `processNames`.
+  `ToolVersionService` exist and `apps-config.ts` now carries `macBundleId`
+  (4 of 10 verified off real builds, the rest deliberately null). Nothing
+  polls them yet, so there is still no installed-app inventory and no update
+  detection.
+- **Mods and interviews have no desktop surface.** The API and tables are live
+  and verified; the first-install interview is never asked, and suggested mods
+  are never shown.
 - **The patch pipeline end to end.** Every route and table exists and the
   promotion rules are verified, but no repo has the workflow yet and no break
   has been dispatched.
@@ -80,8 +82,7 @@ Everything here was exercised against the live project, not just unit-tested.
 ## Not started
 
 Grounding bake-off (Phase 0 — the decision gate for how Iris points at
-things), the watch loop and its privacy guardrails, key-minting flows,
-first-install interviews, the mod registry, the public reliability page, and
+things), the watch loop and its privacy guardrails, key-minting flows, and
 the Windows port.
 
 ## Two things to know before touching the Swift app

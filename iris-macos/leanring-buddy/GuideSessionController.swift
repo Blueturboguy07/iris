@@ -186,6 +186,12 @@ final class GuideSessionController: ObservableObject {
 
     private let guideService: GuideService
 
+    /// Notices when the reader has actually done the step they are on, so the
+    /// guide moves without being told. It only ever runs for a step that
+    /// declares a `watch` block, which is why wiring it in here costs a step
+    /// written before the watch loop existed exactly nothing.
+    let watchLoop: WatchLoop
+
     /// How this controller finds out whether a tool is installed. See
     /// `GuideToolVersionChecker`.
     private let checkToolVersion: GuideToolVersionChecker
@@ -217,13 +223,28 @@ final class GuideSessionController: ObservableObject {
             apiBase: AssistantTransport.configuredPublikBaseURL().absoluteString
         ),
         platformThisAppRunsOn: IrisPlatform = .macos,
+        // Nil rather than `WatchLoop()` because a default argument is evaluated
+        // outside the main actor and `WatchLoop` is main-actor isolated.
+        watchLoop: WatchLoop? = nil,
         checkToolVersion: @escaping GuideToolVersionChecker = { toolName in
             try await ToolVersionService.checkToolVersion(tool: toolName)
         }
     ) {
         self.guideService = guideService
         self.platformThisAppRunsOn = platformThisAppRunsOn
+        self.watchLoop = watchLoop ?? WatchLoop()
         self.checkToolVersion = checkToolVersion
+
+        // The whole feature in four lines: when the loop decides the step is
+        // done, move on. `notYet` is silence by design, and a `userStuck` hint
+        // is already published on the loop for the panel to draw — pushing it
+        // through the controller as well would be two sources for one sentence.
+        self.watchLoop.onVerdict = { [weak self] verdict in
+            guard let self, verdict == .completed else {
+                return
+            }
+            self.advanceToTheNextStep()
+        }
     }
 
     // MARK: - Opening a guide
@@ -338,10 +359,12 @@ final class GuideSessionController: ObservableObject {
         await enterSetupRecoveryIfAPrerequisiteIsMissing(forBranch: resolvedHandoff.branch)
 
         loadState = .guideIsOpen
+        pointTheWatchLoopAtTheCurrentStep()
     }
 
     func closeTheGuide() {
         cancelAnyWorkFromThePreviousStep()
+        watchLoop.stopWatching()
         loadState = .noGuideIsOpen
         guideBeingFollowed = nil
         selectedBranch = nil
@@ -382,6 +405,7 @@ final class GuideSessionController: ObservableObject {
         // Branches do not share prerequisites — the Android route needs a JDK
         // the iPhone route never asks about — so switching re-scans.
         await enterSetupRecoveryIfAPrerequisiteIsMissing(forBranch: branchTheReaderPicked)
+        pointTheWatchLoopAtTheCurrentStep()
     }
 
     // MARK: - What the step card renders
@@ -968,6 +992,9 @@ final class GuideSessionController: ObservableObject {
         setupRecoveryState = nil
         cancelAnyWorkFromThePreviousStep()
         prepareToolCheckRowsForTheCurrentStep()
+        // Leaving the detour is the first moment the reader is actually on a
+        // guide step, so it is the first moment there is anything to watch.
+        pointTheWatchLoopAtTheCurrentStep()
     }
 
     func advanceToTheNextSetupStep() {
@@ -1098,6 +1125,7 @@ final class GuideSessionController: ObservableObject {
         }
         cancelAnyWorkFromThePreviousStep()
         prepareToolCheckRowsForTheCurrentStep()
+        pointTheWatchLoopAtTheCurrentStep()
         startPersistingProgressForTheCurrentPosition()
     }
 
@@ -1124,6 +1152,7 @@ final class GuideSessionController: ObservableObject {
         }
         cancelAnyWorkFromThePreviousStep()
         prepareToolCheckRowsForTheCurrentStep()
+        pointTheWatchLoopAtTheCurrentStep()
         startPersistingProgressForTheCurrentPosition()
     }
 
@@ -1133,7 +1162,26 @@ final class GuideSessionController: ObservableObject {
         readerHasFinishedTheGuide = false
         cancelAnyWorkFromThePreviousStep()
         prepareToolCheckRowsForTheCurrentStep()
+        pointTheWatchLoopAtTheCurrentStep()
         startPersistingProgressForTheCurrentPosition()
+    }
+
+    /// Points the watch loop at whatever step the reader is now on, or stops it
+    /// outright when there is nothing to watch.
+    ///
+    /// The setup detour is deliberately never watched: it is not the guide, its
+    /// steps end in a re-check the reader presses, and advancing "the step" from
+    /// inside it would move the reader's place in a guide they have not started.
+    private func pointTheWatchLoopAtTheCurrentStep() {
+        guard loadState == .guideIsOpen,
+              !readerIsInSetupRecovery,
+              !readerHasFinishedTheGuide,
+              let step = currentStep else {
+            watchLoop.stopWatching()
+            return
+        }
+        // A step with no `watch` block leaves this having started nothing.
+        watchLoop.beginWatching(step: step)
     }
 
     /// Clears the copy confirmation and the "I ran it" latch, and stops any
@@ -1202,6 +1250,7 @@ final class GuideSessionController: ObservableObject {
             readerHasFinishedTheGuide = false
             cancelAnyWorkFromThePreviousStep()
             prepareToolCheckRowsForTheCurrentStep()
+            pointTheWatchLoopAtTheCurrentStep()
         }
     }
 }

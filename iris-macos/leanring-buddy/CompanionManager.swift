@@ -174,6 +174,20 @@ final class CompanionManager: ObservableObject {
 
     func start() {
         refreshAllPermissions()
+
+        // The watch loop's one model call goes through the same two routes as
+        // every other model call in this app. This line is why it does not need
+        // a credential of its own: the account service that resolves the
+        // transport lives here, so the loop is handed the resolution rather than
+        // ever building one.
+        let accountServiceForTheWatchLoop = accountService
+        let publikBaseURLForTheWatchLoop = publikBaseURL
+        guideSessionController.watchLoop.useTransportForVisualChecks {
+            await accountServiceForTheWatchLoop.currentAssistantTransport(
+                publikBaseURL: publikBaseURLForTheWatchLoop
+            )
+        }
+
         print("🔑 Iris start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()
         bindSummonHotkeyTransitions()

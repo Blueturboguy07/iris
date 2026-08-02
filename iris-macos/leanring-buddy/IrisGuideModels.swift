@@ -77,6 +77,158 @@ struct IrisUnsupportedPair: Codable, Equatable, Sendable {
     let alternatives: [String]
 }
 
+/// How the desktop app can tell, without being told, that a step is done.
+///
+/// Mirrors `IrisStepExpectation` in `lib/iris-guides.ts` field for field: each
+/// case name is the wire's `type` value, and the associated value's label is the
+/// wire's key. The order below is also the order `WatchLoop` tries them in — the
+/// first four are answered locally in microseconds and `visual` is the only one
+/// that costs a model call, which is why a step should declare the cheapest
+/// expectation that actually distinguishes done from not-done.
+enum IrisStepExpectation: Equatable, Sendable {
+    case foregroundApp(bundleId: String)
+    case urlHost(host: String)
+    case toolVersion(tool: String)
+    case axElement(roleLabel: String)
+    case visual(prompt: String)
+
+    /// True for the one expectation that cannot be answered without pixels.
+    var requiresLookingAtTheScreen: Bool {
+        if case .visual = self {
+            return true
+        }
+        return false
+    }
+}
+
+extension IrisStepExpectation: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case bundleId
+        case host
+        case tool
+        case roleLabel
+        case prompt
+    }
+
+    /// An expectation whose `type` this build does not recognize throws, and
+    /// `IrisStepWatch` drops it rather than failing the whole guide. A newer
+    /// website teaching Iris a signal an older client cannot evaluate must cost
+    /// that client one signal, not the entire step.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let expectationType = try container.decode(String.self, forKey: .type)
+        switch expectationType {
+        case "foregroundApp":
+            self = .foregroundApp(bundleId: try container.decode(String.self, forKey: .bundleId))
+        case "urlHost":
+            self = .urlHost(host: try container.decode(String.self, forKey: .host))
+        case "toolVersion":
+            self = .toolVersion(tool: try container.decode(String.self, forKey: .tool))
+        case "axElement":
+            self = .axElement(roleLabel: try container.decode(String.self, forKey: .roleLabel))
+        case "visual":
+            self = .visual(prompt: try container.decode(String.self, forKey: .prompt))
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .type,
+                in: container,
+                debugDescription: "unrecognized step expectation type '\(expectationType)'"
+            )
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .foregroundApp(let bundleId):
+            try container.encode("foregroundApp", forKey: .type)
+            try container.encode(bundleId, forKey: .bundleId)
+        case .urlHost(let host):
+            try container.encode("urlHost", forKey: .type)
+            try container.encode(host, forKey: .host)
+        case .toolVersion(let tool):
+            try container.encode("toolVersion", forKey: .type)
+            try container.encode(tool, forKey: .tool)
+        case .axElement(let roleLabel):
+            try container.encode("axElement", forKey: .type)
+            try container.encode(roleLabel, forKey: .roleLabel)
+        case .visual(let prompt):
+            try container.encode("visual", forKey: .type)
+            try container.encode(prompt, forKey: .prompt)
+        }
+    }
+}
+
+/// What a step tells the desktop app to watch for. Mirrors `IrisStepWatch` in
+/// `lib/iris-guides.ts`.
+struct IrisStepWatch: Codable, Equatable, Sendable {
+    let expect: [IrisStepExpectation]
+
+    /// Set when the screen during this step may contain something the reader
+    /// would not want captured — an API key, a password, a recovery phrase.
+    ///
+    /// `WatchLoop` takes no screenshot at all while a sensitive step is open and
+    /// decides completion from side signals only. That is what lets Iris walk
+    /// somebody through creating and pasting a key it never sees.
+    let sensitive: Bool
+
+    /// Shown when the reader appears stuck, before offering to look further.
+    let hints: [String]
+
+    /// True when the step declares the one expectation that costs a model call.
+    var declaresAVisualExpectation: Bool {
+        expect.contains { expectation in expectation.requiresLookingAtTheScreen }
+    }
+
+    /// The prompt the visual check asks, or nil when the step declares none.
+    var visualPrompt: String? {
+        for expectation in expect {
+            if case .visual(let prompt) = expectation {
+                return prompt
+            }
+        }
+        return nil
+    }
+
+    /// Every expectation that can be answered without looking at the screen.
+    var expectationsAnsweredWithoutPixels: [IrisStepExpectation] {
+        expect.filter { expectation in !expectation.requiresLookingAtTheScreen }
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedExpectations = (try? container.decode(
+            [LenientlyDecodedStepExpectation].self,
+            forKey: .expect
+        )) ?? []
+        expect = decodedExpectations.compactMap { decodedExpectation in
+            decodedExpectation.expectationIfThisBuildUnderstandsIt
+        }
+        // Absent means "not sensitive" on the wire, but the safe reading of a
+        // *malformed* value is the cautious one, so anything that is not
+        // explicitly `false` leaves capture off.
+        sensitive = (try? container.decodeIfPresent(Bool.self, forKey: .sensitive)) ?? false
+        hints = (try? container.decodeIfPresent([String].self, forKey: .hints)) ?? []
+    }
+
+    init(expect: [IrisStepExpectation], sensitive: Bool = false, hints: [String] = []) {
+        self.expect = expect
+        self.sensitive = sensitive
+        self.hints = hints
+    }
+}
+
+/// Lets one unrecognized expectation be dropped instead of taking the array —
+/// and with it the step, and with it the guide — down alongside it.
+private struct LenientlyDecodedStepExpectation: Decodable {
+    let expectationIfThisBuildUnderstandsIt: IrisStepExpectation?
+
+    init(from decoder: Decoder) throws {
+        expectationIfThisBuildUnderstandsIt = try? IrisStepExpectation(from: decoder)
+    }
+}
+
 struct IrisGuideStep: Codable, Equatable, Sendable {
     let id: String
     let kind: IrisStepKind
@@ -87,6 +239,12 @@ struct IrisGuideStep: Codable, Equatable, Sendable {
     let href: String?
     let actionLabel: String?
     let verifierLabel: String?
+
+    /// What the desktop app should watch for to decide this step is done. Nil
+    /// means the reader tells Iris themselves, which is every step written
+    /// before the watch loop existed — and the reason `WatchLoop` refuses to
+    /// run at all for a step without one.
+    let watch: IrisStepWatch?
 
     /// An unrecognized `kind` falls back to `terminal` rather than failing the
     /// whole guide, which is exactly what the Tauri panel's `sanitizeGuideStep`
@@ -103,6 +261,9 @@ struct IrisGuideStep: Codable, Equatable, Sendable {
         href = try container.decodeIfPresent(String.self, forKey: .href)
         actionLabel = try container.decodeIfPresent(String.self, forKey: .actionLabel)
         verifierLabel = try container.decodeIfPresent(String.self, forKey: .verifierLabel)
+        // A watch block Iris cannot make sense of leaves the step unwatched
+        // rather than unopenable: the reader can always still press Continue.
+        watch = try? container.decodeIfPresent(IrisStepWatch.self, forKey: .watch)
     }
 
     init(
@@ -114,7 +275,8 @@ struct IrisGuideStep: Codable, Equatable, Sendable {
         command: String? = nil,
         href: String? = nil,
         actionLabel: String? = nil,
-        verifierLabel: String? = nil
+        verifierLabel: String? = nil,
+        watch: IrisStepWatch? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -125,6 +287,7 @@ struct IrisGuideStep: Codable, Equatable, Sendable {
         self.href = href
         self.actionLabel = actionLabel
         self.verifierLabel = verifierLabel
+        self.watch = watch
     }
 }
 

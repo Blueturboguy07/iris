@@ -18,6 +18,16 @@ import SwiftUI
 struct GuidePanelView: View {
     @ObservedObject var guideSessionController: GuideSessionController
 
+    /// Observed separately because it is its own object with its own publishes:
+    /// the indicator has to repaint the instant capture suspends, which happens
+    /// without anything on the controller changing.
+    @ObservedObject private var watchLoop: WatchLoop
+
+    init(guideSessionController: GuideSessionController) {
+        self.guideSessionController = guideSessionController
+        self._watchLoop = ObservedObject(wrappedValue: guideSessionController.watchLoop)
+    }
+
     /// The step card's scroll region is a fixed height so the floating panel
     /// does not jump in size between a one-line step and a five-line one.
     private let scrollableStepAreaHeight: CGFloat = 232
@@ -133,6 +143,10 @@ struct GuidePanelView: View {
         VStack(alignment: .leading, spacing: 12) {
             progressBar
 
+            if watchLoop.isWatchingAStep {
+                watchIndicatorRow
+            }
+
             if guideSessionController.guideOffersAChoiceOfBranches {
                 devicePairPicker
             }
@@ -177,6 +191,95 @@ struct GuidePanelView: View {
             }
         }
         .frame(height: 3)
+    }
+
+    // MARK: - The watch indicator
+
+    /// Shown for exactly as long as the watch loop is alive, and never
+    /// otherwise. A reader must be able to tell at a glance whether Iris is
+    /// looking at their screen, so this is derived from the loop's own state
+    /// rather than set alongside it — the two cannot disagree.
+    ///
+    /// The dot is filled only while frames are actually being taken. Iris being
+    /// deliberately blind — a sensitive step, a password manager in front,
+    /// secure input on — is a different thing from Iris being switched off, and
+    /// the reader deserves to see which one they are in.
+    private var watchIndicatorRow: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(watchLoop.isCapturingRightNow ? DS.Colors.accent : DS.Colors.textTertiary)
+                .frame(width: 6, height: 6)
+
+            Text(watchLoop.watchIndicatorText ?? "")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(DS.Colors.textTertiary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 6)
+
+            Button(action: {
+                watchLoop.setReaderPausedWatching(!watchLoop.readerPausedWatching)
+            }) {
+                Text(watchLoop.readerPausedWatching ? "Resume" : "Pause")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(DS.Colors.textSecondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(
+                        RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
+                            .fill(Color.white.opacity(0.10))
+                    )
+            }
+            .buttonStyle(.plain)
+            .pointerCursor()
+            .nativeTooltip(
+                watchLoop.readerPausedWatching
+                    ? "Let Iris watch this step again."
+                    : "Stop Iris looking at your screen. Takes effect immediately."
+            )
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
+                .fill(Color.white.opacity(0.04))
+        )
+    }
+
+    /// The `userStuck` hint. It appears without the reader asking for anything,
+    /// which is the entire point: a reader who is stuck is, by definition, not
+    /// about to press a button labelled "I am stuck".
+    private func proactiveHintBanner(_ hint: String) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "lightbulb")
+                .font(.system(size: 10))
+                .foregroundColor(DS.Colors.warningText)
+
+            Text(hint)
+                .font(.system(size: 11))
+                .foregroundColor(DS.Colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button(action: {
+                watchLoop.dismissTheProactiveHint()
+            }) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundColor(DS.Colors.textTertiary)
+            }
+            .buttonStyle(.plain)
+            .pointerCursor()
+            .nativeTooltip("Dismiss this suggestion")
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
+                .fill(DS.Colors.warning.opacity(0.10))
+        )
     }
 
     // MARK: - Device pair picker
@@ -312,6 +415,10 @@ struct GuidePanelView: View {
                         .foregroundColor(DS.Colors.textSecondary)
                         .lineSpacing(2)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if let proactiveHint = watchLoop.proactiveHintForTheReader {
+                    proactiveHintBanner(proactiveHint)
                 }
 
                 if let command = guideSessionController.commandBlockTextForTheCurrentStep {

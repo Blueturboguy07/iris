@@ -106,6 +106,39 @@ class WindowPositionManager {
         UserDefaults.standard.removeObject(forKey: hasPreviouslyConfirmedScreenRecordingPermissionUserDefaultsKey)
     }
 
+    /// True once this launch has sent the user to grant Screen Recording.
+    ///
+    /// The permission cannot be observed to change while the app is running:
+    /// `CGPreflightScreenCaptureAccess()` answers once per process and keeps
+    /// answering the same thing, so polling it after the user flips the switch
+    /// in System Settings reports the old value forever. Knowing an attempt was
+    /// made is what lets the UI offer a restart instead of leaving the user
+    /// staring at a row that will never update.
+    static var hasRequestedScreenRecordingDuringCurrentLaunch: Bool {
+        hasAttemptedScreenRecordingSystemPromptDuringCurrentLaunch
+    }
+
+    /// Quits and reopens the app so a newly granted Screen Recording permission
+    /// takes effect.
+    ///
+    /// The new instance is started before this one exits, and only if the open
+    /// actually succeeded — quitting first would leave the user with no app at
+    /// all if the relaunch failed.
+    static func relaunchToApplyPermissions() {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+
+        NSWorkspace.shared.openApplication(
+            at: Bundle.main.bundleURL,
+            configuration: configuration
+        ) { runningApplication, _ in
+            guard runningApplication != nil else { return }
+            DispatchQueue.main.async {
+                NSApp.terminate(nil)
+            }
+        }
+    }
+
     /// Prompts the system dialog for Screen Recording permission.
     /// Uses the system prompt once, then opens System Settings on later attempts so
     /// the user never gets the prompt and the Settings pane at the same time.

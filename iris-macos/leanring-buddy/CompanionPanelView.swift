@@ -398,6 +398,12 @@ struct CompanionPanelView: View {
 
     private var screenRecordingPermissionRow: some View {
         let isGranted = companionManager.hasScreenRecordingPermission
+        // Once the user has been sent to System Settings, this row can no
+        // longer tell whether they granted it — macOS answers the permission
+        // check once per launch. Rather than leave them toggling a switch and
+        // watching nothing happen, offer the restart that actually applies it.
+        let awaitingRestart = !isGranted
+            && WindowPositionManager.hasRequestedScreenRecordingDuringCurrentLaunch
         return HStack {
             HStack(spacing: 8) {
                 Image(systemName: "rectangle.dashed.badge.record")
@@ -412,7 +418,9 @@ struct CompanionPanelView: View {
 
                     Text(isGranted
                          ? "Only takes a screenshot when you ask a question"
-                         : "Quit and reopen after granting")
+                         : awaitingRestart
+                            ? "Granted it? macOS applies this on restart"
+                            : "Only takes a screenshot when you ask a question")
                         .font(.system(size: 10))
                         .foregroundColor(DS.Colors.textTertiary)
                 }
@@ -431,12 +439,16 @@ struct CompanionPanelView: View {
                 }
             } else {
                 Button(action: {
-                    // Triggers the native macOS screen recording prompt on first
-                    // attempt (auto-adds app to the list), then opens System Settings
-                    // on subsequent attempts.
-                    WindowPositionManager.requestScreenRecordingPermission()
+                    if awaitingRestart {
+                        WindowPositionManager.relaunchToApplyPermissions()
+                    } else {
+                        // Triggers the native macOS screen recording prompt on first
+                        // attempt (auto-adds app to the list), then opens System Settings
+                        // on subsequent attempts.
+                        WindowPositionManager.requestScreenRecordingPermission()
+                    }
                 }) {
-                    Text("Grant")
+                    Text(awaitingRestart ? "Restart Iris" : "Grant")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(DS.Colors.textOnAccent)
                         .padding(.horizontal, 10)

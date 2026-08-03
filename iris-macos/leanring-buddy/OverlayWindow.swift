@@ -19,12 +19,21 @@ import AppKit
 import AVFoundation
 import SwiftUI
 
-class OverlayWindow: NSWindow {
+/// The full-screen overlay window.
+///
+/// It is an `NSPanel` rather than a plain `NSWindow` for one reason: the
+/// `.nonactivatingPanel` style is what lets the eye be *clicked* without Iris
+/// stealing frontmost status from whatever app the user is really working in.
+/// Clicking an ordinary background window activates its app; clicking a
+/// non-activating panel does not. It still refuses to become key — the input
+/// bar is a separate panel precisely so that this one never has to hold the
+/// keyboard.
+class OverlayWindow: NSPanel {
     init(screen: NSScreen) {
         // Create window covering entire screen
         super.init(
             contentRect: screen.frame,
-            styleMask: .borderless,
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -33,7 +42,11 @@ class OverlayWindow: NSWindow {
         self.isOpaque = false
         self.backgroundColor = .clear
         self.level = .screenSaver  // Always on top, above submenus and popups
-        self.ignoresMouseEvents = true  // Click-through
+        // CLICK-THROUGH BY DEFAULT. This is the setting that keeps the user's
+        // desktop usable: a full-screen window that accepts mouse events eats
+        // every click on every app underneath it. It is relaxed only while the
+        // pointer is over the eye, and only by `OverlayWindowMouseEventGate`.
+        self.ignoresMouseEvents = true
         self.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
         self.isReleasedWhenClosed = false
         self.hasShadow = false
@@ -57,6 +70,37 @@ class OverlayWindow: NSWindow {
 
     override var canBecomeMain: Bool {
         return false
+    }
+}
+
+/// The one thing allowed to turn the overlay's click-through off, and the
+/// bridge from the SwiftUI content back to the `NSWindow` hosting it.
+///
+/// WHY A GATE AND NOT A HIT TEST. Returning nil from a view's `hitTest(_:)`
+/// stops SwiftUI acting on a click, but the *window* has still swallowed it —
+/// the click never reaches the app underneath. Only `ignoresMouseEvents`, which
+/// the window server reads before it routes the event at all, produces real
+/// click-through. So the overlay's pointer poll drives this gate open while the
+/// pointer is inside the eye's rect and shut everywhere else, which means the
+/// window is click-through for every pixel of the screen except a 76pt square
+/// around the eye.
+@MainActor
+final class OverlayWindowMouseEventGate {
+
+    private weak var overlayWindowToGate: NSWindow?
+
+    /// Mirrors the window's own state so the 60fps poll only touches AppKit on
+    /// an actual change rather than sixty times a second forever.
+    private var theOverlayIsCurrentlyAcceptingMouseEvents = false
+
+    init(overlayWindowToGate: NSWindow?) {
+        self.overlayWindowToGate = overlayWindowToGate
+    }
+
+    func setWhetherTheOverlayAcceptsMouseEvents(_ shouldAcceptMouseEvents: Bool) {
+        guard shouldAcceptMouseEvents != theOverlayIsCurrentlyAcceptingMouseEvents else { return }
+        theOverlayIsCurrentlyAcceptingMouseEvents = shouldAcceptMouseEvents
+        overlayWindowToGate?.ignoresMouseEvents = !shouldAcceptMouseEvents
     }
 }
 
@@ -105,16 +149,41 @@ struct BlueCursorView: View {
     /// been frozen since the machine booted.
     @State private var gazeTracker: IrisEyeGazeTracker
 
-    /// The eye drawn on the overlay. 32pt across — double the 16pt triangle it
-    /// replaced, because a lid, an iris and a pupil need room to read as an
-    /// eye at all, and the whole point is that it is recognisably the eye from
-    /// the website.
-    private static let overlayEyeGeometry = IrisEyePupilGeometry(eyeDiameter: 32)
+    /// Where the eye rests and which of its pixels may be clicked. Everything
+    /// about the eye as a *control* lives in `OverlayEyeInteraction.swift`,
+    /// which is testable without a screen.
+    private static let interactionGeometry = OverlayEyeInteractionGeometry()
 
-    init(screenFrame: CGRect, isFirstAppearance: Bool, companionManager: CompanionManager) {
+    /// The eye drawn on the overlay: 64pt across. It was 32pt, which read as an
+    /// eye but was easy to overlook and far too small to ask anybody to hit —
+    /// and now that clicking it is how you talk to Iris, it has to be an
+    /// obvious target as well as an obvious creature.
+    private static let overlayEyeGeometry = OverlayEyeInteractionGeometry.eyePupilGeometry
+
+    /// Opens and closes the overlay window's click-through, driven by the same
+    /// 60fps pointer poll that drives the gaze. Optional so the view can still
+    /// be constructed outside a window.
+    let overlayWindowMouseEventGate: OverlayWindowMouseEventGate?
+
+    /// Owns the input bar's own small window.
+    let inputBarPanelManager: OverlayEyeInputBarPanelManager?
+
+    /// Whether the eye has been clicked, and therefore whether it is currently
+    /// drawn as an eye or as the settings gear.
+    @State private var eyeActivation = OverlayEyeActivation()
+
+    init(
+        screenFrame: CGRect,
+        isFirstAppearance: Bool,
+        companionManager: CompanionManager,
+        overlayWindowMouseEventGate: OverlayWindowMouseEventGate? = nil,
+        inputBarPanelManager: OverlayEyeInputBarPanelManager? = nil
+    ) {
         self.screenFrame = screenFrame
         self.isFirstAppearance = isFirstAppearance
         self.companionManager = companionManager
+        self.overlayWindowMouseEventGate = overlayWindowMouseEventGate
+        self.inputBarPanelManager = inputBarPanelManager
 
         // Seed the cursor position from the current mouse location so the
         // buddy doesn't flash at (0,0) before onAppear fires.
@@ -122,7 +191,9 @@ struct BlueCursorView: View {
         let localX = mouseLocation.x - screenFrame.origin.x
         let localY = screenFrame.height - (mouseLocation.y - screenFrame.origin.y)
         // Starts at rest in the top-left rather than beside the pointer.
-        _cursorPosition = State(initialValue: CGPoint(x: 44, y: 60))
+        _cursorPosition = State(
+            initialValue: OverlayEyeInteractionGeometry.restingEyeCenterInSwiftUICoordinates
+        )
         _isCursorOnThisScreen = State(initialValue: screenFrame.contains(mouseLocation))
         _gazeTracker = State(initialValue: IrisEyeGazeTracker(
             pointerLocation: mouseLocation,
@@ -170,7 +241,7 @@ struct BlueCursorView: View {
     private var restingPositionInSwiftUICoordinates: CGPoint {
         // Half the eye's own size plus a margin, so the shape clears the menu
         // bar rather than tucking under it.
-        CGPoint(x: 44, y: 60)
+        OverlayEyeInteractionGeometry.restingEyeCenterInSwiftUICoordinates
     }
 
     @State private var cursorPositionWhenNavigationStarted: CGPoint = .zero
@@ -210,8 +281,12 @@ struct BlueCursorView: View {
 
     var body: some View {
         ZStack {
-            // Nearly transparent background (helps with compositing)
+            // Nearly transparent background (helps with compositing).
+            // It spans the whole screen, so it must never take a hit test:
+            // while the window's mouse gate is open it would otherwise be the
+            // thing that swallowed a click that missed the eye's own circle.
             Color.black.opacity(0.001)
+                .allowsHitTesting(false)
 
             // Welcome speech bubble (first launch only)
             if isCursorOnThisScreen && showWelcome && !welcomeText.isEmpty {
@@ -239,6 +314,8 @@ struct BlueCursorView: View {
                     .onPreferenceChange(SizePreferenceKey.self) { newSize in
                         bubbleSize = newSize
                     }
+                    // Speech, not a control — it must never take a click.
+                    .allowsHitTesting(false)
             }
 
             // Onboarding video — always in the view tree so opacity animation works
@@ -283,6 +360,8 @@ struct BlueCursorView: View {
                     .onPreferenceChange(SizePreferenceKey.self) { newSize in
                         bubbleSize = newSize
                     }
+                    // Speech, not a control — it must never take a click.
+                    .allowsHitTesting(false)
             }
 
             // Navigation pointer bubble — shown when buddy arrives at a detected element.
@@ -319,6 +398,8 @@ struct BlueCursorView: View {
                     .onPreferenceChange(NavigationBubbleSizePreferenceKey.self) { newSize in
                         navigationBubbleSize = newSize
                     }
+                    // Speech, not a control — it must never take a click.
+                    .allowsHitTesting(false)
             }
 
             // Iris's eye. One view for every assistant state — there is no
@@ -331,11 +412,34 @@ struct BlueCursorView: View {
             // During cursor following: fast spring animation for snappy tracking.
             // During navigation: NO implicit animation — the frame-by-frame bezier
             // timer controls position directly at 60fps for a smooth arc flight.
-            OverlayIrisEyeView(
-                geometry: Self.overlayEyeGeometry,
-                mood: eyeMood,
-                glanceOffset: irisGlanceOffset
-            )
+            Button {
+                handleAClickOnTheEye()
+            } label: {
+                // The eye and the gear are the same size and wear the same
+                // shell, so this swap changes what the object offers without
+                // moving or resizing it.
+                switch eyeActivation.affordanceToDraw {
+                case .eye:
+                    OverlayIrisEyeView(
+                        geometry: Self.overlayEyeGeometry,
+                        mood: eyeMood,
+                        glanceOffset: irisGlanceOffset
+                    )
+                case .settingsGear:
+                    OverlaySettingsGearView(geometry: Self.overlayEyeGeometry)
+                }
+            }
+            .buttonStyle(.plain)
+            // The eye is round, so its click region is too — the corners of its
+            // bounding box are desktop, not eye.
+            .contentShape(Circle())
+            .pointerCursor(isEnabled: theEyeIsClickableRightNow)
+            // A view at zero opacity still hit-tests in SwiftUI, so an eye that
+            // is invisible on this screen — or mid-flight to an element — has
+            // to be told not to take clicks. The window's own click-through
+            // gate below says the same thing; both have to agree before a
+            // click can be swallowed.
+            .allowsHitTesting(theEyeIsClickableRightNow)
             // The eye carries its own soft ink drop shadow; this is the extra
             // accent glow that only exists mid-flight, inherited from the
             // triangle's swoop. At rest `buddyFlightScale` is 1.0 and the glow
@@ -388,6 +492,17 @@ struct BlueCursorView: View {
             timer?.invalidate()
             navigationAnimationTimer?.invalidate()
             companionManager.tearDownOnboardingVideo()
+            // Leaving the window's mouse gate open would leave a square of the
+            // desktop unclickable with nothing drawn in it to explain why.
+            overlayWindowMouseEventGate?.setWhetherTheOverlayAcceptsMouseEvents(false)
+            inputBarPanelManager?.hideInputBar()
+        }
+        .onChange(of: buddyIsVisibleOnThisScreen) { _, theEyeIsStillOnThisScreen in
+            // The pointer moved to another display, or a flight to an element
+            // started. Either way this screen's eye is gone, and a bar hanging
+            // under an eye that is not there is orphaned UI.
+            guard !theEyeIsStillOnThisScreen else { return }
+            inputBarPanelManager?.hideInputBar()
         }
         .onChange(of: companionManager.detectedElementScreenLocation) { newLocation in
             // When a UI element location is detected, navigate the buddy to
@@ -450,6 +565,47 @@ struct BlueCursorView: View {
         }
     }
 
+    // MARK: - The Eye As A Control
+
+    /// Whether the eye is a thing that can be clicked at this instant.
+    ///
+    /// Only while it is sitting at rest on the screen the pointer is on. An eye
+    /// mid-flight to a `[POINT:…]` target is somewhere the user did not put it
+    /// and is about to leave again, so a click region that chased it around the
+    /// screen would be a moving hole in the desktop.
+    private var theEyeIsClickableRightNow: Bool {
+        buddyNavigationMode == .followingCursor
+            && buddyIsVisibleOnThisScreen
+            && cursorOpacity > 0
+    }
+
+    /// One click target, two meanings, decided by `OverlayEyeActivation`.
+    private func handleAClickOnTheEye() {
+        switch eyeActivation.registerAClickOnTheEye() {
+        case .shouldOpenTheInputBar:
+            presentTheInputBar()
+        case .shouldOpenTheSettingsPanel:
+            // The existing panel, reached the existing way, rather than a
+            // second settings surface that would immediately drift from it.
+            NotificationCenter.default.post(name: .clickyTogglePanel, object: nil)
+        }
+    }
+
+    private func presentTheInputBar() {
+        guard let inputBarPanelManager else { return }
+        inputBarPanelManager.showInputBar(
+            forEyeAtInteractionGeometry: Self.interactionGeometry,
+            onScreenWithFrame: screenFrame,
+            companionManager: companionManager,
+            onTheBarClosing: {
+                // Whatever took the bar down — Escape, a click elsewhere, a
+                // sent message — the gear turns back into an eye here, so the
+                // two can never disagree.
+                self.eyeActivation.dismissTheInputBar()
+            }
+        )
+    }
+
     // MARK: - Cursor Tracking
 
     private func startTrackingCursor() {
@@ -460,6 +616,24 @@ struct BlueCursorView: View {
             // granted. That is why the pointer is polled rather than tapped.
             let mouseLocation = NSEvent.mouseLocation
             self.isCursorOnThisScreen = self.screenFrame.contains(mouseLocation)
+
+            // THE CLICK-THROUGH GATE, re-decided sixty times a second.
+            //
+            // The overlay covers the whole screen and sits above everything, so
+            // for all but one small square of it the only correct answer is
+            // "let the click through to whatever is underneath". The square is
+            // the eye, and only while the eye is actually there to be clicked.
+            // `setWhetherTheOverlayAcceptsMouseEvents` no-ops unless the answer
+            // has changed, so this poll costs nothing while the pointer is off
+            // in the user's own app — which is nearly always.
+            let thePointerIsOverTheEye = Self.interactionGeometry
+                .theOverlayShouldAcceptMouseEvents(
+                    forPointerAtAppKitScreenLocation: mouseLocation,
+                    onScreenWithFrame: self.screenFrame
+                )
+            self.overlayWindowMouseEventGate?.setWhetherTheOverlayAcceptsMouseEvents(
+                thePointerIsOverTheEye && self.theEyeIsClickableRightNow
+            )
 
             // The gaze is recomputed on every tick no matter what the rest of
             // the buddy is doing — it keeps watching while it flies out, while
@@ -815,6 +989,12 @@ struct BlueCursorView: View {
 @MainActor
 class OverlayWindowManager {
     private var overlayWindows: [OverlayWindow] = []
+
+    /// One per overlay window. Held here rather than only inside the SwiftUI
+    /// view so the bars can be taken down when the overlay goes away, and so
+    /// the panels are not deallocated out from under themselves.
+    private var inputBarPanelManagers: [OverlayEyeInputBarPanelManager] = []
+
     var hasShownOverlayBefore = false
 
     func showOverlay(onScreens screens: [NSScreen], companionManager: CompanionManager) {
@@ -828,11 +1008,14 @@ class OverlayWindowManager {
         // Create one overlay window per screen
         for screen in screens {
             let window = OverlayWindow(screen: screen)
+            let inputBarPanelManager = OverlayEyeInputBarPanelManager()
 
             let contentView = BlueCursorView(
                 screenFrame: screen.frame,
                 isFirstAppearance: isFirstAppearance,
-                companionManager: companionManager
+                companionManager: companionManager,
+                overlayWindowMouseEventGate: OverlayWindowMouseEventGate(overlayWindowToGate: window),
+                inputBarPanelManager: inputBarPanelManager
             )
 
             let hostingView = NSHostingView(rootView: contentView)
@@ -840,11 +1023,13 @@ class OverlayWindowManager {
             window.contentView = hostingView
 
             overlayWindows.append(window)
+            inputBarPanelManagers.append(inputBarPanelManager)
             window.orderFrontRegardless()
         }
     }
 
     func hideOverlay() {
+        takeDownEveryInputBar()
         for window in overlayWindows {
             window.orderOut(nil)
             window.contentView = nil
@@ -852,8 +1037,19 @@ class OverlayWindowManager {
         overlayWindows.removeAll()
     }
 
+    /// The input bar belongs to the eye. When the eye goes, so does it —
+    /// otherwise a bar would be left floating with nothing to have opened it.
+    private func takeDownEveryInputBar() {
+        for inputBarPanelManager in inputBarPanelManagers {
+            inputBarPanelManager.hideInputBar()
+        }
+        inputBarPanelManagers.removeAll()
+    }
+
     /// Fades out overlay windows over `duration` seconds, then removes them.
     func fadeOutAndHideOverlay(duration: TimeInterval = 0.4) {
+        takeDownEveryInputBar()
+
         let windowsToFade = overlayWindows
         overlayWindows.removeAll()
 

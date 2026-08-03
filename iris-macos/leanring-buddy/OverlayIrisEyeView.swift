@@ -684,3 +684,47 @@ struct OverlayIrisEyeView: View {
         }
     }
 }
+
+// MARK: - The settings affordance
+
+/// What the eye turns into while the input bar is open: a gear, in the same
+/// place, at the same size, wearing the same dark disc and hairline ring the
+/// eye wears.
+///
+/// The silhouette is deliberately identical — same outer diameter, same shell
+/// colour, same drop shadow — so the swap reads as one object changing what it
+/// offers rather than as one object being replaced by a different one.
+struct OverlaySettingsGearView: View {
+
+    let geometry: IrisEyePupilGeometry
+
+    var body: some View {
+        ZStack {
+            // The eye's track, unrotated and unfilled: the ring is what makes
+            // the two states obviously the same object.
+            Circle()
+                .fill(Color.white.opacity(0.2))
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.25), lineWidth: 1))
+                .frame(width: geometry.eyeDiameter, height: geometry.eyeDiameter)
+
+            Circle()
+                .fill(DS.Colors.eyeShell)
+                .frame(width: geometry.shellDiameter, height: geometry.shellDiameter)
+
+            Image(systemName: "gearshape.fill")
+                .font(.system(size: geometry.shellContentDiameter * 0.52, weight: .semibold))
+                // The lid's pale off-white rather than pure white, so the gear
+                // is made of the same material the eye's opening is.
+                .foregroundColor(DS.Colors.eyeLid)
+        }
+        .frame(width: geometry.eyeDiameter, height: geometry.eyeDiameter)
+        // The same shadow `OverlayIrisEyeView` carries, so nothing about the
+        // object's footprint changes when the affordance does.
+        .shadow(
+            color: DS.Colors.eyeShell.opacity(0.3),
+            radius: geometry.eyeDiameter * (22.0 / 54.0) / 2,
+            x: 0,
+            y: geometry.eyeDiameter * (12.0 / 54.0) / 2
+        )
+    }
+}

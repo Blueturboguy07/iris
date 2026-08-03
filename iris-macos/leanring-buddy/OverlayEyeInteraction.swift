@@ -85,6 +85,135 @@ struct OverlayEyeActivation: Equatable {
     }
 }
 
+// MARK: - The exchange the bar is showing
+
+/// Which of the four things the bar is showing at this instant.
+///
+/// The whole conversation happens here, at the eye. The bar does not hand the
+/// reader off to another window when they ask something — it changes state in
+/// place, so what they see is one small surface doing four things rather than
+/// panels appearing and disappearing around them.
+enum OverlayEyeExchangePhase: Hashable {
+    /// The bar has just opened: an empty field and the suggestion chips.
+    case composingTheFirstQuestion
+    /// A question has been sent and Iris has not answered yet.
+    case waitingForIrisToAnswer
+    /// The answer — or the sentence explaining why there is no answer — is on
+    /// screen, and the field is empty and waiting for a follow-up.
+    case showingTheAnswer
+    /// The answer is still on screen and the reader has gone back to the field
+    /// to ask something else. The answer deliberately stays visible: taking it
+    /// away the moment they touch the field would delete the very thing they
+    /// are asking a follow-up about.
+    case composingAFollowUp
+}
+
+/// The one exchange the bar is currently showing, as a pure value so the whole
+/// state machine can be tested without a screen, a window or a network.
+///
+/// There is exactly one exchange at a time on purpose. The bar hangs off a 64pt
+/// eye and floats over whatever the reader is really doing; a scrollback of
+/// previous questions would turn it into the second panel this whole change
+/// exists to get rid of.
+struct OverlayEyeExchange: Equatable {
+
+    /// What the reader asked, kept on screen while Iris works and while the
+    /// answer is read, so a slow answer never arrives next to a blank space
+    /// where the question used to be.
+    private(set) var questionTheReaderAsked: String?
+
+    /// What Iris said back. This is also where a failure sentence goes — an
+    /// error is shown in the same place an answer would be, because from the
+    /// reader's side "Iris could not answer" *is* the answer to what they
+    /// asked, and a separate alert would be a second surface again.
+    private(set) var whatIrisSaidBack: String?
+
+    /// Whether `whatIrisSaidBack` is a failure sentence rather than a real
+    /// answer. Only the tint depends on it; the position does not.
+    private(set) var whatIrisSaidBackIsAFailureMessage: Bool = false
+
+    private(set) var phase: OverlayEyeExchangePhase = .composingTheFirstQuestion
+
+    init() {}
+
+    /// Whether the bar should be holding the keyboard right now.
+    ///
+    /// THIS IS THE RULE THAT KEEPS THE READER'S OWN TYPING OUT OF THE BAR. The
+    /// bar lives in a panel that can become key, which it has to be while
+    /// somebody is typing a question into it. But a panel that stays key after
+    /// the question is sent goes on swallowing keystrokes meant for the app the
+    /// reader went back to — which is exactly the bug this models away. Focus
+    /// belongs to the bar only while a question is being composed.
+    var theBarShouldHoldTheKeyboard: Bool {
+        switch phase {
+        case .composingTheFirstQuestion, .composingAFollowUp:
+            return true
+        case .waitingForIrisToAnswer, .showingTheAnswer:
+            return false
+        }
+    }
+
+    /// Whether there is an exchange on screen at all, as opposed to the empty
+    /// opening state with its suggestion chips.
+    var thereIsAnExchangeOnScreen: Bool {
+        phase != .composingTheFirstQuestion
+    }
+
+    /// Whether the suggestion chips should be offered. Only before the first
+    /// question: once there is a real exchange to read, three chips underneath
+    /// it are noise competing with the answer.
+    var theSuggestionChipsShouldBeOffered: Bool {
+        phase == .composingTheFirstQuestion
+    }
+
+    /// The reader sent a question. Whatever was on screen from last time goes,
+    /// because the bar shows one exchange and this is now that exchange.
+    mutating func registerTheReaderAsked(_ question: String) {
+        let trimmedQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        // An empty send is not an exchange. Guarding here rather than at every
+        // call site means no caller can put the bar into a working state with
+        // nothing on its way back.
+        guard !trimmedQuestion.isEmpty else { return }
+
+        questionTheReaderAsked = trimmedQuestion
+        whatIrisSaidBack = nil
+        whatIrisSaidBackIsAFailureMessage = false
+        phase = .waitingForIrisToAnswer
+    }
+
+    /// Iris answered, or failed in a way that has a sentence for the reader.
+    ///
+    /// Ignored unless a question is actually outstanding, so a response that
+    /// lands after the reader dismissed the bar and opened it again cannot
+    /// paste a stale answer under a question they have not asked yet.
+    mutating func registerIrisAnswered(
+        _ answer: String,
+        theAnswerIsAFailureMessage: Bool
+    ) {
+        guard phase == .waitingForIrisToAnswer else { return }
+        whatIrisSaidBack = answer
+        whatIrisSaidBackIsAFailureMessage = theAnswerIsAFailureMessage
+        phase = .showingTheAnswer
+    }
+
+    /// The reader clicked back into the field after an answer. Only meaningful
+    /// once there is an answer to follow up on — while Iris is still working
+    /// the field is not the thing to interrupt.
+    mutating func registerTheReaderWentBackToTheField() {
+        guard phase == .showingTheAnswer else { return }
+        phase = .composingAFollowUp
+    }
+
+    /// The bar is going away. Everything on it goes with it: reopening the bar
+    /// is a new conversation at the eye, not a resumed one.
+    mutating func clearTheWholeExchange() {
+        questionTheReaderAsked = nil
+        whatIrisSaidBack = nil
+        whatIrisSaidBackIsAFailureMessage = false
+        phase = .composingTheFirstQuestion
+    }
+}
+
 // MARK: - Where the eye is and what may be clicked
 
 /// The eye's size and resting place, and — the important part — exactly which
@@ -141,6 +270,26 @@ struct OverlayEyeInteractionGeometry {
     /// close to the left one and a bar centred under it would otherwise hang
     /// off the side of the display.
     static let inputBarMarginFromTheScreenEdge: CGFloat = 16
+
+    /// The tallest the bar's window is ever allowed to become, however long the
+    /// answer is.
+    ///
+    /// The bar floats over whatever the reader is actually working in. A
+    /// thousand-word answer that grew the window to match would be a wall
+    /// across their screen that they did not ask for, so past this height the
+    /// answer scrolls inside the bar instead of the bar growing to fit it.
+    static let tallestTheInputBarMayGrow: CGFloat = 420
+
+    /// The shortest the bar's window may be. A floor rather than a fixed size,
+    /// so a measurement that arrives before the content has laid out cannot
+    /// collapse the window to nothing.
+    static let shortestTheInputBarMayBe: CGFloat = 44
+
+    /// The tallest the answer's own scrolling area may be. Under the bar's
+    /// ceiling by enough that the field above it and the question echo always
+    /// have room, so the field can never be pushed off the bottom of the bar
+    /// by a long answer.
+    static let tallestTheAnswerAreaMayGrow: CGFloat = 236
 
     /// Where the eye's centre currently is, in this screen's SwiftUI overlay
     /// coordinates. Held rather than assumed so a caller can ask about the eye
@@ -231,6 +380,70 @@ struct OverlayEyeInteractionGeometry {
 
         return CGPoint(x: clampedLeftEdge, y: clampedBottomEdge)
     }
+
+    /// The bar's whole window frame, in AppKit screen coordinates, for a bar of
+    /// the given height. This is the region the reader can actually click,
+    /// scroll and select inside, because the bar is its own window and it is
+    /// that window — not the overlay — that receives those events.
+    func inputBarFrameInAppKitScreenCoordinates(
+        barHeight: CGFloat,
+        onScreenWithFrame screenFrame: CGRect
+    ) -> CGRect {
+        let barSize = CGSize(
+            width: Self.inputBarWidth,
+            height: Self.heightTheInputBarMayActuallyUse(forMeasuredContentHeight: barHeight)
+        )
+        return CGRect(
+            origin: inputBarOriginInAppKitScreenCoordinates(
+                barSize: barSize,
+                onScreenWithFrame: screenFrame
+            ),
+            size: barSize
+        )
+    }
+
+    /// Everything on this screen that belongs to Iris right now: the eye's
+    /// click target, plus the bar's window when the bar is open.
+    ///
+    /// WHY THIS EXISTS SEPARATELY FROM THE CLICK-THROUGH GATE. The gate
+    /// (`theOverlayShouldAcceptMouseEvents`) is deliberately *only* the eye and
+    /// never grows, because the overlay is the full-screen window and widening
+    /// its gate is how a user loses the ability to click their own apps. The
+    /// bar's clicks arrive by a completely different route — its own small
+    /// window — so the interactive surface grows with the answer without the
+    /// overlay's gate moving a pixel. This function is what lets a test state
+    /// both halves of that at once: the region Iris occupies grows and shrinks
+    /// back, and every point outside it is still the reader's own desktop.
+    func rectOccupiedByIris(
+        withInputBarOfHeight inputBarHeight: CGFloat?,
+        onScreenWithFrame screenFrame: CGRect
+    ) -> CGRect {
+        let eyeRect = interactiveRectInAppKitScreenCoordinates(onScreenWithFrame: screenFrame)
+        guard let inputBarHeight else { return eyeRect }
+        let barFrame = inputBarFrameInAppKitScreenCoordinates(
+            barHeight: inputBarHeight,
+            onScreenWithFrame: screenFrame
+        )
+        return eyeRect.union(barFrame)
+    }
+
+    /// The height the bar's window should actually be given for a measured
+    /// content height: never below the floor, never above the ceiling.
+    ///
+    /// The ceiling is the important half. Everything past it has to scroll
+    /// inside the bar, because the alternative is a floating window that grows
+    /// down the reader's screen in proportion to how talkative Iris was.
+    static func heightTheInputBarMayActuallyUse(
+        forMeasuredContentHeight measuredContentHeight: CGFloat
+    ) -> CGFloat {
+        // NaN means the content has not been measured yet — SwiftUI reports it
+        // while a layout settles — and every comparison against it is false, so
+        // it would slip through the clamp below and collapse the window to
+        // nothing. An infinite height is a different thing: it means "as much
+        // as you will give me", and the clamp answers that correctly.
+        guard !measuredContentHeight.isNaN else { return shortestTheInputBarMayBe }
+        return min(max(measuredContentHeight, shortestTheInputBarMayBe), tallestTheInputBarMayGrow)
+    }
 }
 
 // MARK: - What the bar suggests
@@ -276,6 +489,30 @@ enum OverlayEyeSuggestions {
         // it falls back rather than offering `what does "" mean?`.
         guard !trimmedStepTitle.isEmpty else { return whenNothingElseIsOpen }
         return whileFollowingAGuideStep(titled: trimmedStepTitle)
+    }
+
+    /// What the bar says while Iris is working, which is a different sentence
+    /// depending on which part of the work is happening.
+    ///
+    /// It is spelled out rather than left as a generic spinner because the
+    /// screenshot step is the one that makes people uneasy, and saying "looking
+    /// at your screen" out loud at the moment it happens is the honest version.
+    static func lineShownWhileIrisIsWorking(
+        whileTheAssistantIs assistantState: CompanionAssistantState
+    ) -> String {
+        switch assistantState {
+        case .capturing:
+            return "looking at your screen…"
+        case .thinking:
+            return "thinking…"
+        case .pointing:
+            return "pointing at it…"
+        case .idle:
+            // Reached for the moment between the send and the pipeline actually
+            // starting. "Working" rather than nothing at all, so the bar is
+            // never blank under a question that has just been asked.
+            return "working…"
+        }
     }
 
     static func shortenedForAChip(_ stepTitle: String) -> String {

@@ -2,9 +2,18 @@
 //  CompanionPanelView.swift
 //  leanring-buddy
 //
-//  The SwiftUI content hosted inside the menu bar panel. Shows the assistant
-//  status, a text input for asking questions, and quick settings. Designed to
-//  feel like Loom's recording panel — dark, rounded, minimal, and special.
+//  The SwiftUI content hosted inside the menu bar panel: Iris's settings.
+//  Permissions, the model picker, the guide, the installed publik apps, the
+//  account rows and quit. Designed to feel like Loom's recording panel — dark,
+//  rounded, minimal, and special.
+//
+//  THIS IS NOT WHERE YOU TALK TO IRIS. Asking a question and reading the answer
+//  both happen in the bar under the eye (`OverlayEyeInputBar.swift`). This panel
+//  used to carry a second copy of that conversation — its own "Ask Iris" field
+//  and its own response area — which meant one exchange spread over two windows
+//  and a bar at the eye that threw the reader in here the moment they used it.
+//  The exchange belongs at the eye; the settings belong here; the gear beside
+//  the bar is the way from one to the other.
 //
 
 import SwiftUI
@@ -23,8 +32,6 @@ struct CompanionPanelView: View {
     /// scanning on its own schedule, and the app list has to appear when it
     /// does rather than on the next unrelated state change.
     @ObservedObject var appInventoryService: AppInventoryService
-
-    @State private var messageInput: String = ""
 
     /// Where the pointer is inside the panel, so the eye can glance toward it.
     /// Zero (looking straight ahead) whenever the pointer is elsewhere.
@@ -51,9 +58,9 @@ struct CompanionPanelView: View {
                 .background(DS.Colors.line)
 
             // A guide takes over the panel while one is open: the reader is
-            // following instructions, and leaving the chat box and account rows
-            // underneath them would be two conversations at once. The swap
-            // animates the way the pill's content does: fade up 5pt.
+            // following instructions, and leaving the settings rows underneath
+            // them would be two things at once. The swap animates the way the
+            // pill's content does: fade up 5pt.
             Group {
                 if guideSessionController.loadState.isShowingSomethingAboutAGuide {
                     GuidePanelView(guideSessionController: guideSessionController)
@@ -61,7 +68,7 @@ struct CompanionPanelView: View {
                         .padding(.horizontal, 16)
                         .transition(DS.Motion.contentTransition)
                 } else {
-                    chatAndAccountContent
+                    settingsAndAccountContent
                         .transition(DS.Motion.contentTransition)
                 }
             }
@@ -110,22 +117,17 @@ struct CompanionPanelView: View {
         }
     }
 
-    /// Everything the panel shows when no guide is open: the assistant chat
-    /// box, the model picker, the account rows, and the permissions flow.
+    /// Everything the panel shows when no guide is open: the model picker, the
+    /// account rows, the installed apps and the permissions flow. No chat box —
+    /// see the note at the top of this file.
     @ViewBuilder
-    private var chatAndAccountContent: some View {
+    private var settingsAndAccountContent: some View {
         VStack(alignment: .leading, spacing: 0) {
             permissionsCopySection
                 .padding(.top, 16)
                 .padding(.horizontal, 16)
 
             if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
-                Spacer()
-                    .frame(height: 12)
-
-                askSection
-                    .padding(.horizontal, 16)
-
                 Spacer()
                     .frame(height: 12)
 
@@ -249,108 +251,6 @@ struct CompanionPanelView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-    }
-
-    // MARK: - Ask Iris (text input + response)
-
-    /// The text input wired to the same pipeline that previously received the
-    /// final dictation transcript, plus the latest assistant response.
-    private var askSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                TextField("Ask Iris anything…", text: $messageInput)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12))
-                    .foregroundColor(DS.Colors.ink)
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(DS.Colors.surfaceRaised)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .strokeBorder(DS.Colors.line, lineWidth: 1)
-                    )
-                    .onSubmit {
-                        submitCurrentMessage()
-                    }
-
-                Button(action: {
-                    submitCurrentMessage()
-                }) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 22, weight: .medium))
-                        .foregroundColor(messageInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                         ? DS.Colors.quiet
-                                         : DS.Colors.accent)
-                }
-                .buttonStyle(.plain)
-                .pointerCursor()
-                .disabled(messageInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-
-            responseArea
-        }
-    }
-
-    /// Fixed-height response area so the panel doesn't resize while visible.
-    private var responseArea: some View {
-        ScrollView {
-            Text(responseAreaText)
-                .font(.system(size: 11.5))
-                .foregroundColor(responseAreaIsPlaceholder ? DS.Colors.quiet : DS.Colors.muted)
-                .lineSpacing(2.5)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(10)
-        }
-        .frame(height: 140)
-        .background(
-            RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
-                .fill(Color.white.opacity(0.04))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
-                .strokeBorder(DS.Colors.line, lineWidth: 1)
-        )
-    }
-
-    private var responseAreaText: String {
-        switch companionManager.assistantState {
-        case .capturing:
-            return "Capturing your screen…"
-        case .thinking:
-            return "Thinking…"
-        case .idle, .pointing:
-            if let latestAssistantResponseText = companionManager.latestAssistantResponseText {
-                return latestAssistantResponseText
-            }
-            // Said before the user types rather than after: with no account and
-            // no key there is nothing behind the text field, and finding that
-            // out by asking a question and getting an error is a worse way to
-            // learn it.
-            guard accountService.activeTierDescription != nil else {
-                return AssistantTransportError.noCredentialsAvailable.userFacingMessage
-            }
-            return "Iris sees your screen when you ask, and answers here."
-        }
-    }
-
-    private var responseAreaIsPlaceholder: Bool {
-        switch companionManager.assistantState {
-        case .capturing, .thinking:
-            return true
-        case .idle, .pointing:
-            return companionManager.latestAssistantResponseText == nil
-        }
-    }
-
-    private func submitCurrentMessage() {
-        let trimmedMessage = messageInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedMessage.isEmpty else { return }
-        companionManager.sendUserMessage(trimmedMessage)
-        messageInput = ""
     }
 
     // MARK: - Start Button

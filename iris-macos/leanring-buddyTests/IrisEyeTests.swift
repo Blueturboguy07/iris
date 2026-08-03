@@ -722,3 +722,659 @@ struct OverlayEyeSuggestionTests {
         #expect(OverlayEyeSuggestions.shortenedForAChip("Install Node") == "Install Node")
     }
 }
+
+// MARK: - The answer arrives at the eye, not in the old panel
+
+/// THE BUG THIS WHOLE CHANGE EXISTS TO FIX.
+///
+/// The bar under the eye used to take a question and then post
+/// `.clickyShowPanel`, so the answer rendered in the menu bar panel. One
+/// conversation, two windows: a minimal bar that threw the reader somewhere
+/// else the moment they actually used it.
+///
+/// There is no object to interrogate for "did the view post a notification" —
+/// the hand-off was three lines inside a SwiftUI view's send function — so this
+/// reads the source of the bar and states the absence directly. It is the only
+/// way to pin a *deletion*, and a deletion is exactly what was asked for.
+struct OverlayEyeBarDoesNotDelegateToTheOldPanelTests {
+
+    /// The bar's own source, found relative to this test file. `#filePath` is
+    /// baked in at compile time from the repository the tests were built in, so
+    /// this resolves wherever the checkout lives.
+    private static var sourceOfTheInputBar: String {
+        let testFileURL = URL(fileURLWithPath: #filePath)
+        let repositoryRoot = testFileURL
+            .deletingLastPathComponent()      // leanring-buddyTests
+            .deletingLastPathComponent()      // iris-macos
+        let inputBarSourceURL = repositoryRoot
+            .appendingPathComponent("leanring-buddy")
+            .appendingPathComponent("OverlayEyeInputBar.swift")
+        return (try? String(contentsOf: inputBarSourceURL, encoding: .utf8)) ?? ""
+    }
+
+    @Test func theBarNeverAsksTheOldPanelToOpen() {
+        let source = Self.sourceOfTheInputBar
+        // Sanity first: a missing or unreadable file must fail loudly rather
+        // than pass by finding nothing in an empty string.
+        #expect(source.contains("OverlayEyeInputBarView"), "the bar's source could not be read")
+
+        // The notifications that open the menu bar panel. Neither may appear in
+        // the bar, in a comment or otherwise — the comment that used to sit
+        // above the post explained the hand-off, and it went with it.
+        #expect(!source.contains("clickyShowPanel"))
+        #expect(!source.contains("clickyTogglePanel"))
+        // And nothing posts anything at all from here any more.
+        #expect(!source.contains("NotificationCenter"))
+    }
+
+    @Test func theBarRendersTheAnswerItself() {
+        let source = Self.sourceOfTheInputBar
+        // The other half of the same statement: the answer is drawn here. If
+        // somebody deletes the answer area and re-adds the hand-off, the test
+        // above alone would not notice the first half of that.
+        #expect(source.contains("latestAssistantResponseText"))
+        #expect(source.contains("answerArea"))
+    }
+}
+
+// MARK: - The exchange the bar shows
+
+/// The bar is one small surface that changes state: chips, then the question
+/// with a working line, then the question with the answer, then the field again
+/// for a follow-up. These pin every transition, including the ones that must
+/// *not* happen.
+struct OverlayEyeExchangeTests {
+
+    @Test func theBarOpensReadyForAQuestionWithNothingOnIt() {
+        let exchange = OverlayEyeExchange()
+
+        #expect(exchange.phase == .composingTheFirstQuestion)
+        #expect(exchange.questionTheReaderAsked == nil)
+        #expect(exchange.whatIrisSaidBack == nil)
+        #expect(exchange.theSuggestionChipsShouldBeOffered)
+        #expect(!exchange.thereIsAnExchangeOnScreen)
+    }
+
+    @Test func composingThenWorkingThenAnsweredThenComposingAFollowUp() {
+        var exchange = OverlayEyeExchange()
+        #expect(exchange.phase == .composingTheFirstQuestion)
+
+        // Asked.
+        exchange.registerTheReaderAsked("what's on my screen?")
+        #expect(exchange.phase == .waitingForIrisToAnswer)
+        #expect(exchange.questionTheReaderAsked == "what's on my screen?")
+        // The question stays up while Iris works, so a slow answer never
+        // arrives next to a blank space.
+        #expect(exchange.thereIsAnExchangeOnScreen)
+        // And the chips are gone: three suggestions competing with the thing
+        // you are waiting for is noise.
+        #expect(!exchange.theSuggestionChipsShouldBeOffered)
+
+        // Answered.
+        exchange.registerIrisAnswered("xcode, with a build running", theAnswerIsAFailureMessage: false)
+        #expect(exchange.phase == .showingTheAnswer)
+        #expect(exchange.whatIrisSaidBack == "xcode, with a build running")
+        #expect(exchange.questionTheReaderAsked == "what's on my screen?")
+        #expect(!exchange.whatIrisSaidBackIsAFailureMessage)
+
+        // Composing again, without reopening anything.
+        exchange.registerTheReaderWentBackToTheField()
+        #expect(exchange.phase == .composingAFollowUp)
+        // The answer they are following up on is still in front of them.
+        #expect(exchange.whatIrisSaidBack == "xcode, with a build running")
+
+        // And the follow-up runs the same loop again.
+        exchange.registerTheReaderAsked("which target?")
+        #expect(exchange.phase == .waitingForIrisToAnswer)
+        #expect(exchange.questionTheReaderAsked == "which target?")
+        // The previous answer goes when the new question is asked: the bar
+        // shows one exchange, and this is now that exchange.
+        #expect(exchange.whatIrisSaidBack == nil)
+    }
+
+    @Test func anEmptyQuestionCannotPutTheBarIntoAWorkingState() {
+        var exchange = OverlayEyeExchange()
+
+        exchange.registerTheReaderAsked("   \n  ")
+        // Nothing was sent, so nothing is coming back, and a bar spinning
+        // forever on a question nobody asked is worse than no bar at all.
+        #expect(exchange.phase == .composingTheFirstQuestion)
+        #expect(exchange.questionTheReaderAsked == nil)
+    }
+
+    @Test func theQuestionIsStoredTrimmedTheWayItIsSent() {
+        var exchange = OverlayEyeExchange()
+        exchange.registerTheReaderAsked("  explain this error \n")
+        #expect(exchange.questionTheReaderAsked == "explain this error")
+    }
+
+    @Test func anAnswerThatArrivesWhenNothingWasAskedIsIgnored() {
+        var exchange = OverlayEyeExchange()
+
+        // A response landing after the reader dismissed the bar and opened it
+        // again must not paste a stale answer under a question they have not
+        // asked yet.
+        exchange.registerIrisAnswered("something from last time", theAnswerIsAFailureMessage: false)
+        #expect(exchange.phase == .composingTheFirstQuestion)
+        #expect(exchange.whatIrisSaidBack == nil)
+
+        // Nor may a second response overwrite the one being read.
+        exchange.registerTheReaderAsked("what is this?")
+        exchange.registerIrisAnswered("the first answer", theAnswerIsAFailureMessage: false)
+        exchange.registerIrisAnswered("a late duplicate", theAnswerIsAFailureMessage: false)
+        #expect(exchange.whatIrisSaidBack == "the first answer")
+    }
+
+    @Test func goingBackToTheFieldOnlyMeansSomethingOnceThereIsAnAnswer() {
+        var exchange = OverlayEyeExchange()
+
+        // Before anything is asked there is nothing to follow up on.
+        exchange.registerTheReaderWentBackToTheField()
+        #expect(exchange.phase == .composingTheFirstQuestion)
+
+        // And while Iris is still working, the field is not the thing to
+        // interrupt — every keystroke in that moment belongs to the app the
+        // reader went back to.
+        exchange.registerTheReaderAsked("what's this?")
+        exchange.registerTheReaderWentBackToTheField()
+        #expect(exchange.phase == .waitingForIrisToAnswer)
+    }
+
+    @Test func dismissingTheBarClearsTheWholeExchange() {
+        var exchange = OverlayEyeExchange()
+        exchange.registerTheReaderAsked("what's on my screen?")
+        exchange.registerIrisAnswered("xcode", theAnswerIsAFailureMessage: false)
+
+        exchange.clearTheWholeExchange()
+
+        // Reopening the bar is a new conversation at the eye, not a resumed one.
+        #expect(exchange == OverlayEyeExchange())
+        #expect(exchange.phase == .composingTheFirstQuestion)
+        #expect(exchange.questionTheReaderAsked == nil)
+        #expect(exchange.whatIrisSaidBack == nil)
+        #expect(!exchange.whatIrisSaidBackIsAFailureMessage)
+    }
+}
+
+// MARK: - A failure is shown where an answer would be
+
+struct OverlayEyeExchangeFailureTests {
+
+    @Test func aFailureLandsInTheSamePlaceAnAnswerWouldAndLeavesTheBarOpen() {
+        var exchange = OverlayEyeExchange()
+        exchange.registerTheReaderAsked("what's on my screen?")
+
+        let sentenceTheTransportProduces = AssistantTransportError.noCredentialsAvailable.userFacingMessage
+        exchange.registerIrisAnswered(
+            sentenceTheTransportProduces,
+            theAnswerIsAFailureMessage: true
+        )
+
+        // Same phase, same field, same slot on screen: from the reader's side
+        // "Iris could not answer" is what came back from what they asked, and a
+        // separate alert would be the second surface all over again.
+        #expect(exchange.phase == .showingTheAnswer)
+        #expect(exchange.whatIrisSaidBack == sentenceTheTransportProduces)
+        #expect(exchange.whatIrisSaidBackIsAFailureMessage)
+        #expect(exchange.thereIsAnExchangeOnScreen)
+        #expect(exchange.questionTheReaderAsked == "what's on my screen?")
+    }
+
+    @Test func aFollowUpCanBeAskedStraightAfterAFailure() {
+        var exchange = OverlayEyeExchange()
+        exchange.registerTheReaderAsked("what's on my screen?")
+        exchange.registerIrisAnswered(
+            AssistantTransportError.assistantUnavailable.userFacingMessage,
+            theAnswerIsAFailureMessage: true
+        )
+
+        exchange.registerTheReaderWentBackToTheField()
+        #expect(exchange.phase == .composingAFollowUp)
+        #expect(exchange.theBarShouldHoldTheKeyboard)
+
+        exchange.registerTheReaderAsked("try again")
+        #expect(exchange.phase == .waitingForIrisToAnswer)
+        // The failure tint does not survive into the next exchange.
+        #expect(!exchange.whatIrisSaidBackIsAFailureMessage)
+    }
+
+    @Test func everyTransportFailureHasASentenceTheBarCanShow() {
+        // The bar renders whatever `describeAndHandle` hands it, so an error
+        // with an empty sentence would render as an empty card.
+        for transportError: AssistantTransportError in [
+            .noCredentialsAvailable,
+            .signInRequired,
+            .rateLimited(retryAfterSeconds: 30),
+            .dailyBudgetExhausted(retryAfterSeconds: nil),
+            .assistantUnavailable,
+            .transportFailure(reason: "the network went away")
+        ] {
+            var exchange = OverlayEyeExchange()
+            exchange.registerTheReaderAsked("anything")
+            exchange.registerIrisAnswered(
+                transportError.userFacingMessage,
+                theAnswerIsAFailureMessage: true
+            )
+            #expect(exchange.whatIrisSaidBack?.isEmpty == false)
+            #expect(exchange.phase == .showingTheAnswer)
+        }
+    }
+}
+
+// MARK: - Who holds the keyboard
+
+/// The bar lives in a panel that can become key, because a text field in a
+/// window that cannot be key never sees a keystroke. The danger is the panel
+/// *staying* key after the question has gone: during an earlier verification
+/// pass the literal characters the user typed into their own editor landed in
+/// this bar. `theBarShouldHoldTheKeyboard` is the rule that decides it, and the
+/// panel manager does exactly what it says.
+struct OverlayEyeKeyboardFocusTests {
+
+    @Test func theBarHoldsTheKeyboardWhileAQuestionIsBeingTyped() {
+        let exchange = OverlayEyeExchange()
+        #expect(exchange.theBarShouldHoldTheKeyboard)
+    }
+
+    @Test func theKeyboardIsReleasedTheMomentAQuestionIsSent() {
+        var exchange = OverlayEyeExchange()
+        exchange.registerTheReaderAsked("what's on my screen?")
+
+        // The reader has gone back to whatever they were doing. Their
+        // keystrokes go with them.
+        #expect(!exchange.theBarShouldHoldTheKeyboard)
+    }
+
+    @Test func theKeyboardStaysReleasedWhileTheAnswerIsBeingRead() {
+        var exchange = OverlayEyeExchange()
+        exchange.registerTheReaderAsked("what's on my screen?")
+        exchange.registerIrisAnswered("xcode", theAnswerIsAFailureMessage: false)
+
+        #expect(!exchange.theBarShouldHoldTheKeyboard)
+    }
+
+    @Test func clickingBackIntoTheFieldTakesTheKeyboardBack() {
+        var exchange = OverlayEyeExchange()
+        exchange.registerTheReaderAsked("what's on my screen?")
+        exchange.registerIrisAnswered("xcode", theAnswerIsAFailureMessage: false)
+        #expect(!exchange.theBarShouldHoldTheKeyboard)
+
+        exchange.registerTheReaderWentBackToTheField()
+        #expect(exchange.theBarShouldHoldTheKeyboard)
+
+        // And sending the follow-up hands it straight back again.
+        exchange.registerTheReaderAsked("which target?")
+        #expect(!exchange.theBarShouldHoldTheKeyboard)
+    }
+
+    @Test func theKeyboardIsHeldOnlyWhileSomethingIsBeingComposed() {
+        // Stated as an exhaustive property rather than four separate cases, so
+        // a phase added later cannot quietly default to holding the keyboard.
+        var exchange = OverlayEyeExchange()
+        let phasesWhereTheKeyboardIsHeld: Set<OverlayEyeExchangePhase> = [
+            .composingTheFirstQuestion,
+            .composingAFollowUp
+        ]
+
+        #expect(exchange.theBarShouldHoldTheKeyboard
+                == phasesWhereTheKeyboardIsHeld.contains(exchange.phase))
+        exchange.registerTheReaderAsked("a")
+        #expect(exchange.theBarShouldHoldTheKeyboard
+                == phasesWhereTheKeyboardIsHeld.contains(exchange.phase))
+        exchange.registerIrisAnswered("b", theAnswerIsAFailureMessage: false)
+        #expect(exchange.theBarShouldHoldTheKeyboard
+                == phasesWhereTheKeyboardIsHeld.contains(exchange.phase))
+        exchange.registerTheReaderWentBackToTheField()
+        #expect(exchange.theBarShouldHoldTheKeyboard
+                == phasesWhereTheKeyboardIsHeld.contains(exchange.phase))
+    }
+}
+
+// MARK: - What Iris occupies while the bar is expanded
+
+/// THE OTHER MOST IMPORTANT TESTS IN THIS FILE, alongside
+/// `OverlayEyeClickThroughTests` above.
+///
+/// When an answer arrives the bar gets taller. The reader has to be able to
+/// scroll and select inside it, which means the region that accepts a mouse
+/// event has to grow with it — and shrink back, and never cover anything else.
+///
+/// The two halves of that are deliberately different mechanisms:
+///
+///   * The **overlay's** click-through gate never moves. It is the full-screen
+///     window, and widening its gate is precisely how a user loses the ability
+///     to click their own apps. It is the eye's 76pt square in every state of
+///     the bar.
+///   * The **bar's own window** is what grows. Its clicks and scrolls are
+///     delivered to it directly and never travel through the overlay at all.
+///
+/// So these tests state both at once: the region Iris occupies grows with the
+/// answer and shrinks back on dismissal, the gate does not budge, and a point
+/// out in the middle of the reader's screen is outside everything in every
+/// state.
+struct OverlayEyeExpandedBarClickThroughTests {
+
+    private static let interactionGeometry = OverlayEyeInteractionGeometry()
+
+    private static let screenFrames = [
+        CGRect(x: 0, y: 0, width: 1920, height: 1080),
+        CGRect(x: 1920, y: 240, width: 1512, height: 982),
+        CGRect(x: -1440, y: -300, width: 1440, height: 900)
+    ]
+
+    /// The three heights the bar actually takes: the opening state with its
+    /// chips, the working state, and a long answer that has hit the ceiling.
+    private static let heightWhileComposing: CGFloat = 132
+    private static let heightWhileWorking: CGFloat = 150
+    private static let heightShowingALongAnswer: CGFloat =
+        OverlayEyeInteractionGeometry.tallestTheInputBarMayGrow
+
+    @Test func theRegionIrisOccupiesGrowsWithTheAnswerAndShrinksBackOnDismissal() {
+        for screenFrame in Self.screenFrames {
+            let whileComposing = Self.interactionGeometry.rectOccupiedByIris(
+                withInputBarOfHeight: Self.heightWhileComposing,
+                onScreenWithFrame: screenFrame
+            )
+            let whileShowingALongAnswer = Self.interactionGeometry.rectOccupiedByIris(
+                withInputBarOfHeight: Self.heightShowingALongAnswer,
+                onScreenWithFrame: screenFrame
+            )
+            let afterDismissal = Self.interactionGeometry.rectOccupiedByIris(
+                withInputBarOfHeight: nil,
+                onScreenWithFrame: screenFrame
+            )
+
+            // Grows.
+            #expect(whileShowingALongAnswer.height > whileComposing.height)
+            // And the composing bar is entirely inside the expanded one, so the
+            // field never moves out from under the reader as the answer lands.
+            #expect(whileShowingALongAnswer.contains(whileComposing))
+
+            // Shrinks back to the eye alone.
+            #expect(afterDismissal == Self.interactionGeometry
+                .interactiveRectInAppKitScreenCoordinates(onScreenWithFrame: screenFrame))
+            #expect(afterDismissal.height < whileComposing.height)
+
+            // Nothing Iris occupies ever leaves the screen it belongs to.
+            for occupiedRect in [whileComposing, whileShowingALongAnswer, afterDismissal] {
+                #expect(
+                    screenFrame.contains(occupiedRect),
+                    "Iris occupied \(occupiedRect), which is off the screen \(screenFrame)"
+                )
+            }
+        }
+    }
+
+    @Test func theBarsOwnWindowIsWhatGrows() {
+        for screenFrame in Self.screenFrames {
+            let composingFrame = Self.interactionGeometry.inputBarFrameInAppKitScreenCoordinates(
+                barHeight: Self.heightWhileComposing,
+                onScreenWithFrame: screenFrame
+            )
+            let answeredFrame = Self.interactionGeometry.inputBarFrameInAppKitScreenCoordinates(
+                barHeight: Self.heightShowingALongAnswer,
+                onScreenWithFrame: screenFrame
+            )
+
+            // Taller, same width, and hanging from the same top edge — it grows
+            // downward into empty desktop rather than sliding up over the eye.
+            #expect(answeredFrame.height > composingFrame.height)
+            #expect(answeredFrame.width == composingFrame.width)
+            #expect(abs(answeredFrame.maxY - composingFrame.maxY) < 0.0001)
+        }
+    }
+
+    @Test func theOverlaysGateDoesNotMoveNoMatterHowTallTheBarGets() {
+        for screenFrame in Self.screenFrames {
+            let gateRect = Self.interactionGeometry
+                .interactiveRectInAppKitScreenCoordinates(onScreenWithFrame: screenFrame)
+
+            // The gate is the eye's square, full stop. The bar's own window is
+            // what receives the bar's clicks, so this never has to grow — and
+            // it must not, because it belongs to the full-screen overlay.
+            #expect(gateRect.width <= 100)
+            #expect(gateRect.height <= 100)
+
+            // A point in the middle of the expanded bar is *not* somewhere the
+            // overlay accepts events. That is correct and load-bearing: the
+            // overlay stays click-through there so the event reaches the bar's
+            // own window underneath it.
+            let expandedBarFrame = Self.interactionGeometry.inputBarFrameInAppKitScreenCoordinates(
+                barHeight: Self.heightShowingALongAnswer,
+                onScreenWithFrame: screenFrame
+            )
+            let middleOfTheAnswer = CGPoint(x: expandedBarFrame.midX, y: expandedBarFrame.minY + 20)
+            #expect(!Self.interactionGeometry.theOverlayShouldAcceptMouseEvents(
+                forPointerAtAppKitScreenLocation: middleOfTheAnswer,
+                onScreenWithFrame: screenFrame
+            ))
+        }
+    }
+
+    @Test func aPointFarFromTheEyeIsOutsideEverythingInEveryState() {
+        for screenFrame in Self.screenFrames {
+            let placesTheReaderIsActuallyWorking = [
+                CGPoint(x: screenFrame.midX, y: screenFrame.midY),
+                CGPoint(x: screenFrame.maxX - 1, y: screenFrame.minY),
+                CGPoint(x: screenFrame.maxX - 1, y: screenFrame.maxY - 1),
+                CGPoint(x: screenFrame.minX, y: screenFrame.minY),
+                // Directly below the eye but far past where even a
+                // ceiling-height bar can reach.
+                CGPoint(
+                    x: screenFrame.minX + 58,
+                    y: screenFrame.minY + 8
+                )
+            ]
+
+            for barHeight: CGFloat? in [
+                nil,
+                Self.heightWhileComposing,
+                Self.heightWhileWorking,
+                Self.heightShowingALongAnswer
+            ] {
+                let occupiedRect = Self.interactionGeometry.rectOccupiedByIris(
+                    withInputBarOfHeight: barHeight,
+                    onScreenWithFrame: screenFrame
+                )
+                for pointerLocation in placesTheReaderIsActuallyWorking {
+                    #expect(
+                        !occupiedRect.contains(pointerLocation),
+                        "Iris claimed \(pointerLocation) on \(screenFrame) with a bar of height \(String(describing: barHeight))"
+                    )
+                    // And the overlay's own gate agrees, in every state.
+                    #expect(!Self.interactionGeometry.theOverlayShouldAcceptMouseEvents(
+                        forPointerAtAppKitScreenLocation: pointerLocation,
+                        onScreenWithFrame: screenFrame
+                    ))
+                }
+            }
+        }
+    }
+
+    @Test func aVeryLongAnswerScrollsRatherThanGrowingTheBarWithoutLimit() {
+        // The bar floats over whatever the reader is really working in. A
+        // thousand-word answer that grew the window to match would be a wall
+        // across their screen that they did not ask for.
+        let absurdContentHeight: CGFloat = 4_000
+        let heightActuallyUsed = OverlayEyeInteractionGeometry
+            .heightTheInputBarMayActuallyUse(forMeasuredContentHeight: absurdContentHeight)
+        #expect(heightActuallyUsed == OverlayEyeInteractionGeometry.tallestTheInputBarMayGrow)
+
+        // The answer's own scrolling area is capped below the bar's ceiling, so
+        // the field above it can never be pushed off the bottom of the bar.
+        #expect(OverlayEyeInteractionGeometry.tallestTheAnswerAreaMayGrow
+                < OverlayEyeInteractionGeometry.tallestTheInputBarMayGrow)
+
+        // A ceiling-height bar still fits on a normal display.
+        let screenFrame = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let barFrame = Self.interactionGeometry.inputBarFrameInAppKitScreenCoordinates(
+            barHeight: heightActuallyUsed,
+            onScreenWithFrame: screenFrame
+        )
+        #expect(screenFrame.contains(barFrame))
+    }
+
+    @Test func aMeasurementThatArrivesBeforeTheContentLaysOutCannotCollapseTheBar() {
+        // SwiftUI reports a height of zero for one pass while it settles, and a
+        // window of height zero is a bar that vanished.
+        #expect(OverlayEyeInteractionGeometry.heightTheInputBarMayActuallyUse(forMeasuredContentHeight: 0)
+                == OverlayEyeInteractionGeometry.shortestTheInputBarMayBe)
+        #expect(OverlayEyeInteractionGeometry.heightTheInputBarMayActuallyUse(forMeasuredContentHeight: -20)
+                == OverlayEyeInteractionGeometry.shortestTheInputBarMayBe)
+        #expect(OverlayEyeInteractionGeometry.heightTheInputBarMayActuallyUse(forMeasuredContentHeight: .nan)
+                == OverlayEyeInteractionGeometry.shortestTheInputBarMayBe)
+        #expect(OverlayEyeInteractionGeometry.heightTheInputBarMayActuallyUse(forMeasuredContentHeight: .infinity)
+                == OverlayEyeInteractionGeometry.tallestTheInputBarMayGrow)
+    }
+}
+
+// MARK: - The bar and the eye agree about what is happening
+
+struct OverlayEyeWorkingLineTests {
+
+    @Test func everyAssistantStateHasSomethingForTheBarToSay() {
+        // A spinning eye above a blank bar reads as broken. Every state the eye
+        // has a mood for, the bar has a sentence for.
+        for assistantState: CompanionAssistantState in [.idle, .capturing, .thinking, .pointing] {
+            let line = OverlayEyeSuggestions.lineShownWhileIrisIsWorking(
+                whileTheAssistantIs: assistantState
+            )
+            #expect(!line.isEmpty)
+        }
+    }
+
+    @Test func theBarNamesTheScreenshotOutLoudAtTheMomentItHappens() {
+        // The capture is the step that makes people uneasy, so it is said
+        // rather than hidden behind a generic spinner.
+        #expect(OverlayEyeSuggestions
+            .lineShownWhileIrisIsWorking(whileTheAssistantIs: .capturing)
+            .contains("screen"))
+        #expect(OverlayEyeSuggestions
+            .lineShownWhileIrisIsWorking(whileTheAssistantIs: .thinking)
+            != OverlayEyeSuggestions.lineShownWhileIrisIsWorking(whileTheAssistantIs: .capturing))
+    }
+}
+
+// MARK: - The bar's own window, driven for real
+
+/// The tests above pin the *rules*. These drive a real `NSPanel` through the
+/// same transitions, because the rules are only worth anything if the window
+/// actually does what they say: it has to give up the keyboard on send, be
+/// unable to take it back by accident, take it back on request, grow when an
+/// answer arrives and shrink when the next question replaces it.
+@MainActor
+struct OverlayEyeInputBarPanelTests {
+
+    private static let screenFrame = CGRect(x: 0, y: 0, width: 1512, height: 982)
+
+    private func aBarShowingOnScreen() -> (OverlayEyeInputBarPanelManager, CompanionManager) {
+        let panelManager = OverlayEyeInputBarPanelManager()
+        let companionManager = CompanionManager()
+        panelManager.showInputBar(
+            forEyeAtInteractionGeometry: OverlayEyeInteractionGeometry(),
+            onScreenWithFrame: Self.screenFrame,
+            companionManager: companionManager,
+            onTheBarClosing: {}
+        )
+        return (panelManager, companionManager)
+    }
+
+    @Test func theBarTakesTheKeyboardWhenItOpensAndGivesItBackOnSend() {
+        let (panelManager, _) = aBarShowingOnScreen()
+        defer { panelManager.hideInputBar() }
+
+        // Open: the field has to be typeable, so the window has to be able to
+        // be key.
+        #expect(panelManager.isShowingTheInputBar)
+        #expect(panelManager.theBarIsAskingForTheKeyboard)
+        #expect(panelManager.theBarsWindowCouldBecomeKeyRightNow)
+
+        // Sent: the reader has gone back to their own app, and the window can
+        // no longer be handed the keyboard by AppKit, by a stray click, or by
+        // anything else that has not asked for it.
+        panelManager.releaseTheKeyboardSoTheReadersOwnAppGetsItBack()
+        #expect(!panelManager.theBarIsAskingForTheKeyboard)
+        #expect(!panelManager.theBarsWindowCouldBecomeKeyRightNow)
+
+        // And the bar is still on screen — the answer has to land somewhere.
+        #expect(panelManager.isShowingTheInputBar)
+        #expect(panelManager.frameOfTheBarOnScreen != nil)
+    }
+
+    @Test func clickingBackIntoTheFieldMakesTheBarTypeableAgain() {
+        let (panelManager, _) = aBarShowingOnScreen()
+        defer { panelManager.hideInputBar() }
+
+        panelManager.releaseTheKeyboardSoTheReadersOwnAppGetsItBack()
+        #expect(!panelManager.theBarsWindowCouldBecomeKeyRightNow)
+
+        panelManager.takeTheKeyboardBackForTheTextField()
+        #expect(panelManager.theBarIsAskingForTheKeyboard)
+        #expect(panelManager.theBarsWindowCouldBecomeKeyRightNow)
+
+        // And a second question hands it straight back again.
+        panelManager.releaseTheKeyboardSoTheReadersOwnAppGetsItBack()
+        #expect(!panelManager.theBarsWindowCouldBecomeKeyRightNow)
+    }
+
+    @Test func aDismissedBarKeepsNoClaimOnTheKeyboard() {
+        let (panelManager, _) = aBarShowingOnScreen()
+
+        panelManager.hideInputBar()
+        #expect(!panelManager.isShowingTheInputBar)
+        #expect(!panelManager.theBarIsAskingForTheKeyboard)
+        #expect(!panelManager.theBarsWindowCouldBecomeKeyRightNow)
+        #expect(panelManager.frameOfTheBarOnScreen == nil)
+    }
+
+    @Test func theBarsWindowGrowsWithAnAnswerAndShrinksBackForTheNextQuestion() {
+        let (panelManager, _) = aBarShowingOnScreen()
+        defer { panelManager.hideInputBar() }
+
+        guard let frameWhileComposing = panelManager.frameOfTheBarOnScreen else {
+            Issue.record("the bar was not on screen")
+            return
+        }
+
+        // An answer arrives and the content gets taller.
+        panelManager.resizeTheBarToFit(measuredContentHeight: 320)
+        guard let frameWhileShowingAnAnswer = panelManager.frameOfTheBarOnScreen else {
+            Issue.record("the bar left the screen while growing")
+            return
+        }
+        #expect(frameWhileShowingAnAnswer.height == 320)
+        #expect(frameWhileShowingAnAnswer.height > frameWhileComposing.height)
+        // The region that can take a click or a scroll really did grow, and it
+        // grew downward: the field stays exactly where the reader left it.
+        #expect(abs(frameWhileShowingAnAnswer.maxY - frameWhileComposing.maxY) < 0.5)
+        #expect(frameWhileShowingAnAnswer.contains(frameWhileComposing))
+
+        // The next question replaces the answer and the bar shrinks back.
+        panelManager.resizeTheBarToFit(measuredContentHeight: frameWhileComposing.height)
+        #expect(panelManager.frameOfTheBarOnScreen?.height == frameWhileComposing.height)
+
+        // And an answer nobody could read in one window is capped rather than
+        // drawn down the whole display.
+        panelManager.resizeTheBarToFit(measuredContentHeight: 5_000)
+        #expect(panelManager.frameOfTheBarOnScreen?.height
+                == OverlayEyeInteractionGeometry.tallestTheInputBarMayGrow)
+        #expect(Self.screenFrame.contains(panelManager.frameOfTheBarOnScreen ?? .infinite))
+    }
+
+    @Test func theBarStaysOnItsScreenAtEverySizeItCanBe() {
+        let (panelManager, _) = aBarShowingOnScreen()
+        defer { panelManager.hideInputBar() }
+
+        for measuredContentHeight in stride(from: CGFloat(40), through: 500, by: 20) {
+            panelManager.resizeTheBarToFit(measuredContentHeight: measuredContentHeight)
+            guard let barFrame = panelManager.frameOfTheBarOnScreen else {
+                Issue.record("the bar vanished at height \(measuredContentHeight)")
+                return
+            }
+            #expect(
+                Self.screenFrame.contains(barFrame),
+                "the bar at content height \(measuredContentHeight) was at \(barFrame), off the screen"
+            )
+        }
+    }
+}

@@ -27,8 +27,26 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var assistantState: CompanionAssistantState = .idle
     /// The most recent message the user submitted from the panel text field.
     @Published private(set) var latestUserMessageText: String?
-    /// The most recent assistant response (point tag stripped), shown in the panel.
+    /// The most recent assistant response (point tag stripped), shown in the
+    /// input bar under the eye.
     @Published private(set) var latestAssistantResponseText: String?
+
+    /// Bumped once every time a response is published — an answer or the
+    /// sentence explaining a failure.
+    ///
+    /// WHY A COUNTER AND NOT JUST THE TEXT. The bar under the eye renders one
+    /// exchange, so it has to be able to tell "the answer to the question I
+    /// just sent has arrived" apart from "the words from last time are still
+    /// sitting there". Watching the text cannot do that: ask the same question
+    /// twice and the text is identical both times, so nothing changes and the
+    /// bar would sit on "working…" forever.
+    @Published private(set) var assistantResponseGenerationCount: Int = 0
+
+    /// Whether `latestAssistantResponseText` is a failure sentence rather than
+    /// a real answer. The bar shows both in the same place deliberately — an
+    /// error is what came back from the question, not a separate event — and
+    /// uses this only to tint it.
+    @Published private(set) var latestResponseWasAFailureMessage: Bool = false
     @Published private(set) var hasAccessibilityPermission = false
     @Published private(set) var hasScreenRecordingPermission = false
     @Published private(set) var hasScreenContentPermission = false
@@ -582,7 +600,7 @@ final class CompanionManager: ObservableObject {
 
                 print("🧠 Conversation history: \(conversationHistory.count) exchanges")
 
-                latestAssistantResponseText = responseText
+                publishAssistantResponse(responseText, isAFailureMessage: false)
             } catch is CancellationError {
                 // User asked something else — response was interrupted
             } catch {
@@ -590,7 +608,10 @@ final class CompanionManager: ObservableObject {
                 // failure to one of a fixed set of sentences, and takes care of
                 // signing the user out when the funded tier says the session
                 // is gone.
-                latestAssistantResponseText = await describeAndHandle(assistantError: error)
+                publishAssistantResponse(
+                    await describeAndHandle(assistantError: error),
+                    isAFailureMessage: true
+                )
             }
 
             if !Task.isCancelled {
@@ -602,6 +623,15 @@ final class CompanionManager: ObservableObject {
                 scheduleTransientHideIfNeeded()
             }
         }
+    }
+
+    /// The single place a response reaches the UI, so the text, the "is this a
+    /// failure" flag and the generation counter can never disagree about which
+    /// exchange the reader is looking at.
+    private func publishAssistantResponse(_ responseText: String, isAFailureMessage: Bool) {
+        latestAssistantResponseText = responseText
+        latestResponseWasAFailureMessage = isAFailureMessage
+        assistantResponseGenerationCount += 1
     }
 
     /// If the cursor is in transient mode (user toggled the cursor off),

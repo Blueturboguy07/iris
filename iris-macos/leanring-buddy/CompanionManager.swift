@@ -401,7 +401,9 @@ final class CompanionManager: ObservableObject {
         case .pressed:
             // Don't toggle the panel while the onboarding video is playing
             guard !showOnboardingVideo else { return }
-            NotificationCenter.default.post(name: .clickyTogglePanel, object: nil)
+            // Opens the ask bar, not settings: onboarding tells the reader
+            // this shortcut is how they ask Iris anything.
+            NotificationCenter.default.post(name: .clickySummonAskBar, object: nil)
         case .released, .none:
             break
         }

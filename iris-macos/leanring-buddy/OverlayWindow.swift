@@ -464,6 +464,11 @@ struct BlueCursorView: View {
         }
         .frame(width: screenFrame.width, height: screenFrame.height)
         .ignoresSafeArea()
+        .onReceive(NotificationCenter.default.publisher(for: .clickySummonAskBar)) { _ in
+            // Every screen's overlay hears this; the guard inside means only
+            // the one currently showing the eye acts on it.
+            openTheInputBarFromTheSummonHotkey()
+        }
         .onAppear {
             // Set initial cursor position immediately before starting animation
             let mouseLocation = NSEvent.mouseLocation
@@ -589,6 +594,20 @@ struct BlueCursorView: View {
             // second settings surface that would immediately drift from it.
             NotificationCenter.default.post(name: .clickyTogglePanel, object: nil)
         }
+    }
+
+    /// The summon hotkey opens the ask bar, the same surface a click on the
+    /// eye opens.
+    ///
+    /// Onboarding tells the reader to "press control + option and ask me
+    /// anything", and for a while afterwards the hotkey opened the settings
+    /// panel — which no longer has anywhere to ask anything. A shortcut that
+    /// contradicts the sentence teaching it is worse than no shortcut.
+    private func openTheInputBarFromTheSummonHotkey() {
+        guard buddyIsVisibleOnThisScreen else { return }
+        guard !eyeActivation.theInputBarIsOpen else { return }
+        _ = eyeActivation.registerAClickOnTheEye()
+        presentTheInputBar()
     }
 
     private func presentTheInputBar() {

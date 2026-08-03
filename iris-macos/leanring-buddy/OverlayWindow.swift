@@ -2,9 +2,17 @@
 //  OverlayWindow.swift
 //  leanring-buddy
 //
-//  System-wide transparent overlay window for blue glowing cursor.
-//  One OverlayWindow is created per screen so the cursor buddy
+//  System-wide transparent overlay window for the Iris companion.
+//  One OverlayWindow is created per screen so the companion
 //  seamlessly follows the cursor across multiple monitors.
+//
+//  The companion is Iris's eye — the same eye the website draws, see
+//  `OverlayIrisEyeView.swift`. It used to be a blue triangle, which was a
+//  second cursor chasing the first one. Everything the triangle *did* is
+//  unchanged: it still rides beside the pointer, still flies a bezier arc to
+//  a `[POINT:...]` target and back, still hides itself on the screens that
+//  are not the one performing the flight. Only what is drawn has changed —
+//  and the eye now watches whatever it is meant to be watching.
 //
 
 import AppKit
@@ -52,24 +60,6 @@ class OverlayWindow: NSWindow {
     }
 }
 
-// Cursor-like triangle shape (equilateral)
-struct Triangle: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        let size = min(rect.width, rect.height)
-        let height = size * sqrt(3.0) / 2.0
-
-        // Top vertex
-        path.move(to: CGPoint(x: rect.midX, y: rect.midY - height / 1.5))
-        // Bottom left vertex
-        path.addLine(to: CGPoint(x: rect.midX - size / 2, y: rect.midY + height / 3))
-        // Bottom right vertex
-        path.addLine(to: CGPoint(x: rect.midX + size / 2, y: rect.midY + height / 3))
-        path.closeSubpath()
-        return path
-    }
-}
-
 // PreferenceKey for tracking bubble size
 struct SizePreferenceKey: PreferenceKey {
     static var defaultValue: CGSize = .zero
@@ -96,11 +86,11 @@ enum BuddyNavigationMode {
     case pointingAtTarget
 }
 
-// SwiftUI view for the blue glowing cursor pointer.
+// SwiftUI view for the Iris eye companion.
 // Each screen gets its own BlueCursorView. The view checks whether
 // the cursor is currently on THIS screen and only shows the buddy
-// triangle when it is. While a request is in flight, the triangle is
-// replaced by a spinner (capturing/thinking).
+// when it is. The eye is drawn in every assistant state; while a request
+// is in flight its track spins instead of a separate spinner appearing.
 struct BlueCursorView: View {
     let screenFrame: CGRect
     let isFirstAppearance: Bool
@@ -108,6 +98,18 @@ struct BlueCursorView: View {
 
     @State private var cursorPosition: CGPoint
     @State private var isCursorOnThisScreen: Bool
+
+    /// Whether the pointer has moved recently enough to be worth watching,
+    /// or has sat still long enough for the eye to start wandering instead.
+    /// Seeded in `init` so the eye never starts out believing the pointer has
+    /// been frozen since the machine booted.
+    @State private var gazeTracker: IrisEyeGazeTracker
+
+    /// The eye drawn on the overlay. 32pt across — double the 16pt triangle it
+    /// replaced, because a lid, an iris and a pupil need room to read as an
+    /// eye at all, and the whole point is that it is recognisably the eye from
+    /// the website.
+    private static let overlayEyeGeometry = IrisEyePupilGeometry(eyeDiameter: 32)
 
     init(screenFrame: CGRect, isFirstAppearance: Bool, companionManager: CompanionManager) {
         self.screenFrame = screenFrame
@@ -121,6 +123,10 @@ struct BlueCursorView: View {
         let localY = screenFrame.height - (mouseLocation.y - screenFrame.origin.y)
         _cursorPosition = State(initialValue: CGPoint(x: localX + 35, y: localY + 25))
         _isCursorOnThisScreen = State(initialValue: screenFrame.contains(mouseLocation))
+        _gazeTracker = State(initialValue: IrisEyeGazeTracker(
+            pointerLocation: mouseLocation,
+            observedAt: ProcessInfo.processInfo.systemUptime
+        ))
     }
     @State private var timer: Timer?
     @State private var welcomeText: String = ""
@@ -134,9 +140,16 @@ struct BlueCursorView: View {
     /// The buddy's current behavioral mode (following cursor, navigating, or pointing).
     @State private var buddyNavigationMode: BuddyNavigationMode = .followingCursor
 
-    /// The rotation angle of the triangle in degrees. Default is -35° (cursor-like).
-    /// Changes to face the direction of travel when navigating to a target.
-    @State private var triangleRotationDegrees: Double = -35.0
+    /// Where the iris sits inside the lid right now, in SwiftUI points.
+    /// Recomputed every frame by `updateWhereTheEyeIsLooking`.
+    @State private var irisGlanceOffset: CGSize = .zero
+
+    /// What the eye is watching, in AppKit screen coordinates. `nil` means
+    /// "watch the pointer" — the ordinary case. It is set to an element's
+    /// location for the duration of the flight to it and the pointing that
+    /// follows, so the eye is looking at the thing it flew to rather than
+    /// back over its shoulder at a mouse it has just left behind.
+    @State private var whatTheEyeIsWatchingInScreenCoordinates: CGPoint?
 
     /// Speech bubble text shown when pointing at a detected element.
     @State private var navigationBubbleText: String = ""
@@ -151,7 +164,7 @@ struct BlueCursorView: View {
     /// Invalidated when the flight completes, is canceled, or the view disappears.
     @State private var navigationAnimationTimer: Timer?
 
-    /// Scale factor applied to the buddy triangle during flight. Grows to ~1.3x
+    /// Scale factor applied to the buddy during flight. Grows to ~1.3x
     /// at the midpoint of the arc and shrinks back to 1.0x on landing, creating
     /// an energetic "swooping" feel.
     @State private var buddyFlightScale: CGFloat = 1.0
@@ -293,40 +306,41 @@ struct BlueCursorView: View {
                     }
             }
 
-            // Blue triangle cursor — shown when idle or while pointing at an element.
-            // Both states (triangle, spinner) stay in the view tree permanently
-            // and cross-fade via opacity so SwiftUI doesn't remove/re-insert
-            // them (which caused a visible cursor "pop").
+            // Iris's eye. One view for every assistant state — there is no
+            // longer a separate spinner to cross-fade with, because the
+            // thinking mood spins the eye's own track instead, which is what
+            // the website does. It stays in the view tree permanently and
+            // fades via opacity so SwiftUI never removes and re-inserts it
+            // (which caused a visible "pop").
             //
             // During cursor following: fast spring animation for snappy tracking.
             // During navigation: NO implicit animation — the frame-by-frame bezier
             // timer controls position directly at 60fps for a smooth arc flight.
-            Triangle()
-                .fill(DS.Colors.overlayCursorBlue)
-                .frame(width: 16, height: 16)
-                .rotationEffect(.degrees(triangleRotationDegrees))
-                .shadow(color: DS.Colors.overlayCursorBlue, radius: 8 + (buddyFlightScale - 1.0) * 20, x: 0, y: 0)
-                .scaleEffect(buddyFlightScale)
-                .opacity(buddyIsVisibleOnThisScreen && (companionManager.assistantState == .idle || companionManager.assistantState == .pointing) ? cursorOpacity : 0)
-                .position(cursorPosition)
-                .animation(
-                    buddyNavigationMode == .followingCursor
-                        ? .spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0)
-                        : nil,
-                    value: cursorPosition
-                )
-                .animation(.easeIn(duration: 0.25), value: companionManager.assistantState)
-                .animation(
-                    buddyNavigationMode == .navigatingToTarget ? nil : .easeInOut(duration: 0.3),
-                    value: triangleRotationDegrees
-                )
-
-            // Blue spinner — shown while the AI is working (screenshot capture + Claude)
-            BlueCursorSpinnerView()
-                .opacity(buddyIsVisibleOnThisScreen && (companionManager.assistantState == .capturing || companionManager.assistantState == .thinking) ? cursorOpacity : 0)
-                .position(cursorPosition)
-                .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
-                .animation(.easeIn(duration: 0.15), value: companionManager.assistantState)
+            OverlayIrisEyeView(
+                geometry: Self.overlayEyeGeometry,
+                mood: eyeMood,
+                glanceOffset: irisGlanceOffset
+            )
+            // The eye carries its own soft ink drop shadow; this is the extra
+            // accent glow that only exists mid-flight, inherited from the
+            // triangle's swoop. At rest `buddyFlightScale` is 1.0 and the glow
+            // is fully transparent.
+            .shadow(
+                color: DS.Colors.overlayCursorBlue.opacity(Double(buddyFlightScale - 1.0) * 2.0),
+                radius: 6 + (buddyFlightScale - 1.0) * 20,
+                x: 0,
+                y: 0
+            )
+            .scaleEffect(buddyFlightScale)
+            .opacity(buddyIsVisibleOnThisScreen ? cursorOpacity : 0)
+            .position(cursorPosition)
+            .animation(
+                buddyNavigationMode == .followingCursor
+                    ? .spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0)
+                    : nil,
+                value: cursorPosition
+            )
+            .animation(.easeIn(duration: 0.25), value: companionManager.assistantState)
 
         }
         .frame(width: screenFrame.width, height: screenFrame.height)
@@ -378,7 +392,30 @@ struct BlueCursorView: View {
         }
     }
 
-    /// Whether the buddy triangle should be visible on this screen.
+    // MARK: - Mood
+
+    /// How the app's four assistant states read on the website's four-mood eye
+    /// (`components/iris/IrisEye.tsx`).
+    ///
+    /// | assistant state | eye mood | why |
+    /// | --- | --- | --- |
+    /// | `idle` | `idle` | at rest: it blinks, and it wanders once the pointer stops |
+    /// | `capturing` | `thinking` | taking the screenshot is work, and the spinner it replaced covered this state too |
+    /// | `thinking` | `thinking` | the track spins for as long as Claude is answering |
+    /// | `pointing`, still flying | `ready` | alert and locked on to the target, but it has not landed yet |
+    /// | `pointing`, arrived | `done` | the site's found-it green, held steady on the thing it is pointing at |
+    private var eyeMood: IrisEyeMood {
+        switch companionManager.assistantState {
+        case .idle:
+            return .idle
+        case .capturing, .thinking:
+            return .thinking
+        case .pointing:
+            return buddyNavigationMode == .pointingAtTarget ? .done : .ready
+        }
+    }
+
+    /// Whether the buddy should be visible on this screen.
     /// True when cursor is on this screen during normal following, or
     /// when navigating/pointing at a target on this screen. When another
     /// screen is navigating (detectedElementScreenLocation is set but this
@@ -402,8 +439,18 @@ struct BlueCursorView: View {
 
     private func startTrackingCursor() {
         timer = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { _ in
+            // `NSEvent.mouseLocation` is readable without an Accessibility
+            // grant, unlike an event tap, so the eye keeps watching the
+            // pointer even on a machine where permissions are only partly
+            // granted. That is why the pointer is polled rather than tapped.
             let mouseLocation = NSEvent.mouseLocation
             self.isCursorOnThisScreen = self.screenFrame.contains(mouseLocation)
+
+            // The gaze is recomputed on every tick no matter what the rest of
+            // the buddy is doing — it keeps watching while it flies out, while
+            // it points, and while it flies home — so this has to happen
+            // before any of the early returns below.
+            self.updateWhereTheEyeIsLooking(pointerLocation: mouseLocation)
 
             // During forward flight or pointing, the buddy is NOT interrupted by
             // mouse movement — it completes its full animation and return flight.
@@ -442,6 +489,58 @@ struct BlueCursorView: View {
         return CGPoint(x: x, y: y)
     }
 
+    /// The exact inverse of `convertScreenPointToSwiftUICoordinates`: takes a
+    /// point in this overlay's SwiftUI space back out to AppKit screen space.
+    /// Needed because the eye's position is tracked in SwiftUI coordinates but
+    /// the glance maths works entirely in screen coordinates, so that the one
+    /// y flip in the whole feature lives in `IrisEyePupilGeometry` and nowhere
+    /// else.
+    private func convertSwiftUIPointToScreenCoordinates(_ swiftUIPoint: CGPoint) -> CGPoint {
+        let x = swiftUIPoint.x + screenFrame.origin.x
+        let y = (screenFrame.origin.y + screenFrame.height) - swiftUIPoint.y
+        return CGPoint(x: x, y: y)
+    }
+
+    // MARK: - Where the Eye Is Looking
+
+    /// Recomputes where the iris should sit, in SwiftUI points relative to the
+    /// centre of the lid.
+    ///
+    /// The eye watches whatever it has been told to watch — an element while
+    /// it is flying to one or pointing at one, and otherwise the pointer — and
+    /// falls back to the website's `iris-look` wander once the pointer has sat
+    /// still for a few seconds, because an eye locked onto a motionless mouse
+    /// looks like a paused video rather than a companion.
+    private func updateWhereTheEyeIsLooking(pointerLocation: CGPoint) {
+        let now = ProcessInfo.processInfo.systemUptime
+        gazeTracker.observePointer(at: pointerLocation, timestamp: now)
+
+        let eyeCenterInScreenCoordinates = convertSwiftUIPointToScreenCoordinates(cursorPosition)
+
+        // Watching a specific element beats everything else, including the
+        // idle wander: the whole reason the eye flew over there is to say
+        // "this one".
+        if let whatTheEyeIsWatchingInScreenCoordinates {
+            irisGlanceOffset = Self.overlayEyeGeometry.glanceOffsetInSwiftUICoordinates(
+                eyeCenterInAppKitScreenCoordinates: eyeCenterInScreenCoordinates,
+                pointerLocationInAppKitScreenCoordinates: whatTheEyeIsWatchingInScreenCoordinates
+            )
+            return
+        }
+
+        switch gazeTracker.gazeSource(at: now) {
+        case .pointer:
+            irisGlanceOffset = Self.overlayEyeGeometry.glanceOffsetInSwiftUICoordinates(
+                eyeCenterInAppKitScreenCoordinates: eyeCenterInScreenCoordinates,
+                pointerLocationInAppKitScreenCoordinates: pointerLocation
+            )
+        case .idleWander:
+            irisGlanceOffset = Self.overlayEyeGeometry.idleWanderOffsetInSwiftUICoordinates(
+                atElapsedSeconds: now
+            )
+        }
+    }
+
     // MARK: - Element Navigation
 
     /// Starts animating the buddy toward a detected UI element location.
@@ -474,6 +573,11 @@ struct BlueCursorView: View {
         buddyNavigationMode = .navigatingToTarget
         isReturningToCursor = false
 
+        // Look at the element for the whole flight, not at the mouse being
+        // left behind. The unoffset element location is used rather than the
+        // clamped landing spot so the eye is aimed at the thing itself.
+        whatTheEyeIsWatchingInScreenCoordinates = screenLocation
+
         animateBezierFlightArc(to: clampedTarget) {
             guard self.buddyNavigationMode == .navigatingToTarget else { return }
             self.startPointingAtElement()
@@ -481,9 +585,14 @@ struct BlueCursorView: View {
     }
 
     /// Animates the buddy along a quadratic bezier arc from its current position
-    /// to the specified destination. The triangle rotates to face its direction
-    /// of travel (tangent to the curve) each frame, scales up at the midpoint
-    /// for a "swooping" feel, and the glow intensifies during flight.
+    /// to the specified destination, scaling up at the midpoint for a
+    /// "swooping" feel with the glow intensifying during flight.
+    ///
+    /// The triangle used to rotate to face its direction of travel each frame.
+    /// An eye must not: a rotating eye reads as a spinning object rather than
+    /// as something looking where it is going. It keeps its heading instead by
+    /// aiming its gaze at the target, which `updateWhereTheEyeIsLooking` does
+    /// every frame for the whole flight.
     private func animateBezierFlightArc(
         to destination: CGPoint,
         onComplete: @escaping () -> Void
@@ -542,16 +651,6 @@ struct BlueCursorView: View {
 
             self.cursorPosition = CGPoint(x: bezierX, y: bezierY)
 
-            // Rotation: face the direction of travel by computing the tangent
-            // to the bezier curve. B'(t) = 2(1-t)(P1-P0) + 2t(P2-P1)
-            let tangentX = 2.0 * oneMinusT * (controlPoint.x - startPosition.x)
-                         + 2.0 * t * (endPosition.x - controlPoint.x)
-            let tangentY = 2.0 * oneMinusT * (controlPoint.y - startPosition.y)
-                         + 2.0 * t * (endPosition.y - controlPoint.y)
-            // +90° offset because the triangle's "tip" points up at 0° rotation,
-            // and atan2 returns 0° for rightward movement
-            self.triangleRotationDegrees = atan2(tangentY, tangentX) * (180.0 / .pi) + 90.0
-
             // Scale pulse: sin curve peaks at midpoint of the flight.
             // Buddy grows to ~1.3x at the apex, then shrinks back to 1.0x on landing.
             let scalePulse = sin(linearProgress * .pi)
@@ -563,9 +662,6 @@ struct BlueCursorView: View {
     /// scale-in entrance and variable-speed character streaming.
     private func startPointingAtElement() {
         buddyNavigationMode = .pointingAtTarget
-
-        // Rotate back to default pointer angle now that we've arrived
-        triangleRotationDegrees = -35.0
 
         // Reset navigation bubble state — start small for the scale-bounce entrance
         navigationBubbleText = ""
@@ -634,6 +730,9 @@ struct BlueCursorView: View {
         buddyNavigationMode = .navigatingToTarget
         isReturningToCursor = true
 
+        // Done pointing — look where it is going, which is back at the mouse.
+        whatTheEyeIsWatchingInScreenCoordinates = nil
+
         animateBezierFlightArc(to: cursorWithTrackingOffset) {
             self.finishNavigationAndResumeFollowing()
         }
@@ -656,7 +755,7 @@ struct BlueCursorView: View {
         navigationAnimationTimer = nil
         buddyNavigationMode = .followingCursor
         isReturningToCursor = false
-        triangleRotationDegrees = -35.0
+        whatTheEyeIsWatchingInScreenCoordinates = nil
         buddyFlightScale = 1.0
         navigationBubbleText = ""
         navigationBubbleOpacity = 0.0
@@ -691,37 +790,6 @@ struct BlueCursorView: View {
             self.welcomeText.append(self.fullWelcomeMessage[index])
             currentIndex += 1
         }
-    }
-}
-
-// MARK: - Blue Cursor Spinner
-
-/// A small blue spinning indicator that replaces the triangle cursor
-/// while the AI is working on a request.
-private struct BlueCursorSpinnerView: View {
-    @State private var isSpinning = false
-
-    var body: some View {
-        Circle()
-            .trim(from: 0.15, to: 0.85)
-            .stroke(
-                AngularGradient(
-                    colors: [
-                        DS.Colors.overlayCursorBlue.opacity(0.0),
-                        DS.Colors.overlayCursorBlue
-                    ],
-                    center: .center
-                ),
-                style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
-            )
-            .frame(width: 14, height: 14)
-            .rotationEffect(.degrees(isSpinning ? 360 : 0))
-            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.6), radius: 6, x: 0, y: 0)
-            .onAppear {
-                withAnimation(.linear(duration: 0.8).repeatForever(autoreverses: false)) {
-                    isSpinning = true
-                }
-            }
     }
 }
 

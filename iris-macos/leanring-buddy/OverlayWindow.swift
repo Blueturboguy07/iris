@@ -121,7 +121,8 @@ struct BlueCursorView: View {
         let mouseLocation = NSEvent.mouseLocation
         let localX = mouseLocation.x - screenFrame.origin.x
         let localY = screenFrame.height - (mouseLocation.y - screenFrame.origin.y)
-        _cursorPosition = State(initialValue: CGPoint(x: localX + 35, y: localY + 25))
+        // Starts at rest in the top-left rather than beside the pointer.
+        _cursorPosition = State(initialValue: CGPoint(x: 44, y: 60))
         _isCursorOnThisScreen = State(initialValue: screenFrame.contains(mouseLocation))
         _gazeTracker = State(initialValue: IrisEyeGazeTracker(
             pointerLocation: mouseLocation,
@@ -158,6 +159,20 @@ struct BlueCursorView: View {
 
     /// The cursor position at the moment navigation started, used to detect
     /// if the user moves the cursor enough to cancel the navigation.
+    /// Where the eye lives when it is not flying somewhere: pinned to the top
+    /// left of this screen, below the menu bar.
+    ///
+    /// It used to trail the pointer by a fixed offset, which meant a thing
+    /// moving in the corner of your vision whenever you moved the mouse — the
+    /// eye already says where it is attending by *looking*, so it does not
+    /// also need to chase. Staying put makes it findable: the same place every
+    /// time, rather than wherever the cursor happened to leave it.
+    private var restingPositionInSwiftUICoordinates: CGPoint {
+        // Half the eye's own size plus a margin, so the shape clears the menu
+        // bar rather than tucking under it.
+        CGPoint(x: 44, y: 60)
+    }
+
     @State private var cursorPositionWhenNavigationStarted: CGPoint = .zero
 
     /// Timer driving the frame-by-frame bezier arc flight animation.
@@ -351,7 +366,7 @@ struct BlueCursorView: View {
             isCursorOnThisScreen = screenFrame.contains(mouseLocation)
 
             let swiftUIPosition = convertScreenPointToSwiftUICoordinates(mouseLocation)
-            self.cursorPosition = CGPoint(x: swiftUIPosition.x + 35, y: swiftUIPosition.y + 25)
+            self.cursorPosition = self.restingPositionInSwiftUICoordinates
 
             startTrackingCursor()
 
@@ -473,11 +488,12 @@ struct BlueCursorView: View {
                 return
             }
 
-            // Normal cursor following
-            let swiftUIPosition = self.convertScreenPointToSwiftUICoordinates(mouseLocation)
-            let buddyX = swiftUIPosition.x + 35
-            let buddyY = swiftUIPosition.y + 25
-            self.cursorPosition = CGPoint(x: buddyX, y: buddyY)
+            // At rest the eye holds its corner. Only the gaze, updated above,
+            // responds to the pointer.
+            let resting = self.restingPositionInSwiftUICoordinates
+            if self.cursorPosition != resting {
+                self.cursorPosition = resting
+            }
         }
     }
 
@@ -723,17 +739,18 @@ struct BlueCursorView: View {
     private func startFlyingBackToCursor() {
         let mouseLocation = NSEvent.mouseLocation
         let cursorInSwiftUI = convertScreenPointToSwiftUICoordinates(mouseLocation)
-        let cursorWithTrackingOffset = CGPoint(x: cursorInSwiftUI.x + 35, y: cursorInSwiftUI.y + 25)
+        let flightHome = restingPositionInSwiftUICoordinates
 
         cursorPositionWhenNavigationStarted = cursorInSwiftUI
 
         buddyNavigationMode = .navigatingToTarget
         isReturningToCursor = true
 
-        // Done pointing — look where it is going, which is back at the mouse.
+        // Done pointing — release the target so the gaze returns to the pointer
+        // while it flies back to its corner.
         whatTheEyeIsWatchingInScreenCoordinates = nil
 
-        animateBezierFlightArc(to: cursorWithTrackingOffset) {
+        animateBezierFlightArc(to: flightHome) {
             self.finishNavigationAndResumeFollowing()
         }
     }

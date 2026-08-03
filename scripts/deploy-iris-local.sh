@@ -64,6 +64,21 @@ echo "Installing to $INSTALL_PATH..."
 rm -rf "$INSTALL_PATH"
 cp -R "$BUILT_APP" "$INSTALL_PATH"
 
+# Point the app at a local dev server when asked. The funded assistant
+# endpoints only exist on the iris-assistant branch, so until that ships a
+# build talking to publikhq.com gets a 404 and reports it as "something went
+# wrong reaching the assistant" - which reads as a bug in the app.
+if [ -n "${IRIS_API_BASE_URL:-}" ]; then
+  echo "Pointing at $IRIS_API_BASE_URL..."
+  /usr/libexec/PlistBuddy -c "Add :PublikAPIBaseURL string $IRIS_API_BASE_URL" \
+    "$INSTALL_PATH/Contents/Info.plist" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Set :PublikAPIBaseURL $IRIS_API_BASE_URL" \
+       "$INSTALL_PATH/Contents/Info.plist"
+fi
+
+# Signing must come after any Info.plist edit: changing a file inside the
+# bundle invalidates the seal, and macOS refuses to launch a bundle whose
+# signature no longer matches its contents.
 echo "Signing with $SIGNING_IDENTITY..."
 codesign --force --deep --options runtime --sign "$SIGNING_IDENTITY" "$INSTALL_PATH"
 xattr -dr com.apple.quarantine "$INSTALL_PATH" 2>/dev/null || true

@@ -1,6 +1,9 @@
 # How Iris talks to the catalog apps
 
-Status: **designed, not built.** Nothing in this document exists in code yet.
+Status: **phases 1–3 are built and running.** The shared library is
+`packages/app-link` (37 tests), cue speaks it, and Iris is a client that
+verifies who it is talking to. Phases 4–6 — the remaining eight apps, Iris as
+an MCP server, App Intents — are still design.
 
 This is the answer to the last unbuilt item in the original brief — *"make
 existing software interface with apps, especially signed packaged"* — and to
@@ -20,8 +23,10 @@ The short answer is no, and the reason is specific enough to be worth keeping.
 All of it is passive and one-directional. Iris can watch an app. It cannot ask
 an app anything, and it cannot ask it to do anything.
 
-**And none of it is connected**: as of this writing not one of the nine apps
-emits a single publik log line. The cheap seam is documented and unimplemented.
+**And none of it was connected**: for a long time not one of the nine apps
+emitted a single publik log line. cue is now the first that does — and it holds
+them in memory where they can be queried, rather than only appending them to a
+file.
 
 ## The decision: MCP goes in Iris, not in the apps
 
@@ -151,6 +156,41 @@ process on the same machine is absurd.
   its identity. Acceptable for nine small open-source apps; would not be for a
   password manager.
 
+**What building it changed.** The paragraph above assumed every app could do
+this. Only the Swift ones can. **Node cannot read a Unix socket peer's
+credentials without a native addon** — libuv exposes no `getsockopt` on the
+handle, and there is no `SO_PEERCRED` equivalent in the standard library — so
+for cue, WhimprFlow's Electron shell, and every other Node app, the trust
+boundary is **the user account, not the calling application**. The per-session
+token does not close that gap: any process running as the user can read the
+instance file it came from.
+
+Three things follow, and all three are in the code:
+
+- On the Node target consent is required for **reads as well as actions**, and
+  nothing is ever granted silently. The plan's "defaulting read to
+  on-with-an-indicator is defensible" was predicated on signature verification
+  being available; where it is not, it is not defensible.
+- The consent sheet is handed a `verification` field and must word itself from
+  it. cue says *"A program identifying itself as 'Iris'"* and *"cue cannot
+  verify what this program really is"*, because a sheet that states a claim as
+  a fact is worse than no sheet at all.
+- A grant recorded under `code-signature` is **not honoured for a weaker
+  caller**. Without that rule, an app that gains verification later would hand
+  its stored grants to anything that claimed the same name.
+
+The asymmetry is fine, because the direction that matters most still works:
+**Iris verifies the app.** `AppLinkReport.mayBeSubmitted` is false for any peer
+whose signature did not check out, so an unverified answer is shown to the user
+and can never reach the public breaks tally. Proven both ways with a
+socketpair — unsigned peer `none`, Developer-ID peer `codeSignature`, and the
+same signed binary against a different Team ID `none`.
+
+There is one more Windows gap of the same kind: **libuv gives no way to pass
+`FILE_FLAG_FIRST_PIPE_INSTANCE`**, so a Node server cannot claim its pipe name
+exclusively — the exact trap named above, unavoidable from Node. MSIX packaging
+or a native addon is the fix, and MSIX was already an open question below.
+
 **Consent lives in the target app, and must be built — no OS gives it to us.**
 A UDS, a named pipe and a loopback port are all invisible to TCC and to
 Windows' permission model. So: on first connection the *target app* shows a
@@ -189,16 +229,15 @@ valid as the *event shape*; the file on disk stops being the only channel.
 
 ## Phasing
 
-1. **The shared library** (1–2 weeks): transport, framing, instance file,
-   signature verification, consent sheet, ring buffer.
-2. **One app end to end** — `cue` is the natural candidate: flagship, owned,
-   already notarized. Prove discovery → auth → consent → query before
-   committing nine binaries.
-3. **Iris as client**, replacing log-file reads with live queries. The breaks
-   tally and patch pipeline immediately get better repro data, which is their
-   weakest input today.
-4. **The remaining eight apps** — roughly half a day each once the library
-   exists.
+1. ~~**The shared library**~~ — **built**: `packages/app-link`, zero
+   dependencies, no build step, 37 tests run against a real socket. Transport,
+   framing, instance file, consent store, ring buffer.
+2. ~~**One app end to end**~~ — **built**: cue. Discovery → auth → consent →
+   query, verified against the running app rather than a mock.
+3. ~~**Iris as client**~~ — **built**: `iris-macos/leanring-buddy/AppLink*.swift`.
+   Includes the peer verification the Node side cannot do.
+4. **The remaining eight apps** — roughly half a day each now that the library
+   exists and one app has proved the shape.
 5. **Iris as MCP server**, aggregating the nine sockets into one MCP surface
    for Claude Desktop / Cursor / Raycast. Two constraints from the research
    decide its shape:

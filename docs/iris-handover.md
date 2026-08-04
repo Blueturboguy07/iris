@@ -22,8 +22,8 @@ piece is `docs/iris-app-integration-plan.md`.
 | Mods + interviews | `/api/iris/mods`, `/api/iris/interview` | 201 / 401 |
 | Reliability page | `/reliability` | 200, unlinked by design |
 
-Migrations 0003, 0006, 0007, 0008, 0009 applied. Tests: **web 114, macOS 175,
-Windows 230.**
+Migrations 0003, 0006, 0007, 0008, 0009 applied. Tests: **web 151, macOS 193,
+Windows 230, cue 17.**
 
 ## The desktop apps
 
@@ -44,6 +44,35 @@ VM needs.
 **Tauri** (`iris-desktop/`): frozen at 0.1.4. Superseded, but still the
 behavioural spec for anything being ported.
 
+## The app link
+
+Iris can now ask a running catalog app what it is doing, rather than inferring
+it from a screenshot. Newline-delimited JSON-RPC over a Unix socket, discovered
+through one instance file per running app.
+
+| Piece | Where | State |
+|---|---|---|
+| Shared library | `packages/app-link` (zero deps, no build step) | 37 tests, real sockets |
+| First app | `~/cue` branch `app-link` — **not pushed** | 17 tests, verified live |
+| Iris client | `iris-macos/leanring-buddy/AppLink*.swift` | 15 tests + live probe |
+| Vendoring | `pnpm applink:vendor <repo>` | stamps the source commit |
+
+**cue's branch is local and unpushed.** It changes a shipped app, so it is the
+user's call. Nothing in publik depends on it being merged.
+
+Two things to know before extending it:
+
+- **Node cannot verify its peer.** No native addon means no socket peer
+  credentials, so on the app side the boundary is the user account, not the
+  calling app. That is why consent covers reads too, why nothing is granted
+  silently, and why the sheet says "a program identifying itself as Iris". Iris
+  verifies in the other direction, and `mayBeSubmitted` gates the breaks tally
+  on it. Swift apps will do better; write them with a `verifyPeer` hook.
+- **What goes in `get_state` is the whole question.** cue's answer is
+  `src/applink-state.js`, and its rule is *counts, never content*: a transcript
+  turn count and a timestamp, never a word of the transcript; which API keys are
+  set, never a key. Copy that rule before copying the plumbing.
+
 ## What is NOT done
 
 1. **No installable build exists.** No `iris-v*` tag has ever been cut; the
@@ -59,8 +88,9 @@ behavioural spec for anything being ported.
    dispatch PAT or webhook.
 4. **Telemetry has no producers.** Not one of the nine apps emits a log line,
    so the breaks tally cannot fill.
-5. **App integration is designed, not built** —
-   `docs/iris-app-integration-plan.md`. The last item from the original brief.
+5. **App integration reaches one app of nine.** The library, cue, and Iris's
+   client are built and verified against a running app; the other eight apps
+   have not been wired up. `docs/iris-app-integration-plan.md`, phase 4.
 6. **Windows integration is unproven**: DPAPI, `iris://` delivery by the OS, a
    real OAuth hop, capture and pointing have never run on Windows.
 7. **Grounding lab milestone 2** — click-and-observe verification, and the VM
@@ -134,6 +164,16 @@ enough to choose an architecture, not to quote as a benchmark.
   — and the `🔑` permission lines appear immediately.
 - **The desktop apps are separate projects.** Root `tsconfig`/`vitest` exclude
   `iris-windows/` and `iris-macos/`; each has its own runner and dependencies.
+- **electron-builder's `files` is an allowlist.** Adding a directory to an
+  Electron app and forgetting it there produces a build that runs perfectly
+  from source and throws on `require` the moment it is packaged.
+- **A native dialog from a dock-hidden app cannot be clicked.** cue calls
+  `app.dock.hide()`, so it never becomes frontmost, and
+  `dialog.showMessageBox` appeared and then ignored every click. Ask inside the
+  app's own window instead. In cue specifically, any new full-screen UI must
+  also be listed in *both* the `pointer-events` rule in `styles.css` and the
+  click-through selector in `renderer.js`, or the window stays transparent to
+  the mouse.
 
 ## The lesson worth keeping
 

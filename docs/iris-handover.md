@@ -1,217 +1,144 @@
-# Iris assistant — where it stands and what needs a human
+# Iris — where it stands
 
-Working notes for the `iris-assistant` branch. The plan this follows is
-`~/.claude/plans/sparkling-bubbling-wilkinson.md`.
+Working notes for whoever picks this up. The plan it follows is
+`~/.claude/plans/sparkling-bubbling-wilkinson.md`; the one designed-but-unbuilt
+piece is `docs/iris-app-integration-plan.md`.
 
-## What needs you (nothing below can be done by an agent)
+**Shipped.** 95 commits merged to `main` and deployed to production on
+2026-08-04. Everything marked *live* below was verified against
+`https://publikhq.com`, not staging.
 
-Ordered by what unblocks the most.
+## Live in production
 
-1. ~~Supabase redirect allow list~~ — **done**. `iris://auth/callback**` is
-   in the allow list. The glob matters: the CSRF state token rides inside
-   `redirect_to`, so an exact-match entry would fail at the authorize step.
+| Surface | Route | Verified |
+|---|---|---|
+| Funded model proxy | `POST /api/assistant/chat` | 401 without a token; SSE stream with one |
+| Guide sessions | `POST/GET/PATCH /api/iris/sessions` | 201, progress round-trips |
+| Guides + flows | `GET /api/iris/guides/[slug]` | 200, incl. the `anthropic-api-key` flow |
+| App catalog | `GET /api/iris/apps` | 200, 10 apps, 4 with bundle ids |
+| Breaks tally | `GET /api/iris/breaks` | 200 |
+| Fix-tier routing | `GET /api/assistant/route` | known/unknown → tier |
+| Telemetry | `POST/DELETE /api/telemetry` | 202 / consent withdrawal |
+| Mods + interviews | `/api/iris/mods`, `/api/iris/interview` | 201 / 401 |
+| Reliability page | `/reliability` | 200, unlinked by design |
 
-2. **Confirm the rate limiter on first deploy.** Upstash is provisioned
-   (`iris-ratelimit`, Free, `iad1`) and connected to the project, injecting
-   `UPSTASH_REDIS_REST_KV_REST_API_URL` / `..._TOKEN`. Those names are what
-   `lib/ratelimit.ts` resolves, and the resolver is unit-tested against every
-   naming variant — but the credentials themselves could not be exercised
-   locally, because Vercel marks Marketplace values Sensitive and `vercel env
-   pull` returns `[SENSITIVE]` placeholders. After the first deploy, send the
-   assistant endpoint 21 requests in five minutes: the 21st should come back
-   `429 rate_limited`. If instead everything is allowed, the limiter is
-   failing open and the credentials did not resolve.
+Migrations 0003, 0006, 0007, 0008, 0009 applied. Tests: **web 114, macOS 175,
+Windows 230.**
 
-3. ~~Re-grant Screen Recording~~ — **fixed properly**. The cause was ad-hoc
-   signing: `codesign --sign -` embeds a hash of the binary, so every rebuild
-   is a different app to macOS and the previous grant belongs to a build that
-   no longer exists. `/Applications/Iris.app` is now signed with the real
-   Developer ID certificate, whose designated requirement is bundle id + team
-   id with no hash, so a grant survives every future build. Use
-   `scripts/deploy-iris-local.sh` — it refuses to fall back to ad-hoc. Grant
-   once more (stale entries were cleared with `tccutil reset`) and it sticks.
+## The desktop apps
 
-4. **Watch the Anthropic balance.** Credits are live and the funded tier is
-   metered per user (20 requests / 5 min, 150k tokens / day), but the ceiling
-   is the org balance. Auto-reload is off.
+**macOS** (`iris-macos/`, fork of farzaa/clicky): guides render, `iris://`
+links open them, setup recovery walks a missing prerequisite, sign-in works,
+the watch loop notices when a step is done, app inventory reports installed
+versions and updates, and the whole conversation happens at the eye — 64pt,
+pinned top-left, pupil tracking the pointer, clickable, answer inline, eye
+becomes a settings gear while open.
 
-5. **For the patch pipeline (Phase 8), when you want to switch it on:**
-   - Org-level secret `ANTHROPIC_API_KEY` on the GitHub org, so every catalog
-     repo's workflow can use it.
-   - A PAT with `repo` + `workflow` scope as `GITHUB_DISPATCH_TOKEN` in
-     Vercel. The existing `GITHUB_TOKEN` is read-only and cannot dispatch.
-   - An org webhook (pull_request + release events) pointing at
-     `/api/github/webhook`, with its shared secret as `GITHUB_WEBHOOK_SECRET`.
-   - Copy `docs/templates/publik-patch-agent.yml` into each app repo and fill
-     in that repo's toolchain setup step.
-   - **Review every pull request the agent opens.** Nothing auto-merges, by
-     design: a green suite is not a correct fix, and signed releases are
-     downstream.
+**Windows** (`iris-windows/`, fork of tekram/clicky-windows): forked, stripped
+of voice and non-Anthropic providers, pointed at the same transports; the guide
+panel is a byte-for-byte copy of `iris-desktop/ui/app.js` behind a 60-line
+Electron bridge. Tested in CI on `windows-latest`, because this machine cannot
+run Windows — no hypervisor, and ~6 GB free against the ~70 GB a Windows 11 ARM
+VM needs.
 
-6. **Merge or keep reviewing `iris-assistant`.** 32 commits. Nothing has been
-   merged to `main`.
+**Tauri** (`iris-desktop/`): frozen at 0.1.4. Superseded, but still the
+behavioural spec for anything being ported.
 
-## What works, and how it was checked
+## What is NOT done
 
-Everything here was exercised against the live project, not just unit-tested.
+1. **No installable build exists.** No `iris-v*` tag has ever been cut; the
+   only Iris in the world is the hand-signed copy in `/Applications` here.
+   Tagging runs `.github/workflows/iris-release.yml` — build, Developer-ID
+   sign, notarize, staple, verify it opens.
+2. **No streaming.** `ClaudeAPI` streams over SSE but `CompanionManager`
+   discards every chunk (`onTextChunk: { _ in }`) and publishes once at the
+   end, so answers land as a block. A pipeline change, not a UI one.
+3. **The patch pipeline has never been switched on.** Tables, routes and the
+   workflow template exist and the promotion rules are verified against
+   production — but no repo has the workflow, and there is no org secret,
+   dispatch PAT or webhook.
+4. **Telemetry has no producers.** Not one of the nine apps emits a log line,
+   so the breaks tally cannot fill.
+5. **App integration is designed, not built** —
+   `docs/iris-app-integration-plan.md`. The last item from the original brief.
+6. **Windows integration is unproven**: DPAPI, `iris://` delivery by the OS, a
+   real OAuth hop, capture and pointing have never run on Windows.
+7. **Grounding lab milestone 2** — click-and-observe verification, and the VM
+   to run it unattended.
 
-| Piece | Evidence |
-|---|---|
-| Funded model proxy | Real Supabase JWT → SSE stream; asked for `claude-opus-5` with `max_tokens: 999999`, server pinned Haiku and capped at 2048 |
-| Guide sessions | create → token, PATCH → progress stored, read back correct, wrong token → 404 |
-| Breaks tally suppression | 4 installs on one break → counts `null`; 6 → published. Suppression lives in the SQL view, so UI code cannot leak a small count |
-| Telemetry privacy | anon refused raw rows and the rollup (`42501`); consent withdrawal deletes an install's history |
-| Fix recipe promotion | 2 successes → still candidate; 3rd → validated; 3 failures → demoted |
-| BYO key isolation | exactly one function in the app writes `x-api-key`, it takes no URL, and a final gate rejects that header on any host but `api.anthropic.com` |
-| Swift app | 99 tests; host allowlist byte-identical to `main.rs` |
-| Guides in the desktop app | live `iris://` link fetched cue v3 from publikhq.com and opened it at step 1 of 11; malformed and hostile links each rejected distinctly without crashing |
-| Setup recovery | a missing prerequisite diverts into `setupSteps`; re-check advances to the saved step; skipping is possible; detour progress cannot overwrite guide progress |
-| Mods and interviews | demand accumulated 1-2-3 on one row, phrasing variants collapsed onto it, anon refused both RPC and direct insert while still reading the public list |
+## Needs a person, not an agent
 
-## The face is Iris's now, not Clicky's
+- **Cut a release** (`git tag iris-v0.3.0 && git push --tags`) once the app has
+  been used enough to trust it. Publishing is easier to do than undo.
+- **Patch pipeline, when wanted:** org-level `ANTHROPIC_API_KEY`; a PAT with
+  `repo`+`workflow` as `GITHUB_DISPATCH_TOKEN` (the existing `GITHUB_TOKEN` is
+  read-only and cannot dispatch); an org webhook to `/api/github/webhook` with
+  its secret as `GITHUB_WEBHOOK_SECRET`; and
+  `docs/templates/publik-patch-agent.yml` copied into each app repo with its
+  toolchain step filled in. **Review every PR the agent opens** — nothing
+  auto-merges, deliberately.
+- **Watch the Anthropic balance.** Metered per user (20 req/5 min, 150k
+  tokens/day) but the ceiling is the org balance, and auto-reload is off.
+- **The twenty-minute experiment** in the integration plan: does the macOS TCC
+  Automation prompt fire between two apps signed with the same Team ID?
 
-The Swift app used to wear Clicky's skin (Tailwind-blue capsule buttons on
-green-grey surfaces). It now wears the Tauri pill's, transcribed token-for-token
-from `iris-desktop/ui/styles.css`: the `rgba(14,14,16,.94)` glass shell with the
-periwinkle glow, border and backdrop blur; `#6f8cff` as the only accent;
-ink-filled primary pills with near-black text; 9–12pt type with the 18pt/650
-step heading; and the `cubic-bezier(0.16,1,0.3,1)` content/step entrances. The
-animated eye (blink, pointer-following iris, mood satellite, progress ring
-while a guide is open) lives in the panel header, the menu bar icon is its
-static twin, and the panel now glides when its content changes size, with the
-same ease-out cubic the pill's `glide_iris` used. The screen-pointing cursor is
-tinted the same accent. Still to come from the plan's UI section: the collapsed
-292×48 eye-pill state and corner anchoring — the panel still hangs from the
-status item.
+## Phase 0 result — how Iris points at things
 
-## What is built but not yet reachable by a user
+Called 2026-08-02 on a Safari page of 22 links + 19 buttons, the control type
+the key-minting flow needs. `iris-macos/tools/grounding-lab` measures this
+using the accessibility tree as automatically generated ground truth, so there
+is no hand-labelling.
 
-- **App awareness and updates.** `AppAwarenessService` and
-  `ToolVersionService` exist and `apps-config.ts` now carries `macBundleId`
-  (4 of 10 verified off real builds, the rest deliberately null). Nothing
-  polls them yet, so there is still no installed-app inventory and no update
-  detection.
-- **Mods and interviews have no desktop surface.** The API and tables are live
-  and verified; the first-install interview is never asked, and suggested mods
-  are never shown.
-- **The patch pipeline end to end.** Every route and table exists and the
-  promotion rules are verified, but no repo has the workflow yet and no break
-  has been dispatched.
-- **`/api/telemetry` has no producers.** The convention is written
-  (`docs/publik-sdk-convention.md`); no catalog app emits logs yet.
-
-## Windows
-
-`iris-windows/` is a fork of tekram/clicky-windows (Electron, MIT), stripped of
-voice and the non-Anthropic providers, pointed at publik's transports, and
-given the same deep-link, host-allowlist and guide behaviour as the Mac app.
-The guide panel is a byte-for-byte copy of `iris-desktop/ui/app.js` with a
-60-line bridge that synthesises the Tauri API from Electron's preload, so the
-two stay in step by construction rather than by discipline.
-
-**Testing happens in CI, not here.** This machine cannot run Windows: Apple's
-Virtualization.framework does not support Windows guests on Apple Silicon, and
-a Windows 11 ARM VM needs roughly 70 GB against the ~6 GB free when this was
-written. `.github/workflows/iris-windows.yml` runs on `windows-latest` —
-install, typecheck, lint, 230 tests, package, make the installer, and a launch
-smoke test that requires the packaged exe to survive 10 seconds.
-
-What CI still cannot prove, and a person on Windows must: the DPAPI round
-trip, `iris://` delivery by the OS (parsing is heavily tested, delivery is
-not), a real OAuth round trip, screen capture and pointing accuracy, and
-whether `localStorage` works on the guide window's `file://` origin.
-
-## Not started
-
-Milestone 2 of the grounding lab: click-and-observe verification, and the VM
-that would let it run unattended.
-
-## Watch loop — what it does and refuses to do
-
-Iris now notices when a step is actually done. The ladder is cost-ordered and
-stops at the first rung that answers: an unchanged screen (perceptual hash of a
-256px greyscale frame) costs nothing at all; a changed screen consults
-frontmost app, window title, tool version, git head and the accessibility tree;
-only a step that declares a `visual` expectation, and only when everything
-cheaper was inconclusive, reaches a model. At least 10s between model calls and
-at most 8 per step, enforced in code and tested — after the ceiling the loop
-keeps working on local signals.
-
-The privacy rules are constraints, not features, and each is tested: frames
-live in memory for the length of one call and are never written down; capture
-suspends while secure input is active; a step marked `sensitive` is never
-captured at all and completes from side signals only; an excluded app in front
-(seeded with five password managers) suppresses capture; the indicator is on
-for exactly as long as the loop is, and pause takes effect immediately.
-
-That `sensitive` flag is what makes the key-minting flow honest. The two steps
-where an Anthropic key is on screen take no screenshot whatsoever, and a test
-refuses any step that is both `sensitive` and `visual`, since pairing them
-would hand a model the exact frame the flag exists to withhold.
-
-## Two things to know before touching the Swift app
-
-- `iris-macos/CLAUDE.md` forbids terminal `xcodebuild` because it invalidates
-  TCC grants. That was lifted for this work; treat it as back in force.
-- `leanring-buddyUITests` fails under `CODE_SIGNING_ALLOWED=NO` — macOS kills
-  the unsigned runner. Pre-existing and unrelated; confirmed by removing all
-  new files and reproducing. Use `-only-testing:leanring-buddyTests`.
-
-## Grounding lab — the Phase 0 answer
-
-`iris-macos/tools/grounding-lab` measures how accurately a model can point at
-real macOS UI, using the accessibility tree as automatically generated ground
-truth. No hand-labelling. `swift build` in that directory; see its README.
-
-Measured on a Safari page whose 53 targets are 22 links + 19 buttons — the
-same kind of control the key-minting flow has to point at. Same screenshot,
-same instructions, 20 targets per model arm:
-
-| arm | coverage | hit | median error | p95 error | cost / 20 |
+| arm | coverage | hit | median err | p95 err | cost/20 |
 |---|---|---|---|---|---|
-| `ax` | 77% | **100%** | 0pt | 0pt | $0 |
+| `ax` | 77% | 100% | 0pt | 0pt | $0 |
 | `claude-haiku-4-5` | 90% | 83% | 2pt | 123pt | $0.070 |
 | `claude-sonnet-5` | 100% | 90% | 1pt | 32pt | $0.259 |
 
-**Haiku can ground.** That was the load-bearing unknown: the funded tier pays
-for a Haiku-class model, and if it could not point, grounding would have had
-to move behind bring-your-own-key and change the product. At 83% hit and 2pt
-median error on web controls, it can.
+**Decision: AX first, Haiku for what AX misses** — ~94% end to end at about
+$0.0008 a lookup, so grounding stays free on the funded tier and Sonnet is the
+bring-your-own-key default. **Design for the p95, not the median:** Haiku's
+123pt tail means a confident miss lands far away, and a cursor flying to the
+wrong control is worse than admitting uncertainty.
 
-**The hybrid the plan predicted is the right shape.** Accessibility is free,
-instant and exact where it reaches; it reached 77% here and 100% on Finder.
-Sending only what AX misses to Haiku gives roughly 94% end-to-end
-(0.77 + 0.23 x 0.90 x 0.83) at about $0.0008 per grounding, because most
-lookups never leave the machine. Sonnet is meaningfully better — and 3.7x the
-price — which makes it the right default for the bring-your-own-key tier
-rather than the funded one.
+Target type dominates the number — an earlier Finder capture full of
+near-identical filename rows scored 0/6. Re-run per surface; n=20 per arm is
+enough to choose an architecture, not to quote as a benchmark.
 
-**Read the p95, not just the median.** Haiku's 123pt p95 means that when it is
-wrong it is wrong by a long way. A cursor flying confidently to the wrong
-control is worse than an assistant saying it is unsure, so the pointing UI
-needs a confidence path — prefer AX when it has an answer, and be willing to
-describe the target in words instead of pointing at it.
+## Traps that cost real time here
 
-Caveat on strength of evidence: n=20 per arm on one page of one app. Enough to
-choose an architecture, not enough to quote as a benchmark. An earlier Finder
-capture full of near-identical filename rows scored 0/6 on that role, so
-per-surface variation is large and the harness should be re-run against each
-new flow rather than trusted once.
+- **Ad-hoc signing destroys TCC grants.** `codesign --sign -` embeds a hash of
+  the binary, so every rebuild is a new app to macOS and every permission is
+  lost. Use `scripts/deploy-iris-local.sh`, which signs with the real Developer
+  ID (designated requirement = bundle id + team, no hash) and refuses to fall
+  back to ad-hoc. This is what `iris-macos/CLAUDE.md` is really warning about.
+- **Supabase default privileges grant EXECUTE on new functions to `anon` and
+  `authenticated` by name.** `revoke ... from public` does *not* lock a
+  function down; revoke from `public, anon, authenticated` explicitly. This was
+  a live hole in migration 0003, found by verifying rather than reading.
+- **Vercel prepends a custom env prefix to the provider's own names.** Upstash
+  arrived as `UPSTASH_REDIS_REST_KV_REST_API_URL`; `lib/ratelimit.ts` resolves
+  by suffix and pairs URL+token from the same prefix, because mixing two stores
+  authenticates against the wrong database silently.
+- **Marketplace env values are Sensitive**, so `vercel env pull` yields
+  `[SENSITIVE]` — credentials can only be exercised after a deploy.
+- **Vercel's env-var page paginates.** Read the whole list before concluding
+  something is missing.
+- **Never run `next build` while a dev server is running.** It rewrites `.next`
+  underneath it and every request 500s with an ENOENT on `_buildManifest`.
+- **`leanring-buddyUITests` fails under `CODE_SIGNING_ALLOWED=NO`** — macOS
+  kills the unsigned runner. Pre-existing, unrelated; always use
+  `-only-testing:leanring-buddyTests`.
+- **Reading Iris's logs:** stdout is fully buffered when not a terminal. Give
+  it a pty — `script -q /tmp/iris.log /Applications/Iris.app/Contents/MacOS/Iris`
+  — and the `🔑` permission lines appear immediately.
+- **The desktop apps are separate projects.** Root `tsconfig`/`vitest` exclude
+  `iris-windows/` and `iris-macos/`; each has its own runner and dependencies.
 
-### Bugs the harness found in shipping code
+## The lesson worth keeping
 
-- **`ElementLocationDetector.swift` hardcodes the `computer_20251124` tool
-  version, which `claude-haiku-4-5` rejects outright.** It needs
-  `computer_20250124` with the `computer-use-2025-01-24` beta header for that
-  model. The detector is not wired to anything yet, so nothing is broken
-  today — but grounding would have failed on the cheap tier the moment it was,
-  and the failure looks like "the model cannot point" rather than a version
-  error.
-- The same file flips Y (`displayHeight - y`) to hand AppKit a bottom-left
-  point for the cursor overlay. AX rects are top-left. Copying that flip into
-  grounding scored 0/8 hits at 531pt median error versus 6/8 at 4.5pt — a
-  wrong flip does not look like a bug, it looks like a model that cannot
-  point.
-- `max_tokens: 256` truncates Haiku mid-preamble before it emits the tool call.
-- A `scroll` action carries a coordinate too; counting it as a pointing answer
-  inflates coverage with nonsense.
+Every user-visible bug in this build was found by someone *using* it, not by
+519 passing tests: the app opened by playing the upstream author's demo video;
+it asked for permissions it already had, forever; closing it left no way back
+in; and the new input bar handed off to the old panel to answer. Tests caught
+none of them. Use it before trusting it.

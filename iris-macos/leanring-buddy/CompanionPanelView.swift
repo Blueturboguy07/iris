@@ -143,7 +143,7 @@ struct CompanionPanelView: View {
                 Spacer()
                     .frame(height: 14)
 
-                AppInventorySectionView(appInventoryService: appInventoryService)
+                AppInventorySectionView(appInventoryService: appInventoryService, appLinkService: companionManager.appLinkService)
                     .padding(.horizontal, 16)
 
                 Spacer()

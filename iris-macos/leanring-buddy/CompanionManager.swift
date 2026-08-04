@@ -96,6 +96,12 @@ final class CompanionManager: ObservableObject {
     /// alternative is a Spotlight query every time somebody glances at Iris.
     let appInventoryService = AppInventoryService()
 
+    /// Knows which publik apps are running *right now* and can ask them what
+    /// they are doing. The inventory above answers "is it installed"; this
+    /// answers "and what is wrong with it", which is the question a screenshot
+    /// cannot reach — see `docs/iris-app-integration-plan.md`.
+    let appLinkService = AppLinkService()
+
     /// Where the funded tier lives — publik in a shipped build, and a localhost
     /// origin when a developer's Info.plist says so.
     private let publikBaseURL = AssistantTransport.configuredPublikBaseURL()
@@ -214,6 +220,9 @@ final class CompanionManager: ObservableObject {
 
         print("🔑 Iris start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()
+        // Discovery is a directory listing, so it can run on a timer and costs
+        // nothing. Talking to an app is not, and only happens when asked.
+        appLinkService.startWatchingForRunningApps()
         bindSummonHotkeyTransitions()
         bindAccountStateChanges()
 
@@ -275,6 +284,7 @@ final class CompanionManager: ObservableObject {
 
     func stop() {
         globalSummonHotkeyMonitor.stop()
+        appLinkService.stopWatchingForRunningApps()
         overlayWindowManager.hideOverlay()
         transientHideTask?.cancel()
 
@@ -518,11 +528,20 @@ final class CompanionManager: ObservableObject {
                     (userPlaceholder: entry.userMessage, assistantResponse: entry.assistantResponse)
                 }
 
+                // What the running publik apps have already said about
+                // themselves. Only what is already in hand — composing a prompt
+                // must never be the thing that opens a socket or puts a consent
+                // sheet in front of somebody.
+                let promptWithLiveAppStatus: String = {
+                    guard let liveAppStatus = appLinkService.contextForAssistant() else { return messageText }
+                    return messageText + "\n\n" + liveAppStatus
+                }()
+
                 let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
                     images: labeledImages,
                     systemPrompt: Self.companionResponseSystemPrompt,
                     conversationHistory: historyForAPI,
-                    userPrompt: messageText,
+                    userPrompt: promptWithLiveAppStatus,
                     onTextChunk: { _ in
                         // No streaming display — the panel shows the full response when done
                     }

@@ -21,6 +21,10 @@ import SwiftUI
 
 struct AppInventorySectionView: View {
     @ObservedObject var appInventoryService: AppInventoryService
+    /// Which of those apps are running right now, and what they said when
+    /// asked. Separate from the inventory because "installed" and "running and
+    /// answering" are genuinely different facts.
+    @ObservedObject var appLinkService: AppLinkService
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -94,9 +98,31 @@ struct AppInventorySectionView: View {
                 Text(versionLine(for: installedEntry))
                     .font(.system(size: 10))
                     .foregroundColor(DS.Colors.textTertiary)
+
+                // What the app said when it was asked, or why it could not
+                // answer. Only ever shown for an app that is actually running.
+                if let liveStatusLine = liveStatusLine(for: installedEntry) {
+                    Text(liveStatusLine)
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             Spacer(minLength: 4)
+
+            // Only offered while the app is running: asking a closed app is
+            // meaningless, and Iris deliberately never launches one to ask.
+            if let runningInstance = appLinkService.runningInstance(forSlug: installedEntry.slug) {
+                Button(action: {
+                    Task { await appLinkService.queryDiagnostics(for: runningInstance) }
+                }) {
+                    Text(appLinkService.reports[runningInstance.appId] == nil ? "Ask it what's wrong" : "Ask again")
+                }
+                .irisTinyButton()
+                .disabled(appLinkService.isQuerying)
+                .help("\(installedEntry.name) is running. It will ask you before it answers.")
+            }
 
             if case .updateIsAvailable(let latestReleaseTag) = installedEntry.updateAvailability {
                 Button(action: {
@@ -115,6 +141,27 @@ struct AppInventorySectionView: View {
             RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
                 .fill(Color.white.opacity(0.045))
         )
+    }
+
+    /// One line about what the running app last said.
+    ///
+    /// A refusal is reported as plainly as a failure: "it has not been given
+    /// permission" is a different problem from "it is broken", and telling
+    /// someone to look for a bug when the real answer is a switch they never
+    /// flipped wastes their afternoon.
+    private func liveStatusLine(for installedEntry: CatalogAppInventoryEntry) -> String? {
+        guard let runningInstance = appLinkService.runningInstance(forSlug: installedEntry.slug) else { return nil }
+
+        if let failure = appLinkService.failures[runningInstance.appId] {
+            return failure.message
+        }
+        guard let report = appLinkService.reports[runningInstance.appId] else { return nil }
+        guard let diagnostics = report.diagnostics else { return nil }
+
+        if let lastError = diagnostics.lastError {
+            return "Last error: \(lastError.message)"
+        }
+        return "Running, nothing reported wrong."
     }
 
     /// An installed app whose version could not be read still gets a row — it is

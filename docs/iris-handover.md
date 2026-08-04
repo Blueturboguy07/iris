@@ -164,6 +164,17 @@ enough to choose an architecture, not to quote as a benchmark.
   — and the `🔑` permission lines appear immediately.
 - **The desktop apps are separate projects.** Root `tsconfig`/`vitest` exclude
   `iris-windows/` and `iris-macos/`; each has its own runner and dependencies.
+- **Re-signing re-prompts for the Keychain, and you cannot script past it.**
+  TCC survives a Developer ID rebuild — that is what `deploy-iris-local.sh` is
+  for — but a Keychain item's ACL is bound to the *binary*, so every local
+  redeploy makes macOS ask for the login password before Iris can read its
+  refresh token. SecurityAgent deliberately refuses scripted clicks, so an
+  agent cannot dismiss it either; press Deny (Iris runs signed out) or Always
+  Allow once per build. Users who install a release never see this. The real
+  fix is the data-protection keychain (`kSecUseDataProtectionKeychain`), which
+  scopes access by team + bundle id instead of by binary — it needs a
+  `keychain-access-groups` entitlement and migrates existing items, so it is
+  worth doing deliberately rather than in passing.
 - **electron-builder's `files` is an allowlist.** Adding a directory to an
   Electron app and forgetting it there produces a build that runs perfectly
   from source and throws on `require` the moment it is packaged.

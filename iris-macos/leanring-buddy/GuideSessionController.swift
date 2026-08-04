@@ -182,6 +182,80 @@ final class GuideSessionController: ObservableObject {
         setupRecoveryState != nil
     }
 
+    /// Where the eye is going for the step on screen, and why.
+    ///
+    /// Published rather than computed on demand because resolving it touches
+    /// the accessibility tree and sometimes a model, and the card redraws far
+    /// more often than the step changes.
+    @Published private(set) var pointingDecisionForTheOpenStep: GuidePointingDecision = .doNotPoint(.stepHasNothingToPointAt)
+
+    /// Set by `CompanionManager` so the guide can fly the eye without this
+    /// controller knowing anything about overlays or windows.
+    var sendTheEyeTo: ((CGPoint, CGRect, String) -> Void)?
+    var stopPointingTheEye: (() -> Void)?
+
+    /// Where a descriptor actually is on screen. Injected so the whole guide is
+    /// testable without a screen.
+    var targetLocator: (any GuideTargetLocating)?
+
+    private var pointingTask: Task<Void, Never>?
+
+    /// Work out where to point for the step now on screen, and send the eye.
+    ///
+    /// Called whenever the step changes — including when the watch loop
+    /// advances it, which is the case a manual refresh would miss.
+    func refreshPointingForTheOpenStep() {
+        pointingTask?.cancel()
+
+        guard
+            let branch = selectedBranch,
+            let step = stepTheReaderIsLookingAt
+        else {
+            pointingDecisionForTheOpenStep = .doNotPoint(.stepHasNothingToPointAt)
+            stopPointingTheEye?()
+            return
+        }
+
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        let decision = GuidePointingLadder.decide(
+            target: GuidePointingLadder.target(
+                for: step,
+                shell: branch.shell,
+                modelFallbackIsAvailable: targetLocator != nil
+            ),
+            stepIsSensitive: step.watch?.sensitive ?? false,
+            irisMayLookAtTheScreen: irisMayLookAtTheScreenForPointing,
+            frontmostBundleIdentifier: frontmost?.bundleIdentifier,
+            frontmostAppName: frontmost?.localizedName
+        )
+
+        guard let targetLocator else {
+            pointingDecisionForTheOpenStep = decision
+            return
+        }
+
+        pointingTask = Task { [weak self] in
+            let outcome = await GuideStepPointingCoordinator.resolve(
+                decision: decision,
+                stepTitle: step.title,
+                stepBody: step.body,
+                using: targetLocator
+            )
+            guard !Task.isCancelled, let self else { return }
+            self.pointingDecisionForTheOpenStep = outcome.decision
+            if let location = outcome.screenLocation, let displayFrame = outcome.displayFrame {
+                self.sendTheEyeTo?(location, displayFrame, step.title)
+            } else {
+                self.stopPointingTheEye?()
+            }
+        }
+    }
+
+    /// Whether the inferred path is allowed to run. Screen Recording only; the
+    /// accessibility tree needs no capture, which is why an authored descriptor
+    /// works without it.
+    var irisMayLookAtTheScreenForPointing: Bool = true
+
     // MARK: - Collaborators
 
     private let guideService: GuideService
@@ -998,6 +1072,7 @@ final class GuideSessionController: ObservableObject {
     }
 
     func advanceToTheNextSetupStep() {
+        defer { refreshPointingForTheOpenStep() }
         guard var mutableSetupRecoveryState = setupRecoveryState else { return }
         if mutableSetupRecoveryState.isOnTheLastSetupStep {
             // Past the last setup step there is nothing to show, only something
@@ -1012,6 +1087,7 @@ final class GuideSessionController: ObservableObject {
     }
 
     func returnToThePreviousSetupStep() {
+        defer { refreshPointingForTheOpenStep() }
         guard var mutableSetupRecoveryState = setupRecoveryState,
               mutableSetupRecoveryState.currentSetupStepIndex > 0 else {
             return
@@ -1108,6 +1184,7 @@ final class GuideSessionController: ObservableObject {
     // MARK: - Navigation
 
     func advanceToTheNextStep() {
+        defer { refreshPointingForTheOpenStep() }
         // The detour must never move the reader's place in the guide, so this
         // refuses outright rather than trusting every caller to check first.
         guard !readerIsInSetupRecovery else { return }
@@ -1130,6 +1207,7 @@ final class GuideSessionController: ObservableObject {
     }
 
     func returnToThePreviousStep() {
+        defer { refreshPointingForTheOpenStep() }
         // Back means "the previous thing I was looking at", which inside the
         // detour is the previous setup step.
         if readerIsInSetupRecovery {
@@ -1157,6 +1235,7 @@ final class GuideSessionController: ObservableObject {
     }
 
     func restartTheGuide() {
+        defer { refreshPointingForTheOpenStep() }
         guard selectedBranch != nil else { return }
         currentStepIndex = 0
         readerHasFinishedTheGuide = false

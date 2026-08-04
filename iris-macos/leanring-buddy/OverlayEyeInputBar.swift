@@ -437,6 +437,22 @@ struct OverlayEyeInputBarView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            // The guide sits above the field, not inside the settings dropdown.
+            // The reader following instructions is doing the main thing Iris is
+            // for; asking a question about the step is the secondary thing, and
+            // it stays available underneath rather than replacing it.
+            if let guidePresentation {
+                OverlayEyeGuideCard(
+                    presentation: guidePresentation,
+                    onPrimaryAction: { guideSessionController.performPrimaryAction() },
+                    onSecondaryAction: { guideSessionController.advanceToTheNextStep() },
+                    onBack: { guideSessionController.returnToThePreviousStep() },
+                    onClose: { guideSessionController.closeTheGuide() },
+                    copyConfirmationText: guideSessionController.transientCopyConfirmationText
+                )
+                Divider().background(DS.Colors.line)
+            }
+
             textFieldRow
             whateverTheExchangeIsUpTo
         }
@@ -475,6 +491,39 @@ struct OverlayEyeInputBarView: View {
             showWhateverIrisJustSaid()
         }
         .animation(DS.Motion.contentIn, value: exchange.phase)
+    }
+
+    /// What the guide card should show, or nil when no guide is open.
+    ///
+    /// Read off the controller rather than mirrored into local state: the watch
+    /// loop advances steps without anybody pressing anything, and a copy here
+    /// would go stale exactly when the feature is working.
+    private var guidePresentation: OverlayEyeGuideStepPresentation? {
+        guard
+            guideSessionController.loadState.isShowingSomethingAboutAGuide,
+            let guide = guideSessionController.guideBeingFollowed,
+            let step = guideSessionController.stepTheReaderIsLookingAt,
+            let branch = guideSessionController.selectedBranch
+        else {
+            return nil
+        }
+
+        let totalSteps = branch.steps.count
+        let stepNumber = guideSessionController.currentStepIndex + 1
+        let readerIsOnARealStep = totalSteps > 0 && guideSessionController.currentStepIndex < totalSteps
+
+        return OverlayEyeGuideStepPresentation(
+            appName: guide.appName,
+            stepTitle: step.title,
+            stepBody: step.body,
+            command: step.command,
+            progressLabel: readerIsOnARealStep ? "\(stepNumber) of \(totalSteps)" : nil,
+            progressFraction: totalSteps > 0 ? min(1, Double(stepNumber) / Double(totalSteps)) : 0,
+            completionHint: step.verifierLabel,
+            pointingNote: OverlayEyeGuidePointingNote.note(for: guideSessionController.pointingDecisionForTheOpenStep),
+            readerCanGoBack: guideSessionController.currentStepIndex > 0,
+            isTheLastStep: readerIsOnARealStep && stepNumber == totalSteps
+        )
     }
 
     // MARK: The field

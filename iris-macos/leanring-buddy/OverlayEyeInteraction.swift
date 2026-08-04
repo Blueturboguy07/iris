@@ -83,6 +83,16 @@ struct OverlayEyeActivation: Equatable {
     mutating func dismissTheInputBar() {
         theInputBarIsOpen = false
     }
+
+    /// Open the bar because something other than a click asked for it — a
+    /// guide arriving from an `iris://` link, most importantly.
+    ///
+    /// A guide has nowhere else to appear now that the menu bar panel is
+    /// settings again, so a link that opened a guide and left the bar shut
+    /// would look exactly like a link that did nothing.
+    mutating func openTheInputBarWithoutAClick() {
+        theInputBarIsOpen = true
+    }
 }
 
 // MARK: - The exchange the bar is showing

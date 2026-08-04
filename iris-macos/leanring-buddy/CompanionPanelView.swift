@@ -57,20 +57,18 @@ struct CompanionPanelView: View {
             Divider()
                 .background(DS.Colors.line)
 
-            // A guide takes over the panel while one is open: the reader is
-            // following instructions, and leaving the settings rows underneath
-            // them would be two things at once. The swap animates the way the
-            // pill's content does: fade up 5pt.
+            // The guide used to take over this panel. It does not any more: a
+            // step card in a menu bar dropdown makes the reader look away from
+            // the thing they are being told to do, which is the one thing the
+            // desktop app should be better at than the web page. The guide now
+            // renders under the eye — `OverlayEyeGuideCard` — where the eye can
+            // also fly to the control the step is about.
+            //
+            // This panel is settings. That is what `iris-macos/CLAUDE.md` has
+            // always said it is.
             Group {
-                if guideSessionController.loadState.isShowingSomethingAboutAGuide {
-                    GuidePanelView(guideSessionController: guideSessionController)
-                        .padding(.top, 14)
-                        .padding(.horizontal, 16)
-                        .transition(DS.Motion.contentTransition)
-                } else {
-                    settingsAndAccountContent
-                        .transition(DS.Motion.contentTransition)
-                }
+                settingsAndAccountContent
+                    .transition(DS.Motion.contentTransition)
             }
             .animation(DS.Motion.contentIn, value: guideSessionController.loadState.isShowingSomethingAboutAGuide)
 

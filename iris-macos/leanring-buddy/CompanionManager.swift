@@ -223,6 +223,7 @@ final class CompanionManager: ObservableObject {
         // Discovery is a directory listing, so it can run on a timer and costs
         // nothing. Talking to an app is not, and only happens when asked.
         appLinkService.startWatchingForRunningApps()
+        connectTheGuideToTheEye()
         bindSummonHotkeyTransitions()
         bindAccountStateChanges()
 
@@ -282,9 +283,40 @@ final class CompanionManager: ObservableObject {
         }
     }
 
+    /// Lets a guide step fly the eye without the guide controller knowing that
+    /// overlays, screens or AppKit exist.
+    ///
+    /// The eye is already the app's one way of saying "there" — the assistant's
+    /// `[POINT:…]` answers use exactly these two properties — so a guide step
+    /// reuses it rather than inventing a second kind of arrow.
+    private func connectTheGuideToTheEye() {
+        guideSessionController.targetLocator = SystemGuideTargetLocator(askTheModel: nil)
+        guideSessionController.irisMayLookAtTheScreenForPointing = hasScreenRecordingPermission
+
+        guideSessionController.sendTheEyeTo = { [weak self] location, displayFrame, label in
+            guard let self else { return }
+            self.assistantState = .pointing
+            self.detectedElementBubbleText = label
+            self.detectedElementScreenLocation = location
+            self.detectedElementDisplayFrame = displayFrame
+        }
+
+        guideSessionController.stopPointingTheEye = { [weak self] in
+            guard let self else { return }
+            self.detectedElementScreenLocation = nil
+            self.detectedElementDisplayFrame = nil
+            self.detectedElementBubbleText = nil
+            // Only stand down if the eye was pointing *for the guide*. A model
+            // answer mid-flight has its own reason to be pointing.
+            if self.assistantState == .pointing { self.assistantState = .idle }
+        }
+    }
+
     func stop() {
         globalSummonHotkeyMonitor.stop()
         appLinkService.stopWatchingForRunningApps()
+        guideSessionController.sendTheEyeTo = nil
+        guideSessionController.stopPointingTheEye = nil
         overlayWindowManager.hideOverlay()
         transientHideTask?.cancel()
 

@@ -169,6 +169,30 @@ extension IrisStepExpectation: Codable {
     }
 }
 
+/// Where the eye should fly while a step is open. Mirrors
+/// `IrisStepPointTarget` in `lib/iris-guides.ts`.
+///
+/// The descriptor is text a person would use, never coordinates: coordinates
+/// authored into a guide are wrong the first time anybody resizes a window,
+/// and text can be matched against the accessibility tree, which is exact and
+/// free for about three quarters of controls.
+struct IrisStepPointTarget: Codable, Equatable, Sendable {
+    let descriptor: String
+    /// Iris refuses to point into an app that is not in front — an arrow
+    /// hovering over a hidden window is worse than no arrow — and says
+    /// "switch to X first" instead.
+    let inApp: String?
+    /// True when the target is a window rather than a control inside one.
+    /// Command steps want this: the answer is "that Terminal", not a button.
+    let isWindow: Bool?
+
+    init(descriptor: String, inApp: String? = nil, isWindow: Bool? = nil) {
+        self.descriptor = descriptor
+        self.inApp = inApp
+        self.isWindow = isWindow
+    }
+}
+
 /// What a step tells the desktop app to watch for. Mirrors `IrisStepWatch` in
 /// `lib/iris-guides.ts`.
 struct IrisStepWatch: Codable, Equatable, Sendable {
@@ -255,6 +279,11 @@ struct IrisGuideStep: Codable, Equatable, Sendable {
     /// run at all for a step without one.
     let watch: IrisStepWatch?
 
+    /// Where the eye should fly while this step is open. Nil is the common
+    /// case and does not mean "point at nothing" — see `IrisStepPointTarget`
+    /// and the resolution ladder in `GuidePointing.swift`.
+    let point: IrisStepPointTarget?
+
     /// An unrecognized `kind` falls back to `terminal` rather than failing the
     /// whole guide, which is exactly what the Tauri panel's `sanitizeGuideStep`
     /// does (`iris-desktop/ui/app.js`). Losing one step's styling is a far
@@ -273,6 +302,9 @@ struct IrisGuideStep: Codable, Equatable, Sendable {
         // A watch block Iris cannot make sense of leaves the step unwatched
         // rather than unopenable: the reader can always still press Continue.
         watch = try? container.decodeIfPresent(IrisStepWatch.self, forKey: .watch)
+        // Same reasoning as `watch`: a target Iris cannot parse costs the step
+        // its arrow, not its existence.
+        point = try? container.decodeIfPresent(IrisStepPointTarget.self, forKey: .point)
     }
 
     init(
@@ -285,7 +317,8 @@ struct IrisGuideStep: Codable, Equatable, Sendable {
         href: String? = nil,
         actionLabel: String? = nil,
         verifierLabel: String? = nil,
-        watch: IrisStepWatch? = nil
+        watch: IrisStepWatch? = nil,
+        point: IrisStepPointTarget? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -297,6 +330,7 @@ struct IrisGuideStep: Codable, Equatable, Sendable {
         self.actionLabel = actionLabel
         self.verifierLabel = verifierLabel
         self.watch = watch
+        self.point = point
     }
 }
 

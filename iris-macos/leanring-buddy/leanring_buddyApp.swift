@@ -103,9 +103,12 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openGuide(fromDeepLink guideDeepLink: GuideDeepLink) {
-        // The panel comes forward first so the reader sees the guide loading
-        // rather than watching nothing happen after clicking a link.
-        NotificationCenter.default.post(name: .clickyShowPanel, object: nil)
+        // The bar under the eye comes forward first, so the reader sees the
+        // guide loading rather than watching nothing happen after clicking a
+        // link. It is the bar and not the menu bar panel because the guide
+        // lives at the eye now — posting `.clickyShowPanel` here would open
+        // settings and leave the guide with nowhere to appear at all.
+        NotificationCenter.default.post(name: .clickySummonAskBar, object: nil)
         Task {
             let guideSessionController = companionManager.guideSessionController
             await guideSessionController.openGuide(fromDeepLink: guideDeepLink)
@@ -114,6 +117,10 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             // only in the panel otherwise.
             switch guideSessionController.loadState {
             case .guideIsOpen:
+                // Aim the eye at whatever the first visible step is about. The
+                // step-change hooks cover every later move; this covers the
+                // arrival, which none of them see.
+                guideSessionController.refreshPointingForTheOpenStep()
                 print("🎯 Iris: opened guide \(guideDeepLink.slug) at "
                       + "step \(guideSessionController.currentStepIndex + 1) of "
                       + "\(guideSessionController.numberOfStepsInTheSelectedBranch)")

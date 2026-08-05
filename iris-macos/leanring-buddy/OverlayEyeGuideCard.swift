@@ -138,6 +138,14 @@ struct OverlayEyeGuideCard: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // The panel behind this is deliberately clear, so every piece in the bar
+        // carries its own backdrop — see the same rule on the chips and the
+        // exchange card. Without one the step text is drawn straight onto
+        // whatever the reader has open, which is unreadable the moment that is a
+        // bright window and, worse, looks like a rendering fault rather than a
+        // card.
+        .background(IrisShellBackground(cornerRadius: DS.CornerRadius.large))
     }
 
     private var header: some View {

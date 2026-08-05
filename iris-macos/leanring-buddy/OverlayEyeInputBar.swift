@@ -450,7 +450,10 @@ struct OverlayEyeInputBarView: View {
                     onClose: { guideSessionController.closeTheGuide() },
                     copyConfirmationText: guideSessionController.transientCopyConfirmationText
                 )
-                Divider().background(DS.Colors.line)
+                // No divider: the card carries its own backdrop, so it already
+                // reads as a separate surface from the field below it. A rule
+                // between two pieces of glass would be a line floating on the
+                // desktop with nothing behind it.
             }
 
             textFieldRow

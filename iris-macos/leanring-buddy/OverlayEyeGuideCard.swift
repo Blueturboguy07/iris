@@ -145,7 +145,17 @@ struct OverlayEyeGuideCard: View {
         // whatever the reader has open, which is unreadable the moment that is a
         // bright window and, worse, looks like a rendering fault rather than a
         // card.
-        .background(IrisShellBackground(cornerRadius: DS.CornerRadius.large))
+        //
+        // The panel surface is not enough here. This card floats over the
+        // reader's real screen rather than over Iris's own chrome, so it uses
+        // the darker translucent one that stays legible over a white browser
+        // window.
+        .background(
+            IrisShellBackground(
+                cornerRadius: DS.CornerRadius.large,
+                surface: DS.Colors.readableOverAnything
+            )
+        )
     }
 
     private var header: some View {

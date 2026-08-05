@@ -32,6 +32,22 @@ enum DS {
         /// Slightly translucent so the backdrop blur reads through.
         static let surface = Color(red: 14 / 255, green: 14 / 255, blue: 16 / 255).opacity(0.94)
 
+        /// For a surface that floats over whatever the reader happens to have
+        /// open, rather than over Iris's own chrome.
+        ///
+        /// Deliberately still translucent — this is glass, and seeing the shape
+        /// of what is behind it is the point. But translucency here is a
+        /// contrast problem, not just a look: the guide card sits over the
+        /// reader's real screen, which is often a white browser window, and
+        /// `textPrimary` is near-white.
+        ///
+        /// 0.86 of black is the floor that keeps white text legible against a
+        /// pure white background — around 5:1, comfortably past WCAG AA for body
+        /// text — and the backdrop blur underneath only ever helps from there.
+        /// Lower numbers look better on a dark wallpaper and become unreadable
+        /// on a light one, which is how the card shipped invisible.
+        static let readableOverAnything = Color.black.opacity(0.86)
+
         /// The same shell color fully opaque, for contexts that cannot
         /// composite over a blur (the overlay bubble, fallbacks).
         static let background = Color(hex: "#0E0E10")
@@ -357,12 +373,21 @@ extension View {
 struct IrisShellBackground: View {
     var cornerRadius: CGFloat = DS.CornerRadius.shell
 
+    /// What sits between the blur and the content.
+    ///
+    /// The default is the near-opaque panel surface, which is right for the menu
+    /// bar dropdown: it has the menu bar behind it and nothing else. A surface
+    /// that floats over the reader's actual desktop needs a different answer —
+    /// see `DS.Colors.readableOverAnything` — because the thing behind it might
+    /// be a white browser window, and white text on 6% of white is not text.
+    var surface: Color = DS.Colors.surface
+
     var body: some View {
         ZStack {
             PanelBackdropBlurView()
 
             Rectangle()
-                .fill(DS.Colors.surface)
+                .fill(surface)
 
             // radial-gradient(circle at 16% -20%, rgba(111,140,255,0.12), transparent 44%)
             RadialGradient(

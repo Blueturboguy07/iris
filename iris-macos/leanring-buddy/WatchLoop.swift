@@ -155,6 +155,16 @@ protocol WatchLoopLocalSignalSource: AnyObject {
     func frontmostApplicationName() -> String?
     func frontmostWindowTitle() -> String?
 
+    /// The focused window's rectangle in points, top-left origin, and the size
+    /// of the display the frame was captured from. Both, or neither: a rectangle
+    /// without the display it belongs to cannot be scaled onto the frame.
+    ///
+    /// This is what lets the loop send the model that window instead of the
+    /// whole screen, which is the difference between the visual check being
+    /// right every time and being right none of the time. Nil when accessibility
+    /// will not say — the loop then sends the whole frame, as it always did.
+    func focusedWindowRectangleAndDisplaySizeInPoints() -> (window: CGRect, display: CGSize)?
+
     /// The host of whatever the frontmost browser window is showing, read over
     /// accessibility. Nil when the frontmost app is not a browser, or will not
     /// say, or accessibility has not been granted.
@@ -188,7 +198,8 @@ protocol WatchLoopVisualEvaluator: AnyObject {
         screenshotJPEGData: Data,
         visualPrompt: String,
         stepTitle: String,
-        hintsTheStepAuthorWrote: [String]
+        hintsTheStepAuthorWrote: [String],
+        context: WatchScreenContext
     ) async -> WatchVerdict?
 
     /// Handed the app's single transport resolution at startup, by whoever owns
@@ -872,12 +883,38 @@ final class WatchLoop: ObservableObject {
         // in for the duration of the call and counted back out the instant the
         // call returns, which is what "never retained after the call it was
         // taken for" means in practice.
-        numberOfScreenshotBytesHeldInMemory = screenshotJPEGData.count
+        // Read at the moment of the call, not at the start of the step: the
+        // question is about this frame, and by now the reader may have brought a
+        // different window forward.
+        var frameToSend = screenshotJPEGData
+        var frameIsCroppedToThatWindow = false
+        if let (windowRectangle, displaySize) =
+            localSignalSource.focusedWindowRectangleAndDisplaySizeInPoints(),
+           let croppedToTheWindow = WatchFrameAnnotation.croppingToTheFocusedWindow(
+               inJPEG: screenshotJPEGData,
+               windowBoundsInPoints: windowRectangle,
+               displaySizeInPoints: displaySize
+           )
+        {
+            frameToSend = croppedToTheWindow
+            frameIsCroppedToThatWindow = true
+        }
+
+        // The crop replaces the frame rather than joining it, so the accounting
+        // is of what actually leaves this process. The full screen is released
+        // here and never sent.
+        numberOfScreenshotBytesHeldInMemory = frameToSend.count
         let verdict = await visualEvaluator.evaluateWhetherTheStepLooksDone(
-            screenshotJPEGData: screenshotJPEGData,
+            screenshotJPEGData: frameToSend,
             visualPrompt: visualPrompt,
             stepTitle: stepBeingWatched?.title ?? "",
-            hintsTheStepAuthorWrote: watchPlan.hints
+            hintsTheStepAuthorWrote: watchPlan.hints,
+            context: WatchScreenContext(
+                frontmostApplicationName: localSignalSource.frontmostApplicationName(),
+                focusedWindowTitle: localSignalSource.frontmostWindowTitle(),
+                commandTheStepAsksFor: stepBeingWatched?.command,
+                frameIsCroppedToThatWindow: frameIsCroppedToThatWindow
+            )
         )
         numberOfScreenshotBytesHeldInMemory = 0
 

@@ -93,6 +93,13 @@ final class ScriptedWatchLoopLocalSignalSource: WatchLoopLocalSignalSource {
     func frontmostApplicationBundleIdentifier() -> String? { frontmostBundleIdentifier }
     func frontmostApplicationName() -> String? { frontmostAppName }
     func frontmostWindowTitle() -> String? { windowTitle }
+
+    /// Nil by default, so every existing test keeps sending the whole frame and
+    /// the crop is only exercised where a test asks for it.
+    var focusedWindowRectangleAndDisplaySize: (window: CGRect, display: CGSize)?
+    func focusedWindowRectangleAndDisplaySizeInPoints() -> (window: CGRect, display: CGSize)? {
+        focusedWindowRectangleAndDisplaySize
+    }
     func hostOfTheURLInTheFrontmostWindow() -> String? { urlHostOfTheFrontmostWindow }
 
     func isToolInstalled(named toolName: String) async -> Bool {
@@ -126,14 +133,21 @@ final class ScriptedWatchLoopVisualEvaluator: WatchLoopVisualEvaluator {
     weak var watchLoopToInspectDuringTheCall: WatchLoop?
     private(set) var bytesTheLoopHeldDuringTheCall: Int?
 
+    /// The disambiguating facts the loop passed in. A test asserts on these to
+    /// prove the loop tells the model which window it means, which is the whole
+    /// reason the two cue steps that never fired never fired.
+    private(set) var contextsItWasHanded: [WatchScreenContext] = []
+
     func evaluateWhetherTheStepLooksDone(
         screenshotJPEGData: Data,
         visualPrompt: String,
         stepTitle: String,
-        hintsTheStepAuthorWrote: [String]
+        hintsTheStepAuthorWrote: [String],
+        context: WatchScreenContext
     ) async -> WatchVerdict? {
         numberOfCalls += 1
         byteCountsItWasHanded.append(screenshotJPEGData.count)
+        contextsItWasHanded.append(context)
         bytesTheLoopHeldDuringTheCall = watchLoopToInspectDuringTheCall?.numberOfScreenshotBytesHeldInMemory
         return verdictToAnswerWith
     }
@@ -253,6 +267,103 @@ struct WatchLoopTests {
         #expect(watchLoopUnderTest.watchLoop.isWatchingAStep == false)
         await watchLoopUnderTest.watchLoop.performOneWatchTick()
         #expect(watchLoopUnderTest.frameSource.numberOfCapturesOfAnyKind == 0)
+    }
+
+    // MARK: - What the model is told about the frame
+
+    /// The loop holds the facts that disambiguate the question — which window is
+    /// in front, and what this step asked the reader to run — and for a long
+    /// time it kept them to itself. Rehearsing cue's guide on a real desktop
+    /// showed what that costs: with several terminals open the model judged the
+    /// wrong one, and with a previous command's output still on screen it
+    /// judged the wrong moment.
+    @Test func theModelIsToldWhichWindowAndWhichCommandTheStepMeans() async throws {
+        let watchLoopUnderTest = Self.makeWatchLoop()
+        watchLoopUnderTest.localSignalSource.frontmostAppName = "Terminal"
+        watchLoopUnderTest.localSignalSource.windowTitle = "cue — -zsh — 80×24"
+
+        watchLoopUnderTest.watchLoop.beginWatching(
+            step: Self.step(
+                command: "git checkout 36fa2b41",
+                watch: IrisStepWatch(expect: [.visual(prompt: "has git checkout succeeded?")])
+            )
+        )
+        await Self.tickUntilTheScreenHasChanged(watchLoopUnderTest, toDifferenceHash: 0xFACE)
+
+        let context = try #require(watchLoopUnderTest.visualEvaluator.contextsItWasHanded.last)
+        #expect(context.frontmostApplicationName == "Terminal")
+        #expect(context.focusedWindowTitle == "cue — -zsh — 80×24")
+        #expect(context.commandTheStepAsksFor == "git checkout 36fa2b41")
+    }
+
+    /// Read per call rather than per step: by the time a multi-minute install
+    /// finishes, the reader may well have brought something else forward, and
+    /// the frame being judged is the one in front of them now.
+    @Test func theWindowIsReadAtTheMomentOfTheCallNotTheStartOfTheStep() async throws {
+        let watchLoopUnderTest = Self.makeWatchLoop()
+        watchLoopUnderTest.localSignalSource.frontmostAppName = "Terminal"
+        watchLoopUnderTest.localSignalSource.windowTitle = "cue — -zsh"
+
+        watchLoopUnderTest.watchLoop.beginWatching(step: Self.stepWithOnlyAVisualExpectation)
+        await Self.tickUntilTheScreenHasChanged(watchLoopUnderTest, toDifferenceHash: 0xAAAA)
+
+        watchLoopUnderTest.localSignalSource.frontmostAppName = "Safari"
+        watchLoopUnderTest.localSignalSource.windowTitle = "console.anthropic.com"
+        watchLoopUnderTest.clock.advanceBySeconds(30)
+        await Self.tickUntilTheScreenHasChanged(watchLoopUnderTest, toDifferenceHash: 0xBBBB)
+
+        let context = try #require(watchLoopUnderTest.visualEvaluator.contextsItWasHanded.last)
+        #expect(context.frontmostApplicationName == "Safari")
+        #expect(context.focusedWindowTitle == "console.anthropic.com")
+    }
+
+    /// When accessibility can say where the focused window is, the model is sent
+    /// that window rather than the whole screen. Measured five samples at a
+    /// time, that is the difference between 0/5 and 5/5 on a real frame of a
+    /// finished install — see `WatchFrameAnnotation`.
+    @Test func theFrameIsCutDownToTheFocusedWindowWhenItsPlaceIsKnown() async throws {
+        let watchLoopUnderTest = Self.makeWatchLoop()
+        watchLoopUnderTest.localSignalSource.focusedWindowRectangleAndDisplaySize = (
+            window: CGRect(x: 100, y: 80, width: 600, height: 400),
+            display: CGSize(width: 1512, height: 982)
+        )
+
+        watchLoopUnderTest.watchLoop.beginWatching(step: Self.stepWithOnlyAVisualExpectation)
+        await Self.tickUntilTheScreenHasChanged(watchLoopUnderTest, toDifferenceHash: 0xD00D)
+
+        let context = try #require(watchLoopUnderTest.visualEvaluator.contextsItWasHanded.last)
+        // The scripted frame source hands over bytes that are not a real JPEG,
+        // so the crop cannot succeed — and the flag must follow what actually
+        // happened to the image rather than what was attempted.
+        #expect(context.frameIsCroppedToThatWindow == false)
+    }
+
+    /// Accessibility not answering is the ordinary case on a Mac where the
+    /// permission was never granted. The loop must fall back to the whole frame
+    /// rather than stop looking.
+    @Test func anUnknownWindowPlaceStillSendsTheWholeFrame() async throws {
+        let watchLoopUnderTest = Self.makeWatchLoop()
+        watchLoopUnderTest.localSignalSource.focusedWindowRectangleAndDisplaySize = nil
+
+        watchLoopUnderTest.watchLoop.beginWatching(step: Self.stepWithOnlyAVisualExpectation)
+        await Self.tickUntilTheScreenHasChanged(watchLoopUnderTest, toDifferenceHash: 0xBEEF)
+
+        #expect(watchLoopUnderTest.visualEvaluator.numberOfCalls == 1)
+        let context = try #require(watchLoopUnderTest.visualEvaluator.contextsItWasHanded.last)
+        #expect(context.frameIsCroppedToThatWindow == false)
+    }
+
+    /// A step with no command of its own must not inherit one. Naming a command
+    /// the step never asked for would recreate the carryover bug pointing the
+    /// other way.
+    @Test func aStepWithNoCommandNamesNoCommand() async throws {
+        let watchLoopUnderTest = Self.makeWatchLoop()
+
+        watchLoopUnderTest.watchLoop.beginWatching(step: Self.stepWithOnlyAVisualExpectation)
+        await Self.tickUntilTheScreenHasChanged(watchLoopUnderTest, toDifferenceHash: 0xCAFE)
+
+        let context = try #require(watchLoopUnderTest.visualEvaluator.contextsItWasHanded.last)
+        #expect(context.commandTheStepAsksFor == nil)
     }
 
     // MARK: - Rung 2: the perceptual diff

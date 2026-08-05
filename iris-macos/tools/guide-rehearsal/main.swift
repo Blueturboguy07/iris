@@ -71,6 +71,10 @@ enum RehearsalOutcome {
     case instantPass                    // a local signal already true before — a finding, not a bug
     case notRehearsed(String)
     case harnessCouldNotAsk(String)
+    /// The step's own command exited non-zero. Nothing can be concluded about
+    /// the expectation, and this is a far more serious finding than any verdict:
+    /// the guide told the reader to run something that does not work.
+    case commandFailed(Int32)
 
     var symbol: String {
         switch self {
@@ -80,6 +84,7 @@ enum RehearsalOutcome {
         case .instantPass: return "INSTANT-PASS"
         case .notRehearsed: return "skipped"
         case .harnessCouldNotAsk: return "HARNESS-GAP"
+        case .commandFailed: return "COMMAND-FAILED"
         }
     }
 }
@@ -135,11 +140,28 @@ enum TerminalDriver {
     }
 
     /// Types a command into the window and waits for the prompt to come back.
-    static func runCommand(_ command: String, windowId: String, timeoutSeconds: Double) throws {
-        let escaped = command
+    /// Runs the step's command and reports how it exited.
+    ///
+    /// `do script` hands back nothing about the command's fate, so the shell is
+    /// asked to write its own status out. Without this a guide whose command
+    /// simply fails looks identical to a guide whose watch expectation is
+    /// badly worded — and it was the first that happened: `npm ci` ran in the
+    /// wrong directory, errored, and got reported as three watch failures.
+    @discardableResult
+    static func runCommand(
+        _ command: String,
+        windowId: String,
+        timeoutSeconds: Double,
+        writingExitStatusTo exitStatusFile: URL? = nil
+    ) throws -> Int32? {
+        var shellCommand = command.replacingOccurrences(of: "\n", with: "; ")
+        if let exitStatusFile {
+            try? FileManager.default.removeItem(at: exitStatusFile)
+            shellCommand += "; echo $? > '\(exitStatusFile.path)'"
+        }
+        let escaped = shellCommand
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "\n", with: "; ")
         _ = try run("""
         tell application "Terminal" to do script "\(escaped)" in window id \(windowId)
         """)
@@ -148,11 +170,21 @@ enum TerminalDriver {
         // before believing an idle reading.
         Thread.sleep(forTimeInterval: 1.5)
         let deadline = Date().addingTimeInterval(timeoutSeconds)
+        var finishedBeforeTheDeadline = false
         while Date() < deadline {
-            if try !isBusy(windowId: windowId) { return }
+            if try !isBusy(windowId: windowId) { finishedBeforeTheDeadline = true; break }
             Thread.sleep(forTimeInterval: 1.0)
         }
-        FileHandle.standardError.write(Data("  ! command still running after \(Int(timeoutSeconds))s, capturing anyway\n".utf8))
+        if !finishedBeforeTheDeadline {
+            FileHandle.standardError.write(Data("  ! command still running after \(Int(timeoutSeconds))s, capturing anyway\n".utf8))
+            return nil
+        }
+
+        guard
+            let exitStatusFile,
+            let written = try? String(contentsOf: exitStatusFile, encoding: .utf8)
+        else { return nil }
+        return Int32(written.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 }
 
@@ -174,7 +206,21 @@ enum ScreenCapture {
     /// into in front of them. This makes the frame match that, and it is the
     /// difference between measuring the guide and measuring the operator's
     /// desktop clutter.
-    static func raise(windowId: String) {
+    /// Brings the rehearsal's own Terminal window forward, and says whether it
+    /// actually got there.
+    ///
+    /// It does not always. An app in a fullscreen Space owns the whole display,
+    /// and raising a window that lives in a different Space does not move the
+    /// screen to it — `screencapture` then photographs whatever Space is in
+    /// front, which is somebody else's app. That has now cost three misread
+    /// runs, alongside a sleeping display and a locked screen, and every one of
+    /// them looked exactly like a guide bug: the model says NOT_YET, correctly,
+    /// about a screen with no terminal on it.
+    ///
+    /// So the raise reports, and the caller refuses to draw conclusions from a
+    /// frame this returns false for.
+    @discardableResult
+    static func raise(windowId: String) -> Bool {
         _ = try? TerminalDriver.run("""
         tell application "Terminal"
             activate
@@ -182,6 +228,7 @@ enum ScreenCapture {
         end tell
         """)
         Thread.sleep(forTimeInterval: 1.2)
+        return LocalSignals.frontmostBundleIdentifier() == "com.apple.Terminal"
     }
 
     static func captureScreen(to url: URL) throws -> Data {
@@ -210,7 +257,8 @@ struct VisualEvaluator {
         screenshot: Data,
         stepTitle: String,
         visualPrompt: String,
-        hints: [String]
+        hints: [String],
+        context: WatchScreenContext
     ) -> (verdict: WatchVerdict?, raw: String) {
         guard callsMade < callBudget else { return (nil, "budget exhausted") }
         callsMade += 1
@@ -223,7 +271,11 @@ struct VisualEvaluator {
                 "role": "user",
                 "content": [
                     ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": screenshot.base64EncodedString()]],
-                    ["type": "text", "text": WatchVisualCheck.userPrompt(stepTitle: stepTitle, visualPrompt: visualPrompt)],
+                    ["type": "text", "text": WatchVisualCheck.userPrompt(
+                        stepTitle: stepTitle,
+                        visualPrompt: visualPrompt,
+                        context: context
+                    )],
                 ],
             ]],
         ]
@@ -260,8 +312,96 @@ struct VisualEvaluator {
 // MARK: - Local expectations, evaluated the way the loop does
 
 enum LocalSignals {
+
+    /// Who is in front, asked of System Events rather than `NSWorkspace`.
+    ///
+    /// The app reads `NSWorkspace.shared.frontmostApplication` and is right to:
+    /// it is a GUI process with a run loop, so the workspace notifications that
+    /// keep that property current actually get delivered. This harness is a
+    /// long-lived command-line tool that never spins one, and the property goes
+    /// stale — measured, it reported an app that had not been in front for
+    /// minutes. Feeding that to the model is worse than feeding it nothing: it
+    /// names the wrong window with total confidence, which is the exact failure
+    /// this context was added to fix.
+    ///
+    /// So the harness asks a different mechanism for the same fact. Diverging
+    /// from the app here is deliberate — matching its *code* while getting a
+    /// stale *answer* would make a green rehearsal meaningless.
+    private static func askSystemEvents(for expression: String) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = [
+            "-e",
+            "tell application \"System Events\" to tell (first process whose frontmost is true) to get \(expression)",
+        ]
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = Pipe()
+        guard (try? process.run()) != nil else { return nil }
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        let answer = String(
+            data: outputPipe.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        )?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let answer, !answer.isEmpty, answer != "missing value" else { return nil }
+        return answer
+    }
+
     static func frontmostBundleIdentifier() -> String? {
-        NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        askSystemEvents(for: "bundle identifier of it")
+    }
+
+    static func frontmostApplicationName() -> String? {
+        askSystemEvents(for: "name of it")
+    }
+
+    static func frontmostWindowTitle() -> String? {
+        askSystemEvents(for: "name of window 1")
+    }
+
+    /// Where the focused window is, so the harness can cut the frame down the
+    /// same way the app does. Sending the whole screen here while the app sends
+    /// one window would make a rehearsal a test of something nobody ships.
+    static func focusedWindowRectangleAndDisplaySizeInPoints() -> (window: CGRect, display: CGSize)? {
+        guard
+            let position = askSystemEvents(for: "position of window 1"),
+            let size = askSystemEvents(for: "size of window 1")
+        else { return nil }
+
+        let positionNumbers = position.split(separator: ",").compactMap {
+            Double($0.trimmingCharacters(in: .whitespaces))
+        }
+        let sizeNumbers = size.split(separator: ",").compactMap {
+            Double($0.trimmingCharacters(in: .whitespaces))
+        }
+        guard positionNumbers.count == 2, sizeNumbers.count == 2 else { return nil }
+
+        let mainDisplayBounds = CGDisplayBounds(CGMainDisplayID())
+        guard mainDisplayBounds.width > 0 else { return nil }
+
+        return (
+            window: CGRect(
+                x: positionNumbers[0], y: positionNumbers[1],
+                width: sizeNumbers[0], height: sizeNumbers[1]
+            ),
+            display: mainDisplayBounds.size
+        )
+    }
+
+    /// The frame the model should actually be handed: the focused window if its
+    /// place can be established, the whole screen otherwise — exactly the
+    /// fallback `WatchLoop` takes.
+    static func frameAsTheAppWouldSendIt(_ wholeScreen: Data) -> (frame: Data, cropped: Bool) {
+        guard
+            let (windowRectangle, displaySize) = focusedWindowRectangleAndDisplaySizeInPoints(),
+            let cropped = WatchFrameAnnotation.croppingToTheFocusedWindow(
+                inJPEG: wholeScreen,
+                windowBoundsInPoints: windowRectangle,
+                displaySizeInPoints: displaySize
+            )
+        else { return (wholeScreen, false) }
+        return (cropped, true)
     }
 
     /// Deliberately mirrors `ToolVersionService`: PATH only, plus the two fixed
@@ -393,15 +533,31 @@ for (index, step) in branch.steps.enumerated() {
 
     // BEFORE. The frame the reader sees while the step is still undone.
     let beforeURL = runDirectory.appendingPathComponent("\(step.id)-before.jpg")
-    ScreenCapture.raise(windowId: windowId)
+    let terminalWasInFrontForTheBeforeFrame = ScreenCapture.raise(windowId: windowId)
     let beforeFrame = try ScreenCapture.captureScreen(to: beforeURL)
 
+    // Read after raising the window, so it describes the frame just captured —
+    // the same ordering the loop uses.
+    let (beforeFrameAsSent, beforeFrameWasCropped) =
+        LocalSignals.frameAsTheAppWouldSendIt(beforeFrame)
+    let contextForThisStep = WatchScreenContext(
+        frontmostApplicationName: LocalSignals.frontmostApplicationName(),
+        focusedWindowTitle: LocalSignals.frontmostWindowTitle(),
+        commandTheStepAsksFor: step.command,
+        frameIsCroppedToThatWindow: beforeFrameWasCropped
+    )
+
     var beforeVerdicts: [String: WatchVerdict?] = [:]
-    for expectation in watch.expect where expectation.type == "visual" {
-        let (verdict, _) = evaluator.evaluate(
-            screenshot: beforeFrame, stepTitle: step.title,
-            visualPrompt: expectation.prompt ?? "", hints: watch.hints ?? [])
-        beforeVerdicts["visual"] = verdict
+    // Asking about a frame that does not show the guide's terminal costs money
+    // and buys an answer nobody may act on, so it is not asked.
+    if terminalWasInFrontForTheBeforeFrame {
+        for expectation in watch.expect where expectation.type == "visual" {
+            let (verdict, _) = evaluator.evaluate(
+                screenshot: beforeFrameAsSent, stepTitle: step.title,
+                visualPrompt: expectation.prompt ?? "", hints: watch.hints ?? [],
+                context: contextForThisStep)
+            beforeVerdicts["visual"] = verdict
+        }
     }
     var beforeLocal: [String: Bool] = [:]
     for expectation in watch.expect where expectation.type != "visual" {
@@ -416,9 +572,18 @@ for (index, step) in branch.steps.enumerated() {
     }
 
     // Do the work.
+    var howTheCommandExited: Int32?
     if let command = step.command {
         print("   running: \(command.replacingOccurrences(of: "\n", with: " ; "))")
-        try TerminalDriver.runCommand(command, windowId: windowId, timeoutSeconds: 600)
+        howTheCommandExited = try TerminalDriver.runCommand(
+            command,
+            windowId: windowId,
+            timeoutSeconds: 600,
+            writingExitStatusTo: runDirectory.appendingPathComponent("\(step.id).status")
+        )
+        if let howTheCommandExited, howTheCommandExited != 0 {
+            print("   ✗ the guide's own command exited \(howTheCommandExited)")
+        }
     } else {
         print("   no command — capturing the same frame twice")
     }
@@ -426,8 +591,13 @@ for (index, step) in branch.steps.enumerated() {
 
     // AFTER.
     let afterURL = runDirectory.appendingPathComponent("\(step.id)-after.jpg")
-    ScreenCapture.raise(windowId: windowId)
+    let terminalWasInFrontForTheAfterFrame = ScreenCapture.raise(windowId: windowId)
     let afterFrame = try ScreenCapture.captureScreen(to: afterURL)
+    let bothFramesShowTheGuidesTerminal =
+        terminalWasInFrontForTheBeforeFrame && terminalWasInFrontForTheAfterFrame
+    if !bothFramesShowTheGuidesTerminal {
+        print("   ⚠︎ the rehearsal's Terminal was not in front — another app or Space owned the screen")
+    }
 
     for expectation in watch.expect {
         var beforeText = "-", afterText = "-"
@@ -435,13 +605,37 @@ for (index, step) in branch.steps.enumerated() {
 
         if expectation.type == "visual" {
             let before = beforeVerdicts["visual"] ?? nil
-            let (after, rawAfter) = evaluator.evaluate(
-                screenshot: afterFrame, stepTitle: step.title,
-                visualPrompt: expectation.prompt ?? "", hints: watch.hints ?? [])
-            beforeText = String(describing: before ?? .notYet)
-            afterText = String(describing: after ?? .notYet)
+            var after: WatchVerdict?
+            var rawAfter = ""
+            if bothFramesShowTheGuidesTerminal {
+                let (afterFrameAsSent, afterFrameWasCropped) =
+                    LocalSignals.frameAsTheAppWouldSendIt(afterFrame)
+                (after, rawAfter) = evaluator.evaluate(
+                    screenshot: afterFrameAsSent, stepTitle: step.title,
+                    visualPrompt: expectation.prompt ?? "", hints: watch.hints ?? [],
+                    context: WatchScreenContext(
+                        frontmostApplicationName: LocalSignals.frontmostApplicationName(),
+                        focusedWindowTitle: LocalSignals.frontmostWindowTitle(),
+                        commandTheStepAsksFor: step.command,
+                        frameIsCroppedToThatWindow: afterFrameWasCropped
+                    ))
+            }
+            beforeText = bothFramesShowTheGuidesTerminal ? String(describing: before ?? .notYet) : "-"
+            afterText = bothFramesShowTheGuidesTerminal ? String(describing: after ?? .notYet) : "-"
 
-            if before == .completed {
+            if let howTheCommandExited, howTheCommandExited != 0 {
+                // The expectation was never given a chance. Whatever the model
+                // said about the after-frame is a verdict on a failed command.
+                outcome = .commandFailed(howTheCommandExited)
+            } else if !bothFramesShowTheGuidesTerminal {
+                // Not a verdict about the guide. A frame of somebody else's app
+                // earns a NOT_YET from any honest model, and reporting that as
+                // NEVER-FIRES would be the harness inventing a guide bug out of
+                // its own failure to get the window on screen.
+                outcome = .harnessCouldNotAsk(
+                    "the guide's Terminal was not on screen for both frames — rerun with no fullscreen app in front"
+                )
+            } else if before == .completed {
                 outcome = .firesEarly("said the step was done before the command ran")
             } else if after == .completed {
                 outcome = .verified
@@ -502,6 +696,7 @@ let never = results.filter { if case .neverFires = $0.outcome { return true }; r
 let instant = results.filter { if case .instantPass = $0.outcome { return true }; return false }.count
 let skipped = results.filter { if case .notRehearsed = $0.outcome { return true }; return false }.count
 let gaps = results.filter { if case .harnessCouldNotAsk = $0.outcome { return true }; return false }.count
+let commandFailures = results.filter { if case .commandFailed = $0.outcome { return true }; return false }.count
 
 print("\nverified both directions: \(verified)")
 print("FIRES EARLY (skips the reader ahead): \(early)")
@@ -509,5 +704,6 @@ print("NEVER FIRES (strands the reader): \(never)")
 print("instant pass (a finding about the guide, not a bug): \(instant)")
 print("not rehearsed by design: \(skipped)")
 print("harness could not ask: \(gaps)")
+print("THE GUIDE'S OWN COMMAND FAILED: \(commandFailures)")
 print("\nmodel calls: \(evaluator.callsMade)")
 print("frames: \(runDirectory.path)")

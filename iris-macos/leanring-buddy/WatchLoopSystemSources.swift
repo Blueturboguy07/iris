@@ -214,6 +214,42 @@ final class SystemWatchLoopLocalSignalSource: WatchLoopLocalSignalSource {
         return windowTitleValue as? String
     }
 
+    func focusedWindowRectangleAndDisplaySizeInPoints() -> (window: CGRect, display: CGSize)? {
+        guard
+            let focusedWindow = focusedWindowOfTheFrontmostApplication(),
+            let mainDisplay = NSScreen.main
+        else { return nil }
+
+        var positionValue: CFTypeRef?
+        var sizeValue: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(focusedWindow, kAXPositionAttribute as CFString, &positionValue) == .success,
+            AXUIElementCopyAttributeValue(focusedWindow, kAXSizeAttribute as CFString, &sizeValue) == .success,
+            let positionValue,
+            let sizeValue,
+            CFGetTypeID(positionValue) == AXValueGetTypeID(),
+            CFGetTypeID(sizeValue) == AXValueGetTypeID()
+        else { return nil }
+
+        var windowOrigin = CGPoint.zero
+        var windowSize = CGSize.zero
+        guard
+            AXValueGetValue((positionValue as! AXValue), .cgPoint, &windowOrigin),
+            AXValueGetValue((sizeValue as! AXValue), .cgSize, &windowSize),
+            windowSize.width > 0,
+            windowSize.height > 0
+        else { return nil }
+
+        // Accessibility reports window position top-left origin, measured from
+        // the top-left of the main display — the same space `frame` is captured
+        // in, so nothing is converted here. `NSScreen.frame` is bottom-left
+        // origin but its *size* is not, which is all that is wanted.
+        return (
+            window: CGRect(origin: windowOrigin, size: windowSize),
+            display: mainDisplay.frame.size
+        )
+    }
+
     /// Safari and Chrome both publish the page's address on the focused window's
     /// `AXDocument`. An app that publishes nothing simply answers nil, and the
     /// loop falls back to the window title.
@@ -413,14 +449,19 @@ final class AssistantTransportWatchLoopVisualEvaluator: WatchLoopVisualEvaluator
         screenshotJPEGData: Data,
         visualPrompt: String,
         stepTitle: String,
-        hintsTheStepAuthorWrote: [String]
+        hintsTheStepAuthorWrote: [String],
+        context: WatchScreenContext
     ) async -> WatchVerdict? {
         guard let claudeAPI else {
             return nil
         }
 
         let systemPrompt = Self.systemPrompt(hintsTheStepAuthorWrote: hintsTheStepAuthorWrote)
-        let userPrompt = WatchVisualCheck.userPrompt(stepTitle: stepTitle, visualPrompt: visualPrompt)
+        let userPrompt = WatchVisualCheck.userPrompt(
+            stepTitle: stepTitle,
+            visualPrompt: visualPrompt,
+            context: context
+        )
 
         // The image is passed straight through and never held: this call is the
         // only thing that ever sees it, and it is gone when this function

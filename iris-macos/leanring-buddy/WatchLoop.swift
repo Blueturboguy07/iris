@@ -43,16 +43,10 @@ import Foundation
 
 // MARK: - What a round of watching concluded
 
-/// The three answers a round of watching can reach, matching the protocol's
-/// `completed | not_yet | user_stuck(hint)`.
-enum WatchVerdict: Equatable, Sendable {
-    case completed
-    case notYet
-    /// The reader looks stuck. This is what makes the loop adaptive rather than
-    /// merely automatic: the hint is put in front of them straight away instead
-    /// of Iris waiting silently for something that is not going to happen.
-    case userStuck(hint: String)
-}
+// `WatchVerdict` — the three answers a round of watching can reach, matching
+// the protocol's `completed | not_yet | user_stuck(hint)` — now lives in
+// `WatchVisualCheck.swift`, beside the parsing that produces it, so the
+// rehearsal harness gets the type without dragging the whole loop in with it.
 
 /// Why Iris is not looking at the screen right now.
 ///

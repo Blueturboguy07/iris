@@ -388,10 +388,12 @@ final class SystemWatchLoopLocalSignalSource: WatchLoopLocalSignalSource {
 @MainActor
 final class AssistantTransportWatchLoopVisualEvaluator: WatchLoopVisualEvaluator {
 
-    /// The single line the model is asked for. `STUCK:` carries the hint.
-    static let completedAnswer = "COMPLETED"
-    static let notYetAnswer = "NOT_YET"
-    static let stuckAnswerPrefix = "STUCK:"
+    /// Re-exported so existing call sites and tests keep working. The
+    /// definitions live in `WatchVisualCheck.swift`, which the rehearsal
+    /// harness compiles directly so it cannot drift from what is sent here.
+    static let completedAnswer = WatchVisualCheck.completedAnswer
+    static let notYetAnswer = WatchVisualCheck.notYetAnswer
+    static let stuckAnswerPrefix = WatchVisualCheck.stuckAnswerPrefix
 
     /// Installed at startup by whoever owns the account service. Until then
     /// there is no way for this evaluator to reach a model, which is deliberate:
@@ -418,10 +420,7 @@ final class AssistantTransportWatchLoopVisualEvaluator: WatchLoopVisualEvaluator
         }
 
         let systemPrompt = Self.systemPrompt(hintsTheStepAuthorWrote: hintsTheStepAuthorWrote)
-        let userPrompt = """
-        The step is titled "\(stepTitle)".
-        The question to answer about the screenshot is: \(visualPrompt)
-        """
+        let userPrompt = WatchVisualCheck.userPrompt(stepTitle: stepTitle, visualPrompt: visualPrompt)
 
         // The image is passed straight through and never held: this call is the
         // only thing that ever sees it, and it is gone when this function
@@ -442,27 +441,7 @@ final class AssistantTransportWatchLoopVisualEvaluator: WatchLoopVisualEvaluator
     }
 
     static func systemPrompt(hintsTheStepAuthorWrote: [String]) -> String {
-        var systemPrompt = """
-        You are helping somebody follow an install guide on their own computer. \
-        You are shown one screenshot and asked whether the current step is done.
-
-        Answer with exactly one line and nothing else:
-        \(completedAnswer) — the step is visibly finished.
-        \(notYetAnswer) — the step is not finished, and nothing looks wrong.
-        \(stuckAnswerPrefix) <one short sentence> — the step is not finished AND \
-        something on screen suggests they have gone off the rails: an error, a \
-        dialog they did not expect, or the wrong window in front.
-
-        Prefer \(notYetAnswer) when you are unsure. Saying a step is done when it \
-        is not sends somebody on to a step that cannot work.
-        """
-        if !hintsTheStepAuthorWrote.isEmpty {
-            systemPrompt += "\n\nThe guide's author suggested these hints for somebody who is stuck:\n"
-            for hint in hintsTheStepAuthorWrote {
-                systemPrompt += "- \(hint)\n"
-            }
-        }
-        return systemPrompt
+        WatchVisualCheck.systemPrompt(hintsTheStepAuthorWrote: hintsTheStepAuthorWrote)
     }
 
     /// Reads the one line back. Anything unrecognized is nil — "the loop learned
@@ -472,33 +451,9 @@ final class AssistantTransportWatchLoopVisualEvaluator: WatchLoopVisualEvaluator
         fromModelAnswer modelAnswer: String,
         hintsTheStepAuthorWrote: [String]
     ) -> WatchVerdict? {
-        let firstLineOfTheAnswer = modelAnswer
-            .split(separator: "\n")
-            .first
-            .map(String.init)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let normalizedAnswer = firstLineOfTheAnswer.uppercased()
-
-        if normalizedAnswer.hasPrefix(stuckAnswerPrefix) {
-            let hintFromTheModel = firstLineOfTheAnswer
-                .dropFirst(stuckAnswerPrefix.count)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !hintFromTheModel.isEmpty {
-                return .userStuck(hint: hintFromTheModel)
-            }
-            // A stuck verdict with no hint is useless to the reader, so the
-            // author's own first hint stands in rather than an empty banner.
-            guard let authoredHint = hintsTheStepAuthorWrote.first else {
-                return .notYet
-            }
-            return .userStuck(hint: authoredHint)
-        }
-        if normalizedAnswer.hasPrefix(completedAnswer) {
-            return .completed
-        }
-        if normalizedAnswer.hasPrefix(notYetAnswer) || normalizedAnswer.hasPrefix("NOT YET") {
-            return .notYet
-        }
-        return nil
+        WatchVisualCheck.verdict(
+            fromModelAnswer: modelAnswer,
+            hintsTheStepAuthorWrote: hintsTheStepAuthorWrote
+        )
     }
 }

@@ -96,6 +96,40 @@ Two things to know before extending it:
 7. **Grounding lab milestone 2** — click-and-observe verification, and the VM
    to run it unattended.
 
+## The guides now watch themselves
+
+`lib/guides/<slug>.ts`, one module per guide (`lib/iris-guides.ts` keeps the
+types and assembles them). **151 of 325 steps carry a `watch` block**, up from
+zero — the install page's claim that Iris "checks each one for you" was false
+for every app until 2026-08-04. 11 steps carry an authored `point`.
+
+Of the watched steps, 67 are answered by local signals alone and cost nothing,
+13 put a `visual` behind a local signal, and 63 are visual-only. None of the 63
+had a cheaper signal available — they are all "read what the terminal printed",
+which needs pixels. `docs/guide-flow-spec.md` is the contract for adding more.
+
+Two patterns worth recognising before editing one:
+
+- **`{ expect: [], sensitive: true }` is a watch block that deliberately does
+  not watch.** `WatchLoop.beginWatching` returns early on an empty `expect`, so
+  the loop never starts; the block exists only to set `sensitive`, which
+  `GuidePointingLadder.decide` reads *first* to stop the inferred-pointing
+  fallback screenshotting a screen that may hold an API key. Ten steps use it.
+- **A `toolVersion` expectation only works for a tool in
+  `ToolVersionService.trustedToolFallbackPaths`,** which is git and node. See
+  below.
+
+**Open decision: `toolVersion` for pnpm, cargo and rust can never fire.** An app
+launched from Finder inherits launchd's `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`)
+and nothing else, so `locateExecutableOnSearchPath` cannot see `~/.cargo/bin` or
+`~/Library/pnpm`. The guides degrade correctly today (local signal first,
+`visual` underneath), but the real fix is more fallback paths — and
+`IrisPortTests.macOSFallbacksAreFixedAndLimitedToGitAndNode` deliberately pins
+the list to git and node, ported from the Tauri app. Widening it means running
+binaries out of user-writable directories, which is a judgement call about
+whether that constraint was security or just scope. It is *not* an oversight to
+fix in passing.
+
 ## Needs a person, not an agent
 
 - **Cut a release** (`git tag iris-v0.3.0 && git push --tags`) once the app has

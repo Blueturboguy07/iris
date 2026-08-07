@@ -529,6 +529,13 @@ fn allowed_external_host(host: &str) -> bool {
             // reads as a dead button rather than a blocked host.
             | "files.browseros.com"
             | "go.dev"
+            // Halation sends the reader to fal for a key. Without the host
+            // here the button opens nothing, which reads as the guide being
+            // broken at the one step that cannot be skipped.
+            | "fal.ai"
+            | "www.fal.ai"
+            | "www.nasm.us"
+            | "nasm.us"
     )
 }
 

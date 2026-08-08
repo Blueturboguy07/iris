@@ -101,6 +101,11 @@ for the OAuth redirect. Nothing else.
 4. A visible indicator is on whenever the watch loop is active; a global
    pause toggle always works.
 5. Funded-tier serverside logging is token counts only, never content.
+6. Terminal output is secret-scrubbed on egress before any of it reaches a
+   model — the scrub runs on the client, so nothing unscrubbed ever leaves the
+   machine. A step marked `sensitive: true` is never executed, echoed into the
+   terminal view, or sent to a model at all; it falls back to the copy-by-hand
+   card regardless of `kind`.
 
 ## 6. Server environment
 
@@ -124,3 +129,61 @@ order: foreground app / window title / tool version / git head / AX state,
 then a single visual check only if the step declares one. Verdicts:
 `completed | not_yet | user_stuck(hint)`; `user_stuck` may trigger one
 proactive chat message with optional pointing.
+
+## 8. Autopilot fix protocol
+
+When a guided-install autopilot command exits non-zero, the client does not
+free-chat its way to a fix. It calls a structured tool and only ever reads
+that tool's arguments back — there is no `tool_result` loop, no follow-up
+turn where the model is handed a result and asked to keep going. One call, one
+verdict, client decides what happens next.
+
+**`propose_fix`** is the tool, and its schema is the whole contract:
+
+```
+{
+  diagnosis: string,
+  confidence: "high" | "medium" | "low",
+  retryTheOriginalCommandAfterwards: boolean,
+  action:
+    | { runACommand:            { command: string, whatItDoes: string } }
+    | { askTheReaderToDoSomething: { instruction: string } }
+    | { cannotFixThis:          { reason: string } }
+}
+```
+
+The client renders `diagnosis` regardless of which `action` variant came
+back, runs `runACommand` through the same risk gate as any other guide
+command — nothing here bypasses it, a fix that needs a confirm tap gets
+one — and stops the ladder outright on `cannotFixThis`.
+
+**The ladder** a failing step climbs:
+
+1. Propose a fix from the guide material already in context (the step, the
+   failing command, the terminal tail). No tool beyond `propose_fix` itself.
+2. If that fix fails too, propose a fix informed by a web search. This rung
+   grants Anthropic's server-side `web_search_20250305` tool for that one
+   call — the model searches, reads results, and still answers through
+   `propose_fix`, not free text.
+3. If that also fails, autopilot stops proposing and surfaces the diagnosis
+   plus the failing command to the reader, who takes it from there.
+
+**Tool allowlisting is server-side**, not a client promise. The funded proxy
+accepts only `web_search` and schema-only client tools (`propose_fix` and its
+kin) on this path; `code_execution`, `computer`, `bash`, `text_editor`,
+`memory`, `mcp_toolset`, and `web_fetch` are rejected with `400` if a request
+asks for any of them. A client cannot widen its own blast radius by asking —
+the server would have to widen it first.
+
+**Budgets, latched per guide:**
+
+| Limit | Value |
+|---|---|
+| Fix attempts per step | 2 |
+| Fix attempts per guide | 6 |
+| Model calls per guide (fix ladder) | 8, latched |
+| `max_tokens` per fix call | 700 |
+| Web search `max_uses` | 5 |
+
+Hitting any ceiling behaves like rung 3: diagnosis and failing command
+surfaced, no further proposals for that guide.

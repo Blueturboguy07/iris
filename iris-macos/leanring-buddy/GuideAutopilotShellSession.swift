@@ -271,7 +271,6 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
         // where version managers put the PATH the guides need.
         private func sendPreamble() {
             guard !preambleHasBeenSent, let token = pendingReadyToken, let terminal else { return }
-            FileHandle.standardError.write(Data("[[PREAMBLE SENT token=\(token)]]\n".utf8))
             preambleHasBeenSent = true
             // Discard the prompt noise so the ready marker is found in clean
             // output, and the first real command starts from an empty buffer.

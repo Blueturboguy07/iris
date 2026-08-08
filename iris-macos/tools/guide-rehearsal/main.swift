@@ -428,6 +428,17 @@ let slug = arguments.count > 1 ? arguments[1] : "cue"
 let wantedPlatform = arguments.count > 2 ? arguments[2] : "macos"
 let apiBase = ProcessInfo.processInfo.environment["PUBLIK_API_BASE"] ?? "https://publikhq.com"
 
+// --runner=terminal (default, the AppleScript-into-Terminal path below) or
+// --runner=autopilot (runs each command through the app's own
+// GuideAutopilotShellSession, the way the shipped autopilot does). Autopilot
+// mode is where the exit code is the verdict; visual checks do not apply.
+// --inject-failure=<stepId> makes that step's command fail on purpose, so the
+// fix ladder runs against a real model on a real failure.
+let runnerMode = arguments.first { $0.hasPrefix("--runner=") }?
+    .replacingOccurrences(of: "--runner=", with: "") ?? "terminal"
+let stepToInjectAFailureInto = arguments.first { $0.hasPrefix("--inject-failure=") }?
+    .replacingOccurrences(of: "--inject-failure=", with: "")
+
 guard let apiKey = ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"], !apiKey.isEmpty else {
     print("ANTHROPIC_API_KEY is not set. Source .env.local first — and do not echo it.")
     exit(1)
@@ -457,6 +468,23 @@ try FileManager.default.createDirectory(at: scratchHome, withIntermediateDirecto
 print("Rehearsing \(guide.appName) v\(guide.version), branch \(branch.platform)")
 print("Scratch HOME: \(scratchHome.path)")
 print("Run directory: \(runDirectory.path)\n")
+
+// The autopilot path is entirely separate from the Terminal path below, so it
+// cannot regress it. It kicks off a main-actor task and runs the main loop
+// until that task calls exit — the shell session is @MainActor and would
+// deadlock under a semaphore.
+if runnerMode == "autopilot" {
+    print("Runner: autopilot (GuideAutopilotShellSession). Exit code is the verdict.\n")
+    Task { @MainActor in
+        await rehearseUnderAutopilot(
+            branch: branch,
+            scratchHome: scratchHome.path,
+            injectFailureIntoStepId: stepToInjectAFailureInto
+        )
+        exit(0)
+    }
+    dispatchMain()
+}
 
 var evaluator = VisualEvaluator(apiKey: apiKey, callBudget: 60)
 var results: [RehearsalResult] = []
@@ -707,3 +735,83 @@ print("harness could not ask: \(gaps)")
 print("THE GUIDE'S OWN COMMAND FAILED: \(commandFailures)")
 print("\nmodel calls: \(evaluator.callsMade)")
 print("frames: \(runDirectory.path)")
+
+// MARK: - Autopilot rehearsal
+//
+// Runs each executable command through the app's own GuideAutopilotShellSession
+// — the exact shell the shipped autopilot drives — in the scratch HOME. The
+// exit code is the verdict, so there is no before/after visual frame here.
+// Steps the autopilot never executes (manual, sensitive, dev-server) are
+// reported as such rather than faked, and a risk-gate confirmation on a
+// published guide command is a FINDING: the guide regressed past the web tests
+// or the gate is over-eager.
+
+@MainActor
+func rehearseUnderAutopilot(
+    branch: RehearsalBranch,
+    scratchHome: String,
+    injectFailureIntoStepId: String?
+) async {
+    let session = GuideAutopilotShellSession(startingDirectory: scratchHome)
+    guard await session.start() else {
+        print("could not start the autopilot shell")
+        return
+    }
+    defer { Task { await session.endSession() } }
+
+    var verified = 0, failed = 0, skipped = 0, gateFindings = 0
+
+    for step in branch.steps {
+        guard var command = step.command, !command.isEmpty else {
+            print("· \(step.id): manual — autopilot runs commands, not manual steps")
+            skipped += 1
+            continue
+        }
+        if step.watch?.sensitive == true {
+            print("· \(step.id): sensitive — never executed by autopilot")
+            skipped += 1
+            continue
+        }
+        if GuideAutopilotCommandShape.holdsTheShellOpen(command) {
+            print("· \(step.id): dev server — the watch loop owns completion, not the exit code")
+            skipped += 1
+            continue
+        }
+        if step.id == injectFailureIntoStepId {
+            command = "cd /nonexistent-iris-rehearsal-\(step.id) && \(command)"
+            print("· \(step.id): INJECTING A FAILURE")
+        }
+
+        switch GuideAutopilotRiskAssessment.assess(command) {
+        case .needsAConfirmTap(let reason), .refusedOutright(let reason):
+            print("✗ \(step.id): RISK GATE FIRED on a shipped command — \(reason.plainLanguageSummary)")
+            gateFindings += 1
+            continue
+        case .runsWithoutAsking:
+            break
+        }
+        guard let approved = GuideAutopilotRiskAssessment.approve(command) else { continue }
+
+        let outcome = await session.run(approved, deadline: 900)
+        switch outcome {
+        case .succeeded:
+            print("✓ \(step.id): exit 0")
+            verified += 1
+        case .failed(let status, _):
+            print("✗ \(step.id): exit \(status)")
+            failed += 1
+        case .timedOut:
+            print("✗ \(step.id): timed out")
+            failed += 1
+        case .cancelled, .seemsToBeAskingAQuestion, .sessionFailed:
+            print("· \(step.id): \(outcome)")
+            skipped += 1
+        }
+    }
+
+    print("\n=== AUTOPILOT REHEARSAL ===")
+    print("verified (exit 0): \(verified)")
+    print("failed: \(failed)")
+    print("skipped (manual/sensitive/dev-server): \(skipped)")
+    print("RISK-GATE FINDINGS (shipped command needed a tap): \(gateFindings)")
+}

@@ -14,6 +14,7 @@
 //  that would have to be broken to be verified.
 //
 
+import CoreGraphics
 import Foundation
 import Testing
 // The module follows PRODUCT_NAME, which the fork renamed to Iris.

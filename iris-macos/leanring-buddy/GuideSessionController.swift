@@ -196,6 +196,15 @@ final class GuideSessionController: ObservableObject {
     /// True while the drive loop is running, so the watch-loop resume path
     /// cannot start a second concurrent loop.
     private var autopilotIsDriving = false
+    /// True when autopilot ran into something on the current step it could not
+    /// do on its own — it surfaced the step, skipped a risky command, or handed
+    /// back a sensitive one — and is now waiting on the reader. It matters
+    /// because while it is set, `autopilotOwnsTheCurrentStep` goes false: the
+    /// watch loop is un-muzzled so it can notice the reader finished the step and
+    /// advance, which re-enters the drive loop and picks the install back up.
+    /// Without this, a single gate Iris could not clear stopped the whole
+    /// install dead — the reader's #1 complaint after the first live run.
+    @Published private(set) var autopilotHandedTheCurrentStepToTheReader = false
     /// The shell session is started once per autopilot run, not once per step.
     private var runnerSessionHasStarted = false
 
@@ -815,8 +824,15 @@ final class GuideSessionController: ObservableObject {
 
     /// True while Iris is executing a terminal step itself. The exit code is
     /// then the step's verdict, so the watch loop stands down for that step.
+    ///
+    /// Once autopilot has handed this step back to the reader (it surfaced,
+    /// skipped, or could not run it), Iris no longer owns it: the watch loop
+    /// takes over so it can notice the reader finished the step and advance,
+    /// which resumes the install for the remaining steps.
     var autopilotOwnsTheCurrentStep: Bool {
-        guard autopilotIsRunning, let step = currentStep else { return false }
+        guard autopilotIsRunning,
+              !autopilotHandedTheCurrentStepToTheReader,
+              let step = currentStep else { return false }
         return step.kind == .terminal
             && step.command != nil
             && step.watch?.sensitive != true
@@ -847,6 +863,7 @@ final class GuideSessionController: ObservableObject {
         let runner = makeAutopilotRunner(context)
         autopilotRunner = runner
         autopilotIsRunning = true
+        autopilotHandedTheCurrentStepToTheReader = false
         // While autopilot owns the current terminal step, the watch loop must
         // not also be watching it.
         pointTheWatchLoopAtTheCurrentStep()
@@ -865,6 +882,45 @@ final class GuideSessionController: ObservableObject {
     /// The reader tapped Run it / Skip on a risky command's confirm row.
     func approveThePendingRiskyCommand() { autopilotRunner?.approvePendingCommand() }
     func skipThePendingRiskyCommand() { autopilotRunner?.skipPendingCommand() }
+
+    /// The reader tapped "Try again" on a step Iris surfaced. Re-run the step's
+    /// command through the runner from the top; if it works this time, Iris
+    /// carries on with the rest of the install on its own.
+    func retryTheSurfacedStep() {
+        guard autopilotIsRunning, !autopilotIsDriving,
+              let runner = autopilotRunner,
+              let branch = selectedBranch,
+              currentStepIndex < branch.steps.count else { return }
+        // Iris owns the step again for the duration of the retry, so the watch
+        // loop stands down and cannot also advance it.
+        autopilotHandedTheCurrentStepToTheReader = false
+        pointTheWatchLoopAtTheCurrentStep()
+        let step = branch.steps[currentStepIndex]
+        let stepIndex = currentStepIndex
+        let totalSteps = branch.steps.count
+        Task {
+            let result = await runner.executeStepCommand(
+                step: step, stepIndex: stepIndex, totalSteps: totalSteps
+            )
+            numberOfCommandsAutopilotHasExecuted += 1
+            switch result {
+            case .succeeded:
+                advanceFromWithinAutopilot()
+            case .handedBackAsSensitive, .skippedByReader, .surfacedToReader:
+                handTheCurrentStepBackToTheReader()
+            case .longRunningStarted, .stopped:
+                return
+            }
+        }
+    }
+
+    /// The reader tapped "Continue" on a step Iris surfaced — they are choosing
+    /// to move past it. Skip it and let Iris run the remaining steps.
+    func skipTheSurfacedStepAndContinue() {
+        guard autopilotIsRunning else { return }
+        autopilotHandedTheCurrentStepToTheReader = false
+        advanceToTheNextStep()
+    }
 
     /// What the chat model is told about the guide the reader is on, so a
     /// "why is this failing" question is answered from the step and the real
@@ -926,6 +982,10 @@ final class GuideSessionController: ObservableObject {
         while autopilotIsRunning,
               !readerHasFinishedTheGuide,
               currentStepIndex < branch.steps.count {
+            // A fresh step is Iris's again until proven otherwise, so ownership
+            // is restored here rather than trusting every advance path to clear
+            // the hand-back flag.
+            autopilotHandedTheCurrentStepToTheReader = false
             let step = branch.steps[currentStepIndex]
 
             guard stepIsAutopilotExecutable(step) else {
@@ -943,14 +1003,35 @@ final class GuideSessionController: ObservableObject {
             switch result {
             case .succeeded:
                 advanceFromWithinAutopilot()
-            case .longRunningStarted, .handedBackAsSensitive,
-                 .skippedByReader, .surfacedToReader, .stopped:
-                // Iris hands the step back; the reader (or the watch loop for a
-                // dev server) decides what happens next. Autopilot stays on but
-                // stops auto-advancing until something moves the step on.
+            case .longRunningStarted:
+                // A dev server is up in its own session; the watch loop owns
+                // completion. Autopilot stays on and yields.
+                return
+            case .handedBackAsSensitive, .skippedByReader, .surfacedToReader:
+                // Iris could not finish this step on its own. Hand it to the
+                // reader: un-muzzle the watch loop so it can notice they did it
+                // and advance (which resumes the install), point the eye at
+                // wherever the step wants them, and yield until then.
+                handTheCurrentStepBackToTheReader()
+                return
+            case .stopped:
+                // The session died; nothing more to drive.
                 return
             }
         }
+    }
+
+    /// Marks the current step the reader's to finish and re-aims the watch loop
+    /// and the eye at it, so a gate Iris could not clear does not stall the
+    /// whole install — the reader does that one step and Iris carries on.
+    private func handTheCurrentStepBackToTheReader() {
+        autopilotHandedTheCurrentStepToTheReader = true
+        // Ownership just flipped, so this now begins watching the step instead
+        // of standing the loop down.
+        pointTheWatchLoopAtTheCurrentStep()
+        // Fly the eye to whatever the step points at, so a non-technical reader
+        // is shown where to act rather than left reading terminal scrollback.
+        refreshPointingForTheOpenStep()
     }
 
     /// Opens an `open`/`web` step's link (once) or a `permission` step's
@@ -1436,6 +1517,11 @@ final class GuideSessionController: ObservableObject {
         } else {
             currentStepIndex += 1
         }
+        // A new step is Iris's to own again, so this must be cleared before the
+        // watch loop is re-pointed below — otherwise the loop would keep
+        // watching a step autopilot is about to execute and the two would race
+        // to advance it.
+        autopilotHandedTheCurrentStepToTheReader = false
         cancelAnyWorkFromThePreviousStep()
         prepareToolCheckRowsForTheCurrentStep()
         pointTheWatchLoopAtTheCurrentStep()

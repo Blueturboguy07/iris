@@ -36,6 +36,29 @@ enum GuideAutopilotStepResult: Equatable {
     case stopped
 }
 
+/// How long a fast command must stay visibly "running" before its result line
+/// appears, so a command that finishes in a few milliseconds still reads as
+/// work Iris did rather than a flash on screen. The shell is never slowed — the
+/// command has already finished; only the moment the exit line is shown is held.
+/// A slow command (an `npm ci`) already runs far longer than this, so nothing is
+/// ever added to a real install; only the trivially fast commands get a floor.
+struct GuideAutopilotPacing: Equatable {
+    let minimumVisibleCommandDuration: TimeInterval
+
+    /// The shipped feel: every command is on screen for at least this long, so
+    /// a complex install reads as a sequence of deliberate steps.
+    static let humanPaced = GuideAutopilotPacing(minimumVisibleCommandDuration: 0.7)
+    /// Tests and rehearsals run with no artificial hold, so a fake shell that
+    /// returns instantly keeps the suite fast and deterministic.
+    static let instant = GuideAutopilotPacing(minimumVisibleCommandDuration: 0)
+
+    /// How much longer to hold the "running" state, given how long the command
+    /// actually took. Zero once the real duration already meets the floor.
+    func remainingHold(afterElapsed elapsed: TimeInterval) -> TimeInterval {
+        max(0, minimumVisibleCommandDuration - elapsed)
+    }
+}
+
 /// Everything the runner needs to know about the guide, injected once so the
 /// failure context and the host guard are always populated.
 struct GuideAutopilotGuideContext {
@@ -66,6 +89,9 @@ final class GuideAutopilotRunner: ObservableObject {
 
     @Published private(set) var state: GuideAutopilotState = .notStarted
     @Published private(set) var transcript: [GuideAutopilotTranscriptEntry] = []
+    /// True while a command is actually in the shell (through the pacing hold),
+    /// so the terminal can show a live cursor rather than a dead prompt.
+    @Published private(set) var isExecutingACommand: Bool = false
 
     // MARK: - Collaborators
 
@@ -73,6 +99,9 @@ final class GuideAutopilotRunner: ObservableObject {
     private let longRunningSession: GuideAutopilotShellSessionDriving
     private let fixProposer: GuideAutopilotFixProposing
     private let guideContext: GuideAutopilotGuideContext
+    /// The perceived-pace floor. Real execution is untouched; this only holds a
+    /// fast command's result line so the install reads as deliberate work.
+    private let pacing: GuideAutopilotPacing
 
     // MARK: - Budget counters
 
@@ -87,12 +116,14 @@ final class GuideAutopilotRunner: ObservableObject {
         shellSession: GuideAutopilotShellSessionDriving,
         longRunningSession: GuideAutopilotShellSessionDriving,
         fixProposer: GuideAutopilotFixProposing,
-        guideContext: GuideAutopilotGuideContext
+        guideContext: GuideAutopilotGuideContext,
+        pacing: GuideAutopilotPacing = .humanPaced
     ) {
         self.shellSession = shellSession
         self.longRunningSession = longRunningSession
         self.fixProposer = fixProposer
         self.guideContext = guideContext
+        self.pacing = pacing
         shellSession.onOutputLine = { [weak self] line in
             self?.transcript.append(.output(line: line))
         }
@@ -200,15 +231,19 @@ final class GuideAutopilotRunner: ObservableObject {
     }
 
     private func runApproved(_ command: GuideAutopilotApprovedCommand) async -> GuideCommandOutcome {
+        isExecutingACommand = true
+        defer { isExecutingACommand = false }
         let startedAt = Date()
         let outcome = await shellSession.run(command, deadline: GuideAutopilotShellSession.defaultCommandDeadline)
         let duration = Date().timeIntervalSince(startedAt)
         switch outcome {
         case .succeeded(let workingDirectory):
+            await holdSoTheCommandReadsAsWork(elapsed: duration)
             transcript.append(.exitStatus(code: 0, duration: duration))
             _ = workingDirectory
             return .succeeded
         case .failed(let exitStatus, let workingDirectory):
+            await holdSoTheCommandReadsAsWork(elapsed: duration)
             transcript.append(.exitStatus(code: exitStatus, duration: duration))
             return .failed(workingDirectory: workingDirectory)
         case .cancelled:
@@ -349,9 +384,12 @@ final class GuideAutopilotRunner: ObservableObject {
     }
 
     private func runFixApproved(_ command: GuideAutopilotApprovedCommand) async -> Bool {
+        isExecutingACommand = true
+        defer { isExecutingACommand = false }
         let startedAt = Date()
         let outcome = await shellSession.run(command, deadline: GuideAutopilotShellSession.defaultCommandDeadline)
         let duration = Date().timeIntervalSince(startedAt)
+        await holdSoTheCommandReadsAsWork(elapsed: duration)
         if case .succeeded = outcome {
             transcript.append(.exitStatus(code: 0, duration: duration))
             return true
@@ -362,6 +400,15 @@ final class GuideAutopilotRunner: ObservableObject {
         // A fix's own failure does not consume a rung — it fails this rung
         // and the loop moves on.
         return false
+    }
+
+    /// Holds the "running" state on screen for the pacing floor after a fast
+    /// command has already returned, so it reads as work rather than a flash.
+    /// The command is done; nothing real is being slowed.
+    private func holdSoTheCommandReadsAsWork(elapsed: TimeInterval) async {
+        let hold = pacing.remainingHold(afterElapsed: elapsed)
+        guard hold > 0 else { return }
+        try? await Task.sleep(nanoseconds: UInt64(hold * 1_000_000_000))
     }
 
     // MARK: - Surfacing

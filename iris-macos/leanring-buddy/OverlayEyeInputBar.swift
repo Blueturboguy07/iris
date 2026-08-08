@@ -483,7 +483,9 @@ struct OverlayEyeInputBarView: View {
                     GuideAutopilotTerminalView(
                         runner: runner,
                         onApproveRiskyCommand: { guideSessionController.approveThePendingRiskyCommand() },
-                        onSkipRiskyCommand: { guideSessionController.skipThePendingRiskyCommand() }
+                        onSkipRiskyCommand: { guideSessionController.skipThePendingRiskyCommand() },
+                        onRetrySurfacedStep: { guideSessionController.retryTheSurfacedStep() },
+                        onContinuePastSurfacedStep: { guideSessionController.skipTheSurfacedStepAndContinue() }
                     )
                 }
             }

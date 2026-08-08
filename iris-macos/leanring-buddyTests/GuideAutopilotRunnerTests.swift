@@ -81,7 +81,11 @@ struct GuideAutopilotRunnerTests {
                 slug: "whimprflow", version: 3, appName: "WhimprFlow",
                 platformLabel: "macOS",
                 hostsReachedByTheGuide: ["github.com"]
-            )
+            ),
+            // No artificial hold in tests: a fake shell returns instantly and
+            // the suite must stay fast and deterministic. The pacing floor is
+            // exercised on its own in `pacingHoldsAFastCommandButNotASlowOne`.
+            pacing: .instant
         )
     }
 
@@ -95,6 +99,21 @@ struct GuideAutopilotRunnerTests {
             command: command,
             watch: sensitive ? IrisStepWatch(expect: [], sensitive: true) : nil
         )
+    }
+
+    // MARK: - Pacing
+
+    @Test func pacingHoldsAFastCommandButNotASlowOne() {
+        let paced = GuideAutopilotPacing.humanPaced
+        // A command that finished in a blink is held to the floor…
+        #expect(abs(paced.remainingHold(afterElapsed: 0.005) - 0.695) < 0.0001)
+        // …but a command that already ran longer than the floor gets no hold,
+        // so a real install is never slowed.
+        #expect(paced.remainingHold(afterElapsed: 3.0) == 0)
+        #expect(paced.remainingHold(afterElapsed: 0.7) == 0)
+        #expect(paced.remainingHold(afterElapsed: 100) >= 0)
+        // The test/rehearsal pacing never holds at all.
+        #expect(GuideAutopilotPacing.instant.remainingHold(afterElapsed: 0) == 0)
     }
 
     // MARK: - Happy path

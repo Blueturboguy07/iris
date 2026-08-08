@@ -6,11 +6,19 @@
 //  autopilot is on. It renders `GuideAutopilotRunner`'s transcript — a list of
 //  pure values — and, when a risky command is waiting, the confirm row.
 //
-//  Three signals set a fix apart from a guide command at a glance: an amber
-//  left rule (guide commands get the accent rule), a small "Iris's fix" label
-//  above it, and an indent. On a small translucent card one signal is not
-//  enough. Iris's own sentences render in the prose font, never monospace, so
-//  the reader can always tell Iris apart from the machine.
+//  It is dressed as a real macOS Terminal window on purpose: a title bar with
+//  the three traffic lights, a solid dark body, a `%` prompt in front of every
+//  command, and a block cursor that blinks while a command is actually running.
+//  Iris can finish an install in a blink; a reader watching a blank flash does
+//  not believe anything happened. So each command is typed out and its result
+//  is held on screen for a moment (`GuideAutopilotPacing`) — the shell is never
+//  slowed, only the way it is shown. A complex install then reads as a sequence
+//  of deliberate steps rather than an instant that is hard to trust.
+//
+//  Three signals still set a fix apart from a guide command at a glance: an
+//  amber prompt and rule (guide commands get the accent), a small "Iris's fix"
+//  label above it, and an indent. Iris's own sentences render in the prose
+//  font, never monospace, so the reader can always tell Iris from the machine.
 //
 
 import SwiftUI
@@ -19,20 +27,78 @@ struct GuideAutopilotTerminalView: View {
     @ObservedObject var runner: GuideAutopilotRunner
     let onApproveRiskyCommand: () -> Void
     let onSkipRiskyCommand: () -> Void
+    /// The reader tapped "Try again" on a step Iris surfaced.
+    let onRetrySurfacedStep: () -> Void
+    /// The reader tapped "Continue" to move past a step Iris surfaced.
+    let onContinuePastSurfacedStep: () -> Void
+
+    // The Terminal.app palette, so this reads as the app the reader already
+    // trusts rather than as one more piece of Iris's chrome.
+    private static let windowBackground = Color(red: 0.086, green: 0.086, blue: 0.098)
+    private static let titleBarBackground = Color(red: 0.145, green: 0.145, blue: 0.161)
+    private static let trafficRed = Color(red: 1.0, green: 0.373, blue: 0.341)
+    private static let trafficYellow = Color(red: 0.996, green: 0.737, blue: 0.180)
+    private static let trafficGreen = Color(red: 0.157, green: 0.784, blue: 0.251)
+    private static let cursor = Color.white.opacity(0.82)
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            ForEach(runner.transcript) { entry in
-                row(for: entry)
+        VStack(spacing: 0) {
+            titleBar
+            transcriptBody
+        }
+        .background(Self.windowBackground)
+        .clipShape(RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    // MARK: - Window chrome
+
+    private var titleBar: some View {
+        ZStack {
+            HStack(spacing: 7) {
+                Circle().fill(Self.trafficRed).frame(width: 11, height: 11)
+                Circle().fill(Self.trafficYellow).frame(width: 11, height: 11)
+                Circle().fill(Self.trafficGreen).frame(width: 11, height: 11)
+                Spacer(minLength: 0)
+            }
+            Text("iris — install")
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundColor(Color.white.opacity(0.5))
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 24)
+        .frame(maxWidth: .infinity)
+        .background(Self.titleBarBackground)
+    }
+
+    private var transcriptBody: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            // Index-based identity: the transcript is append-only, so a row's
+            // position is a stable id. (Value identity is not — two identical
+            // output lines would collide — and an unstable id would restart the
+            // typewriter on every redraw.)
+            ForEach(runner.transcript.indices, id: \.self) { index in
+                row(for: runner.transcript[index])
+            }
+
+            // A live prompt with a blinking cursor while the shell is busy — the
+            // signal that Iris is doing something right now, through the pacing
+            // hold as well as the real work.
+            if runner.isExecutingACommand {
+                runningCursorLine
+            }
+
+            // Iris could not finish this step; the reader takes it from here.
+            if case .surfacedToReader = runner.state {
+                surfaceRow
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
-                .fill(Color.black.opacity(0.34))
-        )
+        .padding(.horizontal, 11)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, minHeight: 58, alignment: .topLeading)
     }
 
     @ViewBuilder
@@ -40,23 +106,23 @@ struct GuideAutopilotTerminalView: View {
         switch entry {
         case .stepHeading(let title, let number, let total):
             Text("\(title.uppercased())  ·  \(number) of \(total)")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundColor(DS.Colors.textTertiary)
-                .padding(.top, 2)
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundColor(Color.white.opacity(0.32))
+                .padding(.top, 3)
 
         case .commandFromTheGuide(let text):
-            commandRow(text, rule: DS.Colors.accent, indented: false, label: nil, searchedTheWeb: false)
+            commandRow(text, prompt: DS.Colors.accent, indented: false, label: nil, searchedTheWeb: false)
 
         case .commandFromAFix(let text, let attempt, let searchedTheWeb, _):
             commandRow(
-                text, rule: DS.Colors.amber, indented: true,
+                text, prompt: DS.Colors.amber, indented: true,
                 label: "↻ Iris's fix · attempt \(attempt)", searchedTheWeb: searchedTheWeb
             )
 
         case .output(let line):
-            Text(line)
+            Text(line.isEmpty ? " " : line)
                 .font(.system(size: 10.5, design: .monospaced))
-                .foregroundColor(DS.Colors.textSecondary.opacity(0.85))
+                .foregroundColor(Color.white.opacity(0.72))
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -76,15 +142,17 @@ struct GuideAutopilotTerminalView: View {
             // Iris talking, in prose — not the machine.
             Text(text)
                 .font(.system(size: 11))
-                .foregroundColor(DS.Colors.textPrimary)
+                .foregroundColor(Color.white.opacity(0.92))
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 1)
         }
     }
 
+    // MARK: - Command rows
+
     private func commandRow(
-        _ text: String, rule: Color, indented: Bool, label: String?, searchedTheWeb: Bool
+        _ text: String, prompt: Color, indented: Bool, label: String?, searchedTheWeb: Bool
     ) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             if let label {
@@ -95,28 +163,76 @@ struct GuideAutopilotTerminalView: View {
                     if searchedTheWeb {
                         Text("searched the web")
                             .font(.system(size: 8.5, weight: .medium))
-                            .foregroundColor(DS.Colors.textTertiary)
+                            .foregroundColor(Color.white.opacity(0.4))
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
                             .background(Capsule().fill(Color.white.opacity(0.08)))
                     }
                 }
             }
-            HStack(spacing: 7) {
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(rule)
-                    .frame(width: 2)
-                Text(text)
-                    .font(.system(size: 10.5, design: .monospaced))
-                    .foregroundColor(DS.Colors.textPrimary)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(alignment: .top, spacing: 7) {
+                Text("%")
+                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                    .foregroundColor(prompt)
+                TypewriterCommandText(fullText: text)
             }
-            .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.leading, indented ? 10 : 0)
+        .padding(.leading, indented ? 12 : 0)
     }
+
+    private var runningCursorLine: some View {
+        HStack(spacing: 7) {
+            Text("%")
+                .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                .foregroundColor(DS.Colors.accent.opacity(0.6))
+            BlinkingBlockCursor(color: Self.cursor)
+            Spacer(minLength: 0)
+        }
+    }
+
+    // MARK: - The reader's turn (a surfaced step)
+
+    private var surfaceRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "hand.raised.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(DS.Colors.amber)
+                Text("Your turn")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(DS.Colors.amber)
+            }
+            // The specific diagnosis is already in the transcript above, as
+            // Iris's own sentence. This is the standing offer to keep going.
+            Text("Do this one step and Iris will carry on with the rest — or continue past it.")
+                .font(.system(size: 10.5))
+                .foregroundColor(Color.white.opacity(0.75))
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 8) {
+                Button("Continue past it", action: onContinuePastSurfacedStep)
+                    .irisTextButton()
+                Spacer(minLength: 0)
+                Button("Try again", action: onRetrySurfacedStep)
+                    .irisPrimaryPill(isFullWidth: false, isCompact: true)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .fill(DS.Colors.amber.opacity(0.12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                        .strokeBorder(DS.Colors.amber.opacity(0.4), lineWidth: 1)
+                )
+        )
+        .padding(.top, 2)
+    }
+
+    // MARK: - The confirm row (a risky command)
 
     private func confirmRow(_ request: GuideAutopilotApprovalRequest) -> some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -135,7 +251,7 @@ struct GuideAutopilotTerminalView: View {
 
             Text(request.reason)
                 .font(.system(size: 10.5))
-                .foregroundColor(DS.Colors.textSecondary)
+                .foregroundColor(Color.white.opacity(0.75))
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 8) {
@@ -167,5 +283,69 @@ struct GuideAutopilotTerminalView: View {
     private func formatted(_ duration: TimeInterval) -> String {
         duration < 1 ? String(format: "%.0fms", duration * 1000)
             : String(format: "%.1fs", duration)
+    }
+}
+
+// MARK: - Typewriter + cursor
+
+/// Reveals a command one character at a time, the way it looks when someone
+/// types it into a real Terminal. Purely cosmetic: the command has already run
+/// by the time this animates, and if the animation is ever cancelled the full
+/// text snaps in, so nothing depends on it completing.
+private struct TypewriterCommandText: View {
+    let fullText: String
+    @State private var revealedCharacterCount: Int = 0
+
+    var body: some View {
+        Text(String(fullText.prefix(revealedCharacterCount)))
+            .font(.system(size: 10.5, design: .monospaced))
+            .foregroundColor(DS.Colors.textPrimary)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .task(id: fullText) {
+                revealedCharacterCount = 0
+                let totalCharacters = fullText.count
+                guard totalCharacters > 0 else { return }
+                // Cap the number of sleeps so a very long command still finishes
+                // in well under a second: reveal in at most ~64 chunks.
+                let maximumSteps = 64
+                let charactersPerStep = max(1, totalCharacters / maximumSteps)
+                var shown = 0
+                while shown < totalCharacters {
+                    shown = min(totalCharacters, shown + charactersPerStep)
+                    revealedCharacterCount = shown
+                    do {
+                        try await Task.sleep(nanoseconds: 15_000_000) // ~15ms/chunk
+                    } catch {
+                        revealedCharacterCount = totalCharacters
+                        return
+                    }
+                }
+                revealedCharacterCount = totalCharacters
+            }
+    }
+}
+
+/// A block cursor that blinks at roughly the macOS Terminal rate.
+private struct BlinkingBlockCursor: View {
+    let color: Color
+    @State private var isVisible: Bool = true
+
+    var body: some View {
+        Rectangle()
+            .fill(color)
+            .frame(width: 7, height: 13)
+            .opacity(isVisible ? 1 : 0)
+            .task {
+                while !Task.isCancelled {
+                    do {
+                        try await Task.sleep(nanoseconds: 530_000_000)
+                    } catch {
+                        return
+                    }
+                    isVisible.toggle()
+                }
+            }
     }
 }

@@ -152,7 +152,9 @@ class ClaudeAPI {
         systemPrompt: String,
         messages: [[String: Any]],
         maximumOutputTokens: Int,
-        shouldStream: Bool
+        shouldStream: Bool,
+        tools: [[String: Any]]? = nil,
+        toolChoice: [String: Any]? = nil
     ) -> [String: Any] {
         var requestBody: [String: Any] = [
             "max_tokens": maximumOutputTokens,
@@ -164,6 +166,16 @@ class ClaudeAPI {
         }
         if transport.shouldSendModelInRequestBody {
             requestBody["model"] = model
+        }
+        // Tools ride in the body, not the transport: the funded proxy
+        // allowlists them server-side and the BYO route sends them straight
+        // to Anthropic. AssistantTransport needs no change for this, and
+        // that is deliberate — do not "helpfully" move tools there.
+        if let tools {
+            requestBody["tools"] = tools
+        }
+        if let toolChoice {
+            requestBody["tool_choice"] = toolChoice
         }
         return requestBody
     }
@@ -297,7 +309,113 @@ class ClaudeAPI {
         return (text: accumulatedResponseText, duration: duration)
     }
 
-    /// Non-streaming fallback for validation requests where we don't need progressive display.
+    // MARK: - Tool-carrying requests
+
+    /// One Messages call whose answer arrives as structured tool_use blocks
+    /// (and, with server tools like web_search, as server-executed rounds).
+    /// The tool here is a schema carrier: nothing is executed client-side
+    /// and no tool_result is ever sent back. A `pause_turn` stop reason is
+    /// resumed by resending the conversation with the assistant's blocks
+    /// appended, at most `maximumContinuations` times.
+    func respondWithTools(
+        systemPrompt: String,
+        userMessageText: String,
+        tools: [[String: Any]],
+        toolChoice: [String: Any]?,
+        maximumOutputTokens: Int
+    ) async throws -> ClaudeStreamedMessage {
+        var messages: [[String: Any]] = [
+            ["role": "user", "content": userMessageText]
+        ]
+        let maximumContinuations = 3
+
+        var latest = try await streamOneMessage(
+            systemPrompt: systemPrompt,
+            messages: messages,
+            maximumOutputTokens: maximumOutputTokens,
+            tools: tools,
+            toolChoice: toolChoice
+        )
+        var continuationsUsed = 0
+        while latest.stopReason == "pause_turn", continuationsUsed < maximumContinuations {
+            continuationsUsed += 1
+            messages.append(["role": "assistant", "content": latest.assistantContentBlocks])
+            latest = try await streamOneMessage(
+                systemPrompt: systemPrompt,
+                messages: messages,
+                maximumOutputTokens: maximumOutputTokens,
+                tools: tools,
+                toolChoice: toolChoice
+            )
+        }
+        return latest
+    }
+
+    /// Sends one streaming request and reassembles the full message. Shared
+    /// by `respondWithTools` and `analyzeImage`.
+    private func streamOneMessage(
+        systemPrompt: String,
+        messages: [[String: Any]],
+        maximumOutputTokens: Int,
+        tools: [[String: Any]]? = nil,
+        toolChoice: [String: Any]? = nil,
+        onTextChunk: (@MainActor @Sendable (String) -> Void)? = nil
+    ) async throws -> ClaudeStreamedMessage {
+        let transport = try await resolveTransport().get()
+        var request = try await transport.makeChatRequest()
+        let body = buildRequestBody(
+            for: transport,
+            systemPrompt: systemPrompt,
+            messages: messages,
+            maximumOutputTokens: maximumOutputTokens,
+            shouldStream: true,
+            tools: tools,
+            toolChoice: toolChoice
+        )
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let byteStream: URLSession.AsyncBytes
+        let response: URLResponse
+        do {
+            (byteStream, response) = try await session.bytes(for: request)
+        } catch {
+            throw AssistantTransportError.transportFailure(reason: error.localizedDescription)
+        }
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw AssistantTransportError.requestFailed(statusCode: -1)
+        }
+        guard (200...299).contains(httpResponse.statusCode) else {
+            var failureBodyChunks: [String] = []
+            for try await line in byteStream.lines {
+                failureBodyChunks.append(line)
+            }
+            throw failure(
+                forStatusCode: httpResponse.statusCode,
+                failureBodyData: Data(failureBodyChunks.joined(separator: "\n").utf8),
+                retryAfterHeaderValue: httpResponse.value(forHTTPHeaderField: "Retry-After"),
+                transport: transport
+            )
+        }
+
+        var accumulator = ClaudeSSEMessageAccumulator()
+        var accumulatedText = ""
+        for try await line in byteStream.lines {
+            if let freshText = accumulator.consume(line: line), let onTextChunk {
+                accumulatedText += freshText
+                let textSoFar = accumulatedText
+                await onTextChunk(textSoFar)
+            }
+        }
+        return accumulator.finalize()
+    }
+
+    /// Non-streaming interface over the streaming wire format. The funded
+    /// route hard-codes `stream: true` upstream and answers with SSE no
+    /// matter what the client asked, so parsing the body as plain JSON —
+    /// what this method did originally — failed on the funded tier and the
+    /// watch loop's `try?` swallowed the error. Streaming both routes and
+    /// assembling the message here makes the two tiers genuinely
+    /// interchangeable again.
     func analyzeImage(
         images: [(data: Data, label: String)],
         systemPrompt: String,
@@ -306,55 +424,17 @@ class ClaudeAPI {
     ) async throws -> (text: String, duration: TimeInterval) {
         let startTime = Date()
 
-        let transport = try await resolveTransport().get()
-        var request = try await transport.makeChatRequest()
-
         let messages = buildMessages(
             images: images,
             conversationHistory: conversationHistory,
             userPrompt: userPrompt
         )
-        let body = buildRequestBody(
-            for: transport,
+        let message = try await streamOneMessage(
             systemPrompt: systemPrompt,
             messages: messages,
-            maximumOutputTokens: 256,
-            shouldStream: false
+            maximumOutputTokens: 256
         )
-
-        let bodyData = try JSONSerialization.data(withJSONObject: body)
-        request.httpBody = bodyData
-        let payloadMB = Double(bodyData.count) / 1_048_576.0
-        print("🌐 Claude request via \(transport.tierDescription): \(String(format: "%.1f", payloadMB))MB, \(images.count) image(s)")
-
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            throw AssistantTransportError.transportFailure(reason: error.localizedDescription)
-        }
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw AssistantTransportError.requestFailed(statusCode: -1)
-        }
-        guard (200...299).contains(httpResponse.statusCode) else {
-            throw failure(
-                forStatusCode: httpResponse.statusCode,
-                failureBodyData: data,
-                retryAfterHeaderValue: httpResponse.value(forHTTPHeaderField: "Retry-After"),
-                transport: transport
-            )
-        }
-
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        guard let content = json?["content"] as? [[String: Any]],
-              let textBlock = content.first(where: { ($0["type"] as? String) == "text" }),
-              let text = textBlock["text"] as? String else {
-            throw AssistantTransportError.requestFailed(statusCode: httpResponse.statusCode)
-        }
-
         let duration = Date().timeIntervalSince(startTime)
-        return (text: text, duration: duration)
+        return (text: message.text, duration: duration)
     }
 }

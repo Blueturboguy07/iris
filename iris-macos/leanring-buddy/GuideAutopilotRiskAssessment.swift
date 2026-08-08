@@ -29,7 +29,7 @@
 import Foundation
 
 /// Why a command tripped the gate, in words a reader can act on.
-struct GuideAutopilotRiskReason: Equatable, Sendable {
+nonisolated struct GuideAutopilotRiskReason: Equatable, Sendable {
     /// One plain sentence for the confirm row ("This runs as administrator.").
     let plainLanguageSummary: String
     /// The exact substring that tripped the gate, for highlighting in the
@@ -37,7 +37,7 @@ struct GuideAutopilotRiskReason: Equatable, Sendable {
     let trippingSubstring: String
 }
 
-enum GuideAutopilotRisk: Equatable, Sendable {
+nonisolated enum GuideAutopilotRisk: Equatable, Sendable {
     case runsWithoutAsking
     case needsAConfirmTap(reason: GuideAutopilotRiskReason)
     case refusedOutright(reason: GuideAutopilotRiskReason)
@@ -47,14 +47,14 @@ enum GuideAutopilotRisk: Equatable, Sendable {
 /// nothing else. Minted only by `GuideAutopilotRiskAssessment.approve(_:)`
 /// (clean commands) and `approveAfterAReaderTap(_:)` (confirm-tier commands,
 /// after the tap) — never by a caller.
-struct GuideAutopilotApprovedCommand: Equatable, Sendable {
+nonisolated struct GuideAutopilotApprovedCommand: Equatable, Sendable {
     let text: String
     fileprivate init(text: String) {
         self.text = text
     }
 }
 
-enum GuideAutopilotRiskAssessment {
+nonisolated enum GuideAutopilotRiskAssessment {
 
     // MARK: - The verdict
 
@@ -174,8 +174,10 @@ enum GuideAutopilotRiskAssessment {
 
         // Obfuscation: a command whose effect cannot be read from its text.
         // Chasing every disguise is unwinnable, so the disguise itself is
-        // the trigger.
-        .init(#"\$\("#, "Part of this command is computed when it runs, so its effect can't be read from its text."),
+        // the trigger. `$(( ))` arithmetic is exempt — it computes a number,
+        // not a command — so the pattern matches `$(` only when a second `(`
+        // does not immediately follow.
+        .init(#"\$\((?!\()"#, "Part of this command is computed when it runs, so its effect can't be read from its text."),
         .init(#"`"#, "Part of this command is computed when it runs, so its effect can't be read from its text."),
         .init(#"\beval\b"#, "This runs text as a program."),
         .init(#"\bbase64\b[^\n]*(-d|--decode)[^\n]*\|"#,
@@ -186,7 +188,7 @@ enum GuideAutopilotRiskAssessment {
 
 /// One pattern plus its reason. Case-insensitive, like the web test's
 /// patterns; the first match's text is what the confirm row highlights.
-private struct GuideAutopilotRiskRule {
+nonisolated private struct GuideAutopilotRiskRule {
     let pattern: NSRegularExpression
     let plainLanguageSummary: String
 

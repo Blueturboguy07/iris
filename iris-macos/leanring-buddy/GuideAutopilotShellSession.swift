@@ -1,0 +1,653 @@
+//
+//  GuideAutopilotShellSession.swift
+//  leanring-buddy
+//
+//  One persistent login shell for one guide session. Steps in a guide assume
+//  their predecessors' state — `cd cue` then `npm ci` — so commands run in a
+//  single long-lived shell, not one process per command, and the session
+//  remembers its cwd from the end marker of every command.
+//
+//  The environment is built from scratch, never inherited: a Finder-launched
+//  app carries launchd's four-directory PATH, and handing that to the shell
+//  is how "Iris says node is missing but it is right there" happens. PATH is
+//  deliberately absent from the child environment so the login+interactive
+//  shell rebuilds it through path_helper and the user's own dotfiles.
+//
+//  The shell is driven through a generated ZDOTDIR whose .zshrc loads the
+//  user's real zsh setup and then turns off ZLE, zsh's interactive line
+//  editor. That is what makes programmatic command injection reliable: with
+//  ZLE off there is no per-keystroke echo, no bracketed paste, and no prompt
+//  redraw to mangle or wedge the input, and — because it happens during
+//  shell startup, before a byte of injected input is read — there is no race.
+//  See `privateZdotdir`.
+//
+//  Exit codes ride an in-band sentinel: after each command the session sends
+//      printf '\n__IRIS_END_<token>__ %d\t%s\n' "$?" "$PWD"
+//  with a fresh random token per command, matched only at line start — so a
+//  file that happens to contain the marker text cannot forge completion.
+//  Fields are tab-separated because a cwd with spaces is ordinary.
+//
+//  Isolation: the sentinel path is confined to the pty's own queue, never
+//  the main actor. A running install must complete its bookkeeping even
+//  while the app's main thread is busy drawing, or blocked by something
+//  unrelated — if marker detection rode the main actor, a stalled UI would
+//  read as a stalled shell. Only the public API surface and the output-line
+//  callback touch the main actor.
+//
+
+import Foundation
+
+/// How one command ended.
+enum GuideAutopilotCommandOutcome: Equatable, Sendable {
+    case succeeded(workingDirectory: String)
+    case failed(exitStatus: Int32, workingDirectory: String)
+    /// The reader (or the runner) cancelled it mid-flight.
+    case cancelled
+    /// No end marker within the deadline; the session was rebuilt.
+    case timedOut
+    /// Output stopped mid-line and the tail reads like a question. The
+    /// command is still running; the runner surfaces this to the reader.
+    case seemsToBeAskingAQuestion(tail: String)
+    /// The session itself is unusable (spawn failed, shell died).
+    case sessionFailed
+}
+
+/// The seam the runner is tested through: a fake implements this with
+/// scripted outcomes; only `GuideAutopilotShellSession` owns a real pty.
+@MainActor
+protocol GuideAutopilotShellSessionDriving: AnyObject {
+    var onOutputLine: ((String) -> Void)? { get set }
+    var currentWorkingDirectory: String { get }
+    var resolvedSearchPath: String? { get }
+    func start() async -> Bool
+    func run(
+        _ command: GuideAutopilotApprovedCommand,
+        deadline: TimeInterval
+    ) async -> GuideAutopilotCommandOutcome
+    func cancelTheRunningCommand() async
+    func endSession() async
+    func tailForTheModel() -> String
+}
+
+@MainActor
+final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
+
+    static let defaultCommandDeadline: TimeInterval = 900
+    /// A cold interactive shell legitimately takes a while on a machine with
+    /// heavy dotfiles (nvm alone can add seconds, compinit more).
+    static let readyDeadline: TimeInterval = 60
+    /// Silence this long, with an unterminated tail that reads like a
+    /// question, is surfaced instead of waited out.
+    static let promptDetectionSilence: TimeInterval = 20
+
+    /// Delivered on the main actor, for the transcript view.
+    var onOutputLine: ((String) -> Void)?
+
+    var currentWorkingDirectory: String { state.snapshotWorkingDirectory() }
+    var resolvedSearchPath: String? { state.snapshotSearchPath() }
+
+    private let state: SessionState
+
+    init(startingDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path) {
+        state = SessionState(startingDirectory: startingDirectory)
+        state.deliverOutputLine = { [weak self] line in
+            Task { @MainActor [weak self] in self?.onOutputLine?(line) }
+        }
+    }
+
+    func start() async -> Bool {
+        await withCheckedContinuation { continuation in
+            state.enqueueStart { continuation.resume(returning: $0) }
+        }
+    }
+
+    func run(
+        _ command: GuideAutopilotApprovedCommand,
+        deadline: TimeInterval = GuideAutopilotShellSession.defaultCommandDeadline
+    ) async -> GuideAutopilotCommandOutcome {
+        await withCheckedContinuation { continuation in
+            state.enqueueRun(command, deadline: deadline) { continuation.resume(returning: $0) }
+        }
+    }
+
+    func cancelTheRunningCommand() async {
+        await withCheckedContinuation { continuation in
+            state.enqueueCancel { continuation.resume() }
+        }
+    }
+
+    func endSession() async {
+        await withCheckedContinuation { continuation in
+            state.enqueueEnd { continuation.resume() }
+        }
+    }
+
+    func tailForTheModel() -> String {
+        state.snapshotModelTail()
+    }
+
+    func displayLinesSnapshot() -> [String] {
+        state.snapshotDisplayLines()
+    }
+
+    // MARK: - The queue-confined core
+
+    /// Everything below runs on `queue` (or reads under it). Marked
+    /// @unchecked Sendable because the queue is the isolation mechanism;
+    /// no property is touched off it except via the enqueue/snapshot API.
+    private final class SessionState: @unchecked Sendable {
+
+        var deliverOutputLine: ((String) -> Void)?
+
+        private let queue = DispatchQueue(label: "iris.autopilot.shell-session")
+        private let startingDirectory: String
+
+        private var terminal: GuideAutopilotPseudoTerminal?
+        private var buffer = GuideAutopilotOutputBuffer()
+        private var workingDirectory: String
+        private var searchPath: String?
+        private var shellHasExited = false
+        private var markerToken: String?
+        private var finishRunning: ((GuideAutopilotCommandOutcome) -> Void)?
+        private var lastOutputAt = Date.distantPast
+        private var cancellationWasRequested = false
+        private var alreadyDeliveredLineCount = 0
+        private var commandGeneration = 0
+        /// Guards against the preamble being sent twice (start plus a rebuild).
+        private var preambleHasBeenSent = false
+        private var pendingReadyToken: String?
+        /// A raw copy of recent output for marker detection only, with \r
+        /// deleted (not collapsed as the display buffer does for progress
+        /// bars) so the sentinel survives even when the shell's canonical
+        /// echo or a wrap sprinkles carriage returns through the line. Reset
+        /// before every command; bounded so it cannot grow without limit.
+        private var markerScanText = ""
+
+        init(startingDirectory: String) {
+            self.startingDirectory = startingDirectory
+            self.workingDirectory = startingDirectory
+        }
+
+        // MARK: Public entry points (hop onto the queue)
+
+        func enqueueStart(_ completion: @escaping @Sendable (Bool) -> Void) {
+            queue.async { self.startShell(completion) }
+        }
+
+        func enqueueRun(
+            _ command: GuideAutopilotApprovedCommand,
+            deadline: TimeInterval,
+            _ completion: @escaping @Sendable (GuideAutopilotCommandOutcome) -> Void
+        ) {
+            queue.async { self.runCommand(command, deadline: deadline, completion) }
+        }
+
+        func enqueueCancel(_ completion: @escaping @Sendable () -> Void) {
+            queue.async { self.cancelRunningCommand(completion) }
+        }
+
+        func enqueueEnd(_ completion: @escaping @Sendable () -> Void) {
+            queue.async { self.endShell(completion) }
+        }
+
+        func snapshotWorkingDirectory() -> String {
+            queue.sync { workingDirectory }
+        }
+
+        func snapshotSearchPath() -> String? {
+            queue.sync { searchPath }
+        }
+
+        func snapshotModelTail() -> String {
+            queue.sync { buffer.tailForTheModel() }
+        }
+
+        func snapshotDisplayLines() -> [String] {
+            queue.sync { buffer.displayLines }
+        }
+
+        // MARK: Startup (on queue)
+
+        private func startShell(_ completion: @escaping @Sendable (Bool) -> Void) {
+            let terminal = GuideAutopilotPseudoTerminal()
+            terminal.onOutput = { [weak self] bytes in
+                // Already on the pty queue? No — the terminal has its own
+                // queue; hop onto ours so all state stays confined here.
+                self?.queue.async { self?.ingest(bytes) }
+            }
+            terminal.onProcessExit = { [weak self] _ in
+                self?.queue.async { self?.noteShellExited() }
+            }
+
+            do {
+                // A login + interactive shell. zsh treats any pty stdin as
+                // interactive regardless of -i, so ZLE is unavoidable at
+                // spawn; the preamble's first line disables it. -l sources
+                // the login files and -i sources ~/.zshrc, so the PATH the
+                // guides need (path_helper, brew, nvm, cargo) is all present.
+                try terminal.spawn(
+                    shellPath: GuideAutopilotShellSession.loginShellPath(),
+                    arguments: ["-l", "-i"],
+                    environment: GuideAutopilotShellSession.childEnvironment()
+                )
+            } catch {
+                completion(false)
+                return
+            }
+            self.terminal = terminal
+            shellHasExited = false
+            preambleHasBeenSent = false
+            buffer.removeAll()
+            alreadyDeliveredLineCount = 0
+            markerScanText = ""
+
+            let readyToken = Self.freshToken()
+            pendingReadyToken = readyToken
+            markerToken = readyToken
+            finishRunning = { outcome in
+                if case .succeeded = outcome { completion(true) } else { completion(false) }
+            }
+            scheduleDeadline(seconds: GuideAutopilotShellSession.readyDeadline, forToken: readyToken)
+            // Send the preamble immediately, before ZLE has fully seized the
+            // tty: written this early it lands in the tty input buffer and
+            // the shell consumes it as one batch, which is what lets
+            // `unsetopt zle` on line 1 disable the editor before it can start
+            // echoing per-keystroke. Waiting for the prompt to appear first —
+            // the intuitive thing — is precisely what lets ZLE grab each
+            // character and wedge the injection.
+            sendPreamble()
+        }
+
+        /// Sent only once the shell's own prompt has settled — never into a
+        /// half-initialised ZLE, which is what wedged the injection when the
+        /// preamble raced the shell awake.
+        //
+        // The critical first line disables ZLE, zsh's interactive line
+        // editor: a `-i` shell drives ZLE, which echoes every keystroke,
+        // wraps input in bracketed-paste markers, and redraws the prompt —
+        // all of which mangle programmatic injection. `unsetopt zle` executes
+        // under ZLE (its newline is Enter), turning it off; every line after
+        // is read raw. We keep `-i` because it is what sources ~/.zshrc,
+        // where version managers put the PATH the guides need.
+        private func sendPreamble() {
+            guard !preambleHasBeenSent, let token = pendingReadyToken, let terminal else { return }
+            FileHandle.standardError.write(Data("[[PREAMBLE SENT token=\(token)]]\n".utf8))
+            preambleHasBeenSent = true
+            // Discard the prompt noise so the ready marker is found in clean
+            // output, and the first real command starts from an empty buffer.
+            buffer.removeAll()
+            alreadyDeliveredLineCount = 0
+            markerScanText = ""
+            // ZLE and echo are already off — the generated ZDOTDIR/.zshrc
+            // did that during shell startup, before any of this was read, so
+            // there is no editor to race and plain \n terminators are read
+            // cleanly. This preamble only tidies pager behaviour, moves to
+            // the starting directory, and prints the ready marker (whose
+            // third field, the real PATH, feeds tool-version lookups).
+            terminal.write(
+                "export PAGER=cat GIT_PAGER=cat LESS=-FRX GIT_TERMINAL_PROMPT=0\n"
+                + "cd \(Self.shellQuoted(startingDirectory))\n"
+                + "printf '\\n__IRIS_END_\(token)__ %d\\t%s\\t%s\\n' \"$?\" \"$PWD\" \"$PATH\"\n"
+            )
+        }
+
+        // MARK: Running (on queue)
+
+        private func runCommand(
+            _ command: GuideAutopilotApprovedCommand,
+            deadline: TimeInterval,
+            _ completion: @escaping @Sendable (GuideAutopilotCommandOutcome) -> Void
+        ) {
+            guard let terminal, !shellHasExited else {
+                completion(.sessionFailed)
+                return
+            }
+            guard finishRunning == nil else {
+                completion(.sessionFailed)
+                return
+            }
+            if GuideAutopilotCommandShape.looksSyntacticallyIncomplete(command.text) {
+                // An unterminated construct would swallow the end marker and
+                // wedge every later command; refuse to send it at all.
+                completion(.failed(exitStatus: 2, workingDirectory: workingDirectory))
+                return
+            }
+
+            let token = Self.freshToken()
+            markerToken = token
+            cancellationWasRequested = false
+            buffer.removeAll()
+            alreadyDeliveredLineCount = 0
+            markerScanText = ""
+            lastOutputAt = Date()
+            finishRunning = completion
+
+            // ZLE is off by now, so plain \n line terminators are read
+            // correctly by the shell, including the command's own internal
+            // newlines.
+            terminal.write(
+                command.text
+                + "\nprintf '\\n__IRIS_END_\(token)__ %d\\t%s\\n' \"$?\" \"$PWD\"\n"
+            )
+            scheduleDeadline(seconds: deadline, forToken: token)
+            schedulePromptDetection(forToken: token)
+        }
+
+        // MARK: Ingestion and the marker (on queue)
+
+        private func ingest(_ bytes: [UInt8]) {
+            lastOutputAt = Date()
+            buffer.append(bytes)
+            // Marker scan runs off a raw, \r-stripped copy — the display
+            // buffer's progress-bar collapse would eat the sentinel.
+            let text = String(decoding: bytes, as: UTF8.self)
+            markerScanText += text.replacingOccurrences(of: "\r", with: "")
+            if markerScanText.count > 65_536 {
+                markerScanText = String(markerScanText.suffix(32_768))
+            }
+            deliverDisplayLines()
+            scanForMarker()
+        }
+
+        private func deliverDisplayLines() {
+            let lines = buffer.displayLines
+            deliverNewLines(lines, upTo: max(lines.count - 1, 0))
+        }
+
+        private func scanForMarker() {
+            guard let token = markerToken else { return }
+            // The token appears twice in the stream: once in the echoed
+            // `printf` command that defines the marker (followed by the
+            // literal `%d`) and once in that command's real output (followed
+            // by the integer exit status). Scan every occurrence and accept
+            // the one whose next character is a real status digit and whose
+            // line has fully arrived — so the echo is never mistaken for the
+            // result, and a half-arrived PATH field is never truncated.
+            let markerNeedle = "__IRIS_END_\(token)__ "
+            var searchStart = markerScanText.startIndex
+            while let range = markerScanText.range(
+                of: markerNeedle, range: searchStart..<markerScanText.endIndex
+            ) {
+                let afterMarker = markerScanText[range.upperBound...]
+                if afterMarker.first.map({ $0.isNumber || $0 == "-" }) == true,
+                   let newline = afterMarker.firstIndex(of: "\n") {
+                    finishRun(withMarkerLine: String(afterMarker[..<newline]))
+                    return
+                }
+                searchStart = range.upperBound
+            }
+        }
+
+        private func deliverNewLines(_ lines: [String], upTo end: Int) {
+            guard end > alreadyDeliveredLineCount else { return }
+            for line in lines[alreadyDeliveredLineCount..<end] {
+                // The sentinel is machinery, never shown to the reader — but
+                // the pty's newline translation can leave a short command's
+                // output and its marker collapsed onto one display line, so
+                // strip from the marker onward rather than dropping the line.
+                let visible: Substring
+                if let markerStart = line.range(of: "__IRIS_END_") {
+                    visible = line[..<markerStart.lowerBound]
+                } else {
+                    visible = Substring(line)
+                }
+                if !visible.isEmpty {
+                    deliverOutputLine?(String(visible))
+                }
+            }
+            alreadyDeliveredLineCount = end
+        }
+
+        private func finishRun(withMarkerLine markerLine: String) {
+            // Flush any output that arrived in the same burst as the marker —
+            // a short command's whole output can land with its sentinel, and
+            // deliverNewLines holds back the final line until then.
+            let lines = buffer.displayLines
+            deliverNewLines(lines, upTo: lines.count)
+            markerToken = nil
+            alreadyDeliveredLineCount = 0
+            commandGeneration += 1
+            let fields = markerLine.split(separator: "\t", maxSplits: 2)
+            let exitStatus = fields.first.flatMap { Int32($0) } ?? -1
+            if fields.count > 1 {
+                workingDirectory = String(fields[1])
+            }
+            if fields.count > 2 {
+                // Only the ready marker carries a third field (PATH).
+                searchPath = String(fields[2])
+            }
+
+            let completion = finishRunning
+            finishRunning = nil
+            if cancellationWasRequested {
+                completion?(.cancelled)
+            } else if exitStatus == 0 {
+                completion?(.succeeded(workingDirectory: workingDirectory))
+            } else {
+                completion?(.failed(exitStatus: exitStatus, workingDirectory: workingDirectory))
+            }
+        }
+
+        private func noteShellExited() {
+            shellHasExited = true
+            markerToken = nil
+            commandGeneration += 1
+            let completion = finishRunning
+            finishRunning = nil
+            completion?(.sessionFailed)
+        }
+
+        // MARK: Deadline, prompt detection, cancellation (on queue)
+
+        private func scheduleDeadline(seconds: TimeInterval, forToken token: String) {
+            queue.asyncAfter(deadline: .now() + seconds) { [weak self] in
+                self?.deadlineFired(forToken: token, escalation: 0)
+            }
+        }
+
+        private func deadlineFired(forToken token: String, escalation: Int) {
+            guard markerToken == token, finishRunning != nil else { return }
+            switch escalation {
+            case 0:
+                terminal?.sendInterrupt()
+            case 1:
+                terminal?.sendEndOfInput()
+            default:
+                // A wedged shell must never strand the guide: kill the whole
+                // group and rebuild at the last known cwd. The scrubbed tail
+                // goes to the console because "the marker never came" is
+                // undebuggable without knowing what the shell did say.
+                print("🖥️ autopilot shell missed its deadline; scrubbed tail:\n\(buffer.tailForTheModel())\n[open line: \(buffer.unterminatedTail)]")
+                let completion = finishRunning
+                finishRunning = nil
+                markerToken = nil
+                rebuildShell()
+                completion?(.timedOut)
+                return
+            }
+            queue.asyncAfter(deadline: .now() + 3) { [weak self] in
+                self?.deadlineFired(forToken: token, escalation: escalation + 1)
+            }
+        }
+
+        private func schedulePromptDetection(forToken token: String) {
+            queue.asyncAfter(deadline: .now() + 5) { [weak self] in
+                self?.checkForInteractivePrompt(token: token)
+            }
+        }
+
+        private func checkForInteractivePrompt(token: String) {
+            guard markerToken == token, finishRunning != nil else { return }
+            defer { schedulePromptDetection(forToken: token) }
+            let tail = buffer.unterminatedTail
+            let silentFor = Date().timeIntervalSince(lastOutputAt)
+            guard silentFor >= GuideAutopilotShellSession.promptDetectionSilence,
+                  !tail.isEmpty else { return }
+            let promptShapes = [
+                #"\(y/n\)\s*$"#, #"\[Y/n\]\s*$"#, #"\[y/N\]\s*$"#,
+                #"password:\s*$"#, #"passphrase"#, #"Username:\s*$"#,
+            ]
+            let looksLikeAQuestion = promptShapes.contains {
+                tail.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil
+            }
+            guard looksLikeAQuestion, let completion = finishRunning else { return }
+            // Leave the command running — the reader may answer in v2; v1
+            // offers Cancel. The marker token stays live so a late answer
+            // still ends the run normally.
+            finishRunning = nil
+            completion(.seemsToBeAskingAQuestion(tail: tail))
+        }
+
+        private func cancelRunningCommand(_ completion: @escaping @Sendable () -> Void) {
+            guard finishRunning != nil else {
+                completion()
+                return
+            }
+            cancellationWasRequested = true
+            let generationWhenCancelled = commandGeneration
+            terminal?.sendInterrupt()
+            queue.asyncAfter(deadline: .now() + 3) { [weak self] in
+                guard let self else { return completion() }
+                if self.finishRunning != nil, self.commandGeneration == generationWhenCancelled {
+                    self.terminal?.sendInterrupt()
+                }
+                self.queue.asyncAfter(deadline: .now() + 3) { [weak self] in
+                    guard let self else { return completion() }
+                    if let finish = self.finishRunning,
+                       self.commandGeneration == generationWhenCancelled {
+                        self.finishRunning = nil
+                        self.markerToken = nil
+                        self.rebuildShell()
+                        finish(.cancelled)
+                    }
+                    completion()
+                }
+            }
+        }
+
+        private func rebuildShell() {
+            // A discarded terminal's exit callback must not fire into the
+            // rebuilt session's state.
+            terminal?.onOutput = nil
+            terminal?.onProcessExit = nil
+            terminal?.killProcessGroup()
+            terminal = nil
+            startShell { _ in }
+        }
+
+        private func endShell(_ completion: @escaping @Sendable () -> Void) {
+            if let finish = finishRunning {
+                finishRunning = nil
+                markerToken = nil
+                cancellationWasRequested = true
+                terminal?.sendInterrupt()
+                finish(.cancelled)
+            }
+            terminal?.onOutput = nil
+            terminal?.onProcessExit = nil
+            terminal?.write("exit\n")
+            let terminalToClose = terminal
+            terminal = nil
+            shellHasExited = true
+            queue.asyncAfter(deadline: .now() + 0.5) {
+                terminalToClose?.killProcessGroup()
+                completion()
+            }
+        }
+
+        private static func freshToken() -> String {
+            UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        }
+
+        private static func shellQuoted(_ path: String) -> String {
+            "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }
+    }
+
+    // MARK: - Environment
+
+    nonisolated static func loginShellPath() -> String {
+        if let entry = getpwuid(getuid()), let shell = entry.pointee.pw_shell {
+            let path = String(cString: shell)
+            if FileManager.default.isExecutableFile(atPath: path) { return path }
+        }
+        for fallback in ["/bin/zsh", "/bin/bash"]
+        where FileManager.default.isExecutableFile(atPath: fallback) {
+            return fallback
+        }
+        return "/bin/sh"
+    }
+
+    /// True when the login shell is zsh, which is the only shell the ZDOTDIR
+    /// trick below applies to.
+    nonisolated static func loginShellIsZsh() -> Bool {
+        loginShellPath().hasSuffix("/zsh")
+    }
+
+    /// Creates a private ZDOTDIR whose `.zshrc` loads the user's real zsh
+    /// setup (so PATH and version managers are present) and then disables
+    /// ZLE, zsh's interactive line editor — the deterministic way to get an
+    /// editor-free interactive shell, because it happens during startup
+    /// before the shell reads a byte of injected input, with no race. Cached
+    /// per process; returns nil if the directory cannot be created or the
+    /// shell is not zsh. The system-wide /etc/z* files (path_helper) are
+    /// unaffected by ZDOTDIR and still run; only the user's ~/.z* move here,
+    /// which is why the generated rc sources the real ~/.zprofile and
+    /// ~/.zshrc explicitly.
+    nonisolated static func privateZdotdir() -> String? {
+        guard loginShellIsZsh() else { return nil }
+        return zdotdirOnce
+    }
+
+    private nonisolated static let zdotdirOnce: String? = {
+        let realHome = FileManager.default.homeDirectoryForCurrentUser.path
+        let base = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("iris-autopilot-zdotdir")
+        let rc = """
+        # Generated by Iris autopilot. Load the user's real zsh environment,
+        # then turn off the interactive line editor so Iris can drive the
+        # shell without ZLE echoing, redrawing, or bracketed-paste mangling.
+        IRIS_USER_HOME="${IRIS_USER_HOME:-\(realHome)}"
+        for _iris_rc in .zprofile .zshrc; do
+          [ -r "$IRIS_USER_HOME/$_iris_rc" ] && source "$IRIS_USER_HOME/$_iris_rc"
+        done
+        unset _iris_rc
+        unsetopt zle 2>/dev/null
+        unsetopt prompt_cr prompt_sp 2>/dev/null
+        stty -echo 2>/dev/null
+        PS1='' PS2='' PROMPT='' RPROMPT=''
+        """
+        do {
+            try FileManager.default.createDirectory(
+                atPath: base, withIntermediateDirectories: true
+            )
+            try rc.write(toFile: (base as NSString).appendingPathComponent(".zshrc"),
+                         atomically: true, encoding: .utf8)
+        } catch {
+            return nil
+        }
+        return base
+    }()
+
+    /// Built from scratch. PATH is deliberately absent — the login shell
+    /// rebuilds it — and nothing of Iris's own environment leaks through.
+    nonisolated static func childEnvironment() -> [String: String] {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let user = NSUserName()
+        var environment: [String: String] = [
+            "HOME": home,
+            "USER": user,
+            "LOGNAME": user,
+            "SHELL": loginShellPath(),
+            "TMPDIR": NSTemporaryDirectory(),
+            "TERM": "xterm-256color",
+            "LANG": "en_US.UTF-8",
+            "IRIS_AUTOPILOT": "1",
+        ]
+        if let zdotdir = privateZdotdir() {
+            environment["ZDOTDIR"] = zdotdir
+            environment["IRIS_USER_HOME"] = home
+        }
+        return environment
+    }
+}

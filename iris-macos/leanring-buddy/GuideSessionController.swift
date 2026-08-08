@@ -48,6 +48,11 @@ enum GuideStepPrimaryAction: Equatable, Sendable {
     /// "I ran it" / "Continue" / "Finish" / "Done" — every label that simply
     /// moves the reader on. They differ only in wording, so they share a case.
     case advanceToTheNextStep(buttonLabel: String)
+    /// The one explicit gesture that lets Iris start running the install. It
+    /// is offered only in the panel and is the ONLY path to `startAutopilot`,
+    /// which is what keeps a crafted `iris://` link from ever starting
+    /// execution — the security line this whole feature crosses.
+    case startAutopilotForThisGuide(buttonLabel: String)
 
     var buttonLabel: String {
         switch self {
@@ -56,6 +61,7 @@ enum GuideStepPrimaryAction: Equatable, Sendable {
         case .openLinkIsUnavailable: return "Open"
         case .runToolChecksForThisStep(let buttonLabel): return buttonLabel
         case .advanceToTheNextStep(let buttonLabel): return buttonLabel
+        case .startAutopilotForThisGuide(let buttonLabel): return buttonLabel
         }
     }
 
@@ -168,6 +174,28 @@ final class GuideSessionController: ObservableObject {
     /// The short-lived "Copied — paste in Terminal." line under the command
     /// block. Nil when nothing was copied recently.
     @Published private(set) var transientCopyConfirmationText: String?
+
+    /// True once the reader has handed the install to Iris. It can only become
+    /// true through `startAutopilot`, which is reachable only from
+    /// `performPrimaryAction` — never from opening a guide, deep link or
+    /// otherwise. See the consent invariant in the tests.
+    @Published private(set) var autopilotIsRunning: Bool = false
+
+    /// How many commands autopilot has executed this session. Exists so the
+    /// consent tests can prove a deep link executes nothing.
+    private(set) var numberOfCommandsAutopilotHasExecuted: Int = 0
+
+    /// Builds the runner when autopilot starts. Injected so tests can supply a
+    /// fake and the app can wire the real one (which needs `CompanionManager`'s
+    /// `ClaudeAPI`). Nil in a controller opened without autopilot support: the
+    /// start gesture is then simply never offered.
+    private let makeAutopilotRunner: (@MainActor (GuideAutopilotGuideContext) -> GuideAutopilotRunner)?
+    private var autopilotRunner: GuideAutopilotRunner?
+    /// True while the drive loop is running, so the watch-loop resume path
+    /// cannot start a second concurrent loop.
+    private var autopilotIsDriving = false
+    /// The shell session is started once per autopilot run, not once per step.
+    private var runnerSessionHasStarted = false
 
     /// True once the reader has pressed "Check tools" at least once on this
     /// step, which is what relabels the button to "Check again".
@@ -302,19 +330,25 @@ final class GuideSessionController: ObservableObject {
         watchLoop: WatchLoop? = nil,
         checkToolVersion: @escaping GuideToolVersionChecker = { toolName in
             try await ToolVersionService.checkToolVersion(tool: toolName)
-        }
+        },
+        makeAutopilotRunner: (@MainActor (GuideAutopilotGuideContext) -> GuideAutopilotRunner)? = nil
     ) {
         self.guideService = guideService
         self.platformThisAppRunsOn = platformThisAppRunsOn
         self.watchLoop = watchLoop ?? WatchLoop()
         self.checkToolVersion = checkToolVersion
+        self.makeAutopilotRunner = makeAutopilotRunner
 
         // The whole feature in four lines: when the loop decides the step is
         // done, move on. `notYet` is silence by design, and a `userStuck` hint
         // is already published on the loop for the panel to draw — pushing it
         // through the controller as well would be two sources for one sentence.
+        // The autopilot guard: while Iris is executing a terminal step itself,
+        // the exit code is the verdict, so a watch-loop tick already in flight
+        // must not also advance and double-step.
         self.watchLoop.onVerdict = { [weak self] verdict in
-            guard let self, verdict == .completed else {
+            guard let self, verdict == .completed,
+                  !self.autopilotOwnsTheCurrentStep else {
                 return
             }
             self.advanceToTheNextStep()
@@ -438,6 +472,7 @@ final class GuideSessionController: ObservableObject {
 
     func closeTheGuide() {
         cancelAnyWorkFromThePreviousStep()
+        if autopilotIsRunning { stopAutopilot() }
         watchLoop.stopWatching()
         loadState = .noGuideIsOpen
         guideBeingFollowed = nil
@@ -751,7 +786,156 @@ final class GuideSessionController: ObservableObject {
             } else {
                 advanceToTheNextStep()
             }
+        case .startAutopilotForThisGuide:
+            startAutopilot()
         }
+    }
+
+    // MARK: - Autopilot
+
+    /// True while Iris is executing a terminal step itself. The exit code is
+    /// then the step's verdict, so the watch loop stands down for that step.
+    var autopilotOwnsTheCurrentStep: Bool {
+        guard autopilotIsRunning, let step = currentStep else { return false }
+        return step.kind == .terminal
+            && step.command != nil
+            && step.watch?.sensitive != true
+            && !GuideAutopilotCommandShape.holdsTheShellOpen(step.command ?? "")
+    }
+
+    /// The one entry point that begins execution. Reachable only from
+    /// `performPrimaryAction` (the reader tapping "Let Iris run it"), which is
+    /// the whole security argument: a crafted `iris://` link can preselect a
+    /// guide and step, but it lands the reader on this button — it cannot
+    /// press it. Nothing about opening a guide calls this.
+    func startAutopilot() {
+        guard !autopilotIsRunning,
+              loadState == .guideIsOpen,
+              !readerIsInSetupRecovery,
+              let guide = guideBeingFollowed,
+              let branch = selectedBranch,
+              let makeAutopilotRunner else {
+            return
+        }
+        let context = GuideAutopilotGuideContext(
+            slug: guide.appSlug,
+            version: guide.version,
+            appName: guide.appName,
+            platformLabel: branch.label,
+            hostsReachedByTheGuide: Self.hostsReachedBy(branch: branch)
+        )
+        let runner = makeAutopilotRunner(context)
+        autopilotRunner = runner
+        autopilotIsRunning = true
+        // While autopilot owns the current terminal step, the watch loop must
+        // not also be watching it.
+        pointTheWatchLoopAtTheCurrentStep()
+        Task { await self.driveAutopilotFromTheCurrentStep(runner: runner, branch: branch) }
+    }
+
+    func stopAutopilot() {
+        autopilotIsRunning = false
+        runnerSessionHasStarted = false
+        let runner = autopilotRunner
+        autopilotRunner = nil
+        Task { await runner?.endSession() }
+        pointTheWatchLoopAtTheCurrentStep()
+    }
+
+    /// The reader tapped Run it / Skip on a risky command's confirm row.
+    func approveThePendingRiskyCommand() { autopilotRunner?.approvePendingCommand() }
+    func skipThePendingRiskyCommand() { autopilotRunner?.skipPendingCommand() }
+
+    /// Whether the current step is one Iris executes itself (as opposed to a
+    /// manual, open, permission, or dev-server step the reader/watch loop owns).
+    private func stepIsAutopilotExecutable(_ step: IrisGuideStep) -> Bool {
+        step.kind == .terminal
+            && (step.command?.isEmpty == false)
+            && step.watch?.sensitive != true
+            && !GuideAutopilotCommandShape.holdsTheShellOpen(step.command ?? "")
+    }
+
+    private func driveAutopilotFromTheCurrentStep(
+        runner: GuideAutopilotRunner,
+        branch: IrisGuideBranch
+    ) async {
+        guard !autopilotIsDriving else { return }
+        autopilotIsDriving = true
+        defer { autopilotIsDriving = false }
+
+        if !runnerSessionHasStarted {
+            guard await runner.startSession() else {
+                stopAutopilot()
+                return
+            }
+            runnerSessionHasStarted = true
+        }
+
+        while autopilotIsRunning,
+              !readerHasFinishedTheGuide,
+              currentStepIndex < branch.steps.count {
+            let step = branch.steps[currentStepIndex]
+
+            guard stepIsAutopilotExecutable(step) else {
+                // A manual step: Iris opens what it can and then yields. The
+                // watch loop notices completion and advances, which re-enters
+                // this loop through `advanceToTheNextStep`.
+                autoOpenIfTheStepPointsSomewhere(step)
+                return
+            }
+
+            let result = await runner.executeStepCommand(
+                step: step, stepIndex: currentStepIndex, totalSteps: branch.steps.count
+            )
+            numberOfCommandsAutopilotHasExecuted += 1
+            switch result {
+            case .succeeded:
+                advanceFromWithinAutopilot()
+            case .longRunningStarted, .handedBackAsSensitive,
+                 .skippedByReader, .surfacedToReader, .stopped:
+                // Iris hands the step back; the reader (or the watch loop for a
+                // dev server) decides what happens next. Autopilot stays on but
+                // stops auto-advancing until something moves the step on.
+                return
+            }
+        }
+    }
+
+    /// Opens an `open`/`web` step's link (once) or a `permission` step's
+    /// System Settings pane, so the reader lands where they need to act.
+    private func autoOpenIfTheStepPointsSomewhere(_ step: IrisGuideStep) {
+        guard !readerHasTakenThisStepsAction else { return }
+        if (step.kind == .open || step.kind == .web), let href = step.href {
+            openLinkInBrowser(href)
+        }
+    }
+
+    /// Advance without letting the watch-loop resume path also fire — the
+    /// drive loop's own `while` handles the next step.
+    private func advanceFromWithinAutopilot() {
+        advanceToTheNextStep()
+    }
+
+    /// Re-enters the drive loop after the watch loop advanced a manual step.
+    /// The driving guard makes this a no-op if the drive loop is already
+    /// running (an executed-step advance), so it never double-drives.
+    func resumeAutopilotAfterAdvance() {
+        guard autopilotIsRunning, !autopilotIsDriving,
+              let runner = autopilotRunner, let branch = selectedBranch else { return }
+        Task { await self.driveAutopilotFromTheCurrentStep(runner: runner, branch: branch) }
+    }
+
+    private static func hostsReachedBy(branch: IrisGuideBranch) -> Set<String> {
+        var hosts: Set<String> = []
+        for step in branch.setupSteps + branch.steps {
+            if let command = step.command {
+                hosts.formUnion(GuideAutopilotCommandShape.hostsTheCommandWouldReach(command))
+            }
+            if let href = step.href, let host = URL(string: href)?.host {
+                hosts.insert(host.lowercased())
+            }
+        }
+        return hosts
     }
 
     // MARK: - Copying and opening
@@ -1204,6 +1388,10 @@ final class GuideSessionController: ObservableObject {
         prepareToolCheckRowsForTheCurrentStep()
         pointTheWatchLoopAtTheCurrentStep()
         startPersistingProgressForTheCurrentPosition()
+        // If the watch loop advanced a manual step while autopilot is on,
+        // pick the install back up. A no-op when the drive loop itself just
+        // advanced (its guard), so this never double-drives.
+        resumeAutopilotAfterAdvance()
     }
 
     func returnToThePreviousStep() {
@@ -1256,6 +1444,13 @@ final class GuideSessionController: ObservableObject {
               !readerIsInSetupRecovery,
               !readerHasFinishedTheGuide,
               let step = currentStep else {
+            watchLoop.stopWatching()
+            return
+        }
+        // When autopilot is executing this step, its exit code is the verdict
+        // and the loop stands down — the two must not both advance it. Manual,
+        // open, permission, and dev-server steps stay the loop's to watch.
+        if autopilotOwnsTheCurrentStep {
             watchLoop.stopWatching()
             return
         }

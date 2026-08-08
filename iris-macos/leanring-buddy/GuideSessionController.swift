@@ -190,7 +190,9 @@ final class GuideSessionController: ObservableObject {
     /// `ClaudeAPI`). Nil in a controller opened without autopilot support: the
     /// start gesture is then simply never offered.
     private let makeAutopilotRunner: (@MainActor (GuideAutopilotGuideContext) -> GuideAutopilotRunner)?
-    private var autopilotRunner: GuideAutopilotRunner?
+    /// The live runner, exposed so the terminal view can observe its transcript
+    /// and state. Nil unless autopilot is running.
+    @Published private(set) var autopilotRunner: GuideAutopilotRunner?
     /// True while the drive loop is running, so the watch-loop resume path
     /// cannot start a second concurrent loop.
     private var autopilotIsDriving = false
@@ -793,6 +795,24 @@ final class GuideSessionController: ObservableObject {
 
     // MARK: - Autopilot
 
+    /// True while the reader is actively following a guide (as opposed to no
+    /// guide, or the completion card). The panel stays pinned in this state:
+    /// a running install must not vanish because a click or the pointer
+    /// wandered off it — dismissal is the × button or End only.
+    var isActivelyGuiding: Bool {
+        loadState == .guideIsOpen && !readerHasFinishedTheGuide
+    }
+
+    /// Whether to offer the "Let Iris run it" gesture: autopilot is supported,
+    /// a guide is open, autopilot is not already running, and the branch has at
+    /// least one command Iris could execute. Offering it on a guide with
+    /// nothing to run would be a dead button.
+    var canOfferAutopilot: Bool {
+        guard makeAutopilotRunner != nil, isActivelyGuiding, !autopilotIsRunning,
+              let branch = selectedBranch else { return false }
+        return branch.steps.contains { stepIsAutopilotExecutable($0) }
+    }
+
     /// True while Iris is executing a terminal step itself. The exit code is
     /// then the step's verdict, so the watch loop stands down for that step.
     var autopilotOwnsTheCurrentStep: Bool {
@@ -845,6 +865,38 @@ final class GuideSessionController: ObservableObject {
     /// The reader tapped Run it / Skip on a risky command's confirm row.
     func approveThePendingRiskyCommand() { autopilotRunner?.approvePendingCommand() }
     func skipThePendingRiskyCommand() { autopilotRunner?.skipPendingCommand() }
+
+    /// What the chat model is told about the guide the reader is on, so a
+    /// "why is this failing" question is answered from the step and the real
+    /// terminal output — not inferred from a screenshot. This is the direct
+    /// fix for the fabricated-diagnosis failure (`ping api.publik.local`): the
+    /// model is handed the exact command and its output instead of guessing.
+    func chatContextForTheAssistant() -> String? {
+        guard loadState == .guideIsOpen, !readerIsInSetupRecovery,
+              let guide = guideBeingFollowed, let step = currentStep else {
+            return nil
+        }
+        var context = """
+        [The reader is following the \(guide.appName) install guide, on the step \
+        titled "\(step.title)".
+        """
+        if let command = step.command, !command.isEmpty {
+            context += "\nThe step's command is:\n\(command)"
+        }
+        if let verifier = step.verifierLabel {
+            context += "\nThe step is done when: \(verifier)"
+        }
+        if let tail = autopilotRunner?.currentTerminalTail(), !tail.isEmpty {
+            context += "\nThe most recent output in Iris's terminal was:\n\(tail)"
+        }
+        context += """
+
+        Answer from this and what is on screen. Do not invent commands, \
+        hostnames, URLs, or file paths that are not in this guide or the \
+        output above.]
+        """
+        return context
+    }
 
     /// Whether the current step is one Iris executes itself (as opposed to a
     /// manual, open, permission, or dev-server step the reader/watch loop owns).

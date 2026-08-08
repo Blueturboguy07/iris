@@ -88,7 +88,23 @@ final class CompanionManager: ObservableObject {
     /// lives here rather than in the panel view because an `iris://guide/…`
     /// link can arrive while the panel has never been opened, and the guide has
     /// to survive the panel being closed and reopened.
-    let guideSessionController = GuideSessionController()
+    ///
+    /// Lazy so its autopilot-runner factory can capture `self.claudeAPI`. The
+    /// factory is called only when the reader taps "Let Iris run it", never at
+    /// init, so building the runner from the app's live ClaudeAPI here is safe.
+    lazy var guideSessionController = GuideSessionController(
+        makeAutopilotRunner: { [weak self] context in
+            let claudeAPI = self?.claudeAPI ?? ClaudeAPI(resolveTransport: {
+                .failure(.transportFailure(reason: "assistant unavailable"))
+            })
+            return GuideAutopilotRunner(
+                shellSession: GuideAutopilotShellSession(),
+                longRunningSession: GuideAutopilotShellSession(),
+                fixProposer: GuideAutopilotFixProposer(claudeAPI: claudeAPI),
+                guideContext: context
+            )
+        }
+    )
 
     /// Knows which publik catalog apps are installed on this Mac and which of
     /// them has a newer release. It lives here rather than in the panel view so
@@ -504,6 +520,7 @@ final class CompanionManager: ObservableObject {
     - if the screenshot doesn't seem relevant to their question, just answer the question directly.
     - you can help with anything — coding, writing, general knowledge, brainstorming.
     - never say "simply" or "just".
+    - if the message includes a bracketed note that the reader is following an install guide, ground your answer in the step and the terminal output it gives you. never invent a command, hostname, url, or file path that is not in that note or visibly on screen — if you cannot tell what went wrong, ask the reader to paste the error rather than guessing.
     - don't quote code verbatim at length. describe what the code does or what needs to change conversationally.
     - focus on giving a thorough, useful explanation. don't end with simple yes/no questions like "want me to explain more?" — those are dead ends that force the user to just say yes.
     - instead, when it fits naturally, end by planting a seed — mention something bigger or more ambitious they could try, a related concept that goes deeper, or a next-level technique that builds on what you just explained. it's okay to not end with anything extra if the answer is complete on its own.
@@ -569,11 +586,22 @@ final class CompanionManager: ObservableObject {
                     return messageText + "\n\n" + liveAppStatus
                 }()
 
+                // During a guide, hand the model the current step and the real
+                // terminal output. Answering "why is this failing" from the
+                // actual command and its stderr is what stops the fabricated
+                // diagnosis that started this whole feature.
+                let promptWithGuideContext: String = {
+                    guard let guideContext = guideSessionController.chatContextForTheAssistant() else {
+                        return promptWithLiveAppStatus
+                    }
+                    return promptWithLiveAppStatus + "\n\n" + guideContext
+                }()
+
                 let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
                     images: labeledImages,
                     systemPrompt: Self.companionResponseSystemPrompt,
                     conversationHistory: historyForAPI,
-                    userPrompt: promptWithLiveAppStatus,
+                    userPrompt: promptWithGuideContext,
                     onTextChunk: { _ in
                         // No streaming display — the panel shows the full response when done
                     }

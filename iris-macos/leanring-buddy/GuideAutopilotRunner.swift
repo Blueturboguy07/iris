@@ -112,6 +112,13 @@ final class GuideAutopilotRunner: ObservableObject {
         state = .stopped
     }
 
+    /// The scrubbed tail of the terminal, for grounding a chat answer during a
+    /// guide — so "i'm stuck" is answered from what the command actually
+    /// printed rather than from a screenshot the model reasons at.
+    func currentTerminalTail() -> String {
+        shellSession.tailForTheModel()
+    }
+
     // MARK: - Running one step
 
     func executeStepCommand(

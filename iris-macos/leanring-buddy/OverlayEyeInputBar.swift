@@ -91,6 +91,11 @@ final class OverlayEyeInputBarPanelManager {
     /// apart.
     private var notifyTheOverlayThatTheBarClosed: (() -> Void)?
 
+    /// Answers "should the bar stay put right now?" — true while a guide is
+    /// being followed, so a stray click or the pointer leaving the bar cannot
+    /// tear down a running install. Set when the bar is shown.
+    private var theBarShouldStayPinned: () -> Bool = { false }
+
     init() {}
 
     var isShowingTheInputBar: Bool {
@@ -128,6 +133,9 @@ final class OverlayEyeInputBarPanelManager {
         notifyTheOverlayThatTheBarClosed = onTheBarClosing
         interactionGeometryTheBarHangsFrom = interactionGeometry
         frameOfTheScreenTheBarIsOn = screenFrame
+        theBarShouldStayPinned = { [weak companionManager] in
+            companionManager?.guideSessionController.isActivelyGuiding == true
+        }
 
         // A brand new view every time, which is what makes "dismissing clears
         // the exchange" true without anything having to remember to clear it:
@@ -326,6 +334,13 @@ final class OverlayEyeInputBarPanelManager {
                 return
             }
 
+            // While a guide is being followed, a click anywhere else must not
+            // tear the bar down — the reader is mid-install and needs the
+            // steps to stay put. They dismiss it with the × or End guide.
+            if self.theBarShouldStayPinned() {
+                return
+            }
+
             self.hideInputBar()
         }
     }
@@ -454,6 +469,23 @@ struct OverlayEyeInputBarView: View {
                 // reads as a separate surface from the field below it. A rule
                 // between two pieces of glass would be a line floating on the
                 // desktop with nothing behind it.
+
+                // The one gesture that hands the install to Iris. It is the
+                // only path to execution, which is the whole consent story.
+                if guideSessionController.canOfferAutopilot {
+                    Button("Let Iris run it", action: { guideSessionController.startAutopilot() })
+                        .irisPrimaryPill(isFullWidth: true, isCompact: true)
+                }
+
+                // While Iris is running the install, the terminal it runs it in
+                // hangs directly under the step card.
+                if let runner = guideSessionController.autopilotRunner {
+                    GuideAutopilotTerminalView(
+                        runner: runner,
+                        onApproveRiskyCommand: { guideSessionController.approveThePendingRiskyCommand() },
+                        onSkipRiskyCommand: { guideSessionController.skipThePendingRiskyCommand() }
+                    )
+                }
             }
 
             textFieldRow

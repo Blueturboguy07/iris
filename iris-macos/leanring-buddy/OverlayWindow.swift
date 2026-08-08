@@ -507,6 +507,10 @@ struct BlueCursorView: View {
             // started. Either way this screen's eye is gone, and a bar hanging
             // under an eye that is not there is orphaned UI.
             guard !theEyeIsStillOnThisScreen else { return }
+            // ...unless a guide is being followed: the eye flies off to point
+            // at controls mid-install, and the reader was clear that the steps
+            // vanishing when it does is the wrong behaviour. Keep them up.
+            guard !companionManager.guideSessionController.isActivelyGuiding else { return }
             inputBarPanelManager?.hideInputBar()
         }
         .onChange(of: companionManager.detectedElementScreenLocation) { newLocation in

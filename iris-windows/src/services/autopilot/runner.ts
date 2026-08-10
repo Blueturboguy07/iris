@@ -16,6 +16,7 @@
 //
 
 import type { InstallRecipe, RecipeOutput, RecipeStep, StepCheck, StepKind } from "./recipe";
+import { commandForPlatform } from "./recipe";
 import type { ApprovedCommand, Provenance } from "./risk";
 import { approve, approveAfterAReaderTap, assess } from "./risk";
 import {
@@ -68,7 +69,16 @@ export class AutopilotRunner {
   private finished = false;
   private events: AutopilotEvent[] = [];
 
-  constructor(private readonly recipe: InstallRecipe) {}
+  // The host platform, injected so a recipe's Windows or macOS command is chosen
+  // deterministically (and so tests can pin it). Defaults to the real host.
+  constructor(
+    private readonly recipe: InstallRecipe,
+    private readonly platform: NodeJS.Platform = process.platform,
+  ) {}
+
+  private commandFor(step: RecipeStep): string | undefined {
+    return commandForPlatform(step, this.platform);
+  }
 
   /// Takes the events produced since the last drain. The caller forwards these
   /// to the renderer.
@@ -156,15 +166,16 @@ export class AutopilotRunner {
     if (step === undefined) {
       return this.runUntilBlocked(shell);
     }
-    if (step.command === undefined) {
+    const command = this.commandFor(step);
+    if (command === undefined) {
       return this.surface("This step has no command to run.");
     }
     if (!approved) {
-      return this.surface("You skipped this command, so Iris stopped here.", step.command);
+      return this.surface("You skipped this command, so Iris stopped here.", command);
     }
-    const approvedCommand = approveAfterAReaderTap(step.command, RECIPE_PROVENANCE);
+    const approvedCommand = approveAfterAReaderTap(command, RECIPE_PROVENANCE);
     if (approvedCommand === undefined) {
-      return this.surface("Iris won't run this command automatically.", step.command);
+      return this.surface("Iris won't run this command automatically.", command);
     }
     const progress = await this.execute(approvedCommand, step, shell);
     return progress.kind === "advanced" ? this.runUntilBlocked(shell) : progress.status;
@@ -177,27 +188,25 @@ export class AutopilotRunner {
   }
 
   private async runCommandStep(step: RecipeStep, shell: ShellSession): Promise<StepProgress> {
-    if (step.command === undefined) {
+    const command = this.commandFor(step);
+    if (command === undefined) {
       return { kind: "blocked", status: this.surface("This step has no command to run.") };
     }
-    const verdict = assess(step.command, RECIPE_PROVENANCE);
+    const verdict = assess(command, RECIPE_PROVENANCE);
     if (verdict.tier === "runs_without_asking") {
-      const approved = approve(step.command, RECIPE_PROVENANCE)!;
+      const approved = approve(command, RECIPE_PROVENANCE)!;
       return this.execute(approved, step, shell);
     }
     if (verdict.tier === "needs_a_confirm_tap") {
-      this.emit({ type: "needsConfirm", command: step.command, reason: verdict.reason });
+      this.emit({ type: "needsConfirm", command, reason: verdict.reason });
       return {
         kind: "blocked",
-        status: { type: "needsConfirm", stepIndex: this.index, command: step.command, reason: verdict.reason },
+        status: { type: "needsConfirm", stepIndex: this.index, command, reason: verdict.reason },
       };
     }
     return {
       kind: "blocked",
-      status: this.surface(
-        `Iris won't run this command automatically: ${verdict.reason}`,
-        step.command,
-      ),
+      status: this.surface(`Iris won't run this command automatically: ${verdict.reason}`, command),
     };
   }
 
@@ -206,7 +215,7 @@ export class AutopilotRunner {
     step: RecipeStep,
     shell: ShellSession,
   ): Promise<StepProgress> {
-    const rawCommand = step.command ?? "";
+    const rawCommand = this.commandFor(step) ?? "";
     this.emit({ type: "commandStarted", text: rawCommand });
     const outcome: CommandOutcome = step.longRunning
       ? await shell.runLongRunning(approved, step.readyWhen, LONG_RUNNING_GRACE_MS)

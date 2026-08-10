@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { isDoneOnceOpened, isRunByIris, needsTheReader, type StepKind } from "../src/services/autopilot/recipe";
+import {
+  commandForPlatform,
+  isDoneOnceOpened,
+  isRunByIris,
+  needsTheReader,
+  type RecipeStep,
+  type StepKind,
+} from "../src/services/autopilot/recipe";
 import { builtinRecipes, recipeForSlug } from "../src/services/autopilot/recipes";
 
 describe("step-kind routing", () => {
@@ -31,6 +38,31 @@ describe("the built-in recipes", () => {
 
   it("has no recipe for an unknown slug", () => {
     expect(recipeForSlug("not-a-real-app")).toBeUndefined();
+  });
+
+  it("picks the Windows command on win32 and the posix command elsewhere", () => {
+    const step: RecipeStep = {
+      id: "deps",
+      title: "Install",
+      kind: "command",
+      command: "corepack.cmd pnpm install",
+      posixCommand: "corepack pnpm install",
+    };
+    expect(commandForPlatform(step, "win32")).toBe("corepack.cmd pnpm install");
+    expect(commandForPlatform(step, "darwin")).toBe("corepack pnpm install");
+    expect(commandForPlatform(step, "linux")).toBe("corepack pnpm install");
+  });
+
+  it("falls back to the one command when there is no posix variant", () => {
+    const step: RecipeStep = { id: "clone", title: "Clone", kind: "command", command: "git clone x" };
+    expect(commandForPlatform(step, "win32")).toBe("git clone x");
+    expect(commandForPlatform(step, "darwin")).toBe("git clone x");
+  });
+
+  it("gives OpenASCII a macOS variant for its Windows-only corepack step", () => {
+    const deps = recipeForSlug("openascii")?.steps.find((step) => step.id === "dependencies");
+    expect(deps?.command).toContain("corepack.cmd");
+    expect(deps?.posixCommand).toBe("corepack pnpm install");
   });
 
   it("gives every recipe a slug and at least one step", () => {

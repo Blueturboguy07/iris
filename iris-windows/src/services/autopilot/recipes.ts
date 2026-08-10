@@ -21,9 +21,12 @@ const OPENASCII: InstallRecipe = {
     { id: "check-node", title: "Check Node", kind: "command", command: "node --version", check: { type: "tool_version", tool: "node" } },
     {
       id: "clone",
-      title: "Copy OpenASCII to this PC",
+      title: "Copy OpenASCII to this computer",
       kind: "command",
       command: "cd ~; git clone https://github.com/Blueturboguy07/OpenASCII.git",
+      // Idempotent on the Mac so the demo can be re-run without a clone error.
+      posixCommand:
+        "mkdir -p ~/iris-apps; cd ~/iris-apps; [ -d OpenASCII ] || git clone https://github.com/Blueturboguy07/OpenASCII.git",
     },
     { id: "enter-folder", title: "Open the OpenASCII folder", kind: "command", command: "cd OpenASCII" },
     {
@@ -32,12 +35,19 @@ const OPENASCII: InstallRecipe = {
       kind: "command",
       command: "git checkout 8fc32ce16a6536c1a37a36e483fdc39dfd50d5cd",
     },
-    { id: "dependencies", title: "Install dependencies", kind: "command", command: "corepack.cmd pnpm install" },
+    {
+      id: "dependencies",
+      title: "Install dependencies",
+      kind: "command",
+      command: "corepack.cmd pnpm install",
+      posixCommand: "corepack pnpm install",
+    },
     {
       id: "run",
       title: "Start OpenASCII",
       kind: "command",
       command: "corepack.cmd pnpm dev",
+      posixCommand: "corepack pnpm dev",
       longRunning: true,
       readyWhen: "localhost:5173",
     },

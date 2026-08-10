@@ -14,6 +14,13 @@ import type { InstallRecipe, RecipeOutput } from "../services/autopilot/recipe";
 import { AutopilotRunner, type AutopilotEvent, type RunnerStatus } from "../services/autopilot/runner";
 import type { ShellSession } from "../services/autopilot/shell";
 import { PowerShellSession } from "./powershell-session";
+import { PosixShellSession } from "./posix-shell-session";
+
+/// The real shell for this host: PowerShell on Windows (the shipped product),
+/// a zsh login shell on macOS/Linux (running Iris on a Mac to test the flow).
+function defaultShell(): ShellSession {
+  return process.platform === "win32" ? new PowerShellSession() : new PosixShellSession();
+}
 
 /// Everything the autopilot needs from the app, injected so the controller is
 /// testable without Electron.
@@ -35,7 +42,7 @@ export class AutopilotController {
 
   constructor(
     private readonly host: AutopilotHost,
-    private readonly makeShell: () => ShellSession = () => new PowerShellSession(),
+    private readonly makeShell: () => ShellSession = defaultShell,
     // Injected so tests can drive recipes the built-in set does not carry; in
     // production it is the reviewed, version-pinned recipe registry.
     private readonly resolveRecipe: (slug: string) => InstallRecipe | undefined = recipeForSlug,

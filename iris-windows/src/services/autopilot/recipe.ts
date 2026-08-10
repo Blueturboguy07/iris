@@ -52,6 +52,9 @@ export interface RecipeStep {
   readonly kind: StepKind;
   /// The PowerShell/winget line for a `command` step. Absent otherwise.
   readonly command?: string;
+  /// The macOS/Linux (zsh) equivalent, used when Iris runs on a Mac for testing.
+  /// Falls back to `command` when absent — most steps (git, npm) are identical.
+  readonly posixCommand?: string;
   /// A `command` step that never exits on its own — a dev server that stays up
   /// (`pnpm dev`). Iris starts it and moves on instead of waiting for an exit
   /// that never comes. Mirrors macOS `holdsTheShellOpen`.
@@ -98,4 +101,11 @@ export function needsTheReader(kind: StepKind): boolean {
 /// The step count the UI shows as the denominator ("3 of 8").
 export function totalSteps(recipe: InstallRecipe): number {
   return recipe.steps.length;
+}
+
+/// The command to actually run for a step on this host. Windows uses `command`;
+/// everywhere else prefers `posixCommand`, falling back to `command` — most steps
+/// (git clone, npm ci) are identical across platforms.
+export function commandForPlatform(step: RecipeStep, platform: NodeJS.Platform): string | undefined {
+  return platform === "win32" ? step.command : step.posixCommand ?? step.command;
 }

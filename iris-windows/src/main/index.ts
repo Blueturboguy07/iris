@@ -617,6 +617,14 @@ if (gotSingleInstanceLock) {
     // A link that launched the app is sitting in this process's own argv.
     receiveDeepLinksFromArgv(process.argv);
 
+    // Test convenience: `IRIS_AUTOPILOT_DEMO=<slug>` opens the animated terminal
+    // and starts installing that app straight away, so the whole autopilot can be
+    // watched running an install end to end with no clicks.
+    const demoSlug = process.env.IRIS_AUTOPILOT_DEMO;
+    if (demoSlug && demoSlug.length > 0) {
+      openAutopilotWindow(demoSlug);
+    }
+
     console.log("Iris for Windows started — running in the system tray");
   });
 }

@@ -49,7 +49,10 @@ const OPENASCII: InstallRecipe = {
       command: "corepack.cmd pnpm dev",
       posixCommand: "corepack pnpm dev",
       longRunning: true,
-      readyWhen: "localhost:5173",
+      // Port-agnostic: Vite bumps to the next free port when the default is
+      // taken, so wait for any localhost line rather than a specific port. The
+      // actual URL is captured by detectServedUrl for the open step.
+      readyWhen: "localhost",
     },
     { id: "open", title: "Open OpenASCII", kind: "open", href: "http://localhost:5173" },
   ],

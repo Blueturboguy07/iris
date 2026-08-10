@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:;" />
+    <title>Iris — installing</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <!-- macOS-Terminal chrome. The window itself is frameless; this is the fake
+         title bar with the traffic lights, matching the macOS autopilot look. -->
+    <div class="terminal" id="terminal">
+      <div class="titlebar" id="titlebar">
+        <span class="lights"><i class="light red"></i><i class="light amber"></i><i class="light green"></i></span>
+        <span class="title" id="title">iris — installing</span>
+      </div>
+      <div class="scrollback" id="scrollback" aria-live="polite"></div>
+      <!-- The "your turn" tray: shown only when Iris hands a step back (a sign-in
+           or a permission) or asks to confirm a sensitive command. -->
+      <div class="tray hidden" id="tray">
+        <div class="tray-text" id="tray-text"></div>
+        <div class="tray-buttons" id="tray-buttons"></div>
+      </div>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>

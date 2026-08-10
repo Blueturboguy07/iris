@@ -353,23 +353,62 @@ function openExternalSafely(url: string): void {
   if (classification.allowed) void shell.openExternal(classification.url);
 }
 
+let autopilotWindow: BrowserWindow | null = null;
 let autopilot: AutopilotController | null = null;
 
+/** The animated-terminal window that hosts an install. Frameless — the renderer
+ *  draws its own macOS-Terminal chrome. The slug rides in as a query parameter. */
+function openAutopilotWindow(slug: string): BrowserWindow {
+  if (autopilotWindow && !autopilotWindow.isDestroyed()) {
+    autopilotWindow.show();
+    autopilotWindow.focus();
+    return autopilotWindow;
+  }
+  autopilotWindow = new BrowserWindow({
+    width: 560,
+    height: 480,
+    frame: false,
+    transparent: true,
+    resizable: true,
+    show: false,
+    alwaysOnTop: true,
+    webPreferences: {
+      preload: preloadPath(),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  void autopilotWindow.loadFile(rendererPath("autopilot", "index.html"), { query: { slug } });
+  autopilotWindow.once("ready-to-show", () => autopilotWindow?.show());
+  autopilotWindow.on("closed", () => {
+    autopilotWindow = null;
+    // Tearing down the window ends the install it was showing.
+    autopilot?.dispose();
+  });
+  return autopilotWindow;
+}
+
 /** The one autopilot controller, built lazily. Its host turns runner events into
- *  the app-only side effects: streaming to the panel, opening links, floating to
- *  a gate, and opening the finished app. */
+ *  the app-only side effects: streaming to the terminal, opening links, floating
+ *  to a gate, and opening the finished app. */
 function autopilotController(): AutopilotController {
   if (autopilot) return autopilot;
   autopilot = new AutopilotController({
     emitEvent: (event) => broadcast("autopilot:event", event),
     openExternal: (url) => openExternalSafely(url),
     floatToGate: (instruction, href) => {
-      // Bring the panel to where the reader is looking, open the page a sign-in
-      // step points at, and tell the renderer what to show next to the eye.
-      glideGuidePanel("bottom-right");
-      if (guideWindow && !guideWindow.isDestroyed()) {
-        guideWindow.show();
-        guideWindow.focus();
+      // Bring the terminal to the reader and open the page a sign-in step points
+      // at; the renderer shows the instruction next to the eye. A model-located
+      // glow at the exact field is a later refinement.
+      const surface =
+        autopilotWindow && !autopilotWindow.isDestroyed()
+          ? autopilotWindow
+          : guideWindow && !guideWindow.isDestroyed()
+            ? guideWindow
+            : null;
+      if (surface) {
+        surface.show();
+        surface.focus();
       }
       if (href) openExternalSafely(href);
       broadcast("autopilot:gate", { instruction, href });
@@ -435,6 +474,11 @@ function handleGuideCommand(command: string, args: Record<string, unknown>): unk
     // ── Autopilot (guided install) ──────────────────────────────────────────
     // The panel drives an install through these; the runner streams its progress
     // back on the `autopilot:event` channel (see `autopilotController`).
+    case "autopilot_open":
+      // Opens the animated terminal window, which then calls `autopilot_start`.
+      openAutopilotWindow(String(args.slug ?? ""));
+      return null;
+
     case "autopilot_can_install":
       return autopilotController().canInstall(String(args.slug ?? ""));
 

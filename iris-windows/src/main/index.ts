@@ -13,6 +13,8 @@ import {
 import { classifyExternalLink, refusalMessage } from "../services/external-links";
 import { boundedCommandOutput, toolSpecFor } from "../services/tool-versions";
 import { secretStorageIsAvailable } from "./secrets";
+import { AutopilotController } from "./autopilot-controller";
+import type { RecipeOutput } from "../services/autopilot/recipe";
 
 /**
  * index.ts
@@ -323,6 +325,64 @@ async function checkToolVersion(tool: string): Promise<{
   });
 }
 
+/** Floats the guide panel to a screen corner. Shared by the `glide_iris` command
+ *  and the autopilot's "float to a gate". */
+function glideGuidePanel(anchor: string): void {
+  if (!guideWindow || guideWindow.isDestroyed()) return;
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const [windowWidth, windowHeight] = guideWindow.getSize();
+  const margin = 24;
+  const isRight = anchor.includes("right");
+  const isBottom = anchor.includes("bottom");
+  guideWindow.setPosition(
+    isRight
+      ? display.bounds.x + display.bounds.width - windowWidth - margin
+      : display.bounds.x + margin,
+    isBottom
+      ? display.bounds.y + display.bounds.height - windowHeight - margin
+      : display.bounds.y + margin,
+    true
+  );
+}
+
+/** Opens a link only if the external-link allowlist permits it, swallowing a
+ *  refusal so a side effect (opening a sign-in page, opening the finished app)
+ *  never throws out of the autopilot. */
+function openExternalSafely(url: string): void {
+  const classification = classifyExternalLink(url);
+  if (classification.allowed) void shell.openExternal(classification.url);
+}
+
+let autopilot: AutopilotController | null = null;
+
+/** The one autopilot controller, built lazily. Its host turns runner events into
+ *  the app-only side effects: streaming to the panel, opening links, floating to
+ *  a gate, and opening the finished app. */
+function autopilotController(): AutopilotController {
+  if (autopilot) return autopilot;
+  autopilot = new AutopilotController({
+    emitEvent: (event) => broadcast("autopilot:event", event),
+    openExternal: (url) => openExternalSafely(url),
+    floatToGate: (instruction, href) => {
+      // Bring the panel to where the reader is looking, open the page a sign-in
+      // step points at, and tell the renderer what to show next to the eye.
+      glideGuidePanel("bottom-right");
+      if (guideWindow && !guideWindow.isDestroyed()) {
+        guideWindow.show();
+        guideWindow.focus();
+      }
+      if (href) openExternalSafely(href);
+      broadcast("autopilot:gate", { instruction, href });
+    },
+    onFinished: (output: RecipeOutput) => {
+      // Once it's done, the app just opens.
+      if (output.type === "local_web") openExternalSafely(output.url);
+      broadcast("autopilot:finished", output);
+    },
+  });
+  return autopilot;
+}
+
 function handleGuideCommand(command: string, args: Record<string, unknown>): unknown {
   switch (command) {
     case "take_pending_guide": {
@@ -368,24 +428,24 @@ function handleGuideCommand(command: string, args: Record<string, unknown>): unk
     }
 
     case "glide_iris": {
-      if (!guideWindow || guideWindow.isDestroyed()) return null;
-      const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
-      const [windowWidth, windowHeight] = guideWindow.getSize();
-      const margin = 24;
-      const anchor = String(args.anchor ?? "bottom-right");
-      const isRight = anchor.includes("right");
-      const isBottom = anchor.includes("bottom");
-      guideWindow.setPosition(
-        isRight
-          ? display.bounds.x + display.bounds.width - windowWidth - margin
-          : display.bounds.x + margin,
-        isBottom
-          ? display.bounds.y + display.bounds.height - windowHeight - margin
-          : display.bounds.y + margin,
-        true
-      );
+      glideGuidePanel(String(args.anchor ?? "bottom-right"));
       return null;
     }
+
+    // ── Autopilot (guided install) ──────────────────────────────────────────
+    // The panel drives an install through these; the runner streams its progress
+    // back on the `autopilot:event` channel (see `autopilotController`).
+    case "autopilot_can_install":
+      return autopilotController().canInstall(String(args.slug ?? ""));
+
+    case "autopilot_start":
+      return autopilotController().start(String(args.slug ?? ""));
+
+    case "autopilot_confirm":
+      return autopilotController().confirm(Boolean(args.approved));
+
+    case "autopilot_reader_done":
+      return autopilotController().readerFinished();
 
     case "foreground_app_identity":
       // Windows has no cross-process foreground-app API without a native module.

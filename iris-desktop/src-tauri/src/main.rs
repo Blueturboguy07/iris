@@ -536,6 +536,12 @@ fn allowed_external_host(host: &str) -> bool {
             | "www.fal.ai"
             | "www.nasm.us"
             | "nasm.us"
+            // Dripwriter Origin installs from the Chrome Web Store and is
+            // verified inside a Google Doc; Nutcracker is served from GitHub
+            // Pages. Absent here, those guides' open buttons would do nothing.
+            | "chromewebstore.google.com"
+            | "docs.google.com"
+            | "blueturboguy07.github.io"
     )
 }
 

@@ -23,15 +23,25 @@ export const DEFAULT_COMMAND_TIMEOUT_MS = 15 * 60 * 1000;
 /// started (ms). Generous: a first `pnpm dev` compiles before it serves.
 export const LONG_RUNNING_GRACE_MS = 90 * 1000;
 
-/// What running one command produced.
+/// What running one command produced. A long-running (dev-server) command may
+/// also report the URL it is actually serving on, so the "open" step can land on
+/// the real port even when the default one was already taken.
 export type CommandOutcome =
-  | { readonly kind: "succeeded"; readonly output: string }
+  | { readonly kind: "succeeded"; readonly output: string; readonly servedUrl?: string }
   | { readonly kind: "failed"; readonly exitCode: number; readonly output: string }
   | { readonly kind: "timed_out" }
   | { readonly kind: "session_failed" };
 
 export function succeeded(outcome: CommandOutcome): boolean {
   return outcome.kind === "succeeded";
+}
+
+/// Pulls the first localhost URL a dev server prints out of its output (Vite's
+/// "Local: http://localhost:5174/"), so the install opens the app that is really
+/// there rather than whatever was squatting on the default port.
+export function detectServedUrl(output: string): string | undefined {
+  const match = output.match(/https?:\/\/(?:localhost|127\.0\.0\.1):\d+/i);
+  return match ? match[0] : undefined;
 }
 
 /// A persistent shell the runner drives.

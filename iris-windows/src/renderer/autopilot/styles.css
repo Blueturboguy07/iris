@@ -30,6 +30,47 @@ body {
   overflow: hidden;
 }
 
+/* The stage cross-fades between the eye and the terminal. Both fill the window;
+   the window's own size (eye-small vs terminal-large) is animated from the main
+   process, so growing + fading happen together and read as one morph. */
+.stage {
+  position: fixed;
+  inset: 0;
+}
+
+.eye {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 1;
+  transform: scale(1);
+  transition: opacity 0.4s ease, transform 0.45s cubic-bezier(0.2, 0.8, 0.2, 1);
+  animation: eye-breathe 3.2s ease-in-out infinite;
+}
+
+.eye .pupil {
+  transform-origin: 60px 60px;
+  animation: eye-blink 4.6s ease-in-out infinite;
+}
+
+@keyframes eye-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.06); }
+}
+
+@keyframes eye-blink {
+  0%, 92%, 100% { transform: scaleY(1); }
+  96% { transform: scaleY(0.1); }
+}
+
+.stage.as-terminal .eye {
+  opacity: 0;
+  transform: scale(0.5);
+  pointer-events: none;
+}
+
 .terminal {
   display: flex;
   flex-direction: column;
@@ -38,6 +79,14 @@ body {
   border-radius: 12px;
   overflow: hidden;
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+  opacity: 0;
+  transform: scale(0.94);
+  transition: opacity 0.5s ease, transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.stage.as-terminal .terminal {
+  opacity: 1;
+  transform: scale(1);
 }
 
 .titlebar {

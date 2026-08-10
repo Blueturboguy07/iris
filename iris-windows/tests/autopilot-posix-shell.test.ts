@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { wrapPosixCommand } from "../src/main/posix-shell-session";
 import { parseRun } from "../src/main/powershell-session";
+import { detectServedUrl } from "../src/services/autopilot/shell";
 
 /**
  * The POSIX shell spawns zsh and only does real work on a Mac, but its command
@@ -28,5 +29,16 @@ describe("POSIX command wrapping", () => {
     expect(parsed.exitCode).toBe(0);
     expect(parsed.cwd).toBe("/Users/me/iris-apps");
     expect(parsed.output).toBe("Cloning into 'OpenASCII'...");
+  });
+});
+
+describe("detecting the served URL a dev server actually came up on", () => {
+  it("reads the port out of Vite's output, even when it moved off the default", () => {
+    const viteOutput = "  VITE v5  ready\n  ➜  Local:   http://localhost:5174/\n  ➜  press h to show help";
+    expect(detectServedUrl(viteOutput)).toBe("http://localhost:5174");
+  });
+
+  it("returns undefined when nothing announced a local URL", () => {
+    expect(detectServedUrl("Compiling...\nDone.")).toBeUndefined();
   });
 });

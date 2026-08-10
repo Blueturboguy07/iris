@@ -356,8 +356,67 @@ function openExternalSafely(url: string): void {
 let autopilotWindow: BrowserWindow | null = null;
 let autopilot: AutopilotController | null = null;
 
-/** The animated-terminal window that hosts an install. Frameless — the renderer
- *  draws its own macOS-Terminal chrome. The slug rides in as a query parameter. */
+interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+const EYE_SIZE = 108;
+const TERMINAL_WIDTH = 600;
+const TERMINAL_HEIGHT = 460;
+
+/** The eye's resting spot: the top-left corner of the current display. */
+function autopilotEyeRect(): Rect {
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const margin = 28;
+  return { x: display.workArea.x + margin, y: display.workArea.y + margin, width: EYE_SIZE, height: EYE_SIZE };
+}
+
+/** The terminal's spot: centred on the current display. */
+function autopilotTerminalRect(): Rect {
+  const { x, y, width, height } = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
+  return {
+    x: Math.round(x + (width - TERMINAL_WIDTH) / 2),
+    y: Math.round(y + (height - TERMINAL_HEIGHT) / 2),
+    width: TERMINAL_WIDTH,
+    height: TERMINAL_HEIGHT,
+  };
+}
+
+/** Animates a window's bounds to `to` with an ease-out, then runs `done`, so the
+ *  window grows or shrinks in step with the renderer's eye<->terminal crossfade. */
+function animateWindowBounds(window: BrowserWindow, to: Rect, durationMs: number, done?: () => void): void {
+  const from = window.getBounds();
+  const frames = Math.max(1, Math.round(durationMs / 16));
+  let frame = 0;
+  const timer = setInterval(() => {
+    if (window.isDestroyed()) {
+      clearInterval(timer);
+      return;
+    }
+    frame += 1;
+    const progress = Math.min(1, frame / frames);
+    const eased = 1 - Math.pow(1 - progress, 3);
+    window.setBounds({
+      x: Math.round(from.x + (to.x - from.x) * eased),
+      y: Math.round(from.y + (to.y - from.y) * eased),
+      width: Math.round(from.width + (to.width - from.width) * eased),
+      height: Math.round(from.height + (to.height - from.height) * eased),
+    });
+    if (progress >= 1) {
+      clearInterval(timer);
+      done?.();
+    }
+  }, 16);
+}
+
+/** Opens the autopilot as the Iris eye in the top-left, then glides it to centre
+ *  and morphs it into the terminal (the renderer crossfades in step). Shown on
+ *  `did-finish-load`, which — unlike `ready-to-show` — fires reliably for a
+ *  transparent frameless window; the old code relied on `ready-to-show` and so
+ *  the window opened but stayed invisible. */
 function openAutopilotWindow(slug: string): BrowserWindow {
   if (autopilotWindow && !autopilotWindow.isDestroyed()) {
     autopilotWindow.show();
@@ -365,27 +424,48 @@ function openAutopilotWindow(slug: string): BrowserWindow {
     return autopilotWindow;
   }
   autopilotWindow = new BrowserWindow({
-    width: 560,
-    height: 480,
+    ...autopilotEyeRect(),
     frame: false,
     transparent: true,
-    resizable: true,
+    resizable: false,
     show: false,
+    hasShadow: false,
     alwaysOnTop: true,
-    webPreferences: {
-      preload: preloadPath(),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
+    backgroundColor: "#00000000",
+    webPreferences: { preload: preloadPath(), contextIsolation: true, nodeIntegration: false },
   });
-  void autopilotWindow.loadFile(rendererPath("autopilot", "index.html"), { query: { slug } });
-  autopilotWindow.once("ready-to-show", () => autopilotWindow?.show());
-  autopilotWindow.on("closed", () => {
+  const win = autopilotWindow;
+  void win.loadFile(rendererPath("autopilot", "index.html"), { query: { slug } });
+  win.webContents.once("did-finish-load", () => {
+    if (win.isDestroyed()) return;
+    win.show();
+    win.focus();
+    // Let the eye sit a beat in the corner, then fly to centre and become the
+    // terminal — the renderer crossfades on the same "morph" signal.
+    setTimeout(() => {
+      if (win.isDestroyed()) return;
+      win.webContents.send("autopilot:morph", "terminal");
+      animateWindowBounds(win, autopilotTerminalRect(), 520);
+    }, 650);
+  });
+  win.on("closed", () => {
     autopilotWindow = null;
-    // Tearing down the window ends the install it was showing.
     autopilot?.dispose();
   });
-  return autopilotWindow;
+  return win;
+}
+
+/** Morphs the terminal back into the eye, glides it to the top-left, then closes —
+ *  the "turn back into the eye" finish. Called by the renderer once it is done. */
+function collapseAutopilotWindow(): void {
+  const win = autopilotWindow;
+  if (!win || win.isDestroyed()) return;
+  win.webContents.send("autopilot:morph", "eye");
+  animateWindowBounds(win, autopilotEyeRect(), 460, () => {
+    setTimeout(() => {
+      if (!win.isDestroyed()) win.close();
+    }, 550);
+  });
 }
 
 /** The one autopilot controller, built lazily. Its host turns runner events into
@@ -483,6 +563,11 @@ function handleGuideCommand(command: string, args: Record<string, unknown>): unk
     case "autopilot_open":
       // Opens the animated terminal window, which then calls `autopilot_start`.
       openAutopilotWindow(String(args.slug ?? ""));
+      return null;
+
+    case "autopilot_collapse":
+      // The renderer finished; morph the terminal back into the eye and close.
+      collapseAutopilotWindow();
       return null;
 
     case "autopilot_can_install":

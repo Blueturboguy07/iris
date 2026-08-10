@@ -3,23 +3,40 @@
   <head>
     <meta charset="utf-8" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:;" />
-    <title>Iris — installing</title>
+    <title>Iris</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <!-- macOS-Terminal chrome. The window itself is frameless; this is the fake
-         title bar with the traffic lights, matching the macOS autopilot look. -->
-    <div class="terminal" id="terminal">
-      <div class="titlebar" id="titlebar">
-        <span class="lights"><i class="light red"></i><i class="light amber"></i><i class="light green"></i></span>
-        <span class="title" id="title">iris — installing</span>
+    <!-- The stage holds both faces. It starts as the eye; on the "morph" signal it
+         crossfades to the terminal (and back again when the install is done),
+         while the window itself glides and grows in step from the main process. -->
+    <div class="stage" id="stage">
+      <div class="eye" id="eye" aria-hidden="true">
+        <svg viewBox="0 0 120 120" width="72" height="72">
+          <defs>
+            <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stop-color="#7dd3fc" stop-opacity="0.55" />
+              <stop offset="100%" stop-color="#7dd3fc" stop-opacity="0" />
+            </radialGradient>
+          </defs>
+          <circle cx="60" cy="60" r="58" fill="url(#glow)" />
+          <path d="M12 60 Q60 18 108 60 Q60 102 12 60 Z" fill="none" stroke="#e6e6ea" stroke-width="5" stroke-linejoin="round" />
+          <circle class="pupil" cx="60" cy="60" r="17" fill="#e6e6ea" />
+          <circle cx="66" cy="54" r="4.5" fill="#16161a" />
+        </svg>
       </div>
-      <div class="scrollback" id="scrollback" aria-live="polite"></div>
-      <!-- The "your turn" tray: shown only when Iris hands a step back (a sign-in
-           or a permission) or asks to confirm a sensitive command. -->
-      <div class="tray hidden" id="tray">
-        <div class="tray-text" id="tray-text"></div>
-        <div class="tray-buttons" id="tray-buttons"></div>
+
+      <!-- macOS-Terminal chrome. -->
+      <div class="terminal" id="terminal">
+        <div class="titlebar" id="titlebar">
+          <span class="lights"><i class="light red"></i><i class="light amber"></i><i class="light green"></i></span>
+          <span class="title" id="title">iris — installing</span>
+        </div>
+        <div class="scrollback" id="scrollback" aria-live="polite"></div>
+        <div class="tray hidden" id="tray">
+          <div class="tray-text" id="tray-text"></div>
+          <div class="tray-buttons" id="tray-buttons"></div>
+        </div>
       </div>
     </div>
     <script src="app.js"></script>

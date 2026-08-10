@@ -68,6 +68,10 @@ export class AutopilotRunner {
   private index = 0;
   private finished = false;
   private events: AutopilotEvent[] = [];
+  // The URL a dev-server step actually served on, if it differed from the recipe
+  // default (e.g. Vite moved to :5174 because :5173 was taken). Used so the
+  // "open" step lands on the app that is really there.
+  private detectedServedUrl: string | undefined;
 
   // The host platform, injected so a recipe's Windows or macOS command is chosen
   // deterministically (and so tests can pin it). Defaults to the real host.
@@ -96,6 +100,16 @@ export class AutopilotRunner {
     return this.recipe.steps[this.index];
   }
 
+  /// The recipe's output, but with a local-web URL swapped for the port the dev
+  /// server actually came up on when they differ.
+  private effectiveOutput(): RecipeOutput {
+    const output = this.recipe.output;
+    if (output.type === "local_web" && this.detectedServedUrl !== undefined) {
+      return { type: "local_web", url: this.detectedServedUrl };
+    }
+    return output;
+  }
+
   private emit(event: AutopilotEvent): void {
     this.events.push(event);
   }
@@ -116,7 +130,7 @@ export class AutopilotRunner {
     for (;;) {
       if (this.index >= this.recipe.steps.length) {
         this.finished = true;
-        const output = this.recipe.output;
+        const output = this.effectiveOutput();
         this.emit({ type: "finished", output });
         return { type: "finished", output };
       }
@@ -223,6 +237,7 @@ export class AutopilotRunner {
 
     switch (outcome.kind) {
       case "succeeded":
+        if (outcome.servedUrl !== undefined) this.detectedServedUrl = outcome.servedUrl;
         this.emit({ type: "commandFinished", exitCode: 0, output: outcome.output });
         this.advance();
         return { kind: "advanced" };

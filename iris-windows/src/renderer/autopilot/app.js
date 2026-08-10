@@ -14,6 +14,7 @@
   "use strict";
 
   const native = window.irisNative;
+  const stage = document.getElementById("stage");
   const scrollback = document.getElementById("scrollback");
   const tray = document.getElementById("tray");
   const trayText = document.getElementById("tray-text");
@@ -180,6 +181,8 @@
 
       case "finished":
         addLine("✓ All done. Opening it now.", "done");
+        // Let the reader see "done", then morph back into the eye and close.
+        setTimeout(() => void native.invoke("autopilot_collapse", {}), 1800);
         break;
 
       default:
@@ -197,13 +200,10 @@
     }
   }
 
-  async function start() {
-    if (!native || typeof native.invoke !== "function") {
-      addLine("Iris's bridge isn't available in this window.", "info");
-      return;
-    }
-    if (slug) titleEl.textContent = `iris — installing ${slug}`;
-    native.listen("autopilot:event", (event) => enqueue(event));
+  let installStarted = false;
+  async function beginInstall() {
+    if (installStarted) return;
+    installStarted = true;
     try {
       await native.invoke("autopilot_start", { slug });
     } catch (error) {
@@ -211,5 +211,26 @@
     }
   }
 
-  void start();
+  function start() {
+    if (!native || typeof native.invoke !== "function") {
+      stage.classList.add("as-terminal");
+      addLine("Iris's bridge isn't available in this window.", "info");
+      return;
+    }
+    if (slug) titleEl.textContent = `iris — installing ${slug}`;
+    native.listen("autopilot:event", (event) => enqueue(event));
+    // The window opens as the eye; the main process sends "terminal" once it has
+    // glided to centre, and "eye" again when we ask to collapse. The install
+    // begins as the terminal appears, so it reads as the eye *becoming* the work.
+    native.listen("autopilot:morph", (face) => {
+      if (face === "terminal") {
+        stage.classList.add("as-terminal");
+        setTimeout(() => void beginInstall(), 280);
+      } else if (face === "eye") {
+        stage.classList.remove("as-terminal");
+      }
+    });
+  }
+
+  start();
 })();

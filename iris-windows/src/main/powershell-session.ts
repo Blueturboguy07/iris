@@ -21,6 +21,7 @@ import { spawn } from "node:child_process";
 
 import type { ApprovedCommand } from "../services/autopilot/risk";
 import {
+  detectServedUrl,
   type CommandOutcome,
   type ShellSession,
 } from "../services/autopilot/shell";
@@ -153,16 +154,16 @@ export class PowerShellSession implements ShellSession {
         clearTimeout(timer);
         resolve(outcome);
       };
-      const timer = setTimeout(() => done({ kind: "succeeded", output }), graceMs);
+      const succeed = (): void =>
+        done({ kind: "succeeded", output: output.slice(0, MAX_OUTPUT), servedUrl: detectServedUrl(output) });
+      const timer = setTimeout(succeed, graceMs);
 
       child.stdout?.setEncoding("utf8");
       child.stdout?.on("data", (chunk: string) => {
         if (output.length < MAX_OUTPUT) {
           output += chunk;
         }
-        if (readyMarker !== undefined && output.includes(readyMarker)) {
-          done({ kind: "succeeded", output: output.slice(0, MAX_OUTPUT) });
-        }
+        if (readyMarker !== undefined && output.includes(readyMarker)) succeed();
       });
       child.on("error", () => done({ kind: "session_failed" }));
       // If the server exits on its own before it is ready, that is a failure to

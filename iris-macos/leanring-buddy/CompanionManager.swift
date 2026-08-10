@@ -326,6 +326,31 @@ final class CompanionManager: ObservableObject {
             // answer mid-flight has its own reason to be pointing.
             if self.assistantState == .pointing { self.assistantState = .idle }
         }
+
+        guideSessionController.onGuideCompleted = { [weak self] guide, branch in
+            guard let self else { return }
+            self.openTheFreshlyInstalledApp(guide: guide, branch: branch)
+            // Refresh so the app the reader just installed shows up in
+            // "Your publik apps" without waiting for the next frontmost-app tick.
+            Task { await self.appInventoryService.refreshInventory() }
+        }
+    }
+
+    /// Launches the desktop app a finished guide just installed, so the reader
+    /// lands in the running app rather than on a "you're done" card. Silent for
+    /// local-web, mobile, and credential flows (nothing on this Mac to open) and
+    /// when the bundle cannot be resolved yet — the inventory refresh still
+    /// surfaces it in the list once LaunchServices catches up.
+    private func openTheFreshlyInstalledApp(guide: IrisGuide, branch: IrisGuideBranch) {
+        guard guide.outputType == .desktopApp,
+              let bundleId = branch.installedDesktopAppBundleId,
+              let applicationURL = appInventoryService
+                .installedApplicationURL(forBundleIdentifier: bundleId) else { return }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.openApplication(
+            at: applicationURL, configuration: configuration, completionHandler: nil
+        )
     }
 
     func stop() {
@@ -333,6 +358,7 @@ final class CompanionManager: ObservableObject {
         appLinkService.stopWatchingForRunningApps()
         guideSessionController.sendTheEyeTo = nil
         guideSessionController.stopPointingTheEye = nil
+        guideSessionController.onGuideCompleted = nil
         overlayWindowManager.hideOverlay()
         transientHideTask?.cancel()
 

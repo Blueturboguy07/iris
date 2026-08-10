@@ -46,8 +46,12 @@ struct GuideAutopilotPacing: Equatable {
     let minimumVisibleCommandDuration: TimeInterval
 
     /// The shipped feel: every command is on screen for at least this long, so
-    /// a complex install reads as a sequence of deliberate steps.
-    static let humanPaced = GuideAutopilotPacing(minimumVisibleCommandDuration: 0.7)
+    /// a complex install reads as a sequence of deliberate steps rather than a
+    /// flicker. Tuned up from 0.7s so a fast command still lands as visible work
+    /// — the reader asked for the install to feel like it is actually doing
+    /// something. The real shell is never slowed; this only holds the *display*
+    /// of a command that already finished faster than the floor.
+    static let humanPaced = GuideAutopilotPacing(minimumVisibleCommandDuration: 1.2)
     /// Tests and rehearsals run with no artificial hold, so a fake shell that
     /// returns instantly keeps the suite fast and deterministic.
     static let instant = GuideAutopilotPacing(minimumVisibleCommandDuration: 0)

@@ -378,6 +378,25 @@ struct IrisGuideBranch: Codable, Equatable, Sendable {
     }
 }
 
+extension IrisGuideBranch {
+    /// The bundle identifier of the desktop app this branch installs, read from
+    /// the first step that watches for it in the foreground — the same signal
+    /// the guide already uses to know the app is running. Nil for local-web,
+    /// mobile, and credential flows, which have no Mac app to open. Setup steps
+    /// are checked last, since the app's own foreground check lives in the main
+    /// steps.
+    var installedDesktopAppBundleId: String? {
+        for step in steps + setupSteps {
+            for expectation in step.watch?.expect ?? [] {
+                if case .foregroundApp(let bundleId) = expectation, !bundleId.isEmpty {
+                    return bundleId
+                }
+            }
+        }
+        return nil
+    }
+}
+
 struct IrisGuide: Codable, Equatable, Sendable {
     let appSlug: String
     let appName: String

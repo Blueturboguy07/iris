@@ -233,6 +233,14 @@ final class GuideSessionController: ObservableObject {
     var sendTheEyeTo: ((CGPoint, CGRect, String) -> Void)?
     var stopPointingTheEye: (() -> Void)?
 
+    /// Fired exactly once, the moment the reader reaches the completion card, so
+    /// `CompanionManager` can open the freshly installed app and refresh the
+    /// "Your publik apps" list. Injected the same way as the eye closures so this
+    /// controller stays ignorant of `NSWorkspace` and the inventory service.
+    /// The reader asked that a finished install "just open and be part of your
+    /// apps list" instead of leaving them on a card.
+    var onGuideCompleted: ((IrisGuide, IrisGuideBranch) -> Void)?
+
     /// Where a descriptor actually is on screen. Injected so the whole guide is
     /// testable without a screen.
     var targetLocator: (any GuideTargetLocating)?
@@ -993,6 +1001,17 @@ final class GuideSessionController: ObservableObject {
                 // watch loop notices completion and advances, which re-enters
                 // this loop through `advanceToTheNextStep`.
                 autoOpenIfTheStepPointsSomewhere(step)
+                if stepIsFinishedOnceIrisHasOpenedIt(step) {
+                    // Nothing for the watch loop to confirm and nothing only the
+                    // reader can do: Iris opening it *is* the step. Making the
+                    // reader tap "Continue" here is exactly the friction they
+                    // called out ("it's making me click to run the next step").
+                    // Advance it ourselves after a beat that reads as work.
+                    await holdBetweenAutoAdvancedSteps()
+                    guard autopilotIsRunning else { return }
+                    advanceFromWithinAutopilot()
+                    continue
+                }
                 return
             }
 
@@ -1032,6 +1051,23 @@ final class GuideSessionController: ObservableObject {
         // Fly the eye to whatever the step points at, so a non-technical reader
         // is shown where to act rather than left reading terminal scrollback.
         refreshPointingForTheOpenStep()
+    }
+
+    /// A step the reader has nothing left to do on once Iris has opened it: an
+    /// `open` step with no completion check to satisfy. Deliberately narrow —
+    /// `web`, `permission`, and `paste` steps ask the reader to sign in, grant
+    /// something, or move a secret, so auto-advancing them would skip the very
+    /// thing the step exists for; and a step that declares a `watch` expectation
+    /// still lets the watch loop confirm it the moment the reader finishes.
+    private func stepIsFinishedOnceIrisHasOpenedIt(_ step: IrisGuideStep) -> Bool {
+        step.kind == .open && (step.watch?.expect.isEmpty ?? true)
+    }
+
+    /// A short, deliberate pause before auto-advancing a step Iris handled on its
+    /// own, so a complex install reads as a sequence of real work rather than a
+    /// flash. Nothing real is waiting on it — it only paces the display.
+    private func holdBetweenAutoAdvancedSteps() async {
+        try? await Task.sleep(nanoseconds: 1_400_000_000)
     }
 
     /// Opens an `open`/`web` step's link (once) or a `permission` step's
@@ -1509,11 +1545,18 @@ final class GuideSessionController: ObservableObject {
             return
         }
         let lastStepIndex = branch.steps.count - 1
+        let wasAlreadyFinished = readerHasFinishedTheGuide
         if currentStepIndex >= lastStepIndex {
             // Past the last step is the completion card, never a step index the
             // branch does not have.
             currentStepIndex = lastStepIndex
             readerHasFinishedTheGuide = true
+            // The install just crossed the finish line. Fire the completion hook
+            // once — repeat advances (a late watch-loop tick) must not relaunch
+            // the app or re-scan on every call.
+            if !wasAlreadyFinished, let guide = guideBeingFollowed {
+                onGuideCompleted?(guide, branch)
+            }
         } else {
             currentStepIndex += 1
         }

@@ -380,6 +380,15 @@ final class AppInventoryService: ObservableObject {
 
     // MARK: - Refreshing
 
+    /// Where an installed app lives on this Mac, or nil if it cannot be found
+    /// yet. Reuses the same locator the inventory uses (LaunchServices first,
+    /// then a Spotlight fallback), so a just-installed app is found even before
+    /// LaunchServices has caught up. Used to open an app the moment its guide
+    /// finishes.
+    func installedApplicationURL(forBundleIdentifier bundleIdentifier: String) -> URL? {
+        installedApplicationLocator.applicationBundleURL(forBundleIdentifier: bundleIdentifier)
+    }
+
     /// Rescans now. Reading the catalog is a network call; deciding what is
     /// installed is filesystem and LaunchServices work, so it happens off the
     /// main actor and only the finished answer comes back.

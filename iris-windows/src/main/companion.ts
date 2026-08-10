@@ -126,6 +126,44 @@ export class CompanionManager {
   }
 
   /**
+   * Point the eye at the on-screen control a reader needs to clear an autopilot
+   * gate — the sign-in field, the permission button — so a non-technical person
+   * is shown *where* to act, not just told. Reuses the same capture -> model ->
+   * POINT -> overlay pipeline as a chat answer, with a located-control prompt and
+   * no conversation history (a gate is not part of the chat).
+   *
+   * Best-effort by design: any failure (no credentials, the control off-screen,
+   * the model declining to point) is swallowed, because the written instruction
+   * in the terminal tray is always the fallback and a missing glow must never
+   * block the install.
+   */
+  async pointAtGate(target: string): Promise<void> {
+    try {
+      this.broadcastStage("capturing", "Finding it on screen...");
+      const screenshots = await this.screenCapture.captureAllScreens();
+      const cursorPosition = this.screenCapture.getCursorPosition();
+      const claude = this.createClaudeService();
+      const response = await claude.query({
+        userMessage:
+          `Point at the exact on-screen control the person should use in order to: ${target}. ` +
+          `If it is a field they must type into, point at the field; if it is a button, point at the button. ` +
+          `Reply with only a POINT tag and nothing else.`,
+        screenshots,
+        cursorPosition,
+        conversationHistory: [],
+      });
+      const pointTagsInImageSpace = parsePointTags(response.text);
+      if (pointTagsInImageSpace.length === 0) return;
+      const displayPoints = await this.resolvePointTags(pointTagsInImageSpace, screenshots, claude);
+      this.sendPointsToOverlays(displayPoints);
+    } catch {
+      // The instruction in the tray is the fallback; the glow is a bonus.
+    } finally {
+      this.broadcastStage("done", "");
+    }
+  }
+
+  /**
    * Second pass, then the IMAGE -> DISPLAY conversion. Refinement failures fall
    * back to the first-pass estimate rather than dropping the point entirely.
    */

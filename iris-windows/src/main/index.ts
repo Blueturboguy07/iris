@@ -412,6 +412,12 @@ function autopilotController(): AutopilotController {
       }
       if (href) openExternalSafely(href);
       broadcast("autopilot:gate", { instruction, href });
+      // Then float the eye to the actual control the reader must use. A sign-in
+      // page needs a moment to render before it can be found; a permission
+      // prompt is already up. Best-effort — pointAtGate swallows its own errors.
+      const pointingTarget = href ? `sign in on the page that just opened — ${instruction}` : instruction;
+      const settleDelayMs = href ? 2500 : 800;
+      setTimeout(() => void companion.pointAtGate(pointingTarget), settleDelayMs);
     },
     onFinished: (output: RecipeOutput) => {
       // Once it's done, the app just opens.

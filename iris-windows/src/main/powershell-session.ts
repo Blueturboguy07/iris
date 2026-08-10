@@ -1,0 +1,214 @@
+//
+// The real PowerShell the autopilot runs approved commands in — the runtime
+// implementation of `ShellSession` (src/services/autopilot/shell.ts).
+//
+// Design: one short-lived PowerShell per command, threading the working
+// directory forward explicitly. This is more robust than a persistent REPL over
+// a pipe (whose line-vs-EOF execution semantics vary by PowerShell version) and
+// it stays deterministic: each command is wrapped so its script reports, on two
+// marker lines, the exit code and the resulting current directory. `cd` inside a
+// step therefore persists to the next step, which is what an install sequence
+// (`git clone`, then `cd repo`, then `pnpm install`) needs.
+//
+// Only the working directory carries between steps, not shell variables/env —
+// an acceptable v1 limit for reviewed recipes. This module lives in `main/`
+// because it spawns processes; its pure parsing helpers are exported so the
+// vitest suite can check them on any host. The end-to-end run against real
+// PowerShell is exercised on CI's windows-latest runner.
+//
+
+import { spawn } from "node:child_process";
+
+import type { ApprovedCommand } from "../services/autopilot/risk";
+import {
+  type CommandOutcome,
+  type ShellSession,
+} from "../services/autopilot/shell";
+
+const CODE_MARKER = "__IRIS_CODE__:";
+const CWD_MARKER = "__IRIS_CWD__:";
+const MAX_OUTPUT = 8 * 1024;
+
+/// Quotes a path as a PowerShell single-quoted string (doubling embedded quotes),
+/// so a folder with spaces or apostrophes cannot break out of `Set-Location`.
+export function psSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+/// The script Iris wraps every command in: pin the location, run the command in
+/// its own block, then report the exit code and the resulting location on marker
+/// lines the parser looks for.
+export function wrapCommandScript(command: string, cwd: string): string {
+  return [
+    `Set-Location -LiteralPath ${psSingleQuote(cwd)}`,
+    "$global:LASTEXITCODE = 0",
+    `& { ${command} }`,
+    "$__code = if ($LASTEXITCODE -ne 0) { $LASTEXITCODE } elseif (-not $?) { 1 } else { 0 }",
+    `Write-Output "${CWD_MARKER}$($ExecutionContext.SessionState.Path.CurrentLocation.Path)"`,
+    `Write-Output "${CODE_MARKER}$__code"`,
+    "",
+  ].join("\n");
+}
+
+/// Encodes a script for `-EncodedCommand` (UTF-16LE base64), which sidesteps all
+/// quoting when handing a multi-line script to PowerShell.
+export function encodeForPowerShell(script: string): string {
+  return Buffer.from(script, "utf16le").toString("base64");
+}
+
+export interface ParsedRun {
+  readonly exitCode: number | undefined;
+  readonly cwd: string | undefined;
+  readonly output: string;
+}
+
+/// Pulls the exit code and resulting directory out of a completed run's stdout,
+/// and returns everything else as the visible output (bounded, trimmed). The
+/// marker lines themselves are stripped so they never show in the terminal.
+export function parseRun(stdout: string, stderr: string): ParsedRun {
+  let exitCode: number | undefined;
+  let cwd: string | undefined;
+  const outputLines: string[] = [];
+
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    if (rawLine.startsWith(CODE_MARKER)) {
+      const parsed = Number.parseInt(rawLine.slice(CODE_MARKER.length).trim(), 10);
+      exitCode = Number.isNaN(parsed) ? 1 : parsed;
+    } else if (rawLine.startsWith(CWD_MARKER)) {
+      const value = rawLine.slice(CWD_MARKER.length).trim();
+      cwd = value.length > 0 ? value : undefined;
+    } else {
+      outputLines.push(rawLine);
+    }
+  }
+
+  const combined = `${outputLines.join("\n")}\n${stderr}`.trim();
+  const output = combined.length > MAX_OUTPUT ? combined.slice(0, MAX_OUTPUT) : combined;
+  return { exitCode, cwd, output };
+}
+
+const POWERSHELL_ARGS = ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass"];
+
+interface Collected {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly spawnFailed: boolean;
+}
+
+export class PowerShellSession implements ShellSession {
+  private cwd: string;
+  // Long-running children (dev servers) kept alive for the app's lifetime and
+  // killed on dispose so the runner does not leave orphans behind.
+  private readonly servers: ReturnType<typeof spawn>[] = [];
+
+  constructor(startingDirectory: string = process.env.USERPROFILE ?? "C:\\") {
+    this.cwd = startingDirectory;
+  }
+
+  currentDirectory(): string {
+    return this.cwd;
+  }
+
+  async run(command: ApprovedCommand, deadlineMs: number): Promise<CommandOutcome> {
+    const script = wrapCommandScript(command.text, this.cwd);
+    const collected = await this.spawnEncoded(script, deadlineMs);
+    if (collected === "timed_out") {
+      return { kind: "timed_out" };
+    }
+    if (collected.spawnFailed) {
+      return { kind: "session_failed" };
+    }
+    const parsed = parseRun(collected.stdout, collected.stderr);
+    if (parsed.cwd !== undefined) {
+      this.cwd = parsed.cwd;
+    }
+    const exitCode = parsed.exitCode ?? 1;
+    return exitCode === 0
+      ? { kind: "succeeded", output: parsed.output }
+      : { kind: "failed", exitCode, output: parsed.output };
+  }
+
+  async runLongRunning(
+    command: ApprovedCommand,
+    readyMarker: string | undefined,
+    graceMs: number,
+  ): Promise<CommandOutcome> {
+    // A dev server never exits. Start it in its own PowerShell pinned to the
+    // current directory, then resolve as soon as its readiness marker appears —
+    // or after the grace period — while leaving it running.
+    const script = `Set-Location -LiteralPath ${psSingleQuote(this.cwd)}\n& { ${command.text} }\n`;
+    const child = spawn("powershell.exe", [...POWERSHELL_ARGS, "-EncodedCommand", encodeForPowerShell(script)], {
+      windowsHide: true,
+    });
+    this.servers.push(child);
+
+    return new Promise<CommandOutcome>((resolve) => {
+      let settled = false;
+      let output = "";
+      const done = (outcome: CommandOutcome): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve(outcome);
+      };
+      const timer = setTimeout(() => done({ kind: "succeeded", output }), graceMs);
+
+      child.stdout?.setEncoding("utf8");
+      child.stdout?.on("data", (chunk: string) => {
+        if (output.length < MAX_OUTPUT) {
+          output += chunk;
+        }
+        if (readyMarker !== undefined && output.includes(readyMarker)) {
+          done({ kind: "succeeded", output: output.slice(0, MAX_OUTPUT) });
+        }
+      });
+      child.on("error", () => done({ kind: "session_failed" }));
+      // If the server exits on its own before it is ready, that is a failure to
+      // start — surface it rather than reporting a server that isn't there.
+      child.on("exit", (code) => done(code === 0 ? { kind: "succeeded", output } : { kind: "failed", exitCode: code ?? 1, output }));
+    });
+  }
+
+  dispose(): void {
+    for (const server of this.servers) {
+      server.kill();
+    }
+    this.servers.length = 0;
+  }
+
+  private spawnEncoded(script: string, deadlineMs: number): Promise<Collected | "timed_out"> {
+    return new Promise((resolve) => {
+      const child = spawn("powershell.exe", [...POWERSHELL_ARGS, "-EncodedCommand", encodeForPowerShell(script)], {
+        windowsHide: true,
+      });
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      const finish = (value: Collected | "timed_out"): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const timer = setTimeout(() => {
+        child.kill();
+        finish("timed_out");
+      }, deadlineMs);
+
+      child.stdout?.setEncoding("utf8");
+      child.stderr?.setEncoding("utf8");
+      child.stdout?.on("data", (chunk: string) => {
+        stdout += chunk;
+      });
+      child.stderr?.on("data", (chunk: string) => {
+        stderr += chunk;
+      });
+      child.on("error", () => finish({ stdout, stderr, spawnFailed: true }));
+      child.on("close", () => finish({ stdout, stderr, spawnFailed: false }));
+    });
+  }
+}

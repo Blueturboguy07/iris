@@ -116,6 +116,27 @@ behavioural spec. The governing rule is that an **unknown query parameter is
 rejected, not ignored**. If you add a parameter, add it to the parser, the
 allowlist of names, and the test table — in that order.
 
+### Autopilot (guided-install)
+
+`src/services/autopilot/` runs an install recipe end to end — the Windows port of
+the macOS Swift autopilot. It is pure and unit-tested (`tests/autopilot-*.test.ts`):
+`recipe.ts` (the schema), `risk.ts` (the command gate), `runner.ts` (the no-click
+state machine driven against a `ShellSession`), `shell.ts` (the interface +
+`MockShell`), `recipes.ts` (the built-in recipes). The real shell —
+`src/main/powershell-session.ts` — spawns one PowerShell per command and threads
+the working directory forward, so it lives in `main/`; its pure parsing helpers
+are unit-tested and the whole thing is exercised end to end by
+`tests/autopilot.e2e.test.ts` on the windows-latest runner (guarded to `win32`).
+
+**Trust boundary — this relaxes the allowlist invariant.** `tool-versions.ts` says
+no command is ever built from guide text. The autopilot deliberately runs commands
+that *do* come from a recipe, so `risk.ts` is the compensating control and the
+relaxation is bounded three ways: provenance (recipes are reviewed, version-pinned
+data in this repo, not fetched-as-text guides), a three-tier gate (refuse / one
+tap / run) that mirrors the macOS `GuideAutopilotRiskAssessment.swift`, and an
+un-forgeable `ApprovedCommand` the shell is the only thing that will run. If you
+add a recipe or loosen the gate, keep those three intact and update the tests.
+
 ## Style
 
 Follow the publik house style, which is `iris-macos/CLAUDE.md`'s:

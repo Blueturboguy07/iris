@@ -1,0 +1,101 @@
+//
+// The install-recipe model — the Windows autopilot's answer to a guide branch.
+//
+// A recipe is an ordered list of steps, most of them a PowerShell/winget command
+// Iris runs itself, a few of them things only the reader can do (sign in, grant a
+// permission). Recipes are data, so the same runner drives every app and a new
+// app is a new recipe rather than new code.
+//
+// This is a pure module (no Node/Electron/Windows APIs) so it runs in the vitest
+// suite on any host. It mirrors the Rust reference core that was validated in the
+// Tauri prototype, and aligns conceptually with the macOS `IrisGuideStep` model.
+//
+
+/// What a finished recipe leaves behind, and how Iris opens it — the Windows
+/// answer to "once it's done the app should just open."
+export type RecipeOutput =
+  | { readonly type: "desktop_app"; readonly launch: LaunchTarget }
+  | { readonly type: "local_web"; readonly url: string }
+  | { readonly type: "credential" }
+  | { readonly type: "none" };
+
+/// How to open a desktop app once it is installed.
+export type LaunchTarget =
+  | { readonly via: "shell"; readonly command: string }
+  | { readonly via: "path"; readonly path: string };
+
+/// What a step is, which decides who does it.
+export type StepKind =
+  /// A command Iris runs itself.
+  | "command"
+  /// Open a URL or app; opening it is the whole step, so it needs no tap.
+  | "open"
+  /// The reader signs in. Iris opens the page and floats to it but never types
+  /// the secret — the Windows answer to "ad-hoc sign in", done safely.
+  | "sign_in"
+  /// The reader grants a Windows permission or clears a UAC prompt.
+  | "permission"
+  /// Any other action only the reader can take.
+  | "manual";
+
+/// How Iris can confirm a reader step finished, so the install resumes on its
+/// own instead of waiting for a tap.
+export type StepCheck =
+  | { readonly type: "tool_version"; readonly tool: string }
+  | { readonly type: "process_running"; readonly executable: string }
+  | { readonly type: "path_exists"; readonly path: string };
+
+/// One step in a recipe.
+export interface RecipeStep {
+  readonly id: string;
+  readonly title: string;
+  readonly kind: StepKind;
+  /// The PowerShell/winget line for a `command` step. Absent otherwise.
+  readonly command?: string;
+  /// A `command` step that never exits on its own — a dev server that stays up
+  /// (`pnpm dev`). Iris starts it and moves on instead of waiting for an exit
+  /// that never comes. Mirrors macOS `holdsTheShellOpen`.
+  readonly longRunning?: boolean;
+  /// For a `longRunning` step, a substring of the server's output that means it
+  /// is up (Vite's `localhost:5173`). Iris waits for it, then advances.
+  readonly readyWhen?: string;
+  /// The URL an `open`/`sign_in` step points the reader at.
+  readonly href?: string;
+  /// What to tell the reader when Iris hands them the step — the sentence the
+  /// eye floats next to.
+  readonly instruction?: string;
+  /// How Iris can tell the step is done without being told. Absent means the
+  /// step is finished the moment Iris performs it.
+  readonly check?: StepCheck;
+}
+
+/// A full install recipe for one app.
+export interface InstallRecipe {
+  /// Matches the app's slug in the web catalog.
+  readonly slug: string;
+  readonly appName: string;
+  /// What finishing the recipe produces, and how to open it.
+  readonly output: RecipeOutput;
+  readonly steps: readonly RecipeStep[];
+}
+
+/// Iris runs this step itself rather than handing it over.
+export function isRunByIris(kind: StepKind): boolean {
+  return kind === "command";
+}
+
+/// Opening it is the entire step, so the autopilot advances with no tap.
+export function isDoneOnceOpened(kind: StepKind): boolean {
+  return kind === "open";
+}
+
+/// Only the reader can finish it: float to it, instruct, and wait — never skip
+/// it, because skipping is skipping the sign-in or the permission.
+export function needsTheReader(kind: StepKind): boolean {
+  return kind === "sign_in" || kind === "permission" || kind === "manual";
+}
+
+/// The step count the UI shows as the denominator ("3 of 8").
+export function totalSteps(recipe: InstallRecipe): number {
+  return recipe.steps.length;
+}

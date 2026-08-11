@@ -450,51 +450,77 @@ struct OverlayEyeInputBarView: View {
         !typedMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// True while the centered takeover window is covering the screen with a
+    /// running install. The corner guide card + Ask-Iris field are hidden in that
+    /// case so they are not a cluttered second copy of the same guide. Gated on
+    /// "not yet finished" as well: the takeover flag lingers true until the guide
+    /// is closed, so this flips back to false the instant the install finishes —
+    /// which brings the completion card back — and, because the flag itself is
+    /// still true then, the under-the-card terminal pane stays suppressed and
+    /// cannot flash in.
+    private var theCenteredTakeoverIsCoveringTheScreen: Bool {
+        guideSessionController.autopilotIsShownAsTakeover
+            && !guideSessionController.readerHasFinishedTheGuide
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // The guide sits above the field, not inside the settings dropdown.
-            // The reader following instructions is doing the main thing Iris is
-            // for; asking a question about the step is the secondary thing, and
-            // it stays available underneath rather than replacing it.
-            if let guidePresentation {
-                OverlayEyeGuideCard(
-                    presentation: guidePresentation,
-                    onPrimaryAction: { guideSessionController.performPrimaryAction() },
-                    onSecondaryAction: { guideSessionController.advanceToTheNextStep() },
-                    onBack: { guideSessionController.returnToThePreviousStep() },
-                    onClose: { guideSessionController.closeTheGuide() },
-                    copyConfirmationText: guideSessionController.transientCopyConfirmationText
-                )
-                // No divider: the card carries its own backdrop, so it already
-                // reads as a separate surface from the field below it. A rule
-                // between two pieces of glass would be a line floating on the
-                // desktop with nothing behind it.
-
-                // The one gesture that hands the install to Iris. It is the
-                // only path to execution, which is the whole consent story.
-                if guideSessionController.canOfferAutopilot {
-                    Button("Let Iris run it", action: { guideSessionController.startAutopilot() })
-                        .irisPrimaryPill(isFullWidth: true, isCompact: true)
-                }
-
-                // While Iris is running the install, the terminal it runs it in
-                // is shown in the centered takeover window (the eye morphs into
-                // it). This under-the-card pane is only the fallback for when
-                // the takeover is not up — never draw the terminal in both.
-                if let runner = guideSessionController.autopilotRunner,
-                   !guideSessionController.autopilotIsShownAsTakeover {
-                    GuideAutopilotTerminalView(
-                        runner: runner,
-                        onApproveRiskyCommand: { guideSessionController.approveThePendingRiskyCommand() },
-                        onSkipRiskyCommand: { guideSessionController.skipThePendingRiskyCommand() },
-                        onRetrySurfacedStep: { guideSessionController.retryTheSurfacedStep() },
-                        onContinuePastSurfacedStep: { guideSessionController.skipTheSurfacedStepAndContinue() }
+            if theCenteredTakeoverIsCoveringTheScreen {
+                // While the centered takeover is running the install, the corner
+                // guide card AND the Ask-Iris field would be a cluttered second
+                // copy of the same guide over the desktop. Show nothing here so
+                // the takeover is the only surface. The outer VStack has no
+                // background of its own (each piece below carries its own glass),
+                // so an empty body collapses the bar panel to nothing rather than
+                // leaving an empty glass square. Everything returns the moment the
+                // install finishes (the completion card) or the takeover is torn
+                // down — see `theCenteredTakeoverIsCoveringTheScreen`.
+                EmptyView()
+            } else {
+                // The guide sits above the field, not inside the settings dropdown.
+                // The reader following instructions is doing the main thing Iris is
+                // for; asking a question about the step is the secondary thing, and
+                // it stays available underneath rather than replacing it.
+                if let guidePresentation {
+                    OverlayEyeGuideCard(
+                        presentation: guidePresentation,
+                        onPrimaryAction: { guideSessionController.performPrimaryAction() },
+                        onSecondaryAction: { guideSessionController.advanceToTheNextStep() },
+                        onBack: { guideSessionController.returnToThePreviousStep() },
+                        onClose: { guideSessionController.closeTheGuide() },
+                        copyConfirmationText: guideSessionController.transientCopyConfirmationText
                     )
-                }
-            }
+                    // No divider: the card carries its own backdrop, so it already
+                    // reads as a separate surface from the field below it. A rule
+                    // between two pieces of glass would be a line floating on the
+                    // desktop with nothing behind it.
 
-            textFieldRow
-            whateverTheExchangeIsUpTo
+                    // The one gesture that hands the install to Iris. It is the
+                    // only path to execution, which is the whole consent story.
+                    if guideSessionController.canOfferAutopilot {
+                        Button("Let Iris run it", action: { guideSessionController.startAutopilot() })
+                            .irisPrimaryPill(isFullWidth: true, isCompact: true)
+                    }
+
+                    // While Iris is running the install, the terminal it runs it in
+                    // is shown in the centered takeover window (the eye morphs into
+                    // it). This under-the-card pane is only the fallback for when
+                    // the takeover is not up — never draw the terminal in both.
+                    if let runner = guideSessionController.autopilotRunner,
+                       !guideSessionController.autopilotIsShownAsTakeover {
+                        GuideAutopilotTerminalView(
+                            runner: runner,
+                            onApproveRiskyCommand: { guideSessionController.approveThePendingRiskyCommand() },
+                            onSkipRiskyCommand: { guideSessionController.skipThePendingRiskyCommand() },
+                            onRetrySurfacedStep: { guideSessionController.retryTheSurfacedStep() },
+                            onContinuePastSurfacedStep: { guideSessionController.skipTheSurfacedStepAndContinue() }
+                        )
+                    }
+                }
+
+                textFieldRow
+                whateverTheExchangeIsUpTo
+            }
         }
         // The bar is dismissed the way every transient input on macOS is. This
         // only fires while the bar holds the keyboard — which is while a

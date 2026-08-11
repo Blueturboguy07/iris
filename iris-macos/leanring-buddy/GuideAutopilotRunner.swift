@@ -192,9 +192,10 @@ final class GuideAutopilotRunner: ObservableObject {
             return .skippedByReader
         case .stopped:
             return .stopped
-        case .failed(let workingDirectory):
+        case .failed(let exitStatus, let workingDirectory):
             return await runFailureLadder(
-                step: step, command: command, workingDirectory: workingDirectory
+                step: step, command: command,
+                exitStatus: exitStatus, workingDirectory: workingDirectory
             )
         }
     }
@@ -203,7 +204,7 @@ final class GuideAutopilotRunner: ObservableObject {
 
     private enum GuideCommandOutcome {
         case succeeded
-        case failed(workingDirectory: String)
+        case failed(exitStatus: Int32, workingDirectory: String)
         case skippedByReader
         case stopped
     }
@@ -249,14 +250,16 @@ final class GuideAutopilotRunner: ObservableObject {
         case .failed(let exitStatus, let workingDirectory):
             await holdSoTheCommandReadsAsWork(elapsed: duration)
             transcript.append(.exitStatus(code: exitStatus, duration: duration))
-            return .failed(workingDirectory: workingDirectory)
+            return .failed(exitStatus: exitStatus, workingDirectory: workingDirectory)
         case .cancelled:
             return .skippedByReader
         case .timedOut:
             transcript.append(.explanation(
                 text: "That command took too long and Iris stopped it."
             ))
-            return .failed(workingDirectory: shellSession.currentWorkingDirectory)
+            // 124 is the conventional "killed by timeout" exit code, so the
+            // fix proposer can tell a timeout apart from a real non-zero exit.
+            return .failed(exitStatus: 124, workingDirectory: shellSession.currentWorkingDirectory)
         case .seemsToBeAskingAQuestion(let tail):
             state = .awaitingReaderAtAPrompt(tail: tail)
             transcript.append(.explanation(
@@ -273,6 +276,7 @@ final class GuideAutopilotRunner: ObservableObject {
     private func runFailureLadder(
         step: IrisGuideStep,
         command: String,
+        exitStatus: Int32,
         workingDirectory: String
     ) async -> GuideAutopilotStepResult {
         var priorAttempts: [String] = []
@@ -286,7 +290,7 @@ final class GuideAutopilotRunner: ObservableObject {
             modelCallsUsedThisGuide += 1
 
             let context = failureContext(
-                step: step, command: command,
+                step: step, command: command, exitStatus: exitStatus,
                 workingDirectory: workingDirectory, priorAttempts: priorAttempts
             )
             let useWebSearch = rung >= 1
@@ -495,6 +499,7 @@ final class GuideAutopilotRunner: ObservableObject {
     private func failureContext(
         step: IrisGuideStep,
         command: String,
+        exitStatus: Int32,
         workingDirectory: String,
         priorAttempts: [String]
     ) -> GuideAutopilotFailureContext {
@@ -508,7 +513,7 @@ final class GuideAutopilotRunner: ObservableObject {
             stepBody: step.body,
             verifierLabel: step.verifierLabel,
             commandAsRun: command,
-            exitStatus: 1,
+            exitStatus: exitStatus,
             scrubbedOutputTail: shellSession.tailForTheModel(),
             shellPath: GuideAutopilotShellSession.loginShellPath(),
             workingDirectory: workingDirectory,

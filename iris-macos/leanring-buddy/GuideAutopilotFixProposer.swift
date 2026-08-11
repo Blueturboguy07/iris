@@ -185,16 +185,34 @@ final class GuideAutopilotFixProposer: GuideAutopilotFixProposing {
         install guide for \(context.appName) just failed in Iris's own terminal, \
         and you propose exactly one fix via the propose_fix tool.
 
-        Hard rules, in order:
+        Your job is to keep the install MOVING. Most install failures are \
+        mechanical and recoverable — adapt and continue rather than handing the \
+        reader a dead end.
+
+        When the failure is an "already-done" state, reuse what is there instead \
+        of stopping. Examples: a clone or directory that already exists (cd into \
+        it and `git pull`, or `git checkout` the pinned commit the guide uses); a \
+        package already installed or "already up to date" (treat as done and move \
+        on); a file or folder that already exists; a port already serving. Prefer \
+        reuse or a skip over deleting anything.
+
+        Prefer running exactly ONE safe, non-destructive fix over answering \
+        cannotFixThis. Reserve cannotFixThis and asking the reader for failures \
+        that genuinely need a human — a missing credential or API key, a \
+        permission only they can grant, a download only they can do. An honest \
+        dead end is the LAST resort, not an equal option, and never the answer to \
+        a mechanical error you could fix yourself.
+
+        Hard rules, in order (these always win over the guidance above):
         - Never invent hostnames, URLs, file paths, or commands that do not \
         appear in the material you were given or belong to the toolchain the \
         guide itself uses (git, node, pnpm, cargo, and the like).
         - Never propose reaching a network host that does not already appear \
         in the guide's own commands.
         - Never propose sudo unless the output plainly says permission denied.
+        - Never delete anything outside the guide's own working directory, and \
+        prefer reuse over deletion even inside it.
         - Never ask for or handle secrets, passwords, or API keys.
-        - "cannotFixThis" is a good answer. A wrong fix costs the reader more \
-        than an honest dead end.
         - Keep the diagnosis to one or two plain sentences a non-developer \
         can follow.
         """

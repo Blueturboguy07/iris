@@ -311,7 +311,16 @@ final class CompanionManager: ObservableObject {
     /// `[POINT:…]` answers use exactly these two properties — so a guide step
     /// reuses it rather than inventing a second kind of arrow.
     private func connectTheGuideToTheEye() {
-        guideSessionController.targetLocator = SystemGuideTargetLocator(askTheModel: nil)
+        // Wire the model-based locator so the eye can fly to a control the
+        // accessibility tree can't name (a System Settings toggle, a web
+        // button) — the same capture → [POINT] → global-coords path the
+        // assistant's own pointing uses. Only called when the pointing ladder
+        // has already decided the model may look (non-sensitive step, screen
+        // recording granted).
+        guideSessionController.targetLocator = SystemGuideTargetLocator(askTheModel: { [weak self] stepTitle, stepBody in
+            guard let self else { return nil }
+            return await self.locateGuideTargetWithModel(stepTitle: stepTitle, stepBody: stepBody)
+        })
         guideSessionController.irisMayLookAtTheScreenForPointing = hasScreenRecordingPermission
 
         guideSessionController.sendTheEyeTo = { [weak self] location, displayFrame, label in
@@ -622,6 +631,108 @@ final class CompanionManager: ObservableObject {
     - user asks how to commit in xcode: "see that source control menu up top? click that and hit commit, or you can use command option c as a shortcut. [POINT:285,11:source control]"
     - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
     """
+
+    // MARK: - Guide eye: model-based target location
+
+    /// The locator's focused prompt — find one control and answer with only the
+    /// coordinate tag, using the same [POINT] format the assistant pointing uses.
+    private static let guideTargetLocatorSystemPrompt = """
+    You are locating one on-screen UI control for a step of a software install guide. You are given screenshots of the user's screen(s), each labeled with its pixel dimensions. Find the single control the step refers to — a button, a toggle, a row in a list, a menu item, a link.
+
+    Reply with ONLY a coordinate tag and nothing else.
+    format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screenshot's coordinate space — origin (0,0) is the top-left of the image, x increases rightward, y increases downward — and label is a 1-3 word name for the control. If the control is on a screen other than the first, append :screenN where N is the screen number from the image label. If the control is not visible on any screen, reply exactly [POINT:none].
+    """
+
+    /// Ask the vision model where a guide step's control is, for the eye to fly
+    /// to. Returns an AppKit-global (bottom-left origin, points) rect — the same
+    /// space `SystemGuideTargetLocator`'s accessibility locators return — or nil.
+    /// Frames are ephemeral: a local `let`, never stored or logged as image data.
+    private func locateGuideTargetWithModel(stepTitle: String, stepBody: String) async -> CGRect? {
+        irisTrace("pointing/model: asked for step=\(stepTitle)")
+        do {
+            let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+            irisTrace("pointing/model: captured \(screenCaptures.count) screens")
+            guard !screenCaptures.isEmpty else { return nil }
+
+            let labeledImages = screenCaptures.map { capture -> (data: Data, label: String) in
+                let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
+                return (data: capture.imageData, label: capture.label + dimensionInfo)
+            }
+            let userPrompt = "Guide step: \(stepTitle)\n\(stepBody)\n\nPoint at the one control the user should click or toggle for this step."
+
+            let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
+                images: labeledImages,
+                systemPrompt: Self.guideTargetLocatorSystemPrompt,
+                userPrompt: userPrompt,
+                onTextChunk: { _ in }
+            )
+
+            let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
+            irisTrace("pointing/model: raw reply=\(parseResult.coordinate.map { "[POINT:\(Int($0.x)),\(Int($0.y))]" } ?? "none")")
+
+            guard
+                let pointCoordinate = parseResult.coordinate,
+                let resolved = Self.globalScreenLocation(
+                    fromScreenshotPoint: pointCoordinate,
+                    screenNumber: parseResult.screenNumber,
+                    in: screenCaptures
+                )
+            else {
+                irisTrace("pointing/model: no location")
+                return nil
+            }
+
+            let side: CGFloat = 44
+            let rect = CGRect(
+                x: resolved.location.x - side / 2,
+                y: resolved.location.y - side / 2,
+                width: side, height: side
+            )
+            irisTrace("pointing/model: resolved rect=\(Int(rect.origin.x)),\(Int(rect.origin.y)),\(Int(rect.width)),\(Int(rect.height)) (global-screen)")
+            return rect
+        } catch {
+            irisTrace("pointing/model: capture/model error \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// Convert a parsed [POINT] screenshot-pixel coordinate to AppKit global
+    /// bottom-left-origin points — the space `frame(of:)`/OverlayWindow use — via
+    /// the matching screen capture. The same math as the assistant's [POINT]
+    /// flight in `sendUserMessageToClaudeWithScreenshot`, kept in one place.
+    private static func globalScreenLocation(
+        fromScreenshotPoint pointCoordinate: CGPoint,
+        screenNumber: Int?,
+        in screenCaptures: [CompanionScreenCapture]
+    ) -> (location: CGPoint, displayFrame: CGRect)? {
+        let targetScreenCapture: CompanionScreenCapture? = {
+            if let screenNumber, screenNumber >= 1, screenNumber <= screenCaptures.count {
+                return screenCaptures[screenNumber - 1]
+            }
+            return screenCaptures.first(where: { $0.isCursorScreen }) ?? screenCaptures.first
+        }()
+        guard let capture = targetScreenCapture else { return nil }
+
+        let screenshotWidth = CGFloat(capture.screenshotWidthInPixels)
+        let screenshotHeight = CGFloat(capture.screenshotHeightInPixels)
+        let displayWidth = CGFloat(capture.displayWidthInPoints)
+        let displayHeight = CGFloat(capture.displayHeightInPoints)
+        let displayFrame = capture.displayFrame
+        guard screenshotWidth > 0, screenshotHeight > 0 else { return nil }
+
+        let clampedX = max(0, min(pointCoordinate.x, screenshotWidth))
+        let clampedY = max(0, min(pointCoordinate.y, screenshotHeight))
+        // Screenshot pixels → display points, then top-left → bottom-left, then
+        // display-local → global (identical to the assistant [POINT] path).
+        let displayLocalX = clampedX * (displayWidth / screenshotWidth)
+        let displayLocalY = clampedY * (displayHeight / screenshotHeight)
+        let appKitY = displayHeight - displayLocalY
+        let globalLocation = CGPoint(
+            x: displayLocalX + displayFrame.origin.x,
+            y: appKitY + displayFrame.origin.y
+        )
+        return (globalLocation, displayFrame)
+    }
 
     // MARK: - AI Response Pipeline
 

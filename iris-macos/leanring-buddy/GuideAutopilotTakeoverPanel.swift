@@ -199,6 +199,7 @@ final class GuideAutopilotTakeoverController {
         model?.manualStepTitle = pendingManualTitle
         model?.manualStepInstruction = pendingManualInstruction
         model?.readerMustManuallyContinue = true
+        irisTrace("takeover: PARKED + set readerMustManuallyContinue=true, showsTerminalFace=\(model?.showsTerminalFace == true), title=\(pendingManualTitle)")
         let backdrop = backdropPanel
         let cornerFrame = parkedFrame
         if reduceMotion {
@@ -419,12 +420,12 @@ private struct GuideAutopilotTakeoverView: View {
             .scaleEffect(model.showsTerminalFace ? 1 : 0.94)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        .overlay(alignment: .bottom) {
             // Parked on a manual step: some steps (a TCC permission, a sign-in)
             // have no signal Iris can read, so the reader does the thing and
-            // tells it. A solid inset bar — not a floating overlay — so it is
-            // never clipped by the scrollless transcript overflowing the small
-            // parked window, and it names the step so the reader is never lost.
+            // tells it. A solid bar drawn on top of the terminal's bottom (a
+            // safeAreaInset collapses to nothing in this hosted panel), naming
+            // the step so the reader is never lost.
             if model.readerMustManuallyContinue && model.showsTerminalFace {
                 VStack(spacing: 7) {
                     if !model.manualStepTitle.isEmpty {

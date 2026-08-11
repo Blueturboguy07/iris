@@ -1010,10 +1010,17 @@ final class GuideSessionController: ObservableObject {
         // shows output instead of a blank centered terminal AND passes where the
         // watch loop's ToolVersionService can't see a node/nvm/homebrew install.
         // A genuinely missing tool exits non-zero and hands back the normal way.
+        //
+        // A dev-server command (`npm start`) that holds the shell open IS
+        // executable: executeStepCommand routes it to startLongRunning (a side
+        // session), so Iris starts it rather than parking on it as a "manual"
+        // step with nothing to point at. It is deliberately NOT in
+        // `autopilotOwnsTheCurrentStep`, so the watch loop stays live to notice
+        // the app came up — and a long-running step with no watch auto-advances
+        // once started (see the `.longRunningStarted` case in the drive loop).
         (step.kind == .terminal || step.kind == .check)
             && (step.command?.isEmpty == false)
             && step.watch?.sensitive != true
-            && !GuideAutopilotCommandShape.holdsTheShellOpen(step.command ?? "")
     }
 
     /// A `.terminal` step that carries no command — a vestigial "open your
@@ -1103,8 +1110,20 @@ final class GuideSessionController: ObservableObject {
             case .succeeded:
                 advanceFromWithinAutopilot()
             case .longRunningStarted:
-                // A dev server is up in its own session; the watch loop owns
-                // completion. Autopilot stays on and yields.
+                if step.watch?.expect.isEmpty ?? true {
+                    // The dev server is up but the step declares no watch to
+                    // confirm it (cue's `npm start` — cue launches hidden with
+                    // showInactive() and no Dock icon, so there is nothing for
+                    // the watch loop to detect). Advance ourselves after a beat
+                    // rather than yielding to a watch loop that can never fire
+                    // and stalling the whole install here.
+                    await holdBetweenAutoAdvancedSteps()
+                    guard autopilotIsRunning else { return }
+                    advanceFromWithinAutopilot()
+                    continue
+                }
+                // The step has a watch: the dev server runs in its own session
+                // and the watch loop owns completion. Autopilot stays on, yields.
                 return
             case .handedBackAsSensitive, .skippedByReader, .surfacedToReader:
                 // Iris could not finish this step on its own. Hand it to the

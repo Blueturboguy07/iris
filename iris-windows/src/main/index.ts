@@ -62,6 +62,14 @@ if (!gotSingleInstanceLock) {
 }
 
 function registerIrisScheme(): void {
+  // Windows only. The dev machine is a Mac whose real iris:// handler is the
+  // Swift /Applications/Iris.app, and setAsDefaultProtocolClient sets a *user
+  // default handler override* that outranks that app — so running this Electron
+  // build on the Mac (as CI-mirrored dev testing does) silently steals iris://,
+  // and the website's "Open in Iris" then launches this shell instead of Iris.
+  // On Windows this build IS the handler; there it must register. The open-url
+  // handler above stays for the case where macOS still hands us a link.
+  if (process.platform !== "win32") return;
   if (process.defaultApp && process.argv.length >= 2) {
     // In development the executable is Electron itself, so the registration has
     // to name the script too or Windows launches a bare Electron.

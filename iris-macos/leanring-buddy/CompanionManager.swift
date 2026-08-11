@@ -342,11 +342,12 @@ final class CompanionManager: ObservableObject {
             self?.autopilotTakeoverController.dismiss(afterHold: false)
         }
 
-        guideSessionController.onAutopilotWaitingForReaderAtGate = { [weak self] in
+        guideSessionController.onAutopilotWaitingForReaderAtGate = { [weak self] title, instruction in
             // A manual step: park the terminal aside and lift the dim so the eye
             // (already flying to the step's control) and the control are both in
-            // the clear.
-            self?.autopilotTakeoverController.parkForManualStep()
+            // the clear. The step's own text rides along so the parked card can
+            // tell the reader exactly what to do before they tap continue.
+            self?.autopilotTakeoverController.parkForManualStep(title: title, instruction: instruction)
         }
 
         guideSessionController.onAutopilotResumedFromGate = { [weak self] in

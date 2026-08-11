@@ -36,6 +36,10 @@ final class GuideAutopilotTakeoverModel: ObservableObject {
     /// the watch loop cannot confirm (a permission grant, a sign-in), now that
     /// the corner guide card with its own Continue button is hidden mid-takeover.
     @Published var readerMustManuallyContinue: Bool = false
+    /// What the reader has to do at the parked step, shown above the button so
+    /// they are never guessing (e.g. "Allow screen and microphone access").
+    @Published var manualStepTitle: String = ""
+    @Published var manualStepInstruction: String = ""
 }
 
 /// The controller that owns the two panels and drives the morph in and out.
@@ -44,6 +48,11 @@ final class GuideAutopilotTakeoverController {
     private var backdropPanel: NSPanel?
     private var terminalPanel: NSPanel?
     private var model: GuideAutopilotTakeoverModel?
+
+    /// The parked step's text, held so a park deferred during the entry morph
+    /// (a manual first step) applies the same instruction once it settles.
+    private var pendingManualTitle = ""
+    private var pendingManualInstruction = ""
 
     /// The two frames the terminal window animates between: eye-sized (the
     /// morph's start/end) and terminal-sized (where the install runs). Held so
@@ -141,7 +150,7 @@ final class GuideAutopilotTakeoverController {
             entryMorphHasSettled = true
             if aParkWasRequestedDuringEntry {
                 aParkWasRequestedDuringEntry = false
-                parkForManualStep()
+                parkForManualStep(title: pendingManualTitle, instruction: pendingManualInstruction)
             }
             return
         }
@@ -164,7 +173,7 @@ final class GuideAutopilotTakeoverController {
                 self.entryMorphHasSettled = true
                 if self.aParkWasRequestedDuringEntry {
                     self.aParkWasRequestedDuringEntry = false
-                    self.parkForManualStep()
+                    self.parkForManualStep(title: self.pendingManualTitle, instruction: self.pendingManualInstruction)
                 }
             })
             withAnimation(.timingCurve(0.2, 0.8, 0.2, 1, duration: Self.morphDuration)) {
@@ -178,13 +187,17 @@ final class GuideAutopilotTakeoverController {
     /// the eye drifts to point at it. Called when autopilot hands a manual step
     /// to the reader; `returnToCenter` reverses it when Iris runs the next
     /// command. Idempotent, and safe to call during the entry morph (it waits).
-    func parkForManualStep() {
+    func parkForManualStep(title: String, instruction: String) {
+        pendingManualTitle = title
+        pendingManualInstruction = instruction
         guard let terminal = terminalPanel, !isDismissing else { return }
         // The very first step can be manual; if the entry morph is still growing
         // the window, defer until it settles so the two do not fight.
         guard entryMorphHasSettled else { aParkWasRequestedDuringEntry = true; return }
         guard !isParked else { return }
         isParked = true
+        model?.manualStepTitle = pendingManualTitle
+        model?.manualStepInstruction = pendingManualInstruction
         model?.readerMustManuallyContinue = true
         let backdrop = backdropPanel
         let cornerFrame = parkedFrame
@@ -323,8 +336,8 @@ final class GuideAutopilotTakeoverController {
     /// the rest of the screen is clear for the reader to act on the control the
     /// eye is pointing at.
     private static func parkedFrame(on screen: NSScreen) -> CGRect {
-        let width: CGFloat = 380
-        let height: CGFloat = 260
+        let width: CGFloat = 400
+        let height: CGFloat = 340
         let margin: CGFloat = 24
         return CGRect(
             x: screen.visibleFrame.maxX - width - margin,
@@ -406,15 +419,39 @@ private struct GuideAutopilotTakeoverView: View {
             .scaleEffect(model.showsTerminalFace ? 1 : 0.94)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .overlay(alignment: .bottom) {
-            // Parked on a manual step: the eye has drifted to point at what to
-            // do, but some steps (a TCC permission, a sign-in) have no signal
-            // Iris can read, so the reader tells it when they're done.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            // Parked on a manual step: some steps (a TCC permission, a sign-in)
+            // have no signal Iris can read, so the reader does the thing and
+            // tells it. A solid inset bar — not a floating overlay — so it is
+            // never clipped by the scrollless transcript overflowing the small
+            // parked window, and it names the step so the reader is never lost.
             if model.readerMustManuallyContinue && model.showsTerminalFace {
-                Button("I did it — continue", action: onReaderFinishedManualStep)
-                    .irisPrimaryPill(isFullWidth: false, isCompact: true)
-                    .padding(.bottom, 14)
-                    .transition(.opacity)
+                VStack(spacing: 7) {
+                    if !model.manualStepTitle.isEmpty {
+                        Text(model.manualStepTitle)
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if !model.manualStepInstruction.isEmpty {
+                        Text(model.manualStepInstruction)
+                            .font(.system(size: 11))
+                            .foregroundColor(.white.opacity(0.72))
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Button("I did it — continue", action: onReaderFinishedManualStep)
+                        .irisPrimaryPill(isFullWidth: true, isCompact: true)
+                        .padding(.top, 2)
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity)
+                .background(Color(red: 0.11, green: 0.11, blue: 0.13))
+                .overlay(alignment: .top) {
+                    Rectangle().fill(Color.white.opacity(0.1)).frame(height: 1)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
     }

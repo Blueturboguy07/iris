@@ -258,7 +258,7 @@ final class GuideSessionController: ObservableObject {
     /// brings the terminal back to center when Iris runs the next command.
     /// Injected like the eye closures so this controller stays ignorant of
     /// windows.
-    var onAutopilotWaitingForReaderAtGate: (() -> Void)?
+    var onAutopilotWaitingForReaderAtGate: ((_ title: String, _ instruction: String) -> Void)?
     var onAutopilotResumedFromGate: (() -> Void)?
 
     /// True while the install is being shown in the centered takeover window
@@ -1103,7 +1103,7 @@ final class GuideSessionController: ObservableObject {
                 // did it and advances, which resumes the install for the rest.
                 irisTrace("drive: step \(step.id) → MANUAL branch, waiting at gate (return)")
                 handTheCurrentStepBackToTheReader()
-                onAutopilotWaitingForReaderAtGate?()
+                onAutopilotWaitingForReaderAtGate?(step.title, step.body)
                 return
             }
 

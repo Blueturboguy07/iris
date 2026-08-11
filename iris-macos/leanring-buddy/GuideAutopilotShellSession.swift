@@ -36,11 +36,28 @@
 //
 
 import Foundation
-import os
 
-/// Temporary diagnostic tracing for the autopilot shell. Query with
-/// `log show --last 5m --predicate 'subsystem == "com.publikhq.iris" && category == "autopilot"'`.
-private let irisShellTrace = Logger(subsystem: "com.publikhq.iris", category: "autopilot")
+/// TEMPORARY file trace for diagnosing the autopilot empty-terminal wedge —
+/// os_log is not captured for this signed app, so append to a plain file at
+/// ~/iris-autopilot-trace.log instead. Module-internal so GuideSessionController
+/// writes to the same file. The message is built on the caller's actor, then the
+/// write hops to a serial queue, so no actor-isolated state is read off-actor.
+/// To be removed once the wedge is found.
+private let irisTraceQueue = DispatchQueue(label: "iris.autopilot.trace")
+private let irisTraceFilePath = (NSHomeDirectory() as NSString).appendingPathComponent("iris-autopilot-trace.log")
+func irisTrace(_ message: String) {
+    let line = message + "\n"
+    irisTraceQueue.async {
+        guard let data = line.data(using: .utf8) else { return }
+        if let handle = FileHandle(forWritingAtPath: irisTraceFilePath) {
+            defer { try? handle.close() }
+            handle.seekToEndOfFile()
+            handle.write(data)
+        } else {
+            try? line.write(toFile: irisTraceFilePath, atomically: false, encoding: .utf8)
+        }
+    }
+}
 
 /// How one command ended.
 enum GuideAutopilotCommandOutcome: Equatable, Sendable {
@@ -285,10 +302,10 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             queue.asyncAfter(deadline: .now() + 4) { [weak self] in
                 guard let self else { return }
                 guard self.markerToken == readyToken, let readyCompletion = self.finishRunning else {
-                    irisShellTrace.notice("shell: fail-open SKIPPED (ready already resolved: markerToken match=\(self.markerToken == readyToken, privacy: .public), finishRunning set=\(self.finishRunning != nil, privacy: .public))")
+                    irisTrace("shell: fail-open SKIPPED (ready already resolved: markerToken match=\(self.markerToken == readyToken), finishRunning set=\(self.finishRunning != nil))")
                     return
                 }
-                irisShellTrace.notice("shell: FAIL-OPEN fired — ready marker missed, proceeding anyway")
+                irisTrace("shell: FAIL-OPEN fired — ready marker missed, proceeding anyway")
                 self.displayIsSuppressedUntilShellIsReady = false
                 self.finishRunning = nil
                 self.markerToken = nil
@@ -328,7 +345,7 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
                 + "cd \(Self.shellQuoted(startingDirectory))\n"
                 + "printf '\\n__IRIS_END_\(token)__ %d\\t%s\\t%s\\n' \"$?\" \"$PWD\" \"$PATH\"\n"
             )
-            irisShellTrace.notice("shell: preamble written, token=\(token, privacy: .public)")
+            irisTrace("shell: preamble written, token=\(token)")
         }
 
         // MARK: Running (on queue)
@@ -338,21 +355,21 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             deadline: TimeInterval,
             _ completion: @escaping @Sendable (GuideAutopilotCommandOutcome) -> Void
         ) {
-            irisShellTrace.notice("shell: runCommand called, len=\(command.text.count, privacy: .public), busy=\(self.finishRunning != nil, privacy: .public), exited=\(self.shellHasExited, privacy: .public)")
+            irisTrace("shell: runCommand called, len=\(command.text.count), busy=\(self.finishRunning != nil), exited=\(self.shellHasExited)")
             guard let terminal, !shellHasExited else {
-                irisShellTrace.notice("shell: runCommand → sessionFailed (no terminal / exited)")
+                irisTrace("shell: runCommand → sessionFailed (no terminal / exited)")
                 completion(.sessionFailed)
                 return
             }
             guard finishRunning == nil else {
-                irisShellTrace.notice("shell: runCommand → sessionFailed (finishRunning still set — prior run never completed)")
+                irisTrace("shell: runCommand → sessionFailed (finishRunning still set — prior run never completed)")
                 completion(.sessionFailed)
                 return
             }
             if GuideAutopilotCommandShape.looksSyntacticallyIncomplete(command.text) {
                 // An unterminated construct would swallow the end marker and
                 // wedge every later command; refuse to send it at all.
-                irisShellTrace.notice("shell: runCommand → refused (looks syntactically incomplete)")
+                irisTrace("shell: runCommand → refused (looks syntactically incomplete)")
                 completion(.failed(exitStatus: 2, workingDirectory: workingDirectory))
                 return
             }
@@ -365,7 +382,7 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             markerScanText = ""
             lastOutputAt = Date()
             finishRunning = completion
-            irisShellTrace.notice("shell: runCommand WRITING command, token=\(token, privacy: .public)")
+            irisTrace("shell: runCommand WRITING command, token=\(token)")
 
             // ZLE is off by now, so plain \n line terminators are read
             // correctly by the shell, including the command's own internal
@@ -461,7 +478,7 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             commandGeneration += 1
             let fields = markerLine.split(separator: "\t", maxSplits: 2)
             let exitStatus = fields.first.flatMap { Int32($0) } ?? -1
-            irisShellTrace.notice("shell: MARKER seen, fields=\(fields.count, privacy: .public), exit=\(exitStatus, privacy: .public), wasSuppressed=\(self.displayIsSuppressedUntilShellIsReady, privacy: .public)")
+            irisTrace("shell: MARKER seen, fields=\(fields.count), exit=\(exitStatus), wasSuppressed=\(self.displayIsSuppressedUntilShellIsReady)")
             if fields.count > 1 {
                 workingDirectory = String(fields[1])
             }

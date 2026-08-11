@@ -478,8 +478,11 @@ struct OverlayEyeInputBarView: View {
                 }
 
                 // While Iris is running the install, the terminal it runs it in
-                // hangs directly under the step card.
-                if let runner = guideSessionController.autopilotRunner {
+                // is shown in the centered takeover window (the eye morphs into
+                // it). This under-the-card pane is only the fallback for when
+                // the takeover is not up — never draw the terminal in both.
+                if let runner = guideSessionController.autopilotRunner,
+                   !guideSessionController.autopilotIsShownAsTakeover {
                     GuideAutopilotTerminalView(
                         runner: runner,
                         onApproveRiskyCommand: { guideSessionController.approveThePendingRiskyCommand() },

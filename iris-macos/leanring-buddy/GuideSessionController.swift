@@ -241,6 +241,19 @@ final class GuideSessionController: ObservableObject {
     /// apps list" instead of leaving them on a card.
     var onGuideCompleted: ((IrisGuide, IrisGuideBranch) -> Void)?
 
+    /// Fired when autopilot begins and ends, so `CompanionManager` can raise and
+    /// tear down the centered terminal takeover. Injected like the eye closures
+    /// so this controller stays ignorant of overlays and panels.
+    var onAutopilotDidStart: (() -> Void)?
+    var onAutopilotDidStop: (() -> Void)?
+
+    /// True while the install is being shown in the centered takeover window
+    /// rather than the small pane under the guide card. The pane checks this so
+    /// the terminal is never drawn in two places at once. Set by
+    /// `CompanionManager` when it raises the takeover; cleared when autopilot
+    /// stops.
+    @Published private(set) var autopilotIsShownAsTakeover: Bool = false
+
     /// Where a descriptor actually is on screen. Injected so the whole guide is
     /// testable without a screen.
     var targetLocator: (any GuideTargetLocating)?
@@ -876,15 +889,27 @@ final class GuideSessionController: ObservableObject {
         // not also be watching it.
         pointTheWatchLoopAtTheCurrentStep()
         Task { await self.driveAutopilotFromTheCurrentStep(runner: runner, branch: branch) }
+        // Raise the centered terminal takeover: the eye flies to the middle and
+        // morphs into the terminal the install runs in.
+        onAutopilotDidStart?()
+    }
+
+    /// Set by `CompanionManager` as it raises / tears down the takeover window.
+    func setAutopilotIsShownAsTakeover(_ isShownAsTakeover: Bool) {
+        autopilotIsShownAsTakeover = isShownAsTakeover
     }
 
     func stopAutopilot() {
         autopilotIsRunning = false
         runnerSessionHasStarted = false
+        autopilotIsShownAsTakeover = false
         let runner = autopilotRunner
         autopilotRunner = nil
         Task { await runner?.endSession() }
         pointTheWatchLoopAtTheCurrentStep()
+        // Fold the takeover away if it is still up (e.g. the reader ended the
+        // guide mid-install).
+        onAutopilotDidStop?()
     }
 
     /// The reader tapped Run it / Skip on a risky command's confirm row.

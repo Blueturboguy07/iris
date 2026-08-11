@@ -156,6 +156,15 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
         /// Guards against the preamble being sent twice (start plus a rebuild).
         private var preambleHasBeenSent = false
         private var pendingReadyToken: String?
+        /// True from shell spawn until the ready marker lands. The preamble
+        /// (the PAGER/GIT_PAGER/LESS/GIT_TERMINAL_PROMPT exports, the `cd`, and
+        /// the ready `printf`) echoes back on a `-i` pty before `unsetopt zle`
+        /// has fully silenced echo, so that setup noise reaches the wire and,
+        /// left alone, lands in the terminal as a garbled first line
+        /// (`export PAGER=cat …cd '/Users/…'printf '\n`). None of it is the
+        /// reader's business, so on-screen delivery is held until the shell
+        /// reports ready. The model tail and the marker scan are unaffected.
+        private var displayIsSuppressedUntilShellIsReady = true
         /// A raw copy of recent output for marker detection only, with \r
         /// deleted (not collapsed as the display buffer does for progress
         /// bars) so the sentinel survives even when the shell's canonical
@@ -237,6 +246,7 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             self.terminal = terminal
             shellHasExited = false
             preambleHasBeenSent = false
+            displayIsSuppressedUntilShellIsReady = true
             buffer.removeAll()
             alreadyDeliveredLineCount = 0
             markerScanText = ""
@@ -379,6 +389,13 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
 
         private func deliverNewLines(_ lines: [String], upTo end: Int) {
             guard end > alreadyDeliveredLineCount else { return }
+            // Before the shell is ready, every line is preamble setup noise the
+            // reader must never see. Consume it (advance the cursor) but show
+            // nothing; real command output only starts after the ready marker.
+            if displayIsSuppressedUntilShellIsReady {
+                alreadyDeliveredLineCount = end
+                return
+            }
             for line in lines[alreadyDeliveredLineCount..<end] {
                 // The sentinel is machinery, never shown to the reader — but
                 // the pty's newline translation can leave a short command's
@@ -412,8 +429,13 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
                 workingDirectory = String(fields[1])
             }
             if fields.count > 2 {
-                // Only the ready marker carries a third field (PATH).
+                // Only the ready marker carries a third field (PATH). Its
+                // arrival means the preamble is done echoing: drop any of its
+                // bytes still buffered and let real output show from here on.
                 searchPath = String(fields[2])
+                displayIsSuppressedUntilShellIsReady = false
+                buffer.removeAll()
+                alreadyDeliveredLineCount = 0
             }
 
             let completion = finishRunning

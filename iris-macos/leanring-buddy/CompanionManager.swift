@@ -80,6 +80,11 @@ final class CompanionManager: ObservableObject {
     let globalSummonHotkeyMonitor = GlobalSummonHotkeyMonitor()
     let overlayWindowManager = OverlayWindowManager()
 
+    /// The centered terminal takeover the autopilot runs the install in — the
+    /// eye morphs into it and back. Raised and dismissed from the guide's
+    /// start/stop/completion hooks below.
+    private let autopilotTakeoverController = GuideAutopilotTakeoverController()
+
     /// Owns sign-in and the user's own Anthropic key. The panel observes it
     /// directly, and the request pipeline below asks it which route to take.
     let accountService = AccountService()
@@ -327,13 +332,43 @@ final class CompanionManager: ObservableObject {
             if self.assistantState == .pointing { self.assistantState = .idle }
         }
 
+        guideSessionController.onAutopilotDidStart = { [weak self] in
+            self?.presentAutopilotTakeover()
+        }
+
+        guideSessionController.onAutopilotDidStop = { [weak self] in
+            // Ended mid-install (the reader closed the guide): fold the takeover
+            // away with no completion follow-up.
+            self?.autopilotTakeoverController.dismiss(afterHold: false)
+        }
+
         guideSessionController.onGuideCompleted = { [weak self] guide, branch in
             guard let self else { return }
-            self.openTheFreshlyInstalledApp(guide: guide, branch: branch)
-            // Refresh so the app the reader just installed shows up in
-            // "Your publik apps" without waiting for the next frontmost-app tick.
-            Task { await self.appInventoryService.refreshInventory() }
+            // Let the finished terminal ("✓ done") sit a beat, morph back into
+            // the eye, and only then open the app — so it comes forward as the
+            // eye returns, not on top of the terminal. If no takeover is up (a
+            // manual guide), this opens immediately.
+            self.autopilotTakeoverController.dismiss(afterHold: true) { [weak self] in
+                guard let self else { return }
+                self.openTheFreshlyInstalledApp(guide: guide, branch: branch)
+                // Refresh so the app the reader just installed shows up in
+                // "Your publik apps" without waiting for the next frontmost tick.
+                Task { await self.appInventoryService.refreshInventory() }
+            }
         }
+    }
+
+    /// Raises the centered terminal takeover for the run autopilot just started.
+    private func presentAutopilotTakeover() {
+        guard let runner = guideSessionController.autopilotRunner else { return }
+        guideSessionController.setAutopilotIsShownAsTakeover(true)
+        autopilotTakeoverController.present(
+            runner: runner,
+            onApproveRiskyCommand: { [weak self] in self?.guideSessionController.approveThePendingRiskyCommand() },
+            onSkipRiskyCommand: { [weak self] in self?.guideSessionController.skipThePendingRiskyCommand() },
+            onRetrySurfacedStep: { [weak self] in self?.guideSessionController.retryTheSurfacedStep() },
+            onContinuePastSurfacedStep: { [weak self] in self?.guideSessionController.skipTheSurfacedStepAndContinue() }
+        )
     }
 
     /// Launches the desktop app a finished guide just installed, so the reader
@@ -359,6 +394,9 @@ final class CompanionManager: ObservableObject {
         guideSessionController.sendTheEyeTo = nil
         guideSessionController.stopPointingTheEye = nil
         guideSessionController.onGuideCompleted = nil
+        guideSessionController.onAutopilotDidStart = nil
+        guideSessionController.onAutopilotDidStop = nil
+        autopilotTakeoverController.dismiss(afterHold: false)
         overlayWindowManager.hideOverlay()
         transientHideTask?.cancel()
 

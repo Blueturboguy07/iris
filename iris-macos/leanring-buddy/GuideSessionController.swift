@@ -969,6 +969,17 @@ final class GuideSessionController: ObservableObject {
         advanceToTheNextStep()
     }
 
+    /// The reader tapped "I did it — continue" on a manual step the takeover
+    /// parked on — a permission grant or a sign-in that macOS won't let Iris
+    /// read, so there is no watch signal to auto-advance and the reader tells it
+    /// when they are done. Advance and resume the install, exactly as the watch
+    /// loop does for a step it CAN confirm.
+    func readerFinishedTheGatedStep() {
+        guard autopilotIsRunning else { return }
+        autopilotHandedTheCurrentStepToTheReader = false
+        advanceToTheNextStep()
+    }
+
     /// What the chat model is told about the guide the reader is on, so a
     /// "why is this failing" question is answered from the step and the real
     /// terminal output — not inferred from a screenshot. This is the direct

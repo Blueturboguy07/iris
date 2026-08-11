@@ -31,6 +31,11 @@ import SwiftUI
 @MainActor
 final class GuideAutopilotTakeoverModel: ObservableObject {
     @Published var showsTerminalFace: Bool = false
+    /// True while the takeover is parked on a manual step. Shows the
+    /// "I did it — continue" control so the reader is never stranded on a step
+    /// the watch loop cannot confirm (a permission grant, a sign-in), now that
+    /// the corner guide card with its own Continue button is hidden mid-takeover.
+    @Published var readerMustManuallyContinue: Bool = false
 }
 
 /// The controller that owns the two panels and drives the morph in and out.
@@ -80,7 +85,8 @@ final class GuideAutopilotTakeoverController {
         onApproveRiskyCommand: @escaping () -> Void,
         onSkipRiskyCommand: @escaping () -> Void,
         onRetrySurfacedStep: @escaping () -> Void,
-        onContinuePastSurfacedStep: @escaping () -> Void
+        onContinuePastSurfacedStep: @escaping () -> Void,
+        onReaderFinishedManualStep: @escaping () -> Void
     ) {
         // Already up (e.g. a resumed run) — never stack a second takeover.
         guard terminalPanel == nil, !isDismissing else { return }
@@ -115,7 +121,8 @@ final class GuideAutopilotTakeoverController {
             onApproveRiskyCommand: onApproveRiskyCommand,
             onSkipRiskyCommand: onSkipRiskyCommand,
             onRetrySurfacedStep: onRetrySurfacedStep,
-            onContinuePastSurfacedStep: onContinuePastSurfacedStep
+            onContinuePastSurfacedStep: onContinuePastSurfacedStep,
+            onReaderFinishedManualStep: onReaderFinishedManualStep
         )
         let hostingView = NSHostingView(rootView: takeoverView)
         hostingView.autoresizingMask = [.width, .height]
@@ -178,6 +185,7 @@ final class GuideAutopilotTakeoverController {
         guard entryMorphHasSettled else { aParkWasRequestedDuringEntry = true; return }
         guard !isParked else { return }
         isParked = true
+        model?.readerMustManuallyContinue = true
         let backdrop = backdropPanel
         let cornerFrame = parkedFrame
         if reduceMotion {
@@ -200,6 +208,7 @@ final class GuideAutopilotTakeoverController {
         aParkWasRequestedDuringEntry = false
         guard let terminal = terminalPanel, !isDismissing, isParked else { return }
         isParked = false
+        model?.readerMustManuallyContinue = false
         let backdrop = backdropPanel
         let centerFrame = terminalSizedFrame
         if reduceMotion {
@@ -374,6 +383,9 @@ private struct GuideAutopilotTakeoverView: View {
     let onSkipRiskyCommand: () -> Void
     let onRetrySurfacedStep: () -> Void
     let onContinuePastSurfacedStep: () -> Void
+    /// The reader tapped "I did it — continue" on a manual step Iris parked on
+    /// (a permission grant, a sign-in) that has no watch signal to auto-advance.
+    let onReaderFinishedManualStep: () -> Void
 
     var body: some View {
         ZStack {
@@ -394,6 +406,17 @@ private struct GuideAutopilotTakeoverView: View {
             .scaleEffect(model.showsTerminalFace ? 1 : 0.94)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .bottom) {
+            // Parked on a manual step: the eye has drifted to point at what to
+            // do, but some steps (a TCC permission, a sign-in) have no signal
+            // Iris can read, so the reader tells it when they're done.
+            if model.readerMustManuallyContinue && model.showsTerminalFace {
+                Button("I did it — continue", action: onReaderFinishedManualStep)
+                    .irisPrimaryPill(isFullWidth: false, isCompact: true)
+                    .padding(.bottom, 14)
+                    .transition(.opacity)
+            }
+        }
     }
 }
 

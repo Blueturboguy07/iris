@@ -1186,7 +1186,32 @@ final class GuideSessionController: ObservableObject {
         guard !readerHasTakenThisStepsAction else { return }
         if (step.kind == .open || step.kind == .web), let href = step.href {
             openLinkInBrowser(href)
+        } else if step.kind == .permission {
+            openSystemSettingsForPermissionStep(step)
         }
+    }
+
+    /// Take the reader to the System Settings pane a permission step is about.
+    /// macOS won't let Iris grant the permission itself — that is exactly what
+    /// TCC prevents — but it can open the right pane so the reader isn't hunting
+    /// a sidebar of twenty near-identical rows. Best-effort pane match from the
+    /// step's own words, falling back to the top of Privacy & Security.
+    private func openSystemSettingsForPermissionStep(_ step: IrisGuideStep) {
+        let text = (step.title + " " + step.body).lowercased()
+        let anchor: String
+        if text.contains("screen") {
+            anchor = "Privacy_ScreenCapture"
+        } else if text.contains("accessibility") {
+            anchor = "Privacy_Accessibility"
+        } else if text.contains("microphone") {
+            anchor = "Privacy_Microphone"
+        } else if text.contains("camera") {
+            anchor = "Privacy_Camera"
+        } else {
+            anchor = "Privacy"
+        }
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") else { return }
+        NSWorkspace.shared.open(url)
     }
 
     /// Advance without letting the watch-loop resume path also fire — the

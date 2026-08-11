@@ -50,6 +50,22 @@ final class GuideAutopilotTakeoverController {
     /// second chain on top of it.
     private var isDismissing = false
 
+    /// Parked = the terminal has slid to a corner and shrunk, and the dim is
+    /// lifted, so the reader can see and reach a manual step's control on their
+    /// own screen while the eye drifts to point at it. It returns to the center
+    /// the moment Iris runs the next command.
+    private var isParked = false
+
+    /// A park asked for before the entry morph finished — a guide whose very
+    /// first step is manual. Applied once the morph settles so the grow and the
+    /// park do not fight over the same window frame.
+    private var entryMorphHasSettled = false
+    private var aParkWasRequestedDuringEntry = false
+
+    /// Where the terminal sits while parked (top-right corner). Held so a park
+    /// requested during the entry morph can be applied unchanged once it settles.
+    private var parkedFrame: CGRect = .zero
+
     private var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
 
     private static let morphDuration: TimeInterval = 0.5
@@ -76,6 +92,10 @@ final class GuideAutopilotTakeoverController {
 
         eyeSizedFrame = Self.eyeSizedFrame(on: screen)
         terminalSizedFrame = Self.terminalSizedFrame(on: screen)
+        parkedFrame = Self.parkedFrame(on: screen)
+        isParked = false
+        entryMorphHasSettled = false
+        aParkWasRequestedDuringEntry = false
 
         // The dim backdrop. Click-through on purpose: a manual sub-step (a
         // download, a drag) still needs the reader to reach the app underneath.
@@ -111,6 +131,11 @@ final class GuideAutopilotTakeoverController {
         if reduceMotion {
             terminal.setFrame(terminalSizedFrame, display: true)
             takeoverModel.showsTerminalFace = true
+            entryMorphHasSettled = true
+            if aParkWasRequestedDuringEntry {
+                aParkWasRequestedDuringEntry = false
+                parkForManualStep()
+            }
             return
         }
 
@@ -118,16 +143,75 @@ final class GuideAutopilotTakeoverController {
         // from the eye's spot to the terminal while the SwiftUI cross-fade swaps
         // the eye face for the terminal face — one motion, the eye becoming the
         // work.
+        let centerFrame = terminalSizedFrame
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
             guard let self, self.terminalPanel === terminal else { return }
-            NSAnimationContext.runAnimationGroup { context in
+            NSAnimationContext.runAnimationGroup({ context in
                 context.duration = Self.morphDuration
                 context.timingFunction = Self.morphTiming
-                terminal.animator().setFrame(self.terminalSizedFrame, display: true)
-            }
+                terminal.animator().setFrame(centerFrame, display: true)
+            }, completionHandler: { [weak self] in
+                guard let self, self.terminalPanel === terminal else { return }
+                // The morph has settled; a manual first step can now park the
+                // window without fighting the grow it just finished.
+                self.entryMorphHasSettled = true
+                if self.aParkWasRequestedDuringEntry {
+                    self.aParkWasRequestedDuringEntry = false
+                    self.parkForManualStep()
+                }
+            })
             withAnimation(.timingCurve(0.2, 0.8, 0.2, 1, duration: Self.morphDuration)) {
                 takeoverModel.showsTerminalFace = true
             }
+        }
+    }
+
+    /// Slide the terminal to the corner and shrink it, and lift the dim, so the
+    /// reader can see and reach a manual step's control on their own screen while
+    /// the eye drifts to point at it. Called when autopilot hands a manual step
+    /// to the reader; `returnToCenter` reverses it when Iris runs the next
+    /// command. Idempotent, and safe to call during the entry morph (it waits).
+    func parkForManualStep() {
+        guard let terminal = terminalPanel, !isDismissing else { return }
+        // The very first step can be manual; if the entry morph is still growing
+        // the window, defer until it settles so the two do not fight.
+        guard entryMorphHasSettled else { aParkWasRequestedDuringEntry = true; return }
+        guard !isParked else { return }
+        isParked = true
+        let backdrop = backdropPanel
+        let cornerFrame = parkedFrame
+        if reduceMotion {
+            terminal.setFrame(cornerFrame, display: true)
+            backdrop?.alphaValue = 0
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.morphDuration
+            context.timingFunction = Self.morphTiming
+            terminal.animator().setFrame(cornerFrame, display: true)
+            backdrop?.animator().alphaValue = 0
+        }
+    }
+
+    /// Bring the terminal back to the center and restore the dim — the reader
+    /// finished the manual step and Iris is about to run the next command. A
+    /// no-op unless the terminal is actually parked.
+    func returnToCenter() {
+        aParkWasRequestedDuringEntry = false
+        guard let terminal = terminalPanel, !isDismissing, isParked else { return }
+        isParked = false
+        let backdrop = backdropPanel
+        let centerFrame = terminalSizedFrame
+        if reduceMotion {
+            terminal.setFrame(centerFrame, display: true)
+            backdrop?.alphaValue = 1
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.morphDuration
+            context.timingFunction = Self.morphTiming
+            terminal.animator().setFrame(centerFrame, display: true)
+            backdrop?.animator().alphaValue = 1
         }
     }
 
@@ -196,6 +280,9 @@ final class GuideAutopilotTakeoverController {
         terminalPanel = nil
         backdropPanel = nil
         model = nil
+        isParked = false
+        entryMorphHasSettled = false
+        aParkWasRequestedDuringEntry = false
     }
 
     // MARK: - Geometry
@@ -218,6 +305,21 @@ final class GuideAutopilotTakeoverController {
         return CGRect(
             x: screen.frame.midX - width / 2,
             y: screen.frame.midY - height / 2,
+            width: width, height: height
+        )
+    }
+
+    /// The parked position: a small window tucked into the top-right, still big
+    /// enough to keep the last commands and the running cursor readable, while
+    /// the rest of the screen is clear for the reader to act on the control the
+    /// eye is pointing at.
+    private static func parkedFrame(on screen: NSScreen) -> CGRect {
+        let width: CGFloat = 380
+        let height: CGFloat = 260
+        let margin: CGFloat = 24
+        return CGRect(
+            x: screen.visibleFrame.maxX - width - margin,
+            y: screen.visibleFrame.maxY - height - margin,
             width: width, height: height
         )
     }

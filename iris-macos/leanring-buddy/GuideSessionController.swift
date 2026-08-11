@@ -247,6 +247,16 @@ final class GuideSessionController: ObservableObject {
     var onAutopilotDidStart: (() -> Void)?
     var onAutopilotDidStop: (() -> Void)?
 
+    /// Fired when autopilot reaches a manual step it cannot run for the reader
+    /// (a download, a drag, a permission, a sign-in): the takeover terminal
+    /// parks to a corner so the eye — already flying to the step's control — and
+    /// the control itself are both in the clear. `onAutopilotResumedFromGate`
+    /// brings the terminal back to center when Iris runs the next command.
+    /// Injected like the eye closures so this controller stays ignorant of
+    /// windows.
+    var onAutopilotWaitingForReaderAtGate: (() -> Void)?
+    var onAutopilotResumedFromGate: (() -> Void)?
+
     /// True while the install is being shown in the centered takeover window
     /// rather than the small pane under the guide card. The pane checks this so
     /// the terminal is never drawn in two places at once. Set by
@@ -1037,9 +1047,21 @@ final class GuideSessionController: ObservableObject {
                     advanceFromWithinAutopilot()
                     continue
                 }
+                // A manual step the reader must finish (a download, a drag, a
+                // permission, a sign-in — including a guide whose very first step
+                // is one). Point the eye at its control and park the takeover
+                // terminal aside, so the reader can see and reach it rather than
+                // stare at a blank centered terminal. The watch loop notices they
+                // did it and advances, which resumes the install for the rest.
+                handTheCurrentStepBackToTheReader()
+                onAutopilotWaitingForReaderAtGate?()
                 return
             }
 
+            // Coming off a manual step (or starting the first command): bring the
+            // terminal back to center for the work Iris is about to do. A no-op
+            // when it is already centered.
+            onAutopilotResumedFromGate?()
             let result = await runner.executeStepCommand(
                 step: step, stepIndex: currentStepIndex, totalSteps: branch.steps.count
             )

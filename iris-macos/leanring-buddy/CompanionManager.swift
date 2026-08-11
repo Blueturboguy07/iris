@@ -342,6 +342,19 @@ final class CompanionManager: ObservableObject {
             self?.autopilotTakeoverController.dismiss(afterHold: false)
         }
 
+        guideSessionController.onAutopilotWaitingForReaderAtGate = { [weak self] in
+            // A manual step: park the terminal aside and lift the dim so the eye
+            // (already flying to the step's control) and the control are both in
+            // the clear.
+            self?.autopilotTakeoverController.parkForManualStep()
+        }
+
+        guideSessionController.onAutopilotResumedFromGate = { [weak self] in
+            // The reader finished the manual step and Iris is running again —
+            // bring the terminal back to center.
+            self?.autopilotTakeoverController.returnToCenter()
+        }
+
         guideSessionController.onGuideCompleted = { [weak self] guide, branch in
             guard let self else { return }
             // Let the finished terminal ("✓ done") sit a beat, morph back into

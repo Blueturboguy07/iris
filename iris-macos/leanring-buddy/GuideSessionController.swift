@@ -864,7 +864,7 @@ final class GuideSessionController: ObservableObject {
         guard autopilotIsRunning,
               !autopilotHandedTheCurrentStepToTheReader,
               let step = currentStep else { return false }
-        return step.kind == .terminal
+        return (step.kind == .terminal || step.kind == .check)
             && step.command != nil
             && step.watch?.sensitive != true
             && !GuideAutopilotCommandShape.holdsTheShellOpen(step.command ?? "")
@@ -1000,7 +1000,13 @@ final class GuideSessionController: ObservableObject {
     /// Whether the current step is one Iris executes itself (as opposed to a
     /// manual, open, permission, or dev-server step the reader/watch loop owns).
     private func stepIsAutopilotExecutable(_ step: IrisGuideStep) -> Bool {
-        step.kind == .terminal
+        // `.check` is a tool probe (e.g. `git --version` / `node --version`) that
+        // carries a real command. Running it in Iris's own login shell — which
+        // has the reader's full PATH, unlike the app's own environment — both
+        // shows output instead of a blank centered terminal AND passes where the
+        // watch loop's ToolVersionService can't see a node/nvm/homebrew install.
+        // A genuinely missing tool exits non-zero and hands back the normal way.
+        (step.kind == .terminal || step.kind == .check)
             && (step.command?.isEmpty == false)
             && step.watch?.sensitive != true
             && !GuideAutopilotCommandShape.holdsTheShellOpen(step.command ?? "")

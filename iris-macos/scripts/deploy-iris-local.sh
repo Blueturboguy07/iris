@@ -29,6 +29,7 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="${PROJECT_DIR}/.build-local"
 APP_SRC="${BUILD_DIR}/Build/Products/Release/Iris.app"
 APP_DEST="/Applications/Iris.app"
+LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 cd "${PROJECT_DIR}"
 
@@ -61,6 +62,21 @@ ditto "${APP_SRC}" "${APP_DEST}"
 echo "🔎 Verifying the signature (a stable identity = TCC grants stick)…"
 codesign --verify --deep --strict --verbose=1 "${APP_DEST}"
 codesign -dvv "${APP_DEST}" 2>&1 | grep -E "Authority=Developer ID|TeamIdentifier" || true
+
+# The build leaves a copy in .build-local that ALSO carries bundle id
+# com.publikhq.iris and ALSO claims the iris:// URL scheme. If it stays
+# registered, LaunchServices has two claimants for one scheme and can resolve
+# iris:// (the "Open in Iris" handoff) to the wrong — or a since-deleted — copy.
+# That is exactly how dozens of phantom handlers accreted before. So: drop the
+# build copy's registration and force the /Applications copy to be the one and
+# only iris:// handler on every deploy.
+echo "🧹 Making /Applications/Iris.app the sole iris:// handler…"
+if [ -x "${LSREG}" ]; then
+  "${LSREG}" -u "${APP_SRC}" 2>/dev/null || true
+  "${LSREG}" -f "${APP_DEST}" 2>/dev/null || true
+  CLAIMANTS="$("${LSREG}" -dump 2>/dev/null | grep -c 'claimed schemes:.*iris:' || true)"
+  echo "   iris:// claimants now registered: ${CLAIMANTS} (want 1)"
+fi
 
 echo "🚀 Launching Iris from /Applications…"
 open "${APP_DEST}"

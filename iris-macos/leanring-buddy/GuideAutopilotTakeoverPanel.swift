@@ -22,6 +22,7 @@
 //
 
 import AppKit
+import Combine
 import SwiftUI
 
 /// The one bit of state the morph reads: which face the stage is showing. The

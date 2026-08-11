@@ -1016,6 +1016,16 @@ final class GuideSessionController: ObservableObject {
             && !GuideAutopilotCommandShape.holdsTheShellOpen(step.command ?? "")
     }
 
+    /// A `.terminal` step that carries no command — a vestigial "open your
+    /// Terminal", "you're now in the folder" instruction from the manual guide.
+    /// There is nothing for Iris to run and nothing for the watch loop to
+    /// confirm, and Iris is itself the terminal, so in autopilot it is a no-op
+    /// that must be advanced past rather than parked on (parking it strands the
+    /// whole install on a blank terminal — the cue `open-shell` step 0 wedge).
+    private func stepIsAVestigialTerminalStepInAutopilot(_ step: IrisGuideStep) -> Bool {
+        step.kind == .terminal && (step.command?.isEmpty ?? true)
+    }
+
     private func driveAutopilotFromTheCurrentStep(
         runner: GuideAutopilotRunner,
         branch: IrisGuideBranch
@@ -1051,12 +1061,17 @@ final class GuideSessionController: ObservableObject {
                 // watch loop notices completion and advances, which re-enters
                 // this loop through `advanceToTheNextStep`.
                 autoOpenIfTheStepPointsSomewhere(step)
-                if stepIsFinishedOnceIrisHasOpenedIt(step) {
+                if stepIsFinishedOnceIrisHasOpenedIt(step)
+                    || stepIsAVestigialTerminalStepInAutopilot(step) {
                     // Nothing for the watch loop to confirm and nothing only the
-                    // reader can do: Iris opening it *is* the step. Making the
-                    // reader tap "Continue" here is exactly the friction they
-                    // called out ("it's making me click to run the next step").
-                    // Advance it ourselves after a beat that reads as work.
+                    // reader can do: either Iris opening it *is* the step, or it
+                    // is a commandless "open your Terminal / you're in the folder"
+                    // instruction that is a no-op now that Iris *is* the terminal.
+                    // Making the reader tap "Continue" here is exactly the friction
+                    // they called out ("it's making me click to run the next step")
+                    // — and with the takeover's corner card hidden there is no
+                    // "Continue" to tap, so parking here strands the whole install
+                    // on a blank terminal. Advance it ourselves after a beat.
                     await holdBetweenAutoAdvancedSteps()
                     guard autopilotIsRunning else { return }
                     advanceFromWithinAutopilot()

@@ -18,6 +18,11 @@
 import AppKit
 import Combine
 import Foundation
+import os
+
+/// Temporary diagnostic tracing for the autopilot drive loop. Query with
+/// `log show --last 5m --predicate 'subsystem == "com.publikhq.iris" && category == "autopilot"'`.
+private let irisAutopilotTrace = Logger(subsystem: "com.publikhq.iris", category: "autopilot")
 
 /// What the panel is showing right now. The failure case carries an already
 /// human-readable sentence rather than an error value, because every failure
@@ -1020,11 +1025,15 @@ final class GuideSessionController: ObservableObject {
         autopilotIsDriving = true
         defer { autopilotIsDriving = false }
 
+        irisAutopilotTrace.notice("drive: entered, sessionStarted=\(self.runnerSessionHasStarted, privacy: .public)")
         if !runnerSessionHasStarted {
+            irisAutopilotTrace.notice("drive: awaiting startSession…")
             guard await runner.startSession() else {
+                irisAutopilotTrace.notice("drive: startSession FAILED → stopAutopilot")
                 stopAutopilot()
                 return
             }
+            irisAutopilotTrace.notice("drive: startSession OK")
             runnerSessionHasStarted = true
         }
 
@@ -1036,6 +1045,7 @@ final class GuideSessionController: ObservableObject {
             // the hand-back flag.
             autopilotHandedTheCurrentStepToTheReader = false
             let step = branch.steps[currentStepIndex]
+            irisAutopilotTrace.notice("drive: step[\(self.currentStepIndex, privacy: .public)] id=\(step.id, privacy: .public) kind=\(String(describing: step.kind), privacy: .public) exec=\(self.stepIsAutopilotExecutable(step), privacy: .public)")
 
             guard stepIsAutopilotExecutable(step) else {
                 // A manual step: Iris opens what it can and then yields. The
@@ -1059,6 +1069,7 @@ final class GuideSessionController: ObservableObject {
                 // terminal aside, so the reader can see and reach it rather than
                 // stare at a blank centered terminal. The watch loop notices they
                 // did it and advances, which resumes the install for the rest.
+                irisAutopilotTrace.notice("drive: step \(step.id, privacy: .public) → MANUAL branch, waiting at gate (return)")
                 handTheCurrentStepBackToTheReader()
                 onAutopilotWaitingForReaderAtGate?()
                 return
@@ -1068,9 +1079,11 @@ final class GuideSessionController: ObservableObject {
             // terminal back to center for the work Iris is about to do. A no-op
             // when it is already centered.
             onAutopilotResumedFromGate?()
+            irisAutopilotTrace.notice("drive: executing \(step.id, privacy: .public)…")
             let result = await runner.executeStepCommand(
                 step: step, stepIndex: currentStepIndex, totalSteps: branch.steps.count
             )
+            irisAutopilotTrace.notice("drive: \(step.id, privacy: .public) result=\(String(describing: result), privacy: .public)")
             numberOfCommandsAutopilotHasExecuted += 1
             switch result {
             case .succeeded:

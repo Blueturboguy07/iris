@@ -36,6 +36,11 @@
 //
 
 import Foundation
+import os
+
+/// Temporary diagnostic tracing for the autopilot shell. Query with
+/// `log show --last 5m --predicate 'subsystem == "com.publikhq.iris" && category == "autopilot"'`.
+private let irisShellTrace = Logger(subsystem: "com.publikhq.iris", category: "autopilot")
 
 /// How one command ended.
 enum GuideAutopilotCommandOutcome: Equatable, Sendable {
@@ -278,8 +283,12 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             // 60s deadline/rebuild stays as a further backstop for a truly dead
             // shell, but it must never be the reader's first experience.
             queue.asyncAfter(deadline: .now() + 4) { [weak self] in
-                guard let self, self.markerToken == readyToken,
-                      let readyCompletion = self.finishRunning else { return }
+                guard let self else { return }
+                guard self.markerToken == readyToken, let readyCompletion = self.finishRunning else {
+                    irisShellTrace.notice("shell: fail-open SKIPPED (ready already resolved: markerToken match=\(self.markerToken == readyToken, privacy: .public), finishRunning set=\(self.finishRunning != nil, privacy: .public))")
+                    return
+                }
+                irisShellTrace.notice("shell: FAIL-OPEN fired — ready marker missed, proceeding anyway")
                 self.displayIsSuppressedUntilShellIsReady = false
                 self.finishRunning = nil
                 self.markerToken = nil
@@ -319,6 +328,7 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
                 + "cd \(Self.shellQuoted(startingDirectory))\n"
                 + "printf '\\n__IRIS_END_\(token)__ %d\\t%s\\t%s\\n' \"$?\" \"$PWD\" \"$PATH\"\n"
             )
+            irisShellTrace.notice("shell: preamble written, token=\(token, privacy: .public)")
         }
 
         // MARK: Running (on queue)
@@ -328,17 +338,21 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             deadline: TimeInterval,
             _ completion: @escaping @Sendable (GuideAutopilotCommandOutcome) -> Void
         ) {
+            irisShellTrace.notice("shell: runCommand called, len=\(command.text.count, privacy: .public), busy=\(self.finishRunning != nil, privacy: .public), exited=\(self.shellHasExited, privacy: .public)")
             guard let terminal, !shellHasExited else {
+                irisShellTrace.notice("shell: runCommand → sessionFailed (no terminal / exited)")
                 completion(.sessionFailed)
                 return
             }
             guard finishRunning == nil else {
+                irisShellTrace.notice("shell: runCommand → sessionFailed (finishRunning still set — prior run never completed)")
                 completion(.sessionFailed)
                 return
             }
             if GuideAutopilotCommandShape.looksSyntacticallyIncomplete(command.text) {
                 // An unterminated construct would swallow the end marker and
                 // wedge every later command; refuse to send it at all.
+                irisShellTrace.notice("shell: runCommand → refused (looks syntactically incomplete)")
                 completion(.failed(exitStatus: 2, workingDirectory: workingDirectory))
                 return
             }
@@ -351,6 +365,7 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             markerScanText = ""
             lastOutputAt = Date()
             finishRunning = completion
+            irisShellTrace.notice("shell: runCommand WRITING command, token=\(token, privacy: .public)")
 
             // ZLE is off by now, so plain \n line terminators are read
             // correctly by the shell, including the command's own internal
@@ -446,6 +461,7 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             commandGeneration += 1
             let fields = markerLine.split(separator: "\t", maxSplits: 2)
             let exitStatus = fields.first.flatMap { Int32($0) } ?? -1
+            irisShellTrace.notice("shell: MARKER seen, fields=\(fields.count, privacy: .public), exit=\(exitStatus, privacy: .public), wasSuppressed=\(self.displayIsSuppressedUntilShellIsReady, privacy: .public)")
             if fields.count > 1 {
                 workingDirectory = String(fields[1])
             }

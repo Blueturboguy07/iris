@@ -266,6 +266,27 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             // the intuitive thing — is precisely what lets ZLE grab each
             // character and wedge the injection.
             sendPreamble()
+
+            // Fail-open backstop. The ready marker rides the preamble, which is
+            // written while a `-l -i` shell's ZLE can still mangle it; on some
+            // shell setups that marker is missed entirely, and then the ready
+            // completion never fires — `startSession` hangs and the terminal
+            // stays blank forever with no recourse. If the marker has not landed
+            // a few seconds after spawn, the shell has long since sourced its
+            // dotfiles and settled, so proceed anyway: the first real command
+            // (sent after this, cleanly) runs and its own marker gates it. The
+            // 60s deadline/rebuild stays as a further backstop for a truly dead
+            // shell, but it must never be the reader's first experience.
+            queue.asyncAfter(deadline: .now() + 4) { [weak self] in
+                guard let self, self.markerToken == readyToken,
+                      let readyCompletion = self.finishRunning else { return }
+                self.displayIsSuppressedUntilShellIsReady = false
+                self.finishRunning = nil
+                self.markerToken = nil
+                self.buffer.removeAll()
+                self.alreadyDeliveredLineCount = 0
+                readyCompletion(.succeeded(workingDirectory: self.workingDirectory))
+            }
         }
 
         /// Sent only once the shell's own prompt has settled — never into a
@@ -429,10 +450,18 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
                 workingDirectory = String(fields[1])
             }
             if fields.count > 2 {
-                // Only the ready marker carries a third field (PATH). Its
-                // arrival means the preamble is done echoing: drop any of its
-                // bytes still buffered and let real output show from here on.
+                // Only the ready marker carries a third field (PATH), used for
+                // tool-version lookups.
                 searchPath = String(fields[2])
+            }
+            if displayIsSuppressedUntilShellIsReady {
+                // The FIRST completed marker is the preamble's "ready" marker:
+                // the shell is up and the setup noise is done echoing. Clear
+                // suppression here rather than only when a clean third (PATH)
+                // field parses — on an unusual `-i` shell the marker can arrive
+                // with the PATH field split or empty (Swift's `split` omits a
+                // trailing empty field), and gating the clear on it stranded the
+                // terminal permanently blank while every command ran unseen.
                 displayIsSuppressedUntilShellIsReady = false
                 buffer.removeAll()
                 alreadyDeliveredLineCount = 0

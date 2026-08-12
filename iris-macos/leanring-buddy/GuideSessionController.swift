@@ -930,6 +930,29 @@ final class GuideSessionController: ObservableObject {
     func approveThePendingRiskyCommand() { autopilotRunner?.approvePendingCommand() }
     func skipThePendingRiskyCommand() { autopilotRunner?.skipPendingCommand() }
 
+    /// The terminal's red close button — the escape hatch. While Iris is
+    /// mid-step (a command in the shell, a pending confirm tap, or the fix
+    /// ladder), it stops that step: the command is interrupted and the step
+    /// lands on the "Your turn" row, so the install continues on the reader's
+    /// terms. When nothing is in flight — Iris is already waiting on the
+    /// reader — the red button means what it means on every Mac window:
+    /// close. Autopilot ends, the takeover folds away, and the guide stays
+    /// open where they left it.
+    func abortOrCloseAutopilotFromTheEscapeHatch() {
+        guard autopilotIsRunning, let runner = autopilotRunner else { return }
+        if autopilotIsDriving {
+            // The runner surfaces the step immediately (the "Your turn" row)
+            // and the drive loop does the hand-back itself as the aborted
+            // step unwinds — doing it eagerly here would un-muzzle the watch
+            // loop while the drive loop is still inside the step.
+            irisTrace("escape hatch: aborting the in-flight step")
+            Task { await runner.abortTheCurrentStepBecauseTheReaderAskedToStop() }
+        } else {
+            irisTrace("escape hatch: nothing in flight → stopping autopilot")
+            stopAutopilot()
+        }
+    }
+
     /// The reader tapped "Try again" on a step Iris surfaced. Re-run the step's
     /// command through the runner from the top; if it works this time, Iris
     /// carries on with the rest of the install on its own.

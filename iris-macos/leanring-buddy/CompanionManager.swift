@@ -391,7 +391,8 @@ final class CompanionManager: ObservableObject {
             onSkipRiskyCommand: { [weak self] in self?.guideSessionController.skipThePendingRiskyCommand() },
             onRetrySurfacedStep: { [weak self] in self?.guideSessionController.retryTheSurfacedStep() },
             onContinuePastSurfacedStep: { [weak self] in self?.guideSessionController.skipTheSurfacedStepAndContinue() },
-            onReaderFinishedManualStep: { [weak self] in self?.guideSessionController.readerFinishedTheGatedStep() }
+            onReaderFinishedManualStep: { [weak self] in self?.guideSessionController.readerFinishedTheGatedStep() },
+            onEscapeHatch: { [weak self] in self?.guideSessionController.abortOrCloseAutopilotFromTheEscapeHatch() }
         )
     }
 

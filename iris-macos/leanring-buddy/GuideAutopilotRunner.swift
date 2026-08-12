@@ -116,6 +116,20 @@ final class GuideAutopilotRunner: ObservableObject {
 
     private var confirmationContinuation: CheckedContinuation<Bool, Never>?
 
+    // MARK: - The escape hatch
+
+    /// Set when the reader clicks the terminal's red close button while Iris is
+    /// mid-step. The running command is interrupted immediately; this flag is
+    /// what stops the *rest* of the step — the fix ladder must not propose or
+    /// run anything further once the reader has said stop, and the step must
+    /// land on the "Your turn" row rather than silently evaporating.
+    private var theReaderAskedToStopThisStep = false
+
+    /// What the surfaced state says when the stop came from the reader rather
+    /// than from a failure Iris could not repair.
+    private static let stoppedByTheReaderDiagnosis =
+        "You stopped this step. Take it from here, or continue past it."
+
     init(
         shellSession: GuideAutopilotShellSessionDriving,
         longRunningSession: GuideAutopilotShellSessionDriving,
@@ -162,6 +176,10 @@ final class GuideAutopilotRunner: ObservableObject {
         totalSteps: Int
     ) async -> GuideAutopilotStepResult {
         guard let command = step.command else { return .succeeded }
+
+        // A fresh step is fresh consent: a stop pressed on the previous step
+        // must not silently kill this one.
+        theReaderAskedToStopThisStep = false
 
         // A sensitive step is never typed into a shell — an API key would
         // land in scrollback and shell history. Hand it back.
@@ -252,6 +270,15 @@ final class GuideAutopilotRunner: ObservableObject {
             transcript.append(.exitStatus(code: exitStatus, duration: duration))
             return .failed(exitStatus: exitStatus, workingDirectory: workingDirectory)
         case .cancelled:
+            if theReaderAskedToStopThisStep {
+                // The reader hit the red button. Show the standing offer
+                // (Try again / Continue past it) so the install is stopped,
+                // not stranded — this is the escape hatch's landing place.
+                state = .surfacedToReader(
+                    diagnosis: Self.stoppedByTheReaderDiagnosis,
+                    failingCommand: command.text
+                )
+            }
             return .skippedByReader
         case .timedOut:
             transcript.append(.explanation(
@@ -282,6 +309,12 @@ final class GuideAutopilotRunner: ObservableObject {
         var priorAttempts: [String] = []
 
         for rung in 0..<Self.maximumFixAttemptsPerStep {
+            // The reader pressed stop (the red button) somewhere in the
+            // previous rung — a cancelled fix command, a declined tap. The
+            // ladder is over; hand the step to them.
+            if theReaderAskedToStopThisStep {
+                return surface(diagnosis: Self.stoppedByTheReaderDiagnosis, command: command)
+            }
             guard fixAttemptsUsedThisGuide < Self.maximumFixAttemptsPerGuide,
                   modelCallsUsedThisGuide < Self.maximumModelCallsPerGuide else {
                 return surfaceBudgetExhausted(command: command)
@@ -304,6 +337,13 @@ final class GuideAutopilotRunner: ObservableObject {
                 // or surface, never fabricate.
                 priorAttempts.append("a repair attempt could not reach the model")
                 continue
+            }
+
+            // The stop can also land while the model call above was in flight
+            // — there is nothing to interrupt then, so it is caught here,
+            // before the proposed fix gets to run anything.
+            if theReaderAskedToStopThisStep {
+                return surface(diagnosis: Self.stoppedByTheReaderDiagnosis, command: command)
             }
 
             guard let fix else {
@@ -337,7 +377,10 @@ final class GuideAutopilotRunner: ObservableObject {
                     priorAttempts.append(
                         "\(fixCommand) → \(fixSucceeded ? "ran" : "also failed")"
                     )
-                    guard fix.retryTheOriginalCommandAfterwards else { continue }
+                    // A stop pressed while the fix ran cancels the retry too —
+                    // the rung-top check turns it into the surfaced hand-back.
+                    guard fix.retryTheOriginalCommandAfterwards,
+                          !theReaderAskedToStopThisStep else { continue }
                     transcript.append(.commandFromTheGuide(text: command))
                     let retry = await runGuideCommand(command)
                     switch retry {
@@ -492,6 +535,31 @@ final class GuideAutopilotRunner: ObservableObject {
     func skipPendingCommand() {
         confirmationContinuation?.resume(returning: false)
         confirmationContinuation = nil
+    }
+
+    /// The escape hatch: the reader clicked the terminal's red close button
+    /// while Iris was mid-step. Everything interruptible is interrupted right
+    /// now — a pending "Run it?" resolves as a skip, a command in the shell
+    /// gets Ctrl-C (escalating to a session rebuild if it will not die) — and
+    /// `theReaderAskedToStopThisStep` stops the fix ladder from proposing or
+    /// running anything more. The step lands on the surfaced "Your turn" row,
+    /// so the install continues on the reader's terms rather than dying.
+    func abortTheCurrentStepBecauseTheReaderAskedToStop() async {
+        theReaderAskedToStopThisStep = true
+        transcript.append(.explanation(
+            text: "Stopping this step — you take it from here."
+        ))
+        // Surface right away, whatever Iris was doing — waiting on a confirm
+        // tap, running a command, or off in a model call the cancel below
+        // cannot reach. The reader pressed stop; the row that lets them
+        // continue must not wait on the machinery to notice.
+        state = .surfacedToReader(
+            diagnosis: Self.stoppedByTheReaderDiagnosis,
+            failingCommand: ""
+        )
+        confirmationContinuation?.resume(returning: false)
+        confirmationContinuation = nil
+        await shellSession.cancelTheRunningCommand()
     }
 
     // MARK: - Failure context assembly

@@ -95,7 +95,8 @@ final class GuideAutopilotTakeoverController {
         onSkipRiskyCommand: @escaping () -> Void,
         onRetrySurfacedStep: @escaping () -> Void,
         onContinuePastSurfacedStep: @escaping () -> Void,
-        onReaderFinishedManualStep: @escaping () -> Void
+        onReaderFinishedManualStep: @escaping () -> Void,
+        onEscapeHatch: @escaping () -> Void
     ) {
         // Already up (e.g. a resumed run) — never stack a second takeover.
         guard terminalPanel == nil, !isDismissing else { return }
@@ -131,7 +132,8 @@ final class GuideAutopilotTakeoverController {
             onSkipRiskyCommand: onSkipRiskyCommand,
             onRetrySurfacedStep: onRetrySurfacedStep,
             onContinuePastSurfacedStep: onContinuePastSurfacedStep,
-            onReaderFinishedManualStep: onReaderFinishedManualStep
+            onReaderFinishedManualStep: onReaderFinishedManualStep,
+            onEscapeHatch: onEscapeHatch
         )
         let hostingView = NSHostingView(rootView: takeoverView)
         hostingView.autoresizingMask = [.width, .height]
@@ -400,6 +402,8 @@ private struct GuideAutopilotTakeoverView: View {
     /// The reader tapped "I did it — continue" on a manual step Iris parked on
     /// (a permission grant, a sign-in) that has no watch signal to auto-advance.
     let onReaderFinishedManualStep: () -> Void
+    /// The red traffic light — stop the step, or close the run when idle.
+    let onEscapeHatch: () -> Void
 
     var body: some View {
         ZStack {
@@ -413,7 +417,10 @@ private struct GuideAutopilotTakeoverView: View {
                 onApproveRiskyCommand: onApproveRiskyCommand,
                 onSkipRiskyCommand: onSkipRiskyCommand,
                 onRetrySurfacedStep: onRetrySurfacedStep,
-                onContinuePastSurfacedStep: onContinuePastSurfacedStep
+                onContinuePastSurfacedStep: onContinuePastSurfacedStep,
+                onEscapeHatch: onEscapeHatch,
+                // The takeover window is a fixed frame; the transcript fills it.
+                fixedTranscriptHeight: nil
             )
             .shadow(color: Color.black.opacity(0.55), radius: 40, x: 0, y: 18)
             .opacity(model.showsTerminalFace ? 1 : 0)

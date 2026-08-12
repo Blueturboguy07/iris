@@ -31,6 +31,23 @@ struct GuideAutopilotTerminalView: View {
     let onRetrySurfacedStep: () -> Void
     /// The reader tapped "Continue" to move past a step Iris surfaced.
     let onContinuePastSurfacedStep: () -> Void
+    /// The red traffic light — the escape hatch. Mid-step it stops the running
+    /// command and hands the step to the reader; with nothing in flight it
+    /// closes the run. Added after an install wedged on a hung `pnpm install`
+    /// with no way out short of shutting the Mac down.
+    let onEscapeHatch: () -> Void
+    /// nil = the transcript area fills whatever its container gives it (the
+    /// takeover window, a fixed frame). A value = that fixed height, for the
+    /// under-the-card pane whose container grows to fit and would otherwise
+    /// let a long install run past every clip with nothing scrollable.
+    let fixedTranscriptHeight: CGFloat?
+
+    @State private var escapeHatchIsHovered = false
+
+    /// The auto-follow target: an invisible row after the last transcript
+    /// entry, so "scroll to the end" survives rows changing height as the
+    /// typewriter reveals them.
+    private static let transcriptBottomAnchor = "transcript-bottom-anchor"
 
     // The Terminal.app palette, so this reads as the app the reader already
     // trusts rather than as one more piece of Iris's chrome.
@@ -44,7 +61,11 @@ struct GuideAutopilotTerminalView: View {
     var body: some View {
         VStack(spacing: 0) {
             titleBar
-            transcriptBody
+            if let fixedTranscriptHeight {
+                transcriptBody.frame(height: fixedTranscriptHeight)
+            } else {
+                transcriptBody
+            }
         }
         .background(Self.windowBackground)
         .clipShape(RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous))
@@ -59,7 +80,7 @@ struct GuideAutopilotTerminalView: View {
     private var titleBar: some View {
         ZStack {
             HStack(spacing: 7) {
-                Circle().fill(Self.trafficRed).frame(width: 11, height: 11)
+                escapeHatchTrafficLight
                 Circle().fill(Self.trafficYellow).frame(width: 11, height: 11)
                 Circle().fill(Self.trafficGreen).frame(width: 11, height: 11)
                 Spacer(minLength: 0)
@@ -74,31 +95,77 @@ struct GuideAutopilotTerminalView: View {
         .background(Self.titleBarBackground)
     }
 
+    /// The red traffic light is a real button, and shows the × on hover the
+    /// way the genuine article does. The yellow and green stay decoration.
+    private var escapeHatchTrafficLight: some View {
+        Button(action: onEscapeHatch) {
+            ZStack {
+                Circle().fill(Self.trafficRed).frame(width: 11, height: 11)
+                Image(systemName: "xmark")
+                    .font(.system(size: 6, weight: .heavy))
+                    .foregroundColor(Color.black.opacity(0.55))
+                    .opacity(escapeHatchIsHovered ? 1 : 0)
+            }
+            // A hit target a little bigger than the 11pt dot, so stopping a
+            // runaway install is not a precision exercise.
+            .frame(width: 15, height: 15)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in escapeHatchIsHovered = hovering }
+        .pointerCursor()
+        .nativeTooltip("Stop — Iris hands this step to you")
+    }
+
+    /// The transcript scrolls and follows its own tail. It used to be a plain
+    /// stack in a fixed window, which is how an install longer than the window
+    /// "froze": the shell kept working, the transcript kept growing, and every
+    /// new row — exit lines, fixes, the Your-turn buttons — rendered below the
+    /// clip where nothing could reach it.
     private var transcriptBody: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            // Index-based identity: the transcript is append-only, so a row's
-            // position is a stable id. (Value identity is not — two identical
-            // output lines would collide — and an unstable id would restart the
-            // typewriter on every redraw.)
-            ForEach(runner.transcript.indices, id: \.self) { index in
-                row(for: runner.transcript[index])
-            }
+        ScrollViewReader { scrollProxy in
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 4) {
+                    // Index-based identity: the transcript is append-only, so a row's
+                    // position is a stable id. (Value identity is not — two identical
+                    // output lines would collide — and an unstable id would restart the
+                    // typewriter on every redraw.)
+                    ForEach(runner.transcript.indices, id: \.self) { index in
+                        row(for: runner.transcript[index])
+                    }
 
-            // A live prompt with a blinking cursor while the shell is busy — the
-            // signal that Iris is doing something right now, through the pacing
-            // hold as well as the real work.
-            if runner.isExecutingACommand {
-                runningCursorLine
-            }
+                    // A live prompt with a blinking cursor while the shell is busy — the
+                    // signal that Iris is doing something right now, through the pacing
+                    // hold as well as the real work.
+                    if runner.isExecutingACommand {
+                        runningCursorLine
+                    }
 
-            // Iris could not finish this step; the reader takes it from here.
-            if case .surfacedToReader = runner.state {
-                surfaceRow
+                    // Iris could not finish this step; the reader takes it from here.
+                    if case .surfacedToReader = runner.state {
+                        surfaceRow
+                    }
+
+                    Color.clear
+                        .frame(height: 1)
+                        .id(Self.transcriptBottomAnchor)
+                }
+                .padding(.horizontal, 11)
+                .padding(.vertical, 9)
+                .frame(maxWidth: .infinity, minHeight: 58, alignment: .topLeading)
+            }
+            .onChange(of: runner.transcript.count) {
+                scrollProxy.scrollTo(Self.transcriptBottomAnchor, anchor: .bottom)
+            }
+            .onChange(of: runner.state) {
+                // The surface and confirm rows appear on state alone, and they
+                // carry the buttons — they must never land out of view.
+                scrollProxy.scrollTo(Self.transcriptBottomAnchor, anchor: .bottom)
+            }
+            .onChange(of: runner.isExecutingACommand) {
+                scrollProxy.scrollTo(Self.transcriptBottomAnchor, anchor: .bottom)
             }
         }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 9)
-        .frame(maxWidth: .infinity, minHeight: 58, alignment: .topLeading)
     }
 
     @ViewBuilder

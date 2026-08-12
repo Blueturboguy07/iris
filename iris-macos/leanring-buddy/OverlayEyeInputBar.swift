@@ -513,7 +513,12 @@ struct OverlayEyeInputBarView: View {
                             onApproveRiskyCommand: { guideSessionController.approveThePendingRiskyCommand() },
                             onSkipRiskyCommand: { guideSessionController.skipThePendingRiskyCommand() },
                             onRetrySurfacedStep: { guideSessionController.retryTheSurfacedStep() },
-                            onContinuePastSurfacedStep: { guideSessionController.skipTheSurfacedStepAndContinue() }
+                            onContinuePastSurfacedStep: { guideSessionController.skipTheSurfacedStepAndContinue() },
+                            onEscapeHatch: { guideSessionController.abortOrCloseAutopilotFromTheEscapeHatch() },
+                            // This pane's container (the bar) grows to fit its
+                            // content, so the transcript needs its own bound to
+                            // scroll inside instead of growing past the clamp.
+                            fixedTranscriptHeight: 260
                         )
                     }
                 }

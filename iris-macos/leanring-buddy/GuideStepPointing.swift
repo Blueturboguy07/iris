@@ -41,6 +41,11 @@ struct GuideStepPointingOutcome: Equatable {
     /// Global AppKit coordinates, when there is somewhere to go.
     let screenLocation: CGPoint?
     let displayFrame: CGRect?
+    /// True when this resolution spent a model call, so the caller can count
+    /// it against the step's small model budget. Pointing refreshes on every
+    /// app activation now, and an uncounted model call per refresh is how one
+    /// step burned through the funded tier's day.
+    let theModelWasAsked: Bool
 }
 
 @MainActor
@@ -69,17 +74,26 @@ enum GuideStepPointingCoordinator {
     }
 
     /// Resolve a decision into a place, or explain why there is not one.
+    ///
+    /// `mayAskTheModel` is the caller's per-step budget: the free rungs (a
+    /// window frame, the accessibility tree) always run, but the paid model
+    /// rung is skipped once the step has spent its allowance.
     static func resolve(
         decision: GuidePointingDecision,
         stepTitle: String,
         stepBody: String,
+        mayAskTheModel: Bool,
         using locator: any GuideTargetLocating
     ) async -> GuideStepPointingOutcome {
         guard case .pointAt(let target) = decision else {
-            return GuideStepPointingOutcome(decision: decision, screenLocation: nil, displayFrame: nil)
+            return GuideStepPointingOutcome(
+                decision: decision, screenLocation: nil, displayFrame: nil,
+                theModelWasAsked: false
+            )
         }
 
         var found: CGRect?
+        var theModelWasAsked = false
         if target.isWindow, let bundleIdentifier = target.inApp {
             found = locator.locateWindow(ofApp: bundleIdentifier)
         }
@@ -89,7 +103,8 @@ enum GuideStepPointingCoordinator {
         // Only an inferred target is allowed to reach the model: an authored
         // descriptor the tree could not find is a stale guide, and guessing
         // over the top of it hides that rather than fixing it.
-        if found == nil, target.provenance == .inferred {
+        if found == nil, target.provenance == .inferred, mayAskTheModel {
+            theModelWasAsked = true
             found = await locator.locateByAskingTheModel(stepTitle: stepTitle, stepBody: stepBody)
         }
 
@@ -97,7 +112,8 @@ enum GuideStepPointingCoordinator {
             return GuideStepPointingOutcome(
                 decision: .doNotPoint(.couldNotFindIt(descriptor: target.descriptor)),
                 screenLocation: nil,
-                displayFrame: nil
+                displayFrame: nil,
+                theModelWasAsked: theModelWasAsked
             )
         }
 
@@ -105,7 +121,8 @@ enum GuideStepPointingCoordinator {
         return GuideStepPointingOutcome(
             decision: decision,
             screenLocation: point,
-            displayFrame: displayFrame(containing: point)
+            displayFrame: displayFrame(containing: point),
+            theModelWasAsked: theModelWasAsked
         )
     }
 }

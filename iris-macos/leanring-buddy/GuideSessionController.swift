@@ -339,14 +339,32 @@ final class GuideSessionController: ObservableObject {
             return
         }
 
+        // Pointing now refreshes on every app activation, so the paid model
+        // rung has to be budgeted per step or a single parked step can spend
+        // a screenshot-sized model call on every window switch. The free
+        // rungs (window frame, accessibility tree) re-run every time.
+        let stepIdentityForBudget = "\(currentStepIndex):\(step.id)"
+        if stepIdentityForBudget != stepIdentityTheModelBudgetBelongsTo {
+            stepIdentityTheModelBudgetBelongsTo = stepIdentityForBudget
+            modelPointingAsksSpentOnThisStep = 0
+        }
+        let mayAskTheModel = modelPointingAsksSpentOnThisStep < Self.maximumModelPointingAsksPerStep
+
         pointingTask = Task { [weak self] in
             let outcome = await GuideStepPointingCoordinator.resolve(
                 decision: decision,
                 stepTitle: step.title,
                 stepBody: step.body,
+                mayAskTheModel: mayAskTheModel,
                 using: targetLocator
             )
-            guard !Task.isCancelled, let self else { return }
+            guard let self else { return }
+            // Count the spend even if this task lost a race to a newer
+            // refresh — the call happened either way.
+            if outcome.theModelWasAsked {
+                self.modelPointingAsksSpentOnThisStep += 1
+            }
+            guard !Task.isCancelled else { return }
             self.pointingDecisionForTheOpenStep = outcome.decision
             if let location = outcome.screenLocation, let displayFrame = outcome.displayFrame {
                 self.sendTheEyeTo?(location, displayFrame, step.title)
@@ -355,6 +373,14 @@ final class GuideSessionController: ObservableObject {
             }
         }
     }
+
+    /// The paid pointing rung's allowance for one step. Two, not one, because
+    /// the first ask often races the screen it needs (the right app is still
+    /// coming forward); a second try once it has landed is usually the one
+    /// that hits. Free rungs are unlimited.
+    private static let maximumModelPointingAsksPerStep = 2
+    private var modelPointingAsksSpentOnThisStep = 0
+    private var stepIdentityTheModelBudgetBelongsTo: String?
 
     /// Whether the inferred path is allowed to run. Screen Recording only; the
     /// accessibility tree needs no capture, which is why an authored descriptor
@@ -1220,13 +1246,19 @@ final class GuideSessionController: ObservableObject {
     }
 
     /// A step the reader has nothing left to do on once Iris has opened it: an
-    /// `open` step with no completion check to satisfy. Deliberately narrow —
-    /// `web`, `permission`, and `paste` steps ask the reader to sign in, grant
-    /// something, or move a secret, so auto-advancing them would skip the very
-    /// thing the step exists for; and a step that declares a `watch` expectation
-    /// still lets the watch loop confirm it the moment the reader finishes.
+    /// `open` step with a link Iris actually opened and no completion check to
+    /// satisfy. Deliberately narrow — `web`, `permission`, and `paste` steps
+    /// ask the reader to sign in, grant something, or move a secret, so
+    /// auto-advancing them would skip the very thing the step exists for; and
+    /// a step that declares a `watch` expectation still lets the watch loop
+    /// confirm it the moment the reader finishes.
+    ///
+    /// The `href` requirement is what keeps this honest: an `open` step with
+    /// no link is a reader action dressed as an open ("Press Run" in Xcode),
+    /// and Iris opened nothing — auto-advancing it abandoned the reader right
+    /// before the action the step existed for.
     private func stepIsFinishedOnceIrisHasOpenedIt(_ step: IrisGuideStep) -> Bool {
-        step.kind == .open && (step.watch?.expect.isEmpty ?? true)
+        step.kind == .open && step.href != nil && (step.watch?.expect.isEmpty ?? true)
     }
 
     /// A short, deliberate pause before auto-advancing a step Iris handled on its
@@ -1242,9 +1274,30 @@ final class GuideSessionController: ObservableObject {
         guard !readerHasTakenThisStepsAction else { return }
         if (step.kind == .open || step.kind == .web), let href = step.href {
             openLinkInBrowser(href)
+        } else if let pointedApp = step.point?.inApp,
+                  pointedApp != "com.apple.systempreferences" {
+            // The step is about a control inside a specific app — Xcode's
+            // signing pane, its Run button, cue.app in a Finder window. Bring
+            // that app forward: the eye's frontmost gate can then resolve the
+            // authored point, and the reader lands where the step wants them.
+            // Before this, a `permission` step like "Sign the app with your
+            // Apple ID" fell into the System Settings branch below and opened
+            // Privacy & Security over the top of Xcode — the wrong app,
+            // guaranteed, and the reason the eye never pointed there.
+            activateTheAppTheStepPointsInto(bundleIdentifier: pointedApp)
         } else if step.kind == .permission {
             openSystemSettingsForPermissionStep(step)
         }
+    }
+
+    /// Brings the app an authored point targets to the front, if it is
+    /// running. Never launches it cold: a guide step that needs an app opened
+    /// has an earlier step that opens it, and launching Xcode because a step
+    /// mentions it would be a surprise, not a guide.
+    private func activateTheAppTheStepPointsInto(bundleIdentifier: String) {
+        guard let application = NSRunningApplication
+            .runningApplications(withBundleIdentifier: bundleIdentifier).first else { return }
+        application.activate()
     }
 
     /// Take the reader to the System Settings pane a permission step is about.
@@ -1264,7 +1317,13 @@ final class GuideSessionController: ObservableObject {
         } else if text.contains("camera") {
             anchor = "Privacy_Camera"
         } else {
-            anchor = "Privacy"
+            // No recognizable TCC pane in the step's words. This used to fall
+            // back to opening Privacy & Security anyway, which misdirected
+            // every `permission` step that is not about a Mac permission at
+            // all — an API-key step, "Trust yourself on the iPhone", "Plug in
+            // your iPhone". Opening the wrong pane over the reader's work is
+            // worse than opening nothing.
+            return
         }
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") else { return }
         NSWorkspace.shared.open(url)

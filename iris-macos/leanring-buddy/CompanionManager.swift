@@ -325,6 +325,18 @@ final class CompanionManager: ObservableObject {
 
         guideSessionController.sendTheEyeTo = { [weak self] location, displayFrame, label in
             guard let self else { return }
+            // The overlay can be hidden here — cursor toggled off, or faded
+            // out after a transient interaction. A guide point into a hidden
+            // overlay is a silent no-op: the step says "look where I'm
+            // pointing" and nothing is pointing. Bring the eye up the same
+            // transient way a chat message does.
+            self.transientHideTask?.cancel()
+            self.transientHideTask = nil
+            if !self.isOverlayVisible {
+                self.overlayWindowManager.hasShownOverlayBefore = true
+                self.overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+                self.isOverlayVisible = true
+            }
             self.assistantState = .pointing
             self.detectedElementBubbleText = label
             self.detectedElementScreenLocation = location
@@ -339,6 +351,9 @@ final class CompanionManager: ObservableObject {
             // Only stand down if the eye was pointing *for the guide*. A model
             // answer mid-flight has its own reason to be pointing.
             if self.assistantState == .pointing { self.assistantState = .idle }
+            // If the eye only came up transiently for this point, let it fade
+            // back out rather than staying for good.
+            self.scheduleTransientHideIfNeeded()
         }
 
         guideSessionController.onAutopilotDidStart = { [weak self] in

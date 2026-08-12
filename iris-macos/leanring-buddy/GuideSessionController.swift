@@ -274,6 +274,37 @@ final class GuideSessionController: ObservableObject {
 
     private var pointingTask: Task<Void, Never>?
 
+    /// Re-aims the eye whenever the reader lands in a different app. The
+    /// pointing decision is frontmost-gated — no arrow over a window nobody
+    /// can see — and without this the gate was a one-shot race: a permission
+    /// step `open`s System Settings and pointing refreshes before Settings
+    /// has finished activating, so the decision landed on
+    /// `targetAppIsNotInFront` and no retry ever came. The eye stayed home at
+    /// exactly the steps that most need showing. Watching activations makes
+    /// the refusal self-healing: the moment the right app comes forward, the
+    /// eye flies — and it re-points when the reader wanders off and back.
+    private var appActivationObserver: NSObjectProtocol?
+
+    /// Called from init. Split out so init stays readable.
+    private func startRefreshingPointingOnAppActivation() {
+        appActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.loadState == .guideIsOpen else { return }
+                self.refreshPointingForTheOpenStep()
+            }
+        }
+    }
+
+    deinit {
+        if let appActivationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(appActivationObserver)
+        }
+    }
+
     /// Work out where to point for the step now on screen, and send the eye.
     ///
     /// Called whenever the step changes — including when the watch loop
@@ -399,6 +430,8 @@ final class GuideSessionController: ObservableObject {
             }
             self.advanceToTheNextStep()
         }
+
+        startRefreshingPointingOnAppActivation()
     }
 
     // MARK: - Opening a guide

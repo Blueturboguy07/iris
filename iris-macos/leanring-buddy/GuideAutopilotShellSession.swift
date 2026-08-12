@@ -691,7 +691,12 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
         # then turn off the interactive line editor so Iris can drive the
         # shell without ZLE echoing, redrawing, or bracketed-paste mangling.
         IRIS_USER_HOME="${IRIS_USER_HOME:-\(realHome)}"
-        for _iris_rc in .zprofile .zshrc; do
+        # .zshenv is in this list because ZDOTDIR redirects where zsh looks for
+        # it, so the user's real one never runs on its own — and .zshenv is
+        # exactly where rustup writes `. "$HOME/.cargo/env"`. Without it the
+        # autopilot shell had no cargo, and every `tauri build` a guide asked
+        # for failed in a shell while working in the reader's own Terminal.
+        for _iris_rc in .zshenv .zprofile .zshrc; do
           [ -r "$IRIS_USER_HOME/$_iris_rc" ] && source "$IRIS_USER_HOME/$_iris_rc"
         done
         unset _iris_rc

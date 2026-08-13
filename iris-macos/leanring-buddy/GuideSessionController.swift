@@ -1915,9 +1915,68 @@ final class GuideSessionController: ObservableObject {
             branchKey: branch.branchKey
         )
         let lastStepIndex = max(0, branch.steps.count - 1)
-        currentStepIndex = min(max(0, savedProgress.stepIndex), lastStepIndex)
-        readerHasFinishedTheGuide = savedProgress.isCompleted
+        var resumeIndex = min(max(0, savedProgress.stepIndex), lastStepIndex)
+
+        // Progress storage remembers where the reader WAS; it knows nothing
+        // about what the machine still HAS. A wiped machine (or a deleted
+        // clone, or a trashed app) resumes mid-guide into work that no
+        // longer exists — the reader lands on "paste your key" for an app
+        // that was never rebuilt here. So a resume is validated against
+        // reality, and an unmet prerequisite restarts from step one: the
+        // guides' steps are idempotent by design (guarded clones, cached
+        // installs), so a restart on a machine that actually has everything
+        // blitzes back in seconds, while a restart on a wiped machine is
+        // exactly what the reader needs.
+        var realityCheckFailed = false
+        if resumeIndex > 0,
+           !savedProgressStillMatchesThisMachine(branch: branch, resumeIndex: resumeIndex) {
+            irisTrace("progress: saved step \(resumeIndex) for \(guide.appSlug) fails the reality check — restarting from step one")
+            resumeIndex = 0
+            realityCheckFailed = true
+        }
+
+        currentStepIndex = resumeIndex
+        readerHasFinishedTheGuide = savedProgress.isCompleted && !realityCheckFailed
     }
+
+    /// The reality check behind a resume: every `git clone` step BEFORE the
+    /// resume point must have its repository present, and a branch that
+    /// installs a desktop app must actually have it installed before the
+    /// reader may resume past the step that installs it.
+    private func savedProgressStillMatchesThisMachine(
+        branch: IrisGuideBranch, resumeIndex: Int
+    ) -> Bool {
+        for (index, step) in branch.steps.enumerated() where index < resumeIndex {
+            if let repositoryPath = WatchLoop.repositoryPathAGitCloneWouldCreate(inCommand: step.command) {
+                var isDirectory: ObjCBool = false
+                let gitPath = (repositoryPath as NSString).appendingPathComponent(".git")
+                if !FileManager.default.fileExists(atPath: gitPath, isDirectory: &isDirectory) {
+                    return false
+                }
+            }
+        }
+        // Past the app-installing step with no app on disk = a stale resume,
+        // whatever the storage says. The bundle check is injected by
+        // CompanionManager (inventory-backed); absent injection, trust the
+        // clone check alone rather than failing every resume.
+        if let bundleId = branch.installedDesktopAppBundleId,
+           let installedDesktopAppCheck,
+           resumeIndex > (indexOfTheStepThatInstallsTheApp(inBranch: branch) ?? Int.max),
+           !installedDesktopAppCheck(bundleId) {
+            return false
+        }
+        return true
+    }
+
+    /// The step whose completion puts the app on disk: the last terminal
+    /// step with a command, which for every desktop guide is the install/
+    /// open step at the tail of the build sequence.
+    private func indexOfTheStepThatInstallsTheApp(inBranch branch: IrisGuideBranch) -> Int? {
+        branch.steps.lastIndex { $0.kind == .terminal && !($0.command ?? "").isEmpty }
+    }
+
+    /// Injected by CompanionManager: is this bundle actually installed?
+    var installedDesktopAppCheck: ((String) -> Bool)?
 
     /// Starts a progress write without blocking whoever asked for it. Pressing
     /// Next has to feel instant, and storage is the one thing in that path that

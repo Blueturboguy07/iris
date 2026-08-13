@@ -398,6 +398,11 @@ final class CompanionManager: ObservableObject {
             self.scheduleTransientHideIfNeeded()
         }
 
+        // The resume reality-check's app-on-disk answer, inventory-backed.
+        guideSessionController.installedDesktopAppCheck = { [weak self] bundleId in
+            self?.appInventoryService.installedApplicationURL(forBundleIdentifier: bundleId) != nil
+        }
+
         guideSessionController.onAutopilotDidStart = { [weak self] in
             self?.presentAutopilotTakeover()
         }

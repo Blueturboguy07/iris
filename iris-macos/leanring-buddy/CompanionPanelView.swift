@@ -57,6 +57,11 @@ struct CompanionPanelView: View {
             Divider()
                 .background(DS.Colors.line)
 
+            // Maintain mode's one question, when it has one. Above settings
+            // because a crash the user just lived through outranks a model
+            // picker — and rate-limited hard enough that this card is rare.
+            MaintainAskCard(coordinator: companionManager.maintainIncidentCoordinator)
+
             // The guide used to take over this panel. It does not any more: a
             // step card in a menu bar dropdown makes the reader look away from
             // the thing they are being told to do, which is the one thing the

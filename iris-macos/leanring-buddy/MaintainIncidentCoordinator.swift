@@ -1,0 +1,272 @@
+//
+//  MaintainIncidentCoordinator.swift
+//  leanring-buddy
+//
+//  The ladder that turns raw signals into (at most) one careful question.
+//
+//      L1  crash artifact arrives            (CrashArtifactWatcher, free)
+//      L3  hang confirmed                    (HangProbe, near-free)
+//      L5  signature + recipe cache lookup   (one HTTP GET, zero tokens)
+//      L6  ask the user                      (rate-limited, mutable, honest)
+//      —   on "yes": file to the pool        (the D2 filing)
+//
+//  The ask is the accuracy layer, not a courtesy. Vision-based bug detection
+//  tops out near 50–72% precision in the published record; a detector that
+//  acts on its own suspicion becomes a nag nobody trusts. So: crashes and
+//  confirmed hangs may ask; nothing else in v1. One unsolicited ask per app
+//  per 24 hours. "No, that was me" suppresses that signature for this
+//  machine. "Don't ask about this app" is permanent and surfaced in
+//  settings. No model call happens before a "yes" — there is no model call
+//  in this file at all; Tier B/C fix work is downstream and BYO-gated.
+//
+
+import AppKit
+import Combine
+import Foundation
+
+/// A question maintain mode wants to ask, rendered by the panel.
+struct MaintainAsk: Identifiable, Equatable {
+    let id: String
+    let appSlug: String
+    let appName: String
+    /// One line of evidence, in the user's terms — never a stack trace.
+    let evidenceSentence: String
+    /// The signature behind the ask, carried through to filing on "yes".
+    let signatureId: String
+}
+
+/// What the user answered. Every branch is recorded; a "no" is a labeled
+/// negative worth exactly as much as a "yes".
+enum MaintainAskAnswer {
+    case somethingIsBroken
+    case thatWasMe
+    case neverAskAboutThisApp
+}
+
+@MainActor
+final class MaintainIncidentCoordinator: ObservableObject {
+
+    // MARK: - Published state (the panel reads these)
+
+    @Published private(set) var pendingAsk: MaintainAsk?
+    /// The recipes matched for the pending ask's signature, already ranked
+    /// by the server. Empty until the lookup lands; shown after a "yes".
+    @Published private(set) var recipesForPendingAsk: [PooledFixRecipe] = []
+
+    // MARK: - Budget latch (mirrors GuideAutopilotRunner's shape)
+
+    static let maximumIncidentsPerAppPerDay = 3
+    static let minimumSecondsBetweenAsksPerApp: TimeInterval = 24 * 3600
+
+    // MARK: - Collaborators
+
+    private let poolClient: MaintainPoolClient
+    private let provenanceStore: InstallProvenanceStore
+    private let userDefaults: UserDefaults
+
+    /// Answers "is this process one of ours" — CompanionManager adapts
+    /// AppInventoryService into this.
+    var catalogAppMatcher: ((_ processName: String, _ bundleIdentifier: String?) -> (slug: String, name: String, stack: BreakAppStack)?)?
+
+    // MARK: - Persistence keys
+
+    private static let mutedAppsKey = "iris:maintain:muted-apps"
+    private static let suppressedSignaturesKey = "iris:maintain:suppressed-signatures"
+    private static let askTimestampsKey = "iris:maintain:last-ask-by-app"
+    private static let incidentCountsKey = "iris:maintain:incident-counts"
+
+    private var mutedAppSlugs: Set<String>
+    private var suppressedSignatureIds: Set<String>
+    private var lastAskDateByAppSlug: [String: Date]
+    /// "day-string|slug" → count, pruned to today on load.
+    private var incidentCountsByDayAndApp: [String: Int]
+
+    /// The signature objects behind pending/answered asks, kept out of the
+    /// published struct so the UI layer never holds frame data.
+    private var signaturesByAskId: [String: BreakSignature] = [:]
+    private var appVersionsByAskId: [String: String] = [:]
+
+    init(
+        poolClient: MaintainPoolClient,
+        provenanceStore: InstallProvenanceStore,
+        userDefaults: UserDefaults = .standard
+    ) {
+        self.poolClient = poolClient
+        self.provenanceStore = provenanceStore
+        self.userDefaults = userDefaults
+        mutedAppSlugs = Set(userDefaults.stringArray(forKey: Self.mutedAppsKey) ?? [])
+        suppressedSignatureIds = Set(userDefaults.stringArray(forKey: Self.suppressedSignaturesKey) ?? [])
+        lastAskDateByAppSlug = (userDefaults.dictionary(forKey: Self.askTimestampsKey) as? [String: Date]) ?? [:]
+        incidentCountsByDayAndApp = (userDefaults.dictionary(forKey: Self.incidentCountsKey) as? [String: Int]) ?? [:]
+    }
+
+    // MARK: - Signal entry points
+
+    /// A crash artifact for one of ours. The only path that may ask
+    /// immediately — a crash is unambiguous evidence something ended wrong.
+    func handleCrashArtifact(_ artifact: DetectedCrashArtifact) {
+        let signature = BreakSignatureService.nativeCrashSignature(
+            fromParsedReport: artifact.report,
+            appSlug: artifact.catalogAppSlug,
+            appStack: artifact.catalogAppStack
+        )
+        considerAsking(
+            signature: signature,
+            appSlug: artifact.catalogAppSlug,
+            appName: artifact.report.appName,
+            appVersion: artifact.report.appVersion,
+            evidenceSentence: "\(artifact.report.appName) quit unexpectedly a moment ago."
+        )
+    }
+
+    /// A hang that recovered or ended — asked about after the fact, never
+    /// mid-hang. The probe's gating already required N consecutive failures.
+    func handleConfirmedHang(appSlug: String, appName: String, appStack: BreakAppStack, unresponsiveSeconds: Int) {
+        let signature = BreakSignatureService.hangSignature(
+            appSlug: appSlug, appStack: appStack, blockedTopFrame: nil
+        )
+        considerAsking(
+            signature: signature,
+            appSlug: appSlug,
+            appName: appName,
+            appVersion: nil,
+            evidenceSentence: "\(appName) stopped responding for about \(unresponsiveSeconds) seconds."
+        )
+    }
+
+    // MARK: - The ask gate
+
+    private func considerAsking(
+        signature: BreakSignature,
+        appSlug: String,
+        appName: String,
+        appVersion: String?,
+        evidenceSentence: String
+    ) {
+        guard pendingAsk == nil else {
+            irisTrace("maintain: ask suppressed (one already pending)")
+            return
+        }
+        guard !mutedAppSlugs.contains(appSlug) else {
+            irisTrace("maintain: ask suppressed (\(appSlug) muted)")
+            return
+        }
+        guard !suppressedSignatureIds.contains(signature.signatureId) else {
+            irisTrace("maintain: ask suppressed (signature marked benign by the user)")
+            return
+        }
+        if let lastAsk = lastAskDateByAppSlug[appSlug],
+           Date().timeIntervalSince(lastAsk) < Self.minimumSecondsBetweenAsksPerApp {
+            irisTrace("maintain: ask suppressed (\(appSlug) asked within 24h)")
+            return
+        }
+        let dayKey = Self.dayKey(forAppSlug: appSlug)
+        if incidentCountsByDayAndApp[dayKey, default: 0] >= Self.maximumIncidentsPerAppPerDay {
+            irisTrace("maintain: ask suppressed (\(appSlug) at daily incident cap)")
+            return
+        }
+
+        incidentCountsByDayAndApp[dayKey, default: 0] += 1
+        lastAskDateByAppSlug[appSlug] = Date()
+        persistCounters()
+
+        let ask = MaintainAsk(
+            id: UUID().uuidString,
+            appSlug: appSlug,
+            appName: appName,
+            evidenceSentence: evidenceSentence,
+            signatureId: signature.signatureId
+        )
+        signaturesByAskId[ask.id] = signature
+        if let appVersion { appVersionsByAskId[ask.id] = appVersion }
+        pendingAsk = ask
+        irisTrace("maintain: ASK raised for \(appSlug) (\(signature.kind.rawValue) \(signature.signatureId))")
+
+        // The cache lookup starts now (zero tokens, one GET) so a "yes" can
+        // show a known fix immediately instead of a spinner.
+        Task { [weak self] in
+            guard let self else { return }
+            let answer = await self.poolClient.lookupRecipes(for: signature)
+            guard self.pendingAsk?.id == ask.id else { return }
+            self.recipesForPendingAsk = answer.recipes
+            if let matched = answer.matchedBy {
+                irisTrace("maintain: cache HIT via \(matched) — \(answer.recipes.count) recipe(s)")
+            }
+        }
+    }
+
+    // MARK: - Answers
+
+    func answerPendingAsk(_ answer: MaintainAskAnswer) {
+        guard let ask = pendingAsk else { return }
+        let signature = signaturesByAskId[ask.id]
+        pendingAsk = nil
+        signaturesByAskId[ask.id] = nil
+        let appVersion = appVersionsByAskId.removeValue(forKey: ask.id)
+
+        switch answer {
+        case .somethingIsBroken:
+            irisTrace("maintain: user CONFIRMED break for \(ask.appSlug)")
+            guard let signature else { return }
+            // The D2 filing: consent was collected at signup; a confirmed
+            // break files without a second prompt. Publishing a FIX under
+            // the user's name stays a separate explicit ask downstream.
+            Task { [weak self] in
+                guard let self else { return }
+                let breakId = await self.poolClient.fileConfirmedBreak(ConfirmedBreakFiling(
+                    signature: signature,
+                    title: ask.evidenceSentence,
+                    appVersion: appVersion
+                ))
+                irisTrace("maintain: filed break → \(breakId ?? "FAILED, staged for retry")")
+            }
+
+        case .thatWasMe:
+            // A labeled negative: this signature is benign on this machine
+            // (an app that exits non-zero on quit, a kill the user meant).
+            if let signature {
+                suppressedSignatureIds.insert(signature.signatureId)
+                persistCounters()
+            }
+            irisTrace("maintain: user said benign — signature suppressed")
+
+        case .neverAskAboutThisApp:
+            mutedAppSlugs.insert(ask.appSlug)
+            persistCounters()
+            irisTrace("maintain: \(ask.appSlug) permanently muted by the user")
+        }
+        recipesForPendingAsk = []
+    }
+
+    /// Settings surface: the mute list, readable and reversible.
+    var mutedApps: [String] { mutedAppSlugs.sorted() }
+
+    func unmuteApp(_ appSlug: String) {
+        mutedAppSlugs.remove(appSlug)
+        persistCounters()
+    }
+
+    // MARK: - Persistence
+
+    private func persistCounters() {
+        userDefaults.set(Array(mutedAppSlugs), forKey: Self.mutedAppsKey)
+        userDefaults.set(Array(suppressedSignatureIds), forKey: Self.suppressedSignaturesKey)
+        userDefaults.set(lastAskDateByAppSlug, forKey: Self.askTimestampsKey)
+        // Prune to today so the dictionary cannot grow a key per app per day
+        // forever.
+        let today = Self.todayString()
+        incidentCountsByDayAndApp = incidentCountsByDayAndApp.filter { $0.key.hasPrefix(today) }
+        userDefaults.set(incidentCountsByDayAndApp, forKey: Self.incidentCountsKey)
+    }
+
+    private static func todayString() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        return formatter.string(from: Date())
+    }
+
+    private static func dayKey(forAppSlug appSlug: String) -> String {
+        "\(todayString())|\(appSlug)"
+    }
+}

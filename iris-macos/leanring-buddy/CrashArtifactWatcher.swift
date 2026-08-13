@@ -207,7 +207,14 @@ final class CrashArtifactWatcher {
         guard let match = appMatcher.catalogApp(
             forProcessName: report.appName,
             bundleIdentifier: report.bundleIdentifier
-        ) else { return }
+        ) else {
+            // Traced, because "the matcher said no" and "the watcher never
+            // saw the file" are indistinguishable from silence — and the
+            // first live test lost an hour to exactly that. Name only; the
+            // report itself stays unread past the header.
+            irisTrace("maintain: crash artifact ignored (\(report.appName) is not an installed catalog app)")
+            return
+        }
 
         let correlated = recentTerminationsByProcessName[report.appName].map {
             Date().timeIntervalSince($0) < Self.terminationCorrelationWindow

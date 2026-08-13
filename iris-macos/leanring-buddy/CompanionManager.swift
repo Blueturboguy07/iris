@@ -127,6 +127,37 @@ final class CompanionManager: ObservableObject {
     /// origin when a developer's Info.plist says so.
     private let publikBaseURL = AssistantTransport.configuredPublikBaseURL()
 
+    // MARK: - Maintain mode
+
+    /// Where an app came from decides whether Iris may ever patch it.
+    let installProvenanceStore = InstallProvenanceStore()
+    /// The detect → ask → file ladder. The panel renders its pendingAsk.
+    /// Lazy so it shares the one provenance store above.
+    lazy var maintainIncidentCoordinator = MaintainIncidentCoordinator(
+        poolClient: MaintainPoolClient(),
+        provenanceStore: installProvenanceStore
+    )
+    private var crashArtifactWatcher: CrashArtifactWatcher?
+    private let hangProbe = HangProbe()
+    private var hangProbeTimer: Timer?
+    /// The hang the probe is currently tracking, so the ask fires once on
+    /// recovery/termination rather than every tick.
+    private var confirmedHangByPid: [pid_t: (slug: String, name: String, stack: BreakAppStack, seconds: Int)] = [:]
+
+    /// Slug → stack for signature normalization. Server-provided later; a
+    /// table here first because /api/iris/apps does not carry it yet.
+    static let catalogAppStacksBySlug: [String: BreakAppStack] = [
+        "cue": .electron,
+        "whimprflow": .tauri,
+        "hickeyfield": .tauri,
+        "plantgpt": .electron,
+        "publikclip": .tauri,
+        "nutcracker": .nextjs,
+        "openascii": .nextjs,
+        "noscroll": .other,
+        "lunara": .other,
+    ]
+
     private lazy var claudeAPI: ClaudeAPI = {
         // The transport is resolved per request rather than captured once,
         // because the user can sign in, sign out, or paste a key between two
@@ -256,6 +287,8 @@ final class CompanionManager: ObservableObject {
             await claudeAPI.warmUpTLSConnectionIfNeeded()
         }
 
+        startMaintainMode()
+
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
         // were revoked (e.g. signing change), don't show the cursor — the
@@ -382,6 +415,10 @@ final class CompanionManager: ObservableObject {
 
         guideSessionController.onGuideCompleted = { [weak self] guide, branch in
             guard let self else { return }
+            // The one moment provenance is knowable for certain: a guide
+            // that cloned a repo produced a source build Iris may later
+            // patch; a guide that only downloaded a signed app did not.
+            self.recordInstallProvenance(guide: guide, branch: branch)
             // Let the finished terminal ("✓ done") sit a beat, morph back into
             // the eye, and only then open the app — so it comes forward as the
             // eye returns, not on top of the terminal. If no takeover is up (a
@@ -431,6 +468,10 @@ final class CompanionManager: ObservableObject {
     func stop() {
         globalSummonHotkeyMonitor.stop()
         appLinkService.stopWatchingForRunningApps()
+        crashArtifactWatcher?.stop()
+        crashArtifactWatcher = nil
+        hangProbeTimer?.invalidate()
+        hangProbeTimer = nil
         guideSessionController.sendTheEyeTo = nil
         guideSessionController.stopPointingTheEye = nil
         guideSessionController.onGuideCompleted = nil
@@ -446,6 +487,107 @@ final class CompanionManager: ObservableObject {
         accountStateChangeCancellable?.cancel()
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
+    }
+
+    /// Maintain mode's always-on layer: the crash watch (event-driven, free)
+    /// and the hang probe (2s ticks, only while one of ours is frontmost).
+    /// Nothing here captures a pixel or spends a token; everything funnels
+    /// into the incident coordinator, whose only output is a question.
+    private func startMaintainMode() {
+        // The matcher is only as good as the inventory behind it, and until
+        // now the inventory scanned when the panel opened. Maintain mode
+        // watches whether anyone opens the panel or not, so it brings its
+        // own refresh and its own frontmost tracking.
+        Task { await appInventoryService.refreshInventory() }
+        appInventoryService.startWatchingTheFrontmostApp()
+
+        maintainIncidentCoordinator.catalogAppMatcher = { [weak self] processName, bundleIdentifier in
+            self?.matchCatalogApp(processName: processName, bundleIdentifier: bundleIdentifier)
+        }
+
+        let watcher = CrashArtifactWatcher(appMatcher: self)
+        watcher.onCrashArtifactDetected = { [weak self] artifact in
+            self?.maintainIncidentCoordinator.handleCrashArtifact(artifact)
+        }
+        watcher.start()
+        crashArtifactWatcher = watcher
+
+        // The hang probe ticks only while a catalog app is frontmost. The
+        // ask fires when a confirmed hang ENDS (recovery or exit) — never
+        // mid-hang, when a modal would land on someone already struggling.
+        hangProbe.onVerdict = { [weak self] pid, verdict in
+            guard let self else { return }
+            switch verdict {
+            case .confirmedHang(let seconds):
+                if let known = self.confirmedHangByPid[pid] {
+                    self.confirmedHangByPid[pid] = (known.slug, known.name, known.stack, seconds)
+                } else if let frontmost = NSWorkspace.shared.frontmostApplication,
+                          frontmost.processIdentifier == pid,
+                          let match = self.matchCatalogApp(
+                              processName: frontmost.localizedName ?? "",
+                              bundleIdentifier: frontmost.bundleIdentifier
+                          ) {
+                    self.confirmedHangByPid[pid] = (match.slug, match.name, match.stack, seconds)
+                }
+            case .responsive, .processDisappeared:
+                if let hang = self.confirmedHangByPid.removeValue(forKey: pid) {
+                    self.maintainIncidentCoordinator.handleConfirmedHang(
+                        appSlug: hang.slug, appName: hang.name,
+                        appStack: hang.stack, unresponsiveSeconds: hang.seconds
+                    )
+                }
+            case .unresponsiveButBelowThreshold:
+                break
+            }
+        }
+        let timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self,
+                      self.appInventoryService.frontmostCatalogAppSlug != nil,
+                      let frontmost = NSWorkspace.shared.frontmostApplication,
+                      frontmost.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
+                self.hangProbe.probe(processIdentifier: frontmost.processIdentifier)
+            }
+        }
+        timer.tolerance = 1
+        hangProbeTimer = timer
+    }
+
+    /// Writes the D4 gate's ground truth at guide completion. The clone path
+    /// comes from the repo name — guides clone into `~/<repo>` by
+    /// convention, and the git check in `localPatchingIsPermitted` catches a
+    /// wrong guess by failing closed.
+    private func recordInstallProvenance(guide: IrisGuide, branch: IrisGuideBranch) {
+        guard guide.outputType == .desktopApp else { return }
+        let clonedARepo = (branch.setupSteps + branch.steps)
+            .contains { $0.command?.contains("git clone") == true }
+        if clonedARepo {
+            let repoName = (guide.sourceRepo as NSString).lastPathComponent
+            let clonePath = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(repoName).path
+            installProvenanceStore.recordGuideSourceClone(
+                appSlug: guide.appSlug,
+                clonePath: clonePath,
+                pinnedCommit: guide.sourceCommit
+            )
+        } else {
+            installProvenanceStore.recordSignedDownload(appSlug: guide.appSlug)
+        }
+    }
+
+    private func matchCatalogApp(
+        processName: String, bundleIdentifier: String?
+    ) -> (slug: String, name: String, stack: BreakAppStack)? {
+        let entry = appInventoryService.installedEntriesForDisplay.first { entry in
+            if let bundleIdentifier, let macBundleId = entry.macBundleId,
+               bundleIdentifier == macBundleId {
+                return true
+            }
+            return entry.name.caseInsensitiveCompare(processName) == .orderedSame
+        }
+        guard let entry else { return nil }
+        let stack = Self.catalogAppStacksBySlug[entry.slug] ?? .other
+        return (entry.slug, entry.name, stack)
     }
 
     func refreshAllPermissions() {
@@ -1154,5 +1296,18 @@ final class CompanionManager: ObservableObject {
                 print("⚠️ Onboarding demo skipped: \(error)")
             }
         }
+    }
+}
+
+// MARK: - Maintain mode's crash matcher
+
+extension CompanionManager: CrashArtifactAppMatching {
+    /// The watcher's protocol shape drops the display name — signatures and
+    /// dedupe need only identity.
+    func catalogApp(
+        forProcessName processName: String, bundleIdentifier: String?
+    ) -> (slug: String, stack: BreakAppStack)? {
+        matchCatalogApp(processName: processName, bundleIdentifier: bundleIdentifier)
+            .map { ($0.slug, $0.stack) }
     }
 }

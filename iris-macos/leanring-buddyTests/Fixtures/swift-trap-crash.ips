@@ -1,0 +1,120 @@
+{"app_name":"iris-fixture-crasher","timestamp":"2026-08-13 02:46:25.00 -0700","app_version":"","slice_uuid":"6738a590-8cb6-38f3-837d-71f991695f57","build_version":"","platform":1,"share_with_app_devs":0,"is_first_party":1,"bug_type":"309","os_version":"macOS 15.7.3 (24G419)","roots_installed":0,"incident_id":"3B87BBDA-920D-4358-BB1B-FF1D0EB16612","name":"iris-fixture-crasher"}
+{
+  "uptime" : 41000,
+  "procRole" : "Unspecified",
+  "version" : 2,
+  "userID" : 501,
+  "deployVersion" : 210,
+  "modelCode" : "Mac16,8",
+  "coalitionID" : 911,
+  "osVersion" : {
+    "train" : "macOS 15.7.3",
+    "build" : "24G419",
+    "releaseType" : "User"
+  },
+  "captureTime" : "2026-08-13 02:46:24.8660 -0700",
+  "codeSigningMonitor" : 2,
+  "incident" : "3B87BBDA-920D-4358-BB1B-FF1D0EB16612",
+  "pid" : 90949,
+  "translated" : false,
+  "cpuType" : "ARM-64",
+  "roots_installed" : 0,
+  "bug_type" : "309",
+  "procLaunch" : "2026-08-13 02:46:24.6428 -0700",
+  "procStartAbsTime" : 999093326586,
+  "procExitAbsTime" : 999098658575,
+  "procName" : "iris-fixture-crasher",
+  "procPath" : "\/private\/tmp\/*\/iris-fixture-crasher",
+  "parentProc" : "zsh",
+  "parentPid" : 90939,
+  "coalitionName" : "com.apple.Terminal",
+  "crashReporterKey" : "00000000-0000-0000-0000-000000000000",
+  "appleIntelligenceStatus" : {"state":"available"},
+  "responsiblePid" : 753,
+  "responsibleProc" : "Terminal",
+  "codeSigningID" : "iris-fixture-crasher",
+  "codeSigningTeamID" : "",
+  "codeSigningFlags" : 570556929,
+  "codeSigningValidationCategory" : 10,
+  "codeSigningTrustLevel" : 4294967295,
+  "codeSigningAuxiliaryInfo" : 0,
+  "instructionByteStream" : {"beforePC":"qgUAtekDAKroAwGq4AMCquEDA6riAwSq4wMFquQDCarlAwiq1eMQlA==","atPC":"IAAg1CgAgFLpl4FS6BMAuekHAPlIAIBS6AMAOcAnAJAAkByRwycAkA=="},
+  "bootSessionUUID" : "18476C5C-023F-459F-8DA4-48981FBD6B00",
+  "wakeTime" : 2130,
+  "sleepWakeUUID" : "A46A1D6D-8A60-4A84-9352-AE4847A2B39B",
+  "sip" : "enabled",
+  "exception" : {"codes":"0x0000000000000001, 0x000000019eb78c24","rawCodes":[1,6957796388],"type":"EXC_BREAKPOINT","signal":"SIGTRAP"},
+  "termination" : {"flags":0,"code":5,"namespace":"SIGNAL","indicator":"Trace\/BPT trap: 5","byProc":"exc handler","byPid":90949},
+  "os_fault" : {"process":"iris-fixture-crasher"},
+  "extMods" : {"caller":{"thread_create":0,"thread_set_state":0,"task_for_pid":0},"system":{"thread_create":0,"thread_set_state":0,"task_for_pid":0},"targeted":{"thread_create":0,"thread_set_state":0,"task_for_pid":0},"warnings":0},
+  "faultingThread" : 0,
+  "threads" : [{"triggered":true,"id":1139226,"threadState":{"x":[{"value":469762048},{"value":0},{"value":0},{"value":105553151154400},{"value":0},{"value":6124136752},{"value":101},{"value":0},{"value":512},{"value":2615789563},{"value":511},{"value":6336},{"value":2043},{"value":2045},{"value":2617886919},{"value":2615789563},{"value":2617245696},{"value":199},{"value":0},{"value":7},{"value":8515129760,"symbolLocation":0,"symbol":"_swiftEmptyArrayStorage"},{"value":7},{"value":8515129760,"symbolLocation":0,"symbol":"_swiftEmptyArrayStorage"},{"value":4294967295},{"value":8506638672,"symbolLocation":96,"symbol":"lsl::sPoolBytes"},{"value":6124138000},{"value":0},{"value":0},{"value":0}],"flavor":"ARM_THREAD_STATE64","lr":{"value":6957796388},"cpsr":{"value":1610612736},"fp":{"value":6124136928},"sp":{"value":6124136896},"esr":{"value":4060086273,"description":"(Breakpoint) brk 1"},"pc":{"value":6957796388,"matchesCrashFrame":1},"far":{"value":0}},"queue":"com.apple.main-thread","frames":[{"imageOffset":216100,"symbol":"closure #1 in closure #1 in closure #1 in _assertionFailure(_:_:file:line:flags:)","symbolLocation":240,"imageIndex":1},{"imageOffset":215788,"symbol":"closure #1 in closure #1 in _assertionFailure(_:_:file:line:flags:)","symbolLocation":340,"imageIndex":1},{"imageOffset":214164,"symbol":"_assertionFailure(_:_:file:line:flags:)","symbolLocation":188,"imageIndex":1},{"imageOffset":88320,"symbol":"Array._checkSubscript(_:wasNativeTypeChecked:)","symbolLocation":160,"imageIndex":1},{"imageOffset":90604,"symbol":"Array.subscript.getter","symbolLocation":88,"imageIndex":1},{"imageOffset":2092,"symbol":"deepThree()","symbolLocation":72,"imageIndex":0},{"imageOffset":2124,"symbol":"deepTwo()","symbolLocation":12,"imageIndex":0},{"imageOffset":2012,"symbol":"deepOne()","symbolLocation":12,"imageIndex":0},{"imageOffset":1988,"symbol":"main","symbolLocation":12,"imageIndex":0},{"imageOffset":27544,"symbol":"start","symbolLocation":6076,"imageIndex":2}]}],
+  "usedImages" : [
+  {
+    "source" : "P",
+    "arch" : "arm64",
+    "base" : 4342743040,
+    "size" : 16384,
+    "uuid" : "6738a590-8cb6-38f3-837d-71f991695f57",
+    "path" : "\/private\/tmp\/*\/iris-fixture-crasher",
+    "name" : "iris-fixture-crasher"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 6957580288,
+    "size" : 5697344,
+    "uuid" : "93a84760-9028-3a6f-aca6-087a0fdd9d9f",
+    "path" : "\/usr\/lib\/swift\/libswiftCore.dylib",
+    "name" : "libswiftCore.dylib"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 6660358144,
+    "size" : 636284,
+    "uuid" : "e4e5cd37-5339-3136-b2c5-0c80f0720c26",
+    "path" : "\/usr\/lib\/dyld",
+    "name" : "dyld"
+  },
+  {
+    "size" : 0,
+    "source" : "A",
+    "base" : 0,
+    "uuid" : "00000000-0000-0000-0000-000000000000"
+  }
+],
+  "sharedCache" : {
+  "base" : 6659522560,
+  "size" : 5039734784,
+  "uuid" : "87b95872-5e6e-3168-a703-5f00925e0ab2"
+},
+  "vmSummary" : "ReadOnly portion of Libraries: Total=845.6M resident=0K(0%) swapped_out_or_unallocated=845.6M(100%)\nWritable regions: Total=539.7M written=224K(0%) resident=224K(0%) swapped_out=0K(0%) unallocated=539.4M(100%)\n\n                                VIRTUAL   REGION \nREGION TYPE                        SIZE    COUNT (non-coalesced) \n===========                     =======  ======= \nActivity Tracing                   256K        1 \nKernel Alloc Once                   32K        1 \nMALLOC                           531.2M       14 \nMALLOC guard page                   96K        6 \nSTACK GUARD                       56.0M        1 \nStack                             8176K        1 \n__AUTH                             822K      161 \n__AUTH_CONST                      12.8M      295 \n__DATA                            3207K      274 \n__DATA_CONST                      10.7M      296 \n__DATA_DIRTY                       453K       88 \n__FONT_DATA                        2352        1 \n__LINKEDIT                       616.8M        2 \n__OBJC_RO                         61.4M        1 \n__OBJC_RW                         2397K        1 \n__TEXT                           228.8M      305 \n__TPRO_CONST                       128K        2 \npage table in kernel               224K        1 \nshared memory                       48K        2 \n===========                     =======  ======= \nTOTAL                              1.5G     1453 \n",
+  "legacyInfo" : {
+  "threadTriggered" : {
+    "queue" : "com.apple.main-thread"
+  }
+},
+  "logWritingSignature" : "9e7ce91ea1fed1f945d020daa9d10c57c8b08527",
+  "trialInfo" : {
+  "rollouts" : [
+    {
+      "rolloutId" : "64b21a7351cbb02ce3442e4e",
+      "factorPackIds" : {
+        "REMINDERS_GROCERY" : "6647f0f7b6a75d3dc32993e7"
+      },
+      "deploymentId" : 240000042
+    },
+    {
+      "rolloutId" : "6425c75e4327780c10cc4252",
+      "factorPackIds" : {
+        "SIRI_HOME_AUTOMATION_INTENT_SELECTION_CACHE" : "642600a457e7664b1698eb32"
+      },
+      "deploymentId" : 240000004
+    }
+  ],
+  "experiments" : [
+
+  ]
+}
+}

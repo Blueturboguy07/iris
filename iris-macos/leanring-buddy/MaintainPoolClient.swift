@@ -105,6 +105,25 @@ final class MaintainPoolClient {
         }
     }
 
+    /// Records a recipe outcome with this install's pseudonymous id — the
+    /// signal that promotes recipes across DISTINCT machines. Fire and
+    /// forget: an outcome that never lands costs the pool one data point,
+    /// not the user anything.
+    func fileRecipeOutcome(recipeId: String, succeeded: Bool, installId: UUID) async {
+        let url = publikBaseURL
+            .appendingPathComponent("api/iris/recipes")
+            .appendingPathComponent(recipeId)
+            .appendingPathComponent("outcome")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "succeeded": succeeded,
+            "installId": installId.uuidString.lowercased(),
+        ] as [String: Any])
+        _ = try? await urlSession.data(for: request)
+    }
+
     /// Files a confirmed break. Returns the created break id, or nil when the
     /// intake refused or the network failed — the caller stages locally and
     /// retries on the next incident rather than looping here.

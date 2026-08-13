@@ -19,6 +19,61 @@ struct MaintainAskCard: View {
     @ObservedObject var coordinator: MaintainIncidentCoordinator
 
     var body: some View {
+        pendingAskCard
+        fixStatusCard
+    }
+
+    /// After a "yes": what the fix attempt is doing, did, or couldn't do —
+    /// plus the guidance steps when the known fix is instructions.
+    @ViewBuilder
+    private var fixStatusCard: some View {
+        if coordinator.pendingAsk == nil, let statusLine = coordinator.fixStatusLine {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(statusLine)
+                    .font(.system(size: 11.5))
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if !coordinator.fixGuidanceSteps.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(coordinator.fixGuidanceSteps.enumerated()), id: \.offset) { index, step in
+                            Text("\(index + 1). \(step)")
+                                .font(.system(size: 10.5))
+                                .foregroundColor(DS.Colors.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
+                HStack {
+                    Spacer(minLength: 0)
+                    Button("Done") { coordinator.clearFixStatus() }
+                        .irisTextButton()
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                    .fill(Color.white.opacity(0.05))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+                    )
+            )
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .onAppear {
+                NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+            }
+            .onDisappear {
+                NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var pendingAskCard: some View {
         if let ask = coordinator.pendingAsk {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {

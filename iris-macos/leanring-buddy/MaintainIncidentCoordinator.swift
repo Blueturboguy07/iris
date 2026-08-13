@@ -53,6 +53,15 @@ final class MaintainIncidentCoordinator: ObservableObject {
     /// by the server. Empty until the lookup lands; shown after a "yes".
     @Published private(set) var recipesForPendingAsk: [PooledFixRecipe] = []
 
+    /// After a "yes": what the fix attempt is doing / did, for the card.
+    /// One line, user-facing, honest ("Applying a known fix…", "Fixed and
+    /// rebuilt — restart WhimprFlow to pick it up", "The known fix didn't
+    /// apply to your version").
+    @Published private(set) var fixStatusLine: String?
+    /// Guidance-recipe steps to show after a "yes", when the known fix is
+    /// instructions rather than a patch.
+    @Published private(set) var fixGuidanceSteps: [String] = []
+
     // MARK: - Budget latch (mirrors GuideAutopilotRunner's shape)
 
     static let maximumIncidentsPerAppPerDay = 3
@@ -62,11 +71,14 @@ final class MaintainIncidentCoordinator: ObservableObject {
 
     private let poolClient: MaintainPoolClient
     private let provenanceStore: InstallProvenanceStore
+    private let replayEngine: RecipeReplayEngine
     private let userDefaults: UserDefaults
 
     /// Answers "is this process one of ours" — CompanionManager adapts
     /// AppInventoryService into this.
     var catalogAppMatcher: ((_ processName: String, _ bundleIdentifier: String?) -> (slug: String, name: String, stack: BreakAppStack)?)?
+    /// The installed version of a catalog app, for applicability ranges.
+    var installedVersionLookup: ((_ appSlug: String) -> String?)?
 
     // MARK: - Persistence keys
 
@@ -89,10 +101,12 @@ final class MaintainIncidentCoordinator: ObservableObject {
     init(
         poolClient: MaintainPoolClient,
         provenanceStore: InstallProvenanceStore,
+        replayEngine: RecipeReplayEngine,
         userDefaults: UserDefaults = .standard
     ) {
         self.poolClient = poolClient
         self.provenanceStore = provenanceStore
+        self.replayEngine = replayEngine
         self.userDefaults = userDefaults
         mutedAppSlugs = Set(userDefaults.stringArray(forKey: Self.mutedAppsKey) ?? [])
         suppressedSignatureIds = Set(userDefaults.stringArray(forKey: Self.suppressedSignaturesKey) ?? [])
@@ -208,6 +222,7 @@ final class MaintainIncidentCoordinator: ObservableObject {
         case .somethingIsBroken:
             irisTrace("maintain: user CONFIRMED break for \(ask.appSlug)")
             guard let signature else { return }
+            let bestRecipe = recipesForPendingAsk.first
             // The D2 filing: consent was collected at signup; a confirmed
             // break files without a second prompt. Publishing a FIX under
             // the user's name stays a separate explicit ask downstream.
@@ -219,6 +234,14 @@ final class MaintainIncidentCoordinator: ObservableObject {
                     appVersion: appVersion
                 ))
                 irisTrace("maintain: filed break → \(breakId ?? "FAILED, staged for retry")")
+            }
+            // Tier A: a pooled recipe exists — replay it, zero tokens. No
+            // recipe = the honest dead end on the funded tier ("filed; a
+            // fix from the pool will reach you when one exists").
+            if let bestRecipe {
+                runReplay(recipe: bestRecipe, ask: ask, signature: signature, appVersion: appVersion)
+            } else {
+                fixStatusLine = "Filed. No known fix yet — when one lands in the pool, Iris will offer it."
             }
 
         case .thatWasMe:
@@ -236,6 +259,46 @@ final class MaintainIncidentCoordinator: ObservableObject {
             irisTrace("maintain: \(ask.appSlug) permanently muted by the user")
         }
         recipesForPendingAsk = []
+    }
+
+    /// The Tier-A replay, narrated honestly to the card at each stage.
+    private func runReplay(
+        recipe: PooledFixRecipe, ask: MaintainAsk, signature: BreakSignature, appVersion: String?
+    ) {
+        fixStatusLine = "Applying a known fix…"
+        Task { [weak self] in
+            guard let self else { return }
+            let result = await self.replayEngine.replay(
+                recipe: recipe,
+                appSlug: ask.appSlug,
+                appStack: signature.appStack,
+                installedAppVersion: appVersion ?? self.installedVersionLookup?(ask.appSlug),
+                signatureId: signature.signatureId
+            )
+            switch result {
+            case .guidanceToShow(let steps):
+                self.fixStatusLine = "A known fix exists — here's what to do:"
+                self.fixGuidanceSteps = steps
+            case .patchAppliedAndVerified(let branchName):
+                self.fixStatusLine =
+                    "Fixed and rebuilt (branch \(branchName)). Relaunch \(ask.appName) to pick it up."
+            case .patchRevertedAfterFailedVerification(let blockedStage):
+                self.fixStatusLine =
+                    "The known fix applied but failed verification (\(blockedStage)) — reverted, nothing changed."
+            case .patchDidNotApply:
+                self.fixStatusLine = "The known fix doesn't fit your version. Filed, so a refreshed fix can pool."
+            case .patchingNotPermittedForThisInstall:
+                self.fixStatusLine = "A code fix exists, but this install isn't a source build Iris may patch."
+            case .outsideApplicabilityRange:
+                self.fixStatusLine = "A fix exists for other versions, but not yours yet. Filed."
+            }
+        }
+    }
+
+    /// The card's dismiss for the post-answer status.
+    func clearFixStatus() {
+        fixStatusLine = nil
+        fixGuidanceSteps = []
     }
 
     /// Settings surface: the mute list, readable and reversible.

@@ -131,11 +131,20 @@ final class CompanionManager: ObservableObject {
 
     /// Where an app came from decides whether Iris may ever patch it.
     let installProvenanceStore = InstallProvenanceStore()
+    /// The pool transport and this install's pseudonymous identity, shared
+    /// by the coordinator and the replay engine below.
+    private let maintainPoolClient = MaintainPoolClient()
+    private let maintainInstallIdentity = MaintainInstallIdentity()
     /// The detect → ask → file ladder. The panel renders its pendingAsk.
-    /// Lazy so it shares the one provenance store above.
+    /// Lazy so everything shares the one provenance store above.
     lazy var maintainIncidentCoordinator = MaintainIncidentCoordinator(
-        poolClient: MaintainPoolClient(),
-        provenanceStore: installProvenanceStore
+        poolClient: maintainPoolClient,
+        provenanceStore: installProvenanceStore,
+        replayEngine: RecipeReplayEngine(
+            provenanceStore: installProvenanceStore,
+            poolClient: maintainPoolClient,
+            installIdentity: maintainInstallIdentity
+        )
     )
     private var crashArtifactWatcher: CrashArtifactWatcher?
     private let hangProbe = HangProbe()
@@ -503,6 +512,10 @@ final class CompanionManager: ObservableObject {
 
         maintainIncidentCoordinator.catalogAppMatcher = { [weak self] processName, bundleIdentifier in
             self?.matchCatalogApp(processName: processName, bundleIdentifier: bundleIdentifier)
+        }
+        maintainIncidentCoordinator.installedVersionLookup = { [weak self] appSlug in
+            self?.appInventoryService.installedEntriesForDisplay
+                .first { $0.slug == appSlug }?.installedVersion
         }
 
         let watcher = CrashArtifactWatcher(appMatcher: self)

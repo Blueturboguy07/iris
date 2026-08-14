@@ -527,6 +527,20 @@ final class CompanionManager: ObservableObject {
             self?.appInventoryService.installedEntriesForDisplay
                 .first { $0.slug == appSlug }?.installedVersion
         }
+        maintainIncidentCoordinator.attemptNovelFix = { [weak self] appSlug, stack, signatureId, evidence in
+            guard let self,
+                  let record = self.installProvenanceStore.provenance(forAppSlug: appSlug),
+                  let clonePath = record.clonePath,
+                  let provider = MaintainModelProviderResolver.firstAvailable() else { return nil }
+            let fixer = MaintainTierCFixer(provider: provider)
+            let result = await fixer.attemptFix(
+                clonePath: clonePath, appSlug: appSlug, appStack: stack,
+                signatureId: signatureId, crashEvidence: evidence
+            )
+            if case .fixedAndVerified(let branchName, _) = result { return branchName }
+            return nil
+        }
+
         maintainIncidentCoordinator.backUpFixBranch = { [weak self] branchName, appSlug in
             guard let self,
                   let record = self.installProvenanceStore.provenance(forAppSlug: appSlug),

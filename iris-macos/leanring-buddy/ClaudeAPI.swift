@@ -351,6 +351,24 @@ class ClaudeAPI {
         return latest
     }
 
+    /// A plain multi-turn text exchange: the caller owns the whole message
+    /// history and gets back one assistant turn. This is what the maintain
+    /// mode Tier C fixer's ReAct loop runs on — ask for one bash command,
+    /// run it, append the result, ask again — without the tool-calling API,
+    /// exactly the mini-swe-agent shape. No tools passed, so nothing here can
+    /// reach a server-side tool.
+    func continueTextConversation(
+        systemPrompt: String,
+        messages: [[String: Any]],
+        maximumOutputTokens: Int
+    ) async throws -> ClaudeStreamedMessage {
+        try await streamOneMessage(
+            systemPrompt: systemPrompt,
+            messages: messages,
+            maximumOutputTokens: maximumOutputTokens
+        )
+    }
+
     /// Sends one streaming request and reassembles the full message. Shared
     /// by `respondWithTools` and `analyzeImage`.
     private func streamOneMessage(

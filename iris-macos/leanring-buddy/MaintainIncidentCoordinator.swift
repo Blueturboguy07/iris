@@ -83,6 +83,10 @@ final class MaintainIncidentCoordinator: ObservableObject {
     /// summary to show, or nil when backup is unavailable/not connected —
     /// which is not an error; the fix is safe locally either way.
     var backUpFixBranch: ((_ branchName: String, _ appSlug: String) async -> String?)?
+    /// Tier C: derive a novel fix under the user's own model key. Returns the
+    /// branch name on success, or nil. Present only when a BYO/OpenAI key
+    /// exists — its absence is the honest funded-tier ceiling.
+    var attemptNovelFix: ((_ appSlug: String, _ stack: BreakAppStack, _ signatureId: String, _ evidence: String) async -> String?)?
 
     // MARK: - Persistence keys
 
@@ -101,6 +105,9 @@ final class MaintainIncidentCoordinator: ObservableObject {
     /// published struct so the UI layer never holds frame data.
     private var signaturesByAskId: [String: BreakSignature] = [:]
     private var appVersionsByAskId: [String: String] = [:]
+    /// The frozen, scrubbed crash evidence per ask — Tier C's only bug
+    /// description. The proto signature is already normalized and PII-free.
+    private var evidenceByAskId: [String: String] = [:]
 
     init(
         poolClient: MaintainPoolClient,
@@ -133,8 +140,20 @@ final class MaintainIncidentCoordinator: ObservableObject {
             appSlug: artifact.catalogAppSlug,
             appName: artifact.report.appName,
             appVersion: artifact.report.appVersion,
-            evidenceSentence: "\(artifact.report.appName) quit unexpectedly a moment ago."
+            evidenceSentence: "\(artifact.report.appName) quit unexpectedly a moment ago.",
+            // Tier C's bug description: the exception, the walked frames, and
+            // the pre-hash composite — all normalized and PII-free already.
+            frozenEvidence: Self.evidence(from: signature, report: artifact.report)
         )
+    }
+
+    private static func evidence(from signature: BreakSignature, report: ParsedCrashReport) -> String {
+        var lines = ["Exception: \(report.exceptionType ?? "unknown") \(report.exceptionSignal ?? "")"]
+        lines.append("Signature: \(signature.protoSignature)")
+        for frame in signature.topFrames {
+            lines.append("  at \(frame.module)!\(frame.function)\(frame.sourceFile.map { " (\($0))" } ?? "")")
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// A hang that recovered or ended — asked about after the fact, never
@@ -148,7 +167,10 @@ final class MaintainIncidentCoordinator: ObservableObject {
             appSlug: appSlug,
             appName: appName,
             appVersion: nil,
-            evidenceSentence: "\(appName) stopped responding for about \(unresponsiveSeconds) seconds."
+            evidenceSentence: "\(appName) stopped responding for about \(unresponsiveSeconds) seconds.",
+            // A hang has no stack to hand Tier C; the pool/replay path is
+            // where a hang gets fixed, not novel derivation.
+            frozenEvidence: "Hang: \(signature.protoSignature) (unresponsive ~\(unresponsiveSeconds)s)"
         )
     }
 
@@ -159,7 +181,8 @@ final class MaintainIncidentCoordinator: ObservableObject {
         appSlug: String,
         appName: String,
         appVersion: String?,
-        evidenceSentence: String
+        evidenceSentence: String,
+        frozenEvidence: String
     ) {
         guard pendingAsk == nil else {
             irisTrace("maintain: ask suppressed (one already pending)")
@@ -197,6 +220,7 @@ final class MaintainIncidentCoordinator: ObservableObject {
         )
         signaturesByAskId[ask.id] = signature
         if let appVersion { appVersionsByAskId[ask.id] = appVersion }
+        evidenceByAskId[ask.id] = frozenEvidence
         pendingAsk = ask
         irisTrace("maintain: ASK raised for \(appSlug) (\(signature.kind.rawValue) \(signature.signatureId))")
 
@@ -239,11 +263,15 @@ final class MaintainIncidentCoordinator: ObservableObject {
                 ))
                 irisTrace("maintain: filed break → \(breakId ?? "FAILED, staged for retry")")
             }
-            // Tier A: a pooled recipe exists — replay it, zero tokens. No
-            // recipe = the honest dead end on the funded tier ("filed; a
-            // fix from the pool will reach you when one exists").
+            // Tier A/B: a pooled recipe exists — replay or adapt it. No
+            // recipe → Tier C if the user brought a model key and this is a
+            // patchable source clone; otherwise the honest funded-tier dead
+            // end ("filed; a pooled fix will reach you when one exists").
             if let bestRecipe {
                 runReplay(recipe: bestRecipe, ask: ask, signature: signature, appVersion: appVersion)
+            } else if let attemptNovelFix,
+                      provenanceStore.localPatchingIsPermitted(forAppSlug: ask.appSlug) {
+                runNovelFix(ask: ask, signature: signature)
             } else {
                 fixStatusLine = "Filed. No known fix yet — when one lands in the pool, Iris will offer it."
             }
@@ -301,6 +329,33 @@ final class MaintainIncidentCoordinator: ObservableObject {
                 self.fixStatusLine = "A code fix exists, but this install isn't a source build Iris may patch."
             case .outsideApplicabilityRange:
                 self.fixStatusLine = "A fix exists for other versions, but not yours yet. Filed."
+            }
+        }
+    }
+
+    /// Tier C: no pooled recipe fit, but the user has a model key and this is
+    /// a source clone. Derive a fix from scratch, jailed and bounded, then
+    /// through the same verification gate. Filing already happened.
+    private func runNovelFix(ask: MaintainAsk, signature: BreakSignature) {
+        guard let attemptNovelFix else { return }
+        let evidence = evidenceByAskId[ask.id] ?? signature.protoSignature
+        fixStatusLine = "No known fix — Iris is trying to work one out under your model key…"
+        Task { [weak self] in
+            guard let self else { return }
+            let branchName = await attemptNovelFix(
+                ask.appSlug, signature.appStack, signature.signatureId, evidence
+            )
+            self.evidenceByAskId[ask.id] = nil
+            if let branchName {
+                self.fixStatusLine =
+                    "Worked out a fix and verified it (branch \(branchName)). Relaunch \(ask.appName) to pick it up."
+                if let backUpFixBranch = self.backUpFixBranch,
+                   let summary = await backUpFixBranch(branchName, ask.appSlug) {
+                    self.fixStatusLine = (self.fixStatusLine ?? "") + " \(summary)."
+                }
+            } else {
+                self.fixStatusLine =
+                    "Iris couldn't work out a fix this time. It's filed, so a pooled fix can still reach you."
             }
         }
     }

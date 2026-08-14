@@ -36,6 +36,10 @@ enum KeychainSecretKind: String, CaseIterable, Sendable {
     case gitHubAccessToken = "github-access-token"
     /// The 6-month refresh token that silently renews the one above.
     case gitHubRefreshToken = "github-refresh-token"
+    /// The user's own OpenAI key, used only against `api.openai.com`, only
+    /// for maintain mode's Tier C novel fixes when they choose OpenAI. Like
+    /// the Anthropic key, it never reaches a publik host.
+    case openAIAPIKey = "openai-api-key"
 }
 
 enum KeychainStoreError: Error, Equatable, Sendable {

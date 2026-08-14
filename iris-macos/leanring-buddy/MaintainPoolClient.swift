@@ -124,6 +124,23 @@ final class MaintainPoolClient {
         _ = try? await urlSession.data(for: request)
     }
 
+    /// Records that a fix reached the canonical repo, for the public fix log
+    /// — the listing's "here's what we fixed" surface. Fire and forget; the
+    /// break-status flip to "fixed in vX" is the release webhook's job, this
+    /// is the human-readable companion.
+    func recordFixLog(appSlug: String, diagnosisTitle: String, repo: String) async {
+        let url = publikBaseURL.appendingPathComponent("api/iris/fix-log")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "appSlug": appSlug,
+            "title": diagnosisTitle,
+            "repo": repo,
+        ])
+        _ = try? await urlSession.data(for: request)
+    }
+
     /// Files a confirmed break. Returns the created break id, or nil when the
     /// intake refused or the network failed — the caller stages locally and
     /// retries on the next incident rather than looping here.

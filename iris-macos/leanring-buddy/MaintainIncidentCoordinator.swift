@@ -53,6 +53,10 @@ final class MaintainIncidentCoordinator: ObservableObject {
     /// by the server. Empty until the lookup lands; shown after a "yes".
     @Published private(set) var recipesForPendingAsk: [PooledFixRecipe] = []
 
+    /// The evidence sentence of the most recent confirmed break — the fix's
+    /// human title for the commit, the PR, and the fix log.
+    private(set) var lastConfirmedDiagnosisTitle: String?
+
     /// After a "yes": what the fix attempt is doing / did, for the card.
     /// One line, user-facing, honest ("Applying a known fix…", "Fixed and
     /// rebuilt — restart WhimprFlow to pick it up", "The known fix didn't
@@ -249,6 +253,7 @@ final class MaintainIncidentCoordinator: ObservableObject {
         switch answer {
         case .somethingIsBroken:
             irisTrace("maintain: user CONFIRMED break for \(ask.appSlug)")
+            lastConfirmedDiagnosisTitle = ask.evidenceSentence
             guard let signature else { return }
             let bestRecipe = recipesForPendingAsk.first
             // The D2 filing: consent was collected at signup; a confirmed

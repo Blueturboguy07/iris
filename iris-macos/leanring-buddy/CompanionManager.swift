@@ -550,18 +550,26 @@ final class CompanionManager: ObservableObject {
                   let clonePath = record.clonePath,
                   let canonicalRepo = record.canonicalRepo,
                   let runner = try? MaintainShellRunner(repoRootPath: clonePath) else { return nil }
-            let outcome = await self.gitHubForkService.backUp(
-                branch: branchName, canonicalRepo: canonicalRepo, cloneRunner: runner
+            let title = self.maintainIncidentCoordinator.lastConfirmedDiagnosisTitle ?? "fixed a bug"
+            // Ownership-aware: your own repo → push + merge to canonical;
+            // someone else's app → fork + PR for its owner to review.
+            let outcome = await self.gitHubForkService.propagateFix(
+                branch: branchName, canonicalRepo: canonicalRepo,
+                diagnosisTitle: title, cloneRunner: runner
             )
             switch outcome {
-            case .backedUp(let forkURL, _):
+            case .mergedToCanonical(let repo, _):
+                // The fix reached the source everyone installs from; record
+                // it to the fix log so the listing reflects it.
+                await self.maintainPoolClient.recordFixLog(
+                    appSlug: appSlug, diagnosisTitle: title, repo: repo
+                )
+                return "Merged into \(repo)"
+            case .pullRequestOpened(let url, let number):
+                return "Opened PR #\(number) for the owner to review (\(url))"
+            case .backedUpOnly(let forkURL, _):
                 return "Backed up to \(forkURL)"
-            case .notConnected:
-                // The connect card offers itself; the fix stays safe locally.
-                return nil
-            case .nameCollisionNeedsTheUser(let existingRepoURL):
-                return "Couldn't back up: \(existingRepoURL) already exists and isn't a fork — your call"
-            case .failed:
+            case .notConnected, .failed:
                 return nil
             }
         }

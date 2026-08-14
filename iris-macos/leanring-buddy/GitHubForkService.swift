@@ -235,6 +235,184 @@ final class GitHubForkService: ObservableObject {
         return .backedUp(forkURL: forkURL, branch: branch)
     }
 
+    // MARK: - Ownership-aware propagation
+
+    /// The whole propagation decision, driven by GitHub's OWN permission
+    /// model: if the connected user can push to the canonical repo, this is
+    /// their app — push the fix straight to it and merge it (their repo,
+    /// their verified fix, no ceremony). If they cannot, this machine is a
+    /// user of someone else's app — the fix goes to their fork and opens a
+    /// PR on the canonical repo, where the OWNER's Iris re-verifies and
+    /// decides. GitHub enforces the boundary; Iris never pushes where the
+    /// token has no right to.
+    enum FixPropagation: Equatable, Sendable {
+        /// Owner path: merged straight into the canonical default branch.
+        case mergedToCanonical(repo: String, commitSha: String?)
+        /// Non-owner path: a PR is open on the canonical repo for its owner.
+        case pullRequestOpened(url: String, number: Int)
+        /// Fork backup happened but the canonical step didn't (owner path
+        /// push failed, or a PR already existed).
+        case backedUpOnly(forkURL: String, branch: String)
+        case notConnected
+        case failed(reason: String)
+    }
+
+    /// Propagate a verified fix as far as the user's rights allow.
+    func propagateFix(
+        branch: String,
+        canonicalRepo: String,
+        diagnosisTitle: String,
+        cloneRunner: MaintainShellRunner
+    ) async -> FixPropagation {
+        guard let accessToken = await currentAccessToken(),
+              let login = await authenticatedLogin(token: accessToken) else {
+            return .notConnected
+        }
+        let owner = String(canonicalRepo.split(separator: "/").first ?? "")
+        let repoName = String(canonicalRepo.split(separator: "/").last ?? "")
+        guard !owner.isEmpty, !repoName.isEmpty else { return .failed(reason: "bad canonical repo") }
+
+        if await authenticatedUserCanPush(toRepo: canonicalRepo, token: accessToken) {
+            // Owner path: push the branch straight to canonical and merge it
+            // into the default branch. "Immediate push and merge" — it is
+            // their repo and the fix already passed the full gate.
+            let pushURL = "https://x-access-token:\(accessToken)@github.com/\(canonicalRepo).git"
+            let push = try? await cloneRunner.run(
+                "git push '\(pushURL)' 'HEAD:refs/heads/\(branch)' --force-with-lease 2>&1 | grep -v x-access-token; exit ${pipestatus[1]}",
+                deadline: 300
+            )
+            guard push?.succeeded == true else {
+                return .failed(reason: "push to canonical failed")
+            }
+            let base = await defaultBranch(owner: owner, name: repoName, token: accessToken) ?? "main"
+            // Merge via the API (a squash keeps the default branch clean).
+            let merge = await apiRequest(
+                method: "POST",
+                path: "/repos/\(canonicalRepo)/merges",
+                token: accessToken,
+                jsonBody: ["base": base, "head": branch,
+                           "commit_message": "Iris: \(diagnosisTitle)"]
+            )
+            let mergedSha = (merge?.1)?["sha"] as? String
+            irisTrace("github: owner path — merged \(branch) into \(canonicalRepo)@\(base)")
+            lastBackupSummary = "Fixed and merged into \(canonicalRepo)"
+            return .mergedToCanonical(repo: canonicalRepo, commitSha: mergedSha)
+        }
+
+        // Non-owner path: the fork backup (which handles fork creation and
+        // the push), then open a PR from the fork onto canonical.
+        let backup = await backUp(branch: branch, canonicalRepo: canonicalRepo, cloneRunner: cloneRunner)
+        guard case .backedUp(let forkURL, _) = backup else {
+            if case .nameCollisionNeedsTheUser = backup { return .failed(reason: "repo name collision") }
+            if case .notConnected = backup { return .notConnected }
+            return .failed(reason: "fork backup failed")
+        }
+        let base = await defaultBranch(owner: owner, name: repoName, token: accessToken) ?? "main"
+        guard let (status, json) = await apiRequest(
+            method: "POST",
+            path: "/repos/\(canonicalRepo)/pulls",
+            token: accessToken,
+            jsonBody: [
+                "title": "Iris fix: \(diagnosisTitle)",
+                "head": "\(login):\(branch)",
+                "base": base,
+                "body": Self.pullRequestBody(diagnosisTitle: diagnosisTitle),
+                "maintainer_can_modify": true,
+            ]
+        ) else {
+            return .backedUpOnly(forkURL: forkURL, branch: branch)
+        }
+        // 422 = a PR from this head already exists; treat as already-open.
+        if status == 201, let url = json?["html_url"] as? String, let number = json?["number"] as? Int {
+            irisTrace("github: non-owner path — opened PR #\(number) on \(canonicalRepo)")
+            lastBackupSummary = "Opened a fix PR on \(canonicalRepo) for its owner to review"
+            return .pullRequestOpened(url: url, number: number)
+        }
+        return .backedUpOnly(forkURL: forkURL, branch: branch)
+    }
+
+    /// Whether the connected user has push (or admin) permission on a repo —
+    /// the signal that decides push-direct vs. open-a-PR. GitHub returns the
+    /// authenticated user's permissions inline on the repo object.
+    private func authenticatedUserCanPush(toRepo repo: String, token: String) async -> Bool {
+        guard let (status, json) = await apiRequest(
+            method: "GET", path: "/repos/\(repo)", token: token, jsonBody: nil
+        ), status == 200,
+              let permissions = json?["permissions"] as? [String: Any] else { return false }
+        return (permissions["push"] as? Bool ?? false) || (permissions["admin"] as? Bool ?? false)
+    }
+
+    private static func pullRequestBody(diagnosisTitle: String) -> String {
+        """
+        Iris (publik's maintain mode) fixed a bug on a user's machine and \
+        verified it — the repro fails before the patch, passes after, and \
+        fails again when the patch is reverted, and the full test suite stays \
+        green. Opened for you, the owner, to review and merge.
+
+        Diagnosis: \(diagnosisTitle)
+
+        The change is scoped to the reported symptom; the verification detail \
+        is in the commit trailer.
+        """
+    }
+
+    // MARK: - Owner side: incoming fix PRs
+
+    /// One incoming Iris fix PR on a repo the owner controls.
+    struct IncomingFixPR: Equatable, Sendable {
+        let repo: String
+        let number: Int
+        let title: String
+        let headRepoCloneURL: String
+        let headBranch: String
+        let url: String
+    }
+
+    /// The `iris/fix-*` PRs open on one of the owner's repos, for their Iris
+    /// to re-verify and decide. Only PRs from Iris's branch convention are
+    /// surfaced; a human contributor's PR is the owner's normal GitHub flow.
+    func incomingFixPullRequests(forCanonicalRepo canonicalRepo: String) async -> [IncomingFixPR] {
+        guard let token = await currentAccessToken() else { return [] }
+        guard let (status, _) = await apiRequest(
+            method: "GET", path: "/repos/\(canonicalRepo)/pulls?state=open&per_page=30",
+            token: token, jsonBody: nil
+        ), status == 200 else { return [] }
+        // The array response needs a raw decode; apiRequest returns an object
+        // shape, so re-fetch as an array here.
+        guard let url = URL(string: "https://api.github.com/repos/\(canonicalRepo)/pulls?state=open&per_page=30") else { return [] }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        guard let (data, _) = try? await urlSession.data(for: request),
+              let array = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return [] }
+        return array.compactMap { pull -> IncomingFixPR? in
+            guard let branch = (pull["head"] as? [String: Any])?["ref"] as? String,
+                  branch.hasPrefix("iris/fix-"),
+                  let head = pull["head"] as? [String: Any],
+                  let headRepo = head["repo"] as? [String: Any],
+                  let cloneURL = headRepo["clone_url"] as? String,
+                  let number = pull["number"] as? Int,
+                  let title = pull["title"] as? String,
+                  let htmlURL = pull["html_url"] as? String else { return nil }
+            return IncomingFixPR(
+                repo: canonicalRepo, number: number, title: title,
+                headRepoCloneURL: cloneURL, headBranch: branch, url: htmlURL
+            )
+        }
+    }
+
+    /// Merge an incoming fix PR the owner (or their Iris, after re-verifying)
+    /// approved. Squash so the canonical history stays one-commit-per-fix.
+    func mergeIncomingFixPR(_ pr: IncomingFixPR) async -> Bool {
+        guard let token = await currentAccessToken() else { return false }
+        guard let (status, _) = await apiRequest(
+            method: "PUT", path: "/repos/\(pr.repo)/pulls/\(pr.number)/merge",
+            token: token,
+            jsonBody: ["merge_method": "squash", "commit_title": "Iris fix: \(pr.title)"]
+        ) else { return false }
+        return status == 200
+    }
+
     // MARK: - GitHub API plumbing
 
     private enum RepoRelationship { case absent, isOurFork, unrelatedRepo }

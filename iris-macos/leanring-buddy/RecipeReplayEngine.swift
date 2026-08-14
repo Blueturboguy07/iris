@@ -50,15 +50,25 @@ final class RecipeReplayEngine {
     private let provenanceStore: InstallProvenanceStore
     private let poolClient: MaintainPoolClient
     private let installIdentity: MaintainInstallIdentity
+    private let patchQueue: PatchQueue
+    /// Tier B, present only when the build wires it. Nil = stale recipes end
+    /// at "didn't apply" (the funded tier's honest ceiling).
+    private let fixAdapter: MaintainFixAdapting?
 
     init(
         provenanceStore: InstallProvenanceStore,
         poolClient: MaintainPoolClient,
-        installIdentity: MaintainInstallIdentity
+        installIdentity: MaintainInstallIdentity,
+        // No default: a default argument evaluates nonisolated, and the
+        // queue's init is main-actor. Callers are @MainActor anyway.
+        patchQueue: PatchQueue,
+        fixAdapter: MaintainFixAdapting? = nil
     ) {
         self.provenanceStore = provenanceStore
         self.poolClient = poolClient
         self.installIdentity = installIdentity
+        self.patchQueue = patchQueue
+        self.fixAdapter = fixAdapter
     }
 
     func replay(
@@ -96,8 +106,54 @@ final class RecipeReplayEngine {
             return .patchingNotPermittedForThisInstall
         }
 
-        // Write the patch inside the repo (the runner's boundary) under a
-        // name git ignores by convention only after we clean it up ourselves.
+        // Tier A: the exact pooled diff.
+        let exactResult = await applyVerifyAndCommit(
+            patchText: patchText, recipe: recipe, appSlug: appSlug,
+            appStack: appStack, signatureId: signatureId,
+            runner: runner, clonePath: clonePath, wasAdapted: false
+        )
+        guard case .patchDidNotApply = exactResult else { return exactResult }
+
+        // Tier B: the diff is stale for this version — one constrained BYO
+        // model call re-anchors it, seeded with the pooled diagnosis. Absent
+        // an adapter (or a key), stale is the honest end of the road.
+        guard let fixAdapter else { return .patchDidNotApply }
+        let excerpts = Self.localFileExcerpts(forPatch: patchText, clonePath: clonePath)
+        let adaptation = await fixAdapter.adaptPatch(
+            diagnosis: recipe.diagnosis,
+            stalePatch: patchText,
+            localFileExcerpts: excerpts,
+            appSlug: appSlug
+        )
+        guard case .adaptedPatch(let adaptedDiff) = adaptation else {
+            if case .modelCouldNotAdapt(let reason) = adaptation {
+                irisTrace("maintain: adapt_patch declined — \(reason)")
+            }
+            return .patchDidNotApply
+        }
+        irisTrace("maintain: recipe \(recipe.id) adapted via BYO — retrying apply")
+        return await applyVerifyAndCommit(
+            patchText: adaptedDiff, recipe: recipe, appSlug: appSlug,
+            appStack: appStack, signatureId: signatureId,
+            runner: runner, clonePath: clonePath, wasAdapted: true
+        )
+    }
+
+    /// The shared spine both tiers ride: dry-run, apply, verify (revert on
+    /// failure), commit on a recipe-keyed branch, queue the patch, file the
+    /// outcome. `wasAdapted` only changes the bookkeeping words.
+    private func applyVerifyAndCommit(
+        patchText: String,
+        recipe: PooledFixRecipe,
+        appSlug: String,
+        appStack: BreakAppStack,
+        signatureId: String,
+        runner: MaintainShellRunner,
+        clonePath: String,
+        wasAdapted: Bool
+    ) async -> RecipeReplayResult {
+        // Write the patch inside the repo (the runner's boundary); cleaned up
+        // whatever happens below.
         let patchFileName = ".iris-replay-\(recipe.id).patch"
         let patchFilePath = (clonePath as NSString).appendingPathComponent(patchFileName)
         defer { try? FileManager.default.removeItem(atPath: patchFilePath) }
@@ -111,10 +167,14 @@ final class RecipeReplayEngine {
         // the tree, so a stale recipe never leaves half a patch behind.
         let dryRun = try? await runner.run("git apply --check --3way \(patchFileName)", deadline: 60)
         guard dryRun?.succeeded == true else {
-            irisTrace("maintain: recipe \(recipe.id) stale — did not apply (3way check failed)")
-            await file(outcome: false, kind: "applied", recipe: recipe)
+            if !wasAdapted {
+                irisTrace("maintain: recipe \(recipe.id) stale — did not apply (3way check failed)")
+                await file(outcome: false, kind: "applied", recipe: recipe)
+            }
             return .patchDidNotApply
         }
+        let baseCommit = (try? await runner.run("git rev-parse HEAD", deadline: 30))?
+            .outputTail.trimmingCharacters(in: .whitespacesAndNewlines)
         let applied = try? await runner.run("git apply --3way \(patchFileName)", deadline: 60)
         guard applied?.succeeded == true else {
             await file(outcome: false, kind: "applied", recipe: recipe)
@@ -141,19 +201,48 @@ final class RecipeReplayEngine {
         // Commit on a recipe-keyed branch — the fork service (M4) pushes it.
         let dateStamp = Self.compactDateStamp()
         let branchName = "iris/fix-\(signatureId.prefix(12))-\(dateStamp)"
+        let provenanceWord = wasAdapted ? "adapted from" : "replayed"
         let commitMessage = "Apply pooled fix recipe \(recipe.id)\n\n"
             + "Break-Signature: \(signatureId)\n"
-            + "Fix-Recipe-Match: \(recipe.id)\n"
+            + "Fix-Recipe-Match: \(recipe.id)\(wasAdapted ? " (adapted)" : "")\n"
             + "Verified: applied, build-green\(verification.suitePassed == true ? ", suite-green" : "")\n"
             + "Assisted-by: iris-maintain-mode/1\n"
-            + "Modified-by: Iris (publik) — replayed a pooled recipe"
+            + "Modified-by: Iris (publik) — \(provenanceWord) a pooled recipe"
         let commitScript = "git checkout -b '\(branchName)' 2>/dev/null || git checkout '\(branchName)'; "
             + "git add -A && git commit -m '\(commitMessage.replacingOccurrences(of: "'", with: "'\\''"))' --quiet"
         _ = try? await runner.run(commitScript, deadline: 60)
 
+        patchQueue.record(QueuedPatch(
+            recipeId: recipe.id,
+            signatureId: signatureId,
+            appSlug: appSlug,
+            branchName: branchName,
+            patchText: patchText,
+            baseCommit: baseCommit,
+            appliedAt: Date()
+        ))
+
         await file(outcome: true, kind: "verified", recipe: recipe)
-        irisTrace("maintain: recipe \(recipe.id) replayed and committed on \(branchName)")
+        irisTrace("maintain: recipe \(recipe.id) \(provenanceWord) and committed on \(branchName)")
         return .patchAppliedAndVerified(branchName: branchName)
+    }
+
+    /// The files a diff touches, as they look on THIS machine — the adapt
+    /// call's grounding. Paths come from the diff's own +++ headers, resolved
+    /// under the clone only; anything escaping the root is skipped.
+    static func localFileExcerpts(forPatch patchText: String, clonePath: String) -> String {
+        let root = (clonePath as NSString).standardizingPath
+        var excerpts: [String] = []
+        for line in patchText.split(separator: "\n") where line.hasPrefix("+++ ") {
+            var path = String(line.dropFirst(4)).trimmingCharacters(in: .whitespaces)
+            if path.hasPrefix("b/") { path = String(path.dropFirst(2)) }
+            guard path != "/dev/null" else { continue }
+            let fullPath = ((root as NSString).appendingPathComponent(path) as NSString).standardizingPath
+            guard fullPath.hasPrefix(root + "/"),
+                  let contents = try? String(contentsOfFile: fullPath, encoding: .utf8) else { continue }
+            excerpts.append("=== \(path) ===\n\(String(contents.prefix(6000)))")
+        }
+        return excerpts.joined(separator: "\n\n")
     }
 
     private func file(outcome succeeded: Bool, kind: String, recipe: PooledFixRecipe) async {

@@ -143,7 +143,9 @@ final class CompanionManager: ObservableObject {
         replayEngine: RecipeReplayEngine(
             provenanceStore: installProvenanceStore,
             poolClient: maintainPoolClient,
-            installIdentity: maintainInstallIdentity
+            installIdentity: maintainInstallIdentity,
+            patchQueue: PatchQueue(),
+            fixAdapter: MaintainFixAdapter()
         )
     )
     private var crashArtifactWatcher: CrashArtifactWatcher?

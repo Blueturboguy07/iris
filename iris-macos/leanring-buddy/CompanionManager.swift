@@ -148,6 +148,9 @@ final class CompanionManager: ObservableObject {
             fixAdapter: MaintainFixAdapter()
         )
     )
+    /// The feature-demand pool: a wish about the frontmost app becomes a
+    /// ranked signal, and top requests can surface as suggestions.
+    lazy var maintainFeatureRequests = MaintainFeatureRequests(installIdentity: maintainInstallIdentity)
     /// Fork backup for local fixes. Dormant until the GitHub App's client id
     /// ships in Info.plist (IrisGitHubAppClientID).
     let gitHubForkService = GitHubForkService()
@@ -782,6 +785,15 @@ final class CompanionManager: ObservableObject {
 
         latestUserMessageText = trimmedMessageText
         print("💬 Companion received message: \(trimmedMessageText)")
+
+        // A wish about the app in front is demand, not a question. Pool it as
+        // a signal (never interrupt — the answer pipeline runs as normal), so
+        // "most people who run this wanted X" can become true at scale.
+        if let frontmostSlug = appInventoryService.frontmostCatalogAppSlug,
+           MaintainFeatureRequests.messageLooksLikeAFeatureWish(trimmedMessageText) {
+            let featureRequests = maintainFeatureRequests
+            Task { await featureRequests.poolWish(trimmedMessageText, forAppSlug: frontmostSlug) }
+        }
 
         // Cancel any pending transient hide so the overlay stays visible
         transientHideTask?.cancel()

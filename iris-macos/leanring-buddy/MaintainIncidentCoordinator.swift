@@ -79,6 +79,10 @@ final class MaintainIncidentCoordinator: ObservableObject {
     var catalogAppMatcher: ((_ processName: String, _ bundleIdentifier: String?) -> (slug: String, name: String, stack: BreakAppStack)?)?
     /// The installed version of a catalog app, for applicability ranges.
     var installedVersionLookup: ((_ appSlug: String) -> String?)?
+    /// Backs a verified fix branch up to the user's fork. Returns the one-line
+    /// summary to show, or nil when backup is unavailable/not connected —
+    /// which is not an error; the fix is safe locally either way.
+    var backUpFixBranch: ((_ branchName: String, _ appSlug: String) async -> String?)?
 
     // MARK: - Persistence keys
 
@@ -282,6 +286,12 @@ final class MaintainIncidentCoordinator: ObservableObject {
             case .patchAppliedAndVerified(let branchName):
                 self.fixStatusLine =
                     "Fixed and rebuilt (branch \(branchName)). Relaunch \(ask.appName) to pick it up."
+                // The fork backup rides behind the fix, silently once
+                // connected. Its absence never dims the fix itself.
+                if let backUpFixBranch = self.backUpFixBranch,
+                   let summary = await backUpFixBranch(branchName, ask.appSlug) {
+                    self.fixStatusLine = (self.fixStatusLine ?? "") + " \(summary)."
+                }
             case .patchRevertedAfterFailedVerification(let blockedStage):
                 self.fixStatusLine =
                     "The known fix applied but failed verification (\(blockedStage)) — reverted, nothing changed."

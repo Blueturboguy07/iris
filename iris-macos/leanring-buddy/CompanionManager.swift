@@ -148,6 +148,9 @@ final class CompanionManager: ObservableObject {
             fixAdapter: MaintainFixAdapter()
         )
     )
+    /// Fork backup for local fixes. Dormant until the GitHub App's client id
+    /// ships in Info.plist (IrisGitHubAppClientID).
+    let gitHubForkService = GitHubForkService()
     private var crashArtifactWatcher: CrashArtifactWatcher?
     private let hangProbe = HangProbe()
     private var hangProbeTimer: Timer?
@@ -524,6 +527,27 @@ final class CompanionManager: ObservableObject {
             self?.appInventoryService.installedEntriesForDisplay
                 .first { $0.slug == appSlug }?.installedVersion
         }
+        maintainIncidentCoordinator.backUpFixBranch = { [weak self] branchName, appSlug in
+            guard let self,
+                  let record = self.installProvenanceStore.provenance(forAppSlug: appSlug),
+                  let clonePath = record.clonePath,
+                  let canonicalRepo = record.canonicalRepo,
+                  let runner = try? MaintainShellRunner(repoRootPath: clonePath) else { return nil }
+            let outcome = await self.gitHubForkService.backUp(
+                branch: branchName, canonicalRepo: canonicalRepo, cloneRunner: runner
+            )
+            switch outcome {
+            case .backedUp(let forkURL, _):
+                return "Backed up to \(forkURL)"
+            case .notConnected:
+                // The connect card offers itself; the fix stays safe locally.
+                return nil
+            case .nameCollisionNeedsTheUser(let existingRepoURL):
+                return "Couldn't back up: \(existingRepoURL) already exists and isn't a fork — your call"
+            case .failed:
+                return nil
+            }
+        }
 
         let watcher = CrashArtifactWatcher(appMatcher: self)
         watcher.onCrashArtifactDetected = { [weak self] artifact in
@@ -588,7 +612,8 @@ final class CompanionManager: ObservableObject {
             installProvenanceStore.recordGuideSourceClone(
                 appSlug: guide.appSlug,
                 clonePath: clonePath,
-                pinnedCommit: guide.sourceCommit
+                pinnedCommit: guide.sourceCommit,
+                canonicalRepo: "\(guide.sourceOwner)/\(guide.sourceRepo)"
             )
         } else {
             installProvenanceStore.recordSignedDownload(appSlug: guide.appSlug)

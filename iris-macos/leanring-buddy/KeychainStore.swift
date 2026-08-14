@@ -2,29 +2,40 @@
 //  KeychainStore.swift
 //  leanring-buddy
 //
-//  The only place in this app that touches the macOS Keychain. Exactly two
-//  secrets are ever stored: the user's own Anthropic API key (the BYO tier)
-//  and the Supabase refresh token (the funded tier). Neither is ever printed,
-//  logged, written to UserDefaults, or included in a crash report — the whole
-//  reason this file exists rather than a `UserDefaults.set` call somewhere.
+//  The only place in this app that touches the macOS Keychain. Exactly four
+//  secrets are ever stored: the user's own Anthropic API key (the BYO tier),
+//  the Supabase refresh token (the funded tier), and the GitHub App token
+//  pair (maintain mode's fork backup). None is ever printed, logged, written
+//  to UserDefaults, or included in a crash report — the whole reason this
+//  file exists rather than a `UserDefaults.set` call somewhere.
 //
 //  `docs/iris-assistant-protocol.md` section 1 makes the BYO key's isolation a
 //  ship-blocker, and section 4 requires the refresh token to live here while
 //  the access token stays in memory.
 //
+//  The GitHub pair was a deliberate, reviewed expansion (maintain mode M4,
+//  2026-08-13): the access token expires in 8 hours and the refresh token in
+//  6 months, so persisting both is what makes "connect GitHub once" true
+//  without ever holding a long-lived credential.
+//
 
 import Foundation
 import Security
 
-/// The two secrets Iris keeps. This is an enum rather than a free-form string
-/// so a future caller cannot invent a third Keychain item without editing this
-/// file and being confronted with the rules above.
+/// The secrets Iris keeps. This is an enum rather than a free-form string
+/// so a future caller cannot invent another Keychain item without editing
+/// this file and being confronted with the rules above.
 enum KeychainSecretKind: String, CaseIterable, Sendable {
     /// The user's own `sk-ant-…` key, used only against `api.anthropic.com`.
     case anthropicAPIKey = "anthropic-api-key"
     /// The Supabase refresh token. The access token it mints is deliberately
     /// NOT stored — it lives in `AccountService`'s memory for the session only.
     case supabaseRefreshToken = "supabase-refresh-token"
+    /// GitHub App user access token (8-hour life), used only against
+    /// `api.github.com` and `github.com` push URLs, only for fork backup.
+    case gitHubAccessToken = "github-access-token"
+    /// The 6-month refresh token that silently renews the one above.
+    case gitHubRefreshToken = "github-refresh-token"
 }
 
 enum KeychainStoreError: Error, Equatable, Sendable {

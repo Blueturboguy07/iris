@@ -32,6 +32,9 @@ struct RecordedInstallProvenance: Codable, Equatable, Sendable {
     /// The guide's pinned source commit at install time — the base fixes
     /// diff against until the patch queue advances it.
     let pinnedCommit: String?
+    /// "owner/name" of the canonical repo — what the fork backup forks.
+    /// Optional so records written before it existed keep decoding.
+    let canonicalRepo: String?
     let recordedAt: Date
 }
 
@@ -55,12 +58,15 @@ final class InstallProvenanceStore {
 
     /// Called from guide completion, the one moment the facts are all in
     /// hand. Overwrites an older record: a re-install is a new provenance.
-    func recordGuideSourceClone(appSlug: String, clonePath: String, pinnedCommit: String?) {
+    func recordGuideSourceClone(
+        appSlug: String, clonePath: String, pinnedCommit: String?, canonicalRepo: String?
+    ) {
         byAppSlug[appSlug] = RecordedInstallProvenance(
             appSlug: appSlug,
             provenance: .guideSourceClone,
             clonePath: clonePath,
             pinnedCommit: pinnedCommit,
+            canonicalRepo: canonicalRepo,
             recordedAt: Date()
         )
         persist()
@@ -72,6 +78,7 @@ final class InstallProvenanceStore {
             provenance: .signedAppDownload,
             clonePath: nil,
             pinnedCommit: nil,
+            canonicalRepo: nil,
             recordedAt: Date()
         )
         persist()

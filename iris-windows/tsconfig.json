@@ -6,7 +6,16 @@
     "lib": ["ES2022"],
     "types": ["node"],
     "outDir": "dist",
-    "rootDir": ".",
+    // ".." (the publik repo root), not ".": `tests/maintain-break-signature.test.ts`
+    // imports `../../lib/break-signature.ts` directly, on purpose (see that
+    // module's header) — the parity test for the maintain-mode signature
+    // normalizer has to import the REAL web-side function to compare against,
+    // not a copy of it. `outDir` above is irrelevant to that: this config is
+    // check-only (`npm run typecheck` passes `--noEmit`); emission goes
+    // through `tsconfig.build.json`, which sets its own narrower `rootDir`
+    // and excludes `tests/` entirely, so widening this one has no effect on
+    // what actually ships.
+    "rootDir": "..",
     "strict": true,
     "noUncheckedIndexedAccess": false,
     "esModuleInterop": true,

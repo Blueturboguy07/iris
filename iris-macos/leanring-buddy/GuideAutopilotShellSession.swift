@@ -37,18 +37,49 @@
 
 import Foundation
 
-/// TEMPORARY file trace for diagnosing the autopilot empty-terminal wedge —
-/// os_log is not captured for this signed app, so append to a plain file at
-/// ~/iris-autopilot-trace.log instead. Module-internal so GuideSessionController
-/// writes to the same file. The message is built on the caller's actor, then the
-/// write hops to a serial queue, so no actor-isolated state is read off-actor.
-/// To be removed once the wedge is found.
-private let irisTraceQueue = DispatchQueue(label: "iris.autopilot.trace")
-private let irisTraceFilePath = (NSHomeDirectory() as NSString).appendingPathComponent("iris-autopilot-trace.log")
+/// The local diagnostic log — how the guide autopilot and maintain mode leave
+/// a play-by-play a person can read, since os_log is not captured for this
+/// signed app. It began life as a throwaway trace for the empty-terminal
+/// wedge and became genuinely useful for support and QA, so rather than a
+/// TEMPORARY file in the home directory it is a proper, bounded log:
+///
+///   - it lives in `~/Library/Logs/Iris/` (the conventional place a user or
+///     support would look), not loose in the home directory;
+///   - it is size-capped and rolls to one `.1` backup, so it can never grow
+///     without limit on a long-lived install;
+///   - it records STRUCTURE only — app slugs, exit codes, state flags, and
+///     random per-command sentinel tokens — never command text, command
+///     output, chat/wish text, crash evidence, or any credential. That rule
+///     is load-bearing: this file is plaintext and never leaves the machine,
+///     but it must still be safe for a user to read or hand to support.
+///
+/// The message is built on the caller's actor; the write hops to this serial
+/// queue, so the size check and roll below are race-free and no
+/// actor-isolated state is read off-actor.
+private let irisTraceQueue = DispatchQueue(label: "iris.diagnostic.log")
+private let irisLogDirectoryPath = (NSHomeDirectory() as NSString)
+    .appendingPathComponent("Library/Logs/Iris")
+private let irisTraceFilePath = (irisLogDirectoryPath as NSString)
+    .appendingPathComponent("iris.log")
+/// Roll at 512 KB; with one backup the log costs at most ~1 MB on disk.
+private let irisTraceMaximumBytes = 512 * 1024
 func irisTrace(_ message: String) {
     let line = message + "\n"
     irisTraceQueue.async {
         guard let data = line.data(using: .utf8) else { return }
+        let fileManager = FileManager.default
+        try? fileManager.createDirectory(
+            atPath: irisLogDirectoryPath, withIntermediateDirectories: true
+        )
+        // Roll before the write when the file has grown past the cap: the
+        // current log becomes iris.log.1 (replacing any older backup) and a
+        // fresh iris.log starts. Bounds total on-disk size to ~2x the cap.
+        if let attributes = try? fileManager.attributesOfItem(atPath: irisTraceFilePath),
+           let size = attributes[.size] as? Int, size > irisTraceMaximumBytes {
+            let rolledPath = irisTraceFilePath + ".1"
+            try? fileManager.removeItem(atPath: rolledPath)
+            try? fileManager.moveItem(atPath: irisTraceFilePath, toPath: rolledPath)
+        }
         if let handle = FileHandle(forWritingAtPath: irisTraceFilePath) {
             defer { try? handle.close() }
             handle.seekToEndOfFile()

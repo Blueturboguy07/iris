@@ -50,18 +50,37 @@ d=$(newrepo v5-sprawl)
 printf 'BROKEN\n' > "$d/app.txt"; commitall "$d"
 for i in $(seq 1 13); do printf 'touched\n' > "$d/file$i.txt"; done
 
+# --- Tier C repos: a real bug, committed clean. The fixer (driven by a mock
+#     model in main.swift) must derive+verify+commit the fix ITSELF. Left at
+#     the buggy committed state; the fixer does everything from there. --------
+for tc in tc1-correct tc2-nochange tc3-badfix tc4-escape; do
+  d=$(newrepo "$tc")
+  printf 'BROKEN\n' > "$d/app.txt"; printf 'OK\n' > "$d/health.txt"; commitall "$d"
+done
+
 # --- compile the battery against the real engine files -----------------------
 echo "compiling battery against the real engine…"
 BIN="$REPOS/harness"
 cat > "$REPOS/shim.swift" <<'SWIFT'
 import Foundation
 func irisTrace(_ message: String) {}
+// The model-provider seam, defined here so MaintainTierCFixer compiles
+// without dragging in ClaudeAPI/KeychainStore. Matches the real signatures
+// in MaintainModelProvider.swift exactly; the harness's ScriptedProvider
+// (in main.swift) conforms to it.
+struct MaintainChatTurn: Sendable { let role: String; let text: String }
+@MainActor protocol MaintainModelProviding: Sendable {
+    var displayName: String { get }
+    var isAvailable: Bool { get }
+    func respond(systemPrompt: String, conversation: [MaintainChatTurn], maximumOutputTokens: Int) async throws -> String
+}
 SWIFT
 swiftc -o "$BIN" -swift-version 5 -default-isolation MainActor \
   "$ENGINE/BreakSignatureService.swift" \
   "$ENGINE/VerificationHarness.swift" \
   "$ENGINE/MaintainShellRunner.swift" \
   "$ENGINE/MaintainSandbox.swift" \
+  "$ENGINE/MaintainTierCFixer.swift" \
   "$REPOS/shim.swift" \
   "$HERE/main.swift" 2>&1 | grep -E "error:" && { echo "COMPILE FAILED"; exit 2; }
 

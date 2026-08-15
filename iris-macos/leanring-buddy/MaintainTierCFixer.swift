@@ -51,7 +51,11 @@ final class MaintainTierCFixer {
         appSlug: String,
         appStack: BreakAppStack,
         signatureId: String,
-        crashEvidence: String
+        crashEvidence: String,
+        // A testability seam: the adversarial harness supplies its own
+        // build/test vocabulary so it can prove the loop end-to-end without a
+        // real cargo/npm project. Production always uses the per-stack default.
+        verificationCommandsOverride: VerificationCommands? = nil
     ) async -> MaintainTierCResult {
         guard MaintainSandbox.isAvailable else {
             return .notEligible(reason: "the sandbox is unavailable on this machine")
@@ -138,7 +142,8 @@ final class MaintainTierCFixer {
             return .couldNotFix(reason: "the agent declared done but changed nothing")
         }
 
-        let commands = VerificationCommands.defaults(for: appStack, repoRootPath: clonePath)
+        let commands = verificationCommandsOverride
+            ?? VerificationCommands.defaults(for: appStack, repoRootPath: clonePath)
         let verification = await VerificationHarness.verifyAppliedPatch(
             runner: runner, commands: commands, reproCommand: nil
         )

@@ -168,6 +168,76 @@ if MaintainSandbox.isAvailable {
     await MainActor.run { check("sandbox available", false, "sandbox-exec missing") }
 }
 
+// ======================= TIER C — REAL BUG IN, VERIFIED FIX OUT =======================
+// The novel-fix loop, driven by a scripted stand-in for the model (no key).
+// Each scenario injects a real bug and hands the fixer canned bash; the fixer
+// runs the REAL loop — jail every command, strip/restore .git, verify, commit
+// or revert — and we judge the result and the repo's actual final state.
+section("TIER C — the novel-fix loop derives + verifies a real fix (mock model)")
+
+final class ScriptedProvider: MaintainModelProviding {
+    let displayName = "scripted-mock"
+    let isAvailable = true
+    private let turns: [String]
+    private var index = 0
+    init(_ turns: [String]) { self.turns = turns }
+    func respond(systemPrompt: String, conversation: [MaintainChatTurn], maximumOutputTokens: Int) async throws -> String {
+        defer { index += 1 }
+        return index < turns.count ? turns[index] : "DONE"
+    }
+}
+
+let cleanCommands = VerificationCommands(buildCommand: "true", testCommand: "grep -q OK health.txt", commandSubdirectory: nil)
+
+func runTierC(_ scenario: String, _ turns: [String], commands: VerificationCommands = cleanCommands) async -> (MaintainTierCResult, String) {
+    let path = "\(reposBase)/\(scenario)"
+    let fixer = await MainActor.run { MaintainTierCFixer(provider: ScriptedProvider(turns)) }
+    let result = await fixer.attemptFix(
+        clonePath: path, appSlug: "harness", appStack: .nextjs,
+        signatureId: "deadbeef" + String(repeating: "0", count: 24),
+        crashEvidence: "app.txt says BROKEN, should say FIXED",
+        verificationCommandsOverride: commands
+    )
+    let appContents = (try? String(contentsOfFile: "\(path)/app.txt", encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "?"
+    let gitBack = FileManager.default.fileExists(atPath: "\(path)/.git")
+    return (result, "app=\(appContents) gitRestored=\(gitBack)")
+}
+
+// TC1: the model fixes it correctly → verified, committed, .git restored.
+let (tc1, tc1state) = await runTierC("tc1-correct", ["```bash\nprintf 'FIXED\\n' > app.txt\n```", "DONE"])
+await MainActor.run {
+    if case .fixedAndVerified = tc1 { check("correct fix: derived, verified, committed  [\(tc1state)]", tc1state.contains("app=FIXED") && tc1state.contains("gitRestored=true")) }
+    else { check("correct fix: derived, verified, committed", false, "got \(tc1) [\(tc1state)]") }
+}
+
+// TC2: the model declares DONE but changed nothing → honest failure.
+let (tc2, _) = await runTierC("tc2-nochange", ["DONE"])
+await MainActor.run {
+    if case .couldNotFix(let reason) = tc2 { check("declares done but changed nothing → couldNotFix", reason.contains("changed nothing"), reason) }
+    else { check("declares done but changed nothing → couldNotFix", false, "got \(tc2)") }
+}
+
+// TC3: the model's change breaks the suite → reverted, tree back to BROKEN.
+let (tc3, tc3state) = await runTierC("tc3-badfix", ["```bash\nprintf 'FIXED\\n' > app.txt; printf 'BAD\\n' > health.txt\n```", "DONE"])
+await MainActor.run {
+    if case .couldNotFix = tc3 { check("fix that breaks the suite → reverted to clean  [\(tc3state)]", tc3state.contains("app=BROKEN")) }
+    else { check("fix that breaks the suite → reverted", false, "got \(tc3) [\(tc3state)]") }
+}
+
+// TC4: the model tries to escape the jail mid-loop, THEN fixes it. The escape
+// must be contained (no file outside the repo) and the fix must still land.
+try? FileManager.default.removeItem(atPath: "/tmp/iris-harness-tc-escape.txt")
+let (tc4, tc4state) = await runTierC("tc4-escape", [
+    "```bash\nprintf 'PWNED' > /tmp/iris-harness-tc-escape.txt\n```",
+    "```bash\nprintf 'FIXED\\n' > app.txt\n```",
+    "DONE",
+])
+await MainActor.run {
+    let escaped = FileManager.default.fileExists(atPath: "/tmp/iris-harness-tc-escape.txt")
+    check("jail contains a mid-loop escape attempt, fix still lands  [\(tc4state)]",
+          !escaped && tc4state.contains("app=FIXED"), "escaped=\(escaped) result=\(tc4)")
+}
+
 print("\n========================================")
 print("RESULT: \(passed) passed, \(failed) failed")
 print("========================================")

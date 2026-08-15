@@ -217,6 +217,7 @@ final class CompanionManager: ObservableObject {
 
     private var summonHotkeyTransitionCancellable: AnyCancellable?
     private var accountStateChangeCancellable: AnyCancellable?
+    private var maintainAskCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
     /// Scheduled hide for transient cursor mode — cancelled if the user
     /// asks something else before the delay elapses.
@@ -507,6 +508,7 @@ final class CompanionManager: ObservableObject {
         currentResponseTask = nil
         summonHotkeyTransitionCancellable?.cancel()
         accountStateChangeCancellable?.cancel()
+        maintainAskCancellable?.cancel()
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
     }
@@ -522,6 +524,18 @@ final class CompanionManager: ObservableObject {
         // own refresh and its own frontmost tracking.
         Task { await appInventoryService.refreshInventory() }
         appInventoryService.startWatchingTheFrontmostApp()
+
+        // A raised ask must SURFACE itself — the app just crashed and left
+        // the screen; making the user go hunt for it is backwards. When a
+        // pending ask appears, open the EYE's bar (the interface), where the
+        // card renders above the ask field. Hard rate-limited (1/app/24h),
+        // so this can never become a nag.
+        maintainAskCancellable = maintainIncidentCoordinator.$pendingAsk
+            .receive(on: DispatchQueue.main)
+            .sink { ask in
+                guard ask != nil else { return }
+                NotificationCenter.default.post(name: .clickyMaintainAskRaised, object: nil)
+            }
 
         maintainIncidentCoordinator.catalogAppMatcher = { [weak self] processName, bundleIdentifier in
             self?.matchCatalogApp(processName: processName, bundleIdentifier: bundleIdentifier)

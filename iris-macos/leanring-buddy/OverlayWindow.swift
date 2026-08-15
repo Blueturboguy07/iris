@@ -469,6 +469,12 @@ struct BlueCursorView: View {
             // the one currently showing the eye acts on it.
             openTheInputBarFromTheSummonHotkey()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .clickyMaintainAskRaised)) { _ in
+            // Maintain mode found something and wants to ask. Open the eye's
+            // bar the same way the summon hotkey does; the ask card renders at
+            // the top of it. Same one-screen guard, so it opens once.
+            openTheInputBarFromTheSummonHotkey()
+        }
         .onAppear {
             // Set initial cursor position immediately before starting animation
             let mouseLocation = NSEvent.mouseLocation

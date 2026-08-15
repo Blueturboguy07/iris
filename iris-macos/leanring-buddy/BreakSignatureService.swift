@@ -256,6 +256,70 @@ enum BreakSignatureService {
         )
     }
 
+    /// A Rust panic, from a Tauri app's stderr (the loop's log tap, not an
+    /// .ips — a default Rust panic unwinds rather than crashing, so there is
+    /// no crash report). The message is normalized and the `file:line`
+    /// location kept as the anchor; the caller's location, never the panic
+    /// machinery, is the identity. v0-mangled generic hashes are already
+    /// stripped by `normalizeSymbol`, applied to the location.
+    static func rustPanicSignature(
+        appSlug: String, appStack: BreakAppStack, panicStderr: String
+    ) -> BreakSignature {
+        // Both formats: old `panicked at 'msg', src/f.rs:1:2` and new
+        // `panicked at src/f.rs:1:2:\nmsg`. Pull a file:line and a message.
+        let location = firstMatch(in: panicStderr, pattern: #"[\w./-]+\.rs:\d+(?::\d+)?"#) ?? "unknown.rs"
+        let fileOnly = String(location.split(separator: ":").first ?? "unknown.rs")
+        var message = firstMatch(in: panicStderr, pattern: #"(?<=panicked at ')[^']+"#)
+            ?? firstMatch(in: panicStderr, pattern: #"(?<=:\n)[^\n]+"#)
+            ?? panicStderr
+        message = normalizeMessage(message)
+        let composite = "\(appSlug)|\(appStack.rawValue)|rust-panic|\(fileOnly)|\(message)"
+        return BreakSignature(
+            signatureId: truncatedSHA256(composite),
+            appSlug: appSlug, appStack: appStack, kind: .rustPanic,
+            algoVersion: signatureAlgoVersion,
+            fingerprintStrict: "rust-panic|\(fileOnly)|\(message)",
+            fingerprintLoose: message,
+            topFrames: [], protoSignature: composite
+        )
+    }
+
+    /// An Electron renderer that went away. Categorical only — Chromium has
+    /// already bucketed it into one of its reasons (`crashed`, `oom`,
+    /// `killed`, `launch-failed`, …); there is no stack worth hashing, and a
+    /// renderer-gone reason is the whole identity.
+    static func electronRendererGoneSignature(appSlug: String, reason: String) -> BreakSignature {
+        let normalizedReason = normalizeMessage(reason)
+        let composite = "\(appSlug)|electron|renderer-gone|\(normalizedReason)"
+        return BreakSignature(
+            signatureId: truncatedSHA256(composite),
+            appSlug: appSlug, appStack: .electron, kind: .jsException,
+            algoVersion: signatureAlgoVersion,
+            fingerprintStrict: "renderer-gone|\(normalizedReason)",
+            fingerprintLoose: "renderer-gone|\(normalizedReason)",
+            topFrames: [], protoSignature: composite
+        )
+    }
+
+    /// Out of memory. Deliberately no stack — an OOM's stack is wherever the
+    /// last allocation happened to land, which is noise; the identity is just
+    /// "this app OOMs".
+    static func outOfMemorySignature(appSlug: String, appStack: BreakAppStack) -> BreakSignature {
+        let composite = "\(appSlug)|\(appStack.rawValue)|oom"
+        return BreakSignature(
+            signatureId: truncatedSHA256(composite),
+            appSlug: appSlug, appStack: appStack, kind: .oom,
+            algoVersion: signatureAlgoVersion,
+            fingerprintStrict: "oom", fingerprintLoose: "oom",
+            topFrames: [], protoSignature: composite
+        )
+    }
+
+    private static func firstMatch(in text: String, pattern: String) -> String? {
+        guard let range = text.range(of: pattern, options: .regularExpression) else { return nil }
+        return String(text[range])
+    }
+
     static func launchFailureSignature(
         appSlug: String, appStack: BreakAppStack, daemon: String, normalizedReason: String
     ) -> BreakSignature {

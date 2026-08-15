@@ -31,6 +31,11 @@ extension Notification.Name {
     /// Posted when an `iris://guide/…` link arrives and the panel has to come
     /// forward to show it, whether or not it was already open.
     static let clickyShowPanel = Notification.Name("clickyShowPanel")
+    /// Posted when maintain mode raises an ask (a confirmed-worthy crash or
+    /// hang). The overlay answers it by opening the eye's bar so the ask card
+    /// is in front of the reader — the eye is the interface, not a settings
+    /// dropdown they would have to go find after their app just vanished.
+    static let clickyMaintainAskRaised = Notification.Name("clickyMaintainAskRaised")
 }
 
 /// Custom NSPanel subclass that can become the key window even with

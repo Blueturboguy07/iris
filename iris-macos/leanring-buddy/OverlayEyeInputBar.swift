@@ -477,6 +477,13 @@ struct OverlayEyeInputBarView: View {
                 // down — see `theCenteredTakeoverIsCoveringTheScreen`.
                 EmptyView()
             } else {
+                // A maintain-mode ask outranks everything else in the bar: the
+                // reader's app just crashed, and this is the card the whole
+                // feature exists to show. It renders above the guide card and
+                // the field, and observes the coordinator itself so it appears
+                // and clears without the bar being rebuilt.
+                MaintainAskCard(coordinator: companionManager.maintainIncidentCoordinator)
+
                 // The guide sits above the field, not inside the settings dropdown.
                 // The reader following instructions is doing the main thing Iris is
                 // for; asking a question about the step is the secondary thing, and

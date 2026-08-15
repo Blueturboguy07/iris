@@ -113,12 +113,28 @@ enum VerificationHarness {
     ///
     /// The tree is left in the applied state on success, and restored to the
     /// applied state after leg 3's revert — the caller owns committing.
+    /// The most files a single fix may touch before it stops looking like a
+    /// fix and starts looking like a refactor (or a mistake). Google's
+    /// small-CL guidance is the reference; a maintain-mode fix should be far
+    /// under it.
+    static let maximumFilesTouched = 12
+
     static func verifyAppliedPatch(
         runner: MaintainShellRunner,
         commands: VerificationCommands,
         reproCommand: String?
     ) async -> VerificationOutcome {
         var outcome = VerificationOutcome()
+
+        // Diff-scope gate, FIRST — before a single build or test runs. A fix
+        // that passes the suite can still be wrong in ways the suite cannot
+        // see: it deletes the failing test to go green, or it sprawls across
+        // the codebase. The suite is necessary, not sufficient; this is the
+        // other half. A block here is as hard as a failed leg.
+        let scope = await enforceDiffScope(runner: runner)
+        guard scope.ok else {
+            return blocked(&outcome, stage: "diff-scope", tail: scope.reason ?? "diff-scope violation")
+        }
 
         // Legs 1–3 only exist when a repro test does.
         if let reproCommand {
@@ -183,6 +199,57 @@ enum VerificationHarness {
         }
 
         return outcome
+    }
+
+    /// Reads the applied (uncommitted) diff and blocks a fix that touches too
+    /// many files or weakens tests. Uses `git diff --numstat HEAD`, so it
+    /// sees exactly what the patch changed against the last commit.
+    private static func enforceDiffScope(
+        runner: MaintainShellRunner
+    ) async -> (ok: Bool, reason: String?) {
+        guard let result = try? await runner.run("git diff --numstat HEAD", deadline: 60),
+              result.succeeded else {
+            // Can't read the diff → can't vouch for its scope → fail closed.
+            return (false, "could not read the diff to check its scope")
+        }
+        let lines = result.outputTail
+            .split(separator: "\n")
+            .map(String.init)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+
+        // `git diff` only sees TRACKED changes — a fix that ADDS new files
+        // (whole new modules, or a pile of junk) is invisible to it. Count
+        // untracked files too, or the file-count limit is trivially evaded.
+        let untracked = (try? await runner.run("git ls-files --others --exclude-standard", deadline: 60))?
+            .outputTail
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty } ?? []
+
+        let totalFiles = lines.count + untracked.count
+        guard totalFiles > 0 else { return (true, nil) } // nothing changed
+
+        if totalFiles > maximumFilesTouched {
+            return (false, "touches \(totalFiles) files (\(lines.count) changed, \(untracked.count) new), over the \(maximumFilesTouched)-file limit for one fix")
+        }
+
+        for line in lines {
+            // numstat: "<added>\t<deleted>\t<path>". A binary file shows "-".
+            let fields = line.split(separator: "\t", maxSplits: 2).map(String.init)
+            guard fields.count == 3 else { continue }
+            let added = Int(fields[0]) ?? 0
+            let deleted = Int(fields[1]) ?? 0
+            let path = fields[2].lowercased()
+            let looksLikeATest = path.contains("test") || path.contains("spec")
+                || path.contains("__tests__")
+            // A fix that removes more test lines than it adds is weakening the
+            // very thing that would catch a regression — the classic "delete
+            // the failing test to go green". Blocked outright.
+            if looksLikeATest && deleted > added {
+                return (false, "weakens tests in \(fields[2]) (-\(deleted)/+\(added))")
+            }
+        }
+        return (true, nil)
     }
 
     private static func blocked(

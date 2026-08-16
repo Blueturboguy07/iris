@@ -47,16 +47,15 @@
  *     never a separately-looked-up installed version. Wiring a real
  *     `installedVersionLookup` closure through here is additive once that
  *     service exists.
- *   - The OpenAI BYO key and the GitHub device-flow token pair are read from
- *     `secrets.ts`, whose `SecretName` union does not yet include
- *     `"openaiApiKey" | "gitHubAccessToken" | "gitHubRefreshToken"` (flagged
- *     in `model-provider.ts`'s and `github-fork-service.ts`'s own headers).
- *     Until that one-line type edit lands: `readOpenAiApiKey` below always
- *     answers `null` (Tier C runs on the Anthropic BYO key only, which IS
- *     wired for real), and the GitHub fork-backup token pair uses
- *     `InMemoryGitHubTokenStorage` — the feature works for the running
- *     session but starts "not connected" again on every relaunch, an honest
- *     degrade rather than a crash or a fabricated persistence layer.
+ *   - The OpenAI BYO key stays deliberately unwired: `readOpenAiApiKey` below
+ *     always answers `null`, so Tier C runs on the Anthropic BYO key alone.
+ *     This is policy, not an interlock — Iris is Anthropic-only (`CLAUDE.md`,
+ *     "Do not reintroduce ... a non-Anthropic provider"), even though the
+ *     ported `model-provider.ts` still carries the macOS `OpenAIMaintainProvider`
+ *     class. Reintroducing OpenAI is a founder decision, not a wiring gap.
+ *     (The GitHub device-flow token pair, by contrast, is now persisted for
+ *     real through `safeStorage` — see `github-token-storage.ts` — so a
+ *     connected fork-backup survives relaunch, matching macOS's Keychain pair.)
  *   - `install-provenance.ts`'s own interlock: nothing here calls
  *     `InstallProvenanceStore.recordGuideSourceClone` on a successful
  *     autopilot install finish (`main/autopilot-controller.ts`'s
@@ -79,7 +78,8 @@ import type { BreakAppStack, ParsedWindowsCrash } from "../../services/maintain/
 import { defaultVerificationCommandsForStack } from "../../services/maintain/incoming-fix-reviewer";
 import { MaintainInstallIdentity } from "../../services/maintain/install-identity";
 import { InstallProvenanceStore } from "../../services/maintain/install-provenance";
-import { GitHubForkService, InMemoryGitHubTokenStorage } from "../../services/maintain/github-fork-service";
+import { GitHubForkService } from "../../services/maintain/github-fork-service";
+import { SecretsBackedGitHubTokenStorage } from "./github-token-storage";
 import { firstAvailableMaintainProvider } from "../../services/maintain/model-provider";
 import { FileSystemPatchQueueStorage, PatchQueue } from "../../services/maintain/patch-queue";
 import { MaintainPoolClient } from "../../services/maintain/pool-client";
@@ -113,10 +113,10 @@ export class MaintainController {
     this.installIdentity = new MaintainInstallIdentity({ persistence: this.stateStore });
     this.patchQueue = new PatchQueue(new FileSystemPatchQueueStorage(path.join(this.userDataPath(), "patch-queue")));
     this.gitHubForkService = new GitHubForkService({
-      // INTERLOCK: `InMemoryGitHubTokenStorage`, not a `secrets.ts`-backed
-      // pair — see the module header. Swapping this for real persisted
-      // tokens is a one-line change once `SecretName` carries them.
-      tokenStorage: new InMemoryGitHubTokenStorage(),
+      // Persisted for real through `safeStorage` (DPAPI), the Windows analog of
+      // the Keychain pair `iris-macos` keeps — so a connected fork-backup
+      // survives relaunch. See `github-token-storage.ts`.
+      tokenStorage: new SecretsBackedGitHubTokenStorage(),
       openExternal: (url) => {
         void shell.openExternal(url);
       },
@@ -246,9 +246,10 @@ export class MaintainController {
   ): Promise<string | undefined> {
     const modelProvider = firstAvailableMaintainProvider({
       readAnthropicApiKey: () => readSecret("anthropicApiKey"),
-      // INTERLOCK: no `"openaiApiKey"` in `secrets.ts`'s `SecretName` yet —
-      // see the module header. Tier C runs on the Anthropic key only until
-      // that lands.
+      // Deliberately null: Iris is Anthropic-only (`CLAUDE.md`), so Tier C
+      // never runs on OpenAI even though `model-provider.ts` still carries the
+      // ported provider. This is policy — see the module header — not a
+      // pending interlock.
       readOpenAiApiKey: () => null,
     });
     if (modelProvider === undefined) {

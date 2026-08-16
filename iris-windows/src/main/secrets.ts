@@ -10,12 +10,21 @@
  * ciphertext is bound to the Windows user account and is useless if the file is
  * copied off the machine.
  *
- * There are exactly two secrets, matching `iris-macos`'s `KeychainStore`:
+ * The secrets here match `iris-macos`'s `KeychainStore`:
  *   - the user's own Anthropic API key (BYO tier)
  *   - the Supabase refresh token
+ *   - maintain mode's GitHub device-flow token pair (fork-backup), the Windows
+ *     analog of the pair `iris-macos` keeps in the Keychain — see
+ *     `main/maintain/github-token-storage.ts`. These reach api.github.com only,
+ *     never a publik host, so they sit alongside the Anthropic BYO key rather
+ *     than violating the key-isolation rule.
  *
- * The access token is deliberately NOT here: it lives in memory only, per
- * protocol section 4.
+ * The Supabase access token is deliberately NOT here: it lives in memory only,
+ * per protocol section 4. There is no OpenAI slot on purpose: Iris is
+ * Anthropic-only (see `CLAUDE.md`, "Do not reintroduce ... a non-Anthropic
+ * provider"), so maintain mode's Tier C fixer runs on the Anthropic BYO key
+ * alone even though the ported `model-provider.ts` still carries the macOS
+ * `OpenAIMaintainProvider` class.
  *
  * Neither value is ever logged. `toString()` is overridden nowhere because
  * nothing in this module ever returns a wrapper — the raw string leaves only
@@ -27,7 +36,11 @@ import { app, safeStorage } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-export type SecretName = "anthropicApiKey" | "supabaseRefreshToken";
+export type SecretName =
+  | "anthropicApiKey"
+  | "supabaseRefreshToken"
+  | "gitHubAccessToken"
+  | "gitHubRefreshToken";
 
 interface SecretFileContents {
   /** base64 of the DPAPI ciphertext, keyed by secret name. */

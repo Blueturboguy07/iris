@@ -15,6 +15,8 @@ import { boundedCommandOutput, toolSpecFor } from "../services/tool-versions";
 import { secretStorageIsAvailable } from "./secrets";
 import { AutopilotController } from "./autopilot-controller";
 import type { RecipeOutput } from "../services/autopilot/recipe";
+import { MaintainController, type MaintainHost } from "./maintain/controller";
+import type { MaintainAskAnswer, MaintainIncidentSnapshot } from "../services/maintain/incident-coordinator";
 
 /**
  * index.ts
@@ -34,6 +36,7 @@ let overlayWindows: BrowserWindow[] = [];
 const settings = new SettingsStore();
 const account = new AccountSession(settings);
 let companion: CompanionManager;
+let maintain: MaintainController;
 let cursorBuddyInterval: ReturnType<typeof setInterval> | null = null;
 
 /** A guide link that arrived before the panel was ready to receive it. */
@@ -476,6 +479,137 @@ function collapseAutopilotWindow(): void {
   });
 }
 
+// MARK: - Maintain mode's ask card
+//
+// The one piece of UI maintain mode has: a small always-on-top card, bottom-
+// right of the display the cursor is on — the notification corner, distinct
+// from the autopilot's top-left eye so an install and an ask can never
+// contend for the same spot. It appears the moment the coordinator has
+// something to show (a pending ask, or a fix-status line after one was
+// answered) and disappears the moment it does not — mirrored from Swift's
+// `MaintainAskCard`, whose body "renders nothing when there is nothing to
+// ask... which is almost always, by design." Unlike the overlay windows, this
+// one is NOT click-through: the three answer buttons need real clicks, so it
+// stays a small ordinary (if frameless, transparent, and non-activating on
+// first appearance) window rather than joining `overlayWindows`.
+
+let maintainWindow: BrowserWindow | null = null;
+let maintainWindowReady = false;
+let pendingMaintainSnapshot: MaintainIncidentSnapshot | null = null;
+
+const MAINTAIN_CARD_WIDTH = 340;
+/** Just tall enough for nothing — the window still exists at this height for
+ *  an instant between `showInactive()` and the renderer's first real
+ *  `maintain:resize` call, which happens within one animation frame of the
+ *  card's content actually painting. */
+const MAINTAIN_CARD_COLLAPSED_HEIGHT = 40;
+const MAINTAIN_CARD_MAX_HEIGHT = 440;
+
+/** Bottom-right of whatever display the cursor is on, sized to `height` and
+ *  clamped to a sane range — the renderer measures its own content and calls
+ *  back through `maintain:resize` (mirrors Swift's `clickyResizePanelToContent`
+ *  notification, posted from `MaintainAskCard`'s `onAppear`/`onDisappear`). */
+function maintainCardRect(height: number): Rect {
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const margin = 24;
+  const clampedHeight = Math.max(MAINTAIN_CARD_COLLAPSED_HEIGHT, Math.min(MAINTAIN_CARD_MAX_HEIGHT, Math.round(height)));
+  return {
+    x: display.workArea.x + display.workArea.width - MAINTAIN_CARD_WIDTH - margin,
+    y: display.workArea.y + display.workArea.height - clampedHeight - margin,
+    width: MAINTAIN_CARD_WIDTH,
+    height: clampedHeight,
+  };
+}
+
+function createMaintainWindow(): BrowserWindow {
+  const window = new BrowserWindow({
+    ...maintainCardRect(MAINTAIN_CARD_COLLAPSED_HEIGHT),
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    closable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    hasShadow: false,
+    show: false,
+    backgroundColor: "#00000000",
+    webPreferences: {
+      preload: preloadPath(),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  window.setAlwaysOnTop(true, "screen-saver");
+  void window.loadFile(rendererPath("maintain", "index.html"));
+  window.webContents.once("did-finish-load", () => {
+    maintainWindowReady = true;
+    if (pendingMaintainSnapshot) {
+      window.webContents.send("maintain:snapshot", pendingMaintainSnapshot);
+      pendingMaintainSnapshot = null;
+    }
+  });
+  window.on("closed", () => {
+    maintainWindow = null;
+    maintainWindowReady = false;
+  });
+  return window;
+}
+
+function maintainWindowInstance(): BrowserWindow {
+  if (maintainWindow && !maintainWindow.isDestroyed()) return maintainWindow;
+  maintainWindow = createMaintainWindow();
+  return maintainWindow;
+}
+
+/** True exactly when the coordinator has nothing to show — the same
+ *  condition `incident-coordinator.ts`'s own `currentSnapshot()` collapses
+ *  to `EMPTY_SNAPSHOT` on. */
+function maintainSnapshotIsEmpty(snapshot: MaintainIncidentSnapshot): boolean {
+  return snapshot.pendingAsk === null && snapshot.fixStatusLine === null && snapshot.fixGuidanceSteps.length === 0;
+}
+
+function showMaintainCard(snapshot: MaintainIncidentSnapshot): void {
+  const window = maintainWindowInstance();
+  const currentHeight = window.isVisible() ? window.getBounds().height : MAINTAIN_CARD_COLLAPSED_HEIGHT;
+  window.setBounds(maintainCardRect(currentHeight));
+  if (maintainWindowReady) {
+    window.webContents.send("maintain:snapshot", snapshot);
+  } else {
+    pendingMaintainSnapshot = snapshot;
+  }
+  if (!window.isVisible()) {
+    // Inactive, like the overlay windows: an ask card that steals focus the
+    // instant it appears would yank the keyboard out from under whatever the
+    // reader was doing when the app crashed.
+    window.showInactive();
+    window.setAlwaysOnTop(true, "screen-saver");
+  }
+}
+
+function hideMaintainCard(): void {
+  if (maintainWindow && !maintainWindow.isDestroyed() && maintainWindow.isVisible()) {
+    maintainWindow.hide();
+  }
+}
+
+/** The host `MaintainController` pushes every observable state change
+ *  through — the main-process half of the push/pull pair
+ *  `incident-coordinator.ts`'s header describes. */
+function maintainHost(): MaintainHost {
+  return {
+    emitSnapshot: (snapshot) => {
+      if (maintainSnapshotIsEmpty(snapshot)) {
+        hideMaintainCard();
+      } else {
+        showMaintainCard(snapshot);
+      }
+    },
+  };
+}
+
 /** The one autopilot controller, built lazily. Its host turns runner events into
  *  the app-only side effects: streaming to the terminal, opening links, floating
  *  to a gate, and opening the finished app. */
@@ -662,6 +796,22 @@ function setupIPC(): void {
   ipcMain.handle("window:close", (event) => {
     BrowserWindow.fromWebContents(event.sender)?.close();
   });
+
+  // ── Maintain mode ────────────────────────────────────────────────────────
+  // The five calls the ask card drives, plus the resize callback described in
+  // `showMaintainCard`'s comment. `maintain:snapshot` (the push half) is sent
+  // directly to `maintainWindow`, not broadcast to every window, since the
+  // card is the only renderer that ever needs it.
+  ipcMain.handle("maintain:getSnapshot", () => maintain.currentSnapshot());
+  ipcMain.handle("maintain:answerAsk", (_event, answer: MaintainAskAnswer) => maintain.answerAsk(answer));
+  ipcMain.handle("maintain:clearFixStatus", () => maintain.clearFixStatus());
+  ipcMain.handle("maintain:mutedApps", () => maintain.mutedApps());
+  ipcMain.handle("maintain:unmuteApp", (_event, appSlug: string) => maintain.unmuteApp(appSlug));
+  ipcMain.handle("maintain:resize", (_event, height: number) => {
+    if (maintainWindow && !maintainWindow.isDestroyed()) {
+      maintainWindow.setBounds(maintainCardRect(height));
+    }
+  });
 }
 
 // MARK: - Bootstrap
@@ -672,6 +822,7 @@ if (gotSingleInstanceLock) {
 
     overlayWindows = createOverlayWindows();
     companion = new CompanionManager(settings, account, overlayWindows);
+    maintain = new MaintainController(maintainHost());
 
     setupIPC();
 
@@ -717,6 +868,12 @@ if (gotSingleInstanceLock) {
     if (demoSlug && demoSlug.length > 0) {
       openAutopilotWindow(demoSlug);
     }
+
+    // Same idiom, maintain mode's side: `IRIS_MAINTAIN_DEMO_CRASH=<slug>`
+    // raises a synthetic ask a few seconds in, so the whole ladder — ask
+    // card, pool round trip, fix status — is provable with no real crash and
+    // no catalog app with a known Windows exe (see `controller.ts`'s header).
+    maintain.triggerDemoIncidentIfConfigured();
 
     console.log("Iris for Windows started — running in the system tray");
   });

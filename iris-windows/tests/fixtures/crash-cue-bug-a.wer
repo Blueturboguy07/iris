@@ -1,0 +1,27 @@
+Version=1
+EventType=APPCRASH
+ReportType=2
+Consent=1
+ReportIdentifier=3f1a2b4c-0011-4a5b-9e21-abfe0012aa01
+Sig[0].Name=Application Name
+Sig[0].Value=cue.exe
+Sig[1].Name=Application Version
+Sig[1].Value=0.2.3.0
+Sig[2].Name=Application Timestamp
+Sig[2].Value=66b1c2a0
+Sig[3].Name=Fault Module Name
+Sig[3].Value=cue.exe
+Sig[4].Name=Fault Module Version
+Sig[4].Value=0.2.3.0
+Sig[5].Name=Fault Module Timestamp
+Sig[5].Value=66b1c2a0
+Sig[6].Name=Exception Code
+Sig[6].Value=c0000005
+Sig[7].Name=Exception Offset
+Sig[7].Value=0000000000012345
+AppPath=C:\Users\test\AppData\Local\Programs\cue\cue.exe
+AppName=cue.exe
+
+[dynamic data]
+Bucket=123456789
+BucketTable=5

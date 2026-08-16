@@ -8,7 +8,8 @@ import { contextBridge, ipcRenderer } from "electron";
  * renderer can do.
  *
  * Two surfaces are exposed:
- *   `window.iris`       — the chat, overlay, and settings windows.
+ *   `window.iris`       — the chat, overlay, settings, and maintain-mode ask
+ *                         card windows.
  *   `window.irisNative` — the generic command/event pair the transplanted guide
  *                         panel needs. `src/renderer/guide/iris-bridge.js`
  *                         reshapes it into the `window.__TAURI__` object that
@@ -56,6 +57,23 @@ contextBridge.exposeInMainWorld("iris", {
   openExternal: (url: string) => ipcRenderer.invoke("shell:openExternal", url),
   minimizeWindow: () => ipcRenderer.invoke("window:minimize"),
   closeWindow: () => ipcRenderer.invoke("window:close"),
+
+  // Maintain mode. The ask card (src/renderer/maintain) is the only renderer
+  // that calls these — see `main/index.ts`'s "Maintain mode" section and
+  // `services/maintain/incident-coordinator.ts`'s `MaintainIncidentSnapshot`.
+  getMaintainSnapshot: () => ipcRenderer.invoke("maintain:getSnapshot"),
+  answerMaintainAsk: (answer: "somethingIsBroken" | "thatWasMe" | "neverAskAboutThisApp") =>
+    ipcRenderer.invoke("maintain:answerAsk", answer),
+  clearMaintainFixStatus: () => ipcRenderer.invoke("maintain:clearFixStatus"),
+  mutedMaintainApps: () => ipcRenderer.invoke("maintain:mutedApps"),
+  unmuteMaintainApp: (appSlug: string) => ipcRenderer.invoke("maintain:unmuteApp", appSlug),
+  /** The card measures its own rendered height and reports it back so the
+   *  (frameless, non-resizable-by-the-OS) window can be sized to fit — see
+   *  `main/index.ts`'s `maintainCardRect`. */
+  resizeMaintainCard: (height: number) => ipcRenderer.invoke("maintain:resize", height),
+  onMaintainSnapshot: (callback: (snapshot: unknown) => void) => {
+    ipcRenderer.on("maintain:snapshot", (_event, snapshot) => callback(snapshot));
+  },
 });
 
 /** The generic bridge the transplanted guide panel drives. */

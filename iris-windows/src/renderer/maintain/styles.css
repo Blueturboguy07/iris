@@ -1,0 +1,170 @@
+/* Maintain mode's ask card — the dark glass shell + #6f8cff accent transcribed
+   from iris-desktop/ui/styles.css (via iris-macos/leanring-buddy/DesignSystem.swift),
+   same tokens `renderer/autopilot/styles.css` already uses on this side. The
+   ask itself borrows Swift's amber (DS.Colors.amber, ~10%/35% opacity fill/
+   border) so it reads as "needs your attention" without being alarming; the
+   fix-status card that follows a "yes" is the neutral glass shell, with green
+   reserved for the one line that means "a known fix exists for this." */
+
+:root {
+  --shell-bg: rgba(22, 22, 26, 0.92);
+  --card-bg: rgba(255, 255, 255, 0.05);
+  --card-border: rgba(255, 255, 255, 0.12);
+  --text: #e6e6ea;
+  --dim: #a9a9b3;
+  --accent: #6f8cff;
+  --accent-ink: #0b1220;
+  --amber: #f5c451;
+  --amber-bg: rgba(245, 196, 81, 0.1);
+  --amber-border: rgba(245, 196, 81, 0.35);
+  --green: #6ee7a8;
+  --mono: -apple-system, "Segoe UI", "SF Pro Text", system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  font-family: var(--mono);
+  color: var(--text);
+  -webkit-user-select: none;
+  user-select: none;
+  overflow: hidden;
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 2px;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.card[hidden] {
+  display: none;
+}
+
+.ask-card {
+  background: var(--amber-bg);
+  border-color: var(--amber-border);
+}
+
+.ask-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.badge {
+  display: inline-flex;
+  color: var(--amber);
+  flex: 0 0 auto;
+}
+
+.ask-header h1 {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.35;
+}
+
+.evidence,
+.status {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.status {
+  color: var(--text);
+}
+
+.known-fix {
+  margin: 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--green);
+}
+
+.steps {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.steps[hidden] {
+  display: none;
+}
+
+.steps li {
+  font-size: 10.5px;
+  color: var(--dim);
+  line-height: 1.5;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+button {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  border-radius: 999px;
+  padding: 6px 12px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+button.primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+  border-color: transparent;
+}
+
+button.primary:hover {
+  filter: brightness(1.06);
+}
+
+button.text {
+  background: transparent;
+  color: var(--dim);
+  border-color: rgba(255, 255, 255, 0.14);
+  padding: 6px 10px;
+}
+
+button.text:hover {
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.28);
+}

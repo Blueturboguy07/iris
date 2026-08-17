@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   InMemoryInstallProvenancePersistence,
   InstallProvenanceStore,
+  decideInstallProvenance,
   gitDirectoryExists,
 } from "../src/services/maintain/install-provenance";
 
@@ -14,6 +15,84 @@ import {
  * is the one function every downstream maintain-mode module checks before
  * touching a file, so it gets the most direct coverage here.
  */
+
+describe("decideInstallProvenance — the pure install-finish decision", () => {
+  it("records a guide-source clone for a desktop app that cloned, carrying repo + commit + clone path", () => {
+    expect(
+      decideInstallProvenance({
+        outputType: "desktop_app",
+        clonedARepo: true,
+        clonePath: "C:\\Users\\test\\publikclip",
+        canonicalRepo: "Blueturboguy07/publikclip",
+        pinnedCommit: "a53a359b985b1d2d666266062936cc186f02340b",
+      })
+    ).toEqual({
+      kind: "guide_source_clone",
+      clonePath: "C:\\Users\\test\\publikclip",
+      canonicalRepo: "Blueturboguy07/publikclip",
+      pinnedCommit: "a53a359b985b1d2d666266062936cc186f02340b",
+    });
+  });
+
+  it("records a signed download for a desktop app that did not clone", () => {
+    expect(
+      decideInstallProvenance({
+        outputType: "desktop_app",
+        clonedARepo: false,
+        clonePath: undefined,
+        canonicalRepo: undefined,
+        pinnedCommit: undefined,
+      })
+    ).toEqual({ kind: "signed_app_download" });
+  });
+
+  it("fails closed to a signed download when a clone is claimed but no clone path landed", () => {
+    // A guide_source_clone whose path we cannot pin is unpatchable — the D4
+    // gate's "unknown = signed = don't touch it" instinct applies here too.
+    expect(
+      decideInstallProvenance({
+        outputType: "desktop_app",
+        clonedARepo: true,
+        clonePath: undefined,
+        canonicalRepo: "Blueturboguy07/publikclip",
+        pinnedCommit: "abc",
+      })
+    ).toEqual({ kind: "signed_app_download" });
+  });
+
+  it("nulls a missing repo/commit rather than recording undefined", () => {
+    expect(
+      decideInstallProvenance({
+        outputType: "desktop_app",
+        clonedARepo: true,
+        clonePath: "C:\\clone",
+        canonicalRepo: undefined,
+        pinnedCommit: undefined,
+      })
+    ).toEqual({ kind: "guide_source_clone", clonePath: "C:\\clone", canonicalRepo: null, pinnedCommit: null });
+  });
+
+  it("records nothing for a local_web install — a dev server has no binary to patch", () => {
+    expect(
+      decideInstallProvenance({
+        outputType: "local_web",
+        clonedARepo: true,
+        clonePath: "C:\\Users\\test\\OpenASCII",
+        canonicalRepo: "Blueturboguy07/OpenASCII",
+        pinnedCommit: "8fc32ce",
+      })
+    ).toEqual({ kind: "none" });
+  });
+
+  it("records nothing for a credential or none install", () => {
+    expect(
+      decideInstallProvenance({ outputType: "credential", clonedARepo: false, clonePath: undefined, canonicalRepo: undefined, pinnedCommit: undefined })
+    ).toEqual({ kind: "none" });
+    expect(
+      decideInstallProvenance({ outputType: "none", clonedARepo: false, clonePath: undefined, canonicalRepo: undefined, pinnedCommit: undefined })
+    ).toEqual({ kind: "none" });
+  });
+});
 
 describe("recording provenance", () => {
   it("records a guide-source clone with every field the guide-completion moment supplies", () => {

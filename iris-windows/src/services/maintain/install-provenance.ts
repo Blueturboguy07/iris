@@ -16,16 +16,18 @@
  * "never guess" invariant the macOS `AppInventoryService` holds for bundle
  * identity, and the same one this file holds for install identity.
  *
- * INTERLOCK (not this task's file, flagged per the porting spec's ground
- * rules — §5, gap 2): recording a `guide_source_clone` provenance needs
- * `canonicalRepo` and the pinned commit at recipe completion, which
- * `services/autopilot/recipe.ts`'s `InstallRecipe`/`RecipeOutput` do not
- * currently carry, and `main/autopilot-controller.ts` does not yet call this
- * store on a successful `RunnerStatus.finished`. Whoever wires that up calls
- * `InstallProvenanceStore.recordGuideSourceClone` at that moment; nothing in
- * this file assumes it has already happened, and until it does,
- * `localPatchingIsPermitted` never returns true for a freshly-autopiloted
- * install — an honest degrade (replay/Tier-C simply never fires), not a
+ * INTERLOCK (now wired — the gap the porting spec §5, gap 2 flagged is closed):
+ * recording a `guide_source_clone` provenance needs `canonicalRepo` and the
+ * pinned commit at recipe completion. `services/autopilot/recipe.ts`'s
+ * `InstallRecipe` now carries both (`canonicalRepo`/`pinnedCommit`), and
+ * `main/autopilot-controller.ts`'s `onFinished` now hands the finished install
+ * — its output kind, whether it cloned, and the shell's clone path — to
+ * `main/maintain/controller.ts`'s `recordInstallProvenance`, which runs the
+ * pure `decideInstallProvenance` below and calls `recordGuideSourceClone` or
+ * `recordSignedDownload` accordingly. Nothing in this file assumes any
+ * particular caller drives it; before an install finishes for a given app,
+ * `localPatchingIsPermitted` still returns false for it — an honest degrade
+ * (replay/Tier-C simply never fires until provenance is recorded), not a
  * crash.
  *
  * This file is pure: like `install-identity.ts`, it never imports `electron`.
@@ -138,6 +140,74 @@ export interface RecordGuideSourceCloneOptions {
   readonly clonePath: string;
   readonly pinnedCommit: string | null;
   readonly canonicalRepo: string | null;
+}
+
+/** The facts an autopilot install finish has in hand about what it produced,
+ *  fed to `decideInstallProvenance`. A structural shape rather than an import
+ *  of `autopilot/recipe.ts` so this pure decision stays inside `services/`
+ *  with no dependency on the runner it happens to be driven by. */
+export interface FinishedInstallProvenanceFacts {
+  /** The recipe's `RecipeOutput` kind — `desktop_app` / `local_web` /
+   *  `credential` / `none`. */
+  readonly outputType: "desktop_app" | "local_web" | "credential" | "none";
+  /** True when running the recipe cloned a source repo (see
+   *  `autopilot/recipe.ts`'s `recipeClonesARepo`). */
+  readonly clonedARepo: boolean;
+  /** The shell's working directory at finish — after a cloning recipe cd's
+   *  into its clone, this IS the clone path. `undefined` for a recipe that
+   *  never entered a clone. */
+  readonly clonePath: string | undefined;
+  readonly canonicalRepo: string | undefined;
+  readonly pinnedCommit: string | undefined;
+}
+
+/** The provenance a finished install should record, or `none` when it records
+ *  nothing at all (a `local_web`/`credential` install is not an app on disk
+ *  maintain mode patches). A discriminated union so the caller cannot forget a
+ *  field — the `guide_source_clone` case carries exactly what
+ *  `recordGuideSourceClone` needs. */
+export type InstallProvenanceDecision =
+  | {
+      readonly kind: "guide_source_clone";
+      readonly clonePath: string;
+      readonly pinnedCommit: string | null;
+      readonly canonicalRepo: string | null;
+    }
+  | { readonly kind: "signed_app_download" }
+  | { readonly kind: "none" };
+
+/**
+ * The pure mirror of macOS `CompanionManager.recordInstallProvenance`: decides
+ * WHICH provenance a finished install writes, without touching the store, so
+ * the decision is testable on its own.
+ *
+ * Two gates, in the same order as Swift:
+ *   1. Only a `desktop_app` install records provenance at all. macOS guards
+ *      `guard guide.outputType == .desktopApp else { return }` first — a
+ *      `local_web` app (OpenASCII) is a dev server the reader runs, not a built
+ *      binary on disk with a trust boundary, so there is nothing to record and
+ *      nothing maintain mode would ever patch.
+ *   2. Within a desktop app: a build that cloned source (and left the shell in
+ *      that clone, so `clonePath` is in hand) is a `guide_source_clone` Iris
+ *      may patch; anything else is a `signed_app_download` it never may. A
+ *      recipe that reports it cloned but somehow left no usable clone path
+ *      fails CLOSED to `signed_app_download` rather than recording a
+ *      `guide_source_clone` whose path cannot be patched — the same
+ *      "unknown = signed = don't touch it" instinct the D4 gate holds.
+ */
+export function decideInstallProvenance(facts: FinishedInstallProvenanceFacts): InstallProvenanceDecision {
+  if (facts.outputType !== "desktop_app") {
+    return { kind: "none" };
+  }
+  if (facts.clonedARepo && facts.clonePath !== undefined && facts.clonePath.length > 0) {
+    return {
+      kind: "guide_source_clone",
+      clonePath: facts.clonePath,
+      pinnedCommit: facts.pinnedCommit ?? null,
+      canonicalRepo: facts.canonicalRepo ?? null,
+    };
+  }
+  return { kind: "signed_app_download" };
 }
 
 /**

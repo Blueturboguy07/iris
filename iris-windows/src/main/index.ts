@@ -13,8 +13,7 @@ import {
 import { classifyExternalLink, refusalMessage } from "../services/external-links";
 import { boundedCommandOutput, toolSpecFor } from "../services/tool-versions";
 import { secretStorageIsAvailable } from "./secrets";
-import { AutopilotController } from "./autopilot-controller";
-import type { RecipeOutput } from "../services/autopilot/recipe";
+import { AutopilotController, type FinishedInstall } from "./autopilot-controller";
 import { MaintainController, type MaintainHost } from "./maintain/controller";
 import type { MaintainAskAnswer, MaintainIncidentSnapshot } from "../services/maintain/incident-coordinator";
 
@@ -641,8 +640,16 @@ function autopilotController(): AutopilotController {
       const settleDelayMs = href ? 2500 : 800;
       setTimeout(() => void companion.pointAtGate(pointingTarget), settleDelayMs);
     },
-    onFinished: (output: RecipeOutput) => {
-      // Once it's done, the app just opens.
+    onFinished: (finishedInstall: FinishedInstall) => {
+      // The one moment provenance is knowable for certain — a guide-source
+      // clone maintain mode may later patch, versus a signed download it never
+      // may. Recorded before anything opens, mirroring macOS's
+      // `onGuideCompleted` → `recordInstallProvenance` ordering.
+      maintain.recordInstallProvenance(finishedInstall);
+      // Once it's done, the app just opens. A local_web app opens its URL; a
+      // desktop app is left for the reader/inventory to launch (opening an
+      // arbitrary exe path is deliberately not an autopilot side effect).
+      const output = finishedInstall.output;
       if (output.type === "local_web") openExternalSafely(output.url);
       broadcast("autopilot:finished", output);
     },
@@ -869,10 +876,15 @@ if (gotSingleInstanceLock) {
       openAutopilotWindow(demoSlug);
     }
 
+    // The always-on detection layer: the crash-artifact watch (event-driven,
+    // free) and — on Windows — the 2s hang-probe tick over the frontmost
+    // catalog app. Self-triggers a real ask when one of ours (publikclip,
+    // today) crashes or hangs; see `maintain/controller.ts`'s `startDetection`.
+    maintain.startDetection();
+
     // Same idiom, maintain mode's side: `IRIS_MAINTAIN_DEMO_CRASH=<slug>`
     // raises a synthetic ask a few seconds in, so the whole ladder — ask
-    // card, pool round trip, fix status — is provable with no real crash and
-    // no catalog app with a known Windows exe (see `controller.ts`'s header).
+    // card, pool round trip, fix status — is provable with no real crash.
     maintain.triggerDemoIncidentIfConfigured();
 
     console.log("Iris for Windows started — running in the system tray");

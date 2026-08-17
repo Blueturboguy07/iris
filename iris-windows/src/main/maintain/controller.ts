@@ -20,26 +20,31 @@
  * real `WindowsJobObjectSandbox`, and whichever BYO model provider the user
  * configured).
  *
- * NOT wired here, flagged rather than silently skipped (porting spec §5):
+ * NOW WIRED (the gap the porting spec §5 gap 4 flagged is closed): real
+ * crash + hang SIGNAL SOURCES self-trigger. `startDetection()` constructs and
+ * starts `services/maintain/crash-watcher.ts`'s `CrashArtifactWatcher` against
+ * `services/maintain/app-inventory.ts`'s `WindowsAppInventory` (the matcher +
+ * frontmost tracker + slug→stack dict), and runs a ~2s hang-probe tick over
+ * whatever catalog app is frontmost, buffering a confirmed hang until it
+ * recovers/exits before asking (the `confirmedHangByPid` latch, mirroring
+ * macOS's `CompanionManager.startMaintainMode`). This became wireable once a
+ * Windows catalog app with a known exe exists: `services/autopilot/recipes.ts`
+ * now carries the publikclip source-build recipe, whose installed
+ * `publikclip-app.exe` `WindowsAppInventory` recognizes. `reportNativeCrash`/
+ * `reportConfirmedHang`/`reportLaunchFailure` remain the seam the watchers call
+ * (and the env-gated `triggerDemoIncidentIfConfigured` still exercises the
+ * whole ladder with no real crash). The hang TICK is gated to Windows —
+ * `checkProcessResponsiveViaPowerShell` and the foreground read both need
+ * `powershell.exe` — so the Mac dev build does not spawn a failing probe every
+ * two seconds; the crash watcher itself starts everywhere (it watches Windows
+ * paths that simply do not exist on the Mac, so it stays quiet there).
  *
- *   - Real crash/hang/launch-failure SIGNAL SOURCES. `services/maintain/crash-watcher.ts`
- *     (`CrashArtifactWatcher`) and `services/maintain/hang-probe.ts` (`HangProbe` +
- *     `checkProcessResponsiveViaPowerShell`) already exist as pure/real pairs
- *     in this repo, but nothing here constructs or starts them, for a concrete
- *     reason and not an oversight: `CrashArtifactWatcher` needs a
- *     `CrashArtifactAppMatching` table (process name → catalog slug/stack),
- *     and there is currently no Windows catalog app anywhere in this repo with
- *     a known `.exe` launch target to build that table from —
- *     `services/autopilot/recipes.ts`'s one built-in recipe (OpenASCII) is a
- *     `local_web` app with no exe at all (porting spec §5 gap 4). A live
- *     watcher wired to zero real entries would be worse than not wiring one.
- *     This controller instead exposes `reportNativeCrash`/`reportConfirmedHang`/
- *     `reportLaunchFailure` — the exact call shape a real watcher will use
- *     once a Windows catalog app with a known exe exists — plus a narrow,
- *     env-var-gated manual trigger (`triggerDemoIncidentIfConfigured`) that
- *     proves the whole ladder end to end today, the same way
- *     `IRIS_AUTOPILOT_DEMO` proves the autopilot end to end with no real
- *     guide click.
+ * STILL not wired here, flagged rather than silently skipped (porting spec §5):
+ *
+ *   - Launch-failure detection has no watcher yet — `reportLaunchFailure`
+ *     exists for an autopilot/direct-launch path to call, but nothing calls it
+ *     automatically (there is no Windows "process died seconds after spawn"
+ *     signal source in this repo).
  *   - `installedVersionLookup`. There is no Windows analog of macOS's
  *     `AppInventoryService` in this repo yet, so a pooled recipe's
  *     `applicability.app_version` range is matched against whatever version
@@ -56,12 +61,13 @@
  *     (The GitHub device-flow token pair, by contrast, is now persisted for
  *     real through `safeStorage` — see `github-token-storage.ts` — so a
  *     connected fork-backup survives relaunch, matching macOS's Keychain pair.)
- *   - `install-provenance.ts`'s own interlock: nothing here calls
- *     `InstallProvenanceStore.recordGuideSourceClone` on a successful
- *     autopilot install finish (`main/autopilot-controller.ts`'s
- *     `onFinished`) — that interlock needs `services/autopilot/recipe.ts`'s
- *     `InstallRecipe`/`RecipeOutput` to carry a `canonicalRepo` field first,
- *     per that module's own header, and is out of this file's ownership.
+ *
+ * Install provenance IS now recorded on a real autopilot install finish:
+ * `main/autopilot-controller.ts`'s `onFinished` hands the finished install to
+ * this file's `recordInstallProvenance`, which runs the pure
+ * `decideInstallProvenance` and calls `recordGuideSourceClone` /
+ * `recordSignedDownload`. `InstallRecipe` now carries `canonicalRepo` and
+ * `pinnedCommit`, closing the interlock `install-provenance.ts`'s header flagged.
  */
 
 import { app, shell } from "electron";
@@ -75,9 +81,21 @@ import {
   type MaintainIncidentSnapshot,
 } from "../../services/maintain/incident-coordinator";
 import type { BreakAppStack, ParsedWindowsCrash } from "../../services/maintain/break-signature";
+import { CrashArtifactWatcher, type DetectedCrashArtifact } from "../../services/maintain/crash-watcher";
+import {
+  HangProbe,
+  checkProcessResponsiveViaPowerShell,
+  type HangProbeVerdict,
+} from "../../services/maintain/hang-probe";
+import {
+  WindowsAppInventory,
+  windowsCatalogAppForSlug,
+  type FrontmostCatalogApp,
+} from "../../services/maintain/app-inventory";
 import { defaultVerificationCommandsForStack } from "../../services/maintain/incoming-fix-reviewer";
 import { MaintainInstallIdentity } from "../../services/maintain/install-identity";
-import { InstallProvenanceStore } from "../../services/maintain/install-provenance";
+import { InstallProvenanceStore, decideInstallProvenance } from "../../services/maintain/install-provenance";
+import type { FinishedInstall } from "../autopilot-controller";
 import { GitHubForkService } from "../../services/maintain/github-fork-service";
 import { SecretsBackedGitHubTokenStorage } from "./github-token-storage";
 import { firstAvailableMaintainProvider } from "../../services/maintain/model-provider";
@@ -94,6 +112,12 @@ export interface MaintainHost {
   emitSnapshot(snapshot: MaintainIncidentSnapshot): void;
 }
 
+/** How often the hang probe ticks over the frontmost catalog app — the direct
+ *  port of macOS's `Timer.scheduledTimer(withTimeInterval: 2, ...)`. Four
+ *  consecutive failed probes at this cadence is ~8–10s of confirmed silence
+ *  before anything escalates (see `hang-probe.ts`). */
+const HANG_PROBE_TICK_INTERVAL_MS = 2000;
+
 export class MaintainController {
   private readonly host: MaintainHost;
   private readonly stateStore: MaintainStateStore;
@@ -104,6 +128,27 @@ export class MaintainController {
   private readonly gitHubForkService: GitHubForkService;
   private readonly replayEngine: RecipeReplayEngine;
   private readonly coordinator: MaintainIncidentCoordinator;
+
+  // MARK: - Detection (the always-on signal sources)
+
+  private readonly appInventory: WindowsAppInventory;
+  private readonly crashArtifactWatcher: CrashArtifactWatcher;
+  private readonly hangProbe: HangProbe;
+  private hangProbeInterval: ReturnType<typeof setInterval> | undefined;
+  /** Guards against a slow foreground read overlapping the next 2s tick. */
+  private hangTickInFlight = false;
+  /** The catalog app the last tick probed — read by the hang-verdict handler
+   *  to attribute a confirmed hang to a slug/pid (mirrors macOS reading
+   *  `NSWorkspace.frontmostApplication` inside its verdict closure). */
+  private lastProbedFrontmostApp: FrontmostCatalogApp | undefined;
+  /** The hang the probe is currently tracking per pid, so the ask fires ONCE
+   *  on recovery/exit rather than every tick — the Windows analog of macOS's
+   *  `confirmedHangByPid`. Mutable `seconds` so a still-hanging app updates its
+   *  duration in place. */
+  private readonly confirmedHangByPid = new Map<
+    number,
+    { slug: string; appName: string; stack: BreakAppStack; exeName: string | undefined; seconds: number }
+  >();
 
   constructor(host: MaintainHost) {
     this.host = host;
@@ -140,6 +185,126 @@ export class MaintainController {
         this.attemptNovelFix(appSlug, appStack, signatureId, evidence),
       onStateChanged: (snapshot) => this.host.emitSnapshot(snapshot),
     });
+
+    // The always-on detection layer. Constructed here; started by
+    // `startDetection()` from `main/index.ts` after the app is ready.
+    this.appInventory = new WindowsAppInventory();
+    this.crashArtifactWatcher = new CrashArtifactWatcher({ appMatcher: this.appInventory });
+    this.crashArtifactWatcher.onCrashArtifactDetected = (artifact) => this.onCrashArtifactDetected(artifact);
+    this.hangProbe = new HangProbe({
+      checkResponsive: (processId) => checkProcessResponsiveViaPowerShell(processId),
+      onVerdict: (processId, verdict) => this.onHangVerdict(processId, verdict),
+    });
+  }
+
+  // MARK: - Detection lifecycle
+
+  /**
+   * Starts the always-on signal sources: the crash-artifact watch (event-
+   * driven, free) and — on Windows only — the ~2s hang-probe tick over the
+   * frontmost catalog app. Called once from `main/index.ts`'s bootstrap.
+   * Mirrors macOS `CompanionManager.startMaintainMode`; everything funnels into
+   * the coordinator, whose only output is a question.
+   */
+  startDetection(): void {
+    void this.appInventory.refreshCatalog();
+    void this.crashArtifactWatcher.start();
+
+    // The probe mechanism (`Get-Process ... Responding`) and the foreground
+    // read are PowerShell — Windows only. The Mac dev build starts the crash
+    // watcher (harmless on non-Windows paths) but not this tick, so it never
+    // spawns a failing `powershell.exe` every two seconds.
+    if (process.platform === "win32" && this.hangProbeInterval === undefined) {
+      this.hangProbeInterval = setInterval(() => void this.hangProbeTick(), HANG_PROBE_TICK_INTERVAL_MS);
+    }
+  }
+
+  /** Stops the detection layer. Not wired to a quit path today (Iris is a tray
+   *  app whose windows closing does not quit it), but symmetrical and used by
+   *  tests. */
+  stopDetection(): void {
+    this.crashArtifactWatcher.stop();
+    if (this.hangProbeInterval !== undefined) {
+      clearInterval(this.hangProbeInterval);
+      this.hangProbeInterval = undefined;
+    }
+  }
+
+  /** A crash artifact for one of ours landed — hand it to the coordinator as a
+   *  native crash, with the app's display name resolved from the inventory. */
+  private onCrashArtifactDetected(artifact: DetectedCrashArtifact): void {
+    this.reportNativeCrash({
+      parsedCrash: artifact.report,
+      appSlug: artifact.catalogAppSlug,
+      appName: this.appInventory.appNameForSlug(artifact.catalogAppSlug),
+      appStack: artifact.catalogAppStack,
+    });
+  }
+
+  /** One 2s tick: probe whatever catalog app is frontmost, if any. A no-op
+   *  when nothing of ours is in front. Guarded so a slow foreground read never
+   *  overlaps the next tick. */
+  private async hangProbeTick(): Promise<void> {
+    if (this.hangTickInFlight) return;
+    this.hangTickInFlight = true;
+    try {
+      const frontmost = await this.appInventory.frontmostCatalogApp();
+      this.lastProbedFrontmostApp = frontmost;
+      if (frontmost === undefined) return;
+      await this.hangProbe.probe(frontmost.pid);
+    } finally {
+      this.hangTickInFlight = false;
+    }
+  }
+
+  /**
+   * Buffers a confirmed hang until it RECOVERS or EXITS, then asks — never
+   * mid-hang, when a modal would land on someone already struggling. Straight
+   * port of macOS's `hangProbe.onVerdict` closure and its `confirmedHangByPid`
+   * bookkeeping. A `processDisappeared` also notes the exit to the crash
+   * watcher, so a crash artifact that lands right after is corroborated.
+   */
+  private onHangVerdict(processId: number, verdict: HangProbeVerdict): void {
+    switch (verdict.kind) {
+      case "confirmedHang": {
+        const alreadyTracking = this.confirmedHangByPid.get(processId);
+        if (alreadyTracking !== undefined) {
+          alreadyTracking.seconds = verdict.unresponsiveSeconds;
+        } else if (this.lastProbedFrontmostApp?.pid === processId) {
+          const frontmost = this.lastProbedFrontmostApp;
+          this.confirmedHangByPid.set(processId, {
+            slug: frontmost.slug,
+            appName: frontmost.appName,
+            stack: frontmost.stack,
+            exeName: windowsCatalogAppForSlug(frontmost.slug)?.exeName,
+            seconds: verdict.unresponsiveSeconds,
+          });
+        }
+        break;
+      }
+      case "responsive":
+      case "processDisappeared": {
+        const hang = this.confirmedHangByPid.get(processId);
+        if (hang !== undefined) {
+          this.confirmedHangByPid.delete(processId);
+          this.reportConfirmedHang({
+            appSlug: hang.slug,
+            appName: hang.appName,
+            appStack: hang.stack,
+            unresponsiveSeconds: hang.seconds,
+          });
+        }
+        if (verdict.kind === "processDisappeared") {
+          const exeName = hang?.exeName ?? windowsCatalogAppForSlug(this.lastProbedFrontmostApp?.slug ?? "")?.exeName;
+          if (exeName !== undefined) {
+            this.crashArtifactWatcher.noteProcessExited(exeName);
+          }
+        }
+        break;
+      }
+      case "unresponsiveButBelowThreshold":
+        break;
+    }
   }
 
   // MARK: - Signal entry points (the future watchers' call shape — see the
@@ -207,6 +372,47 @@ export class MaintainController {
         },
       });
     }, 3000);
+  }
+
+  // MARK: - Install provenance (the D4 gate's ground truth)
+
+  /**
+   * Records how an app just got onto this machine, called from
+   * `main/autopilot-controller.ts`'s `onFinished` — the one moment provenance
+   * is knowable for certain. The Windows mirror of macOS
+   * `CompanionManager.recordInstallProvenance`: a `desktop_app` build that
+   * cloned source becomes a `guide_source_clone` maintain mode may patch; any
+   * other `desktop_app` install a `signed_app_download` it never may; a
+   * `local_web`/`credential` install records nothing (there is no built binary
+   * with a trust boundary). The provenance decision itself is the pure
+   * `decideInstallProvenance`; this method only dispatches it to the store.
+   */
+  recordInstallProvenance(finishedInstall: FinishedInstall): void {
+    const decision = decideInstallProvenance({
+      outputType: finishedInstall.output.type,
+      clonedARepo: finishedInstall.clonedARepo,
+      clonePath: finishedInstall.clonePath,
+      canonicalRepo: finishedInstall.canonicalRepo,
+      pinnedCommit: finishedInstall.pinnedCommit,
+    });
+    switch (decision.kind) {
+      case "guide_source_clone":
+        this.provenanceStore.recordGuideSourceClone({
+          appSlug: finishedInstall.slug,
+          clonePath: decision.clonePath,
+          pinnedCommit: decision.pinnedCommit,
+          canonicalRepo: decision.canonicalRepo,
+        });
+        break;
+      case "signed_app_download":
+        this.provenanceStore.recordSignedDownload(finishedInstall.slug);
+        break;
+      case "none":
+        maintainTrace(
+          `maintain: nothing to record for ${finishedInstall.slug || "install"} (${finishedInstall.output.type} install)`
+        );
+        break;
+    }
   }
 
   // MARK: - IPC-driven surface (see `main/index.ts`'s `setupIPC`)

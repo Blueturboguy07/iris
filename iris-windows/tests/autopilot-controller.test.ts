@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { AutopilotController, type AutopilotHost } from "../src/main/autopilot-controller";
-import type { InstallRecipe, RecipeOutput } from "../src/services/autopilot/recipe";
+import { AutopilotController, type AutopilotHost, type FinishedInstall } from "../src/main/autopilot-controller";
+import type { InstallRecipe } from "../src/services/autopilot/recipe";
 import type { AutopilotEvent } from "../src/services/autopilot/runner";
 import { MockShell } from "../src/services/autopilot/shell";
 
@@ -15,7 +15,7 @@ class RecordingHost implements AutopilotHost {
   readonly events: AutopilotEvent[] = [];
   readonly opened: string[] = [];
   readonly floated: Array<{ instruction: string; href: string | undefined }> = [];
-  finishedOutput: RecipeOutput | undefined;
+  finishedInstall: FinishedInstall | undefined;
 
   emitEvent(event: AutopilotEvent): void {
     this.events.push(event);
@@ -26,8 +26,8 @@ class RecordingHost implements AutopilotHost {
   floatToGate(instruction: string, href: string | undefined): void {
     this.floated.push({ instruction, href });
   }
-  onFinished(output: RecipeOutput): void {
-    this.finishedOutput = output;
+  onFinished(finishedInstall: FinishedInstall): void {
+    this.finishedInstall = finishedInstall;
   }
 }
 
@@ -56,8 +56,38 @@ describe("the autopilot controller", () => {
     expect(status.type).toBe("finished");
     expect(shell.commandsRun).toEqual(["git clone https://example.com/x.git"]);
     expect(host.opened).toContain("http://localhost:5173"); // the open step
-    expect(host.finishedOutput).toEqual({ type: "local_web", url: "http://localhost:5173" });
+    expect(host.finishedInstall?.output).toEqual({ type: "local_web", url: "http://localhost:5173" });
     expect(host.events.some((event) => event.type === "finished")).toBe(true);
+  });
+
+  it("reports the finished install's provenance facts — clone flag, clone path, repo, and commit", async () => {
+    const desktopRecipe: InstallRecipe = {
+      slug: "publikclip",
+      appName: "publikclip",
+      output: { type: "desktop_app", launch: { via: "path", path: "C:\\App\\app.exe" } },
+      canonicalRepo: "Blueturboguy07/publikclip",
+      pinnedCommit: "a53a359b985b1d2d666266062936cc186f02340b",
+      steps: [
+        { id: "clone", title: "Clone", kind: "command", command: "git clone https://github.com/Blueturboguy07/publikclip.git" },
+        { id: "enter", title: "Enter", kind: "command", command: "cd publikclip" },
+      ],
+    };
+    // A shell whose cwd is the clone directory the recipe cd'd into.
+    const shell = new MockShell([], "C:\\Users\\test\\publikclip");
+    const { controller, host } = controllerFor(desktopRecipe, shell);
+
+    const status = await controller.start("publikclip");
+
+    expect(status.type).toBe("finished");
+    expect(host.finishedInstall).toEqual({
+      slug: "publikclip",
+      appName: "publikclip",
+      output: { type: "desktop_app", launch: { via: "path", path: "C:\\App\\app.exe" } },
+      canonicalRepo: "Blueturboguy07/publikclip",
+      pinnedCommit: "a53a359b985b1d2d666266062936cc186f02340b",
+      clonedARepo: true,
+      clonePath: "C:\\Users\\test\\publikclip",
+    });
   });
 
   it("floats to a gate on a sign-in step and resumes when the reader is done", async () => {

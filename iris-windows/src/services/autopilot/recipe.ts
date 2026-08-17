@@ -79,6 +79,18 @@ export interface InstallRecipe {
   readonly appName: string;
   /// What finishing the recipe produces, and how to open it.
   readonly output: RecipeOutput;
+  /// `"owner/name"` of the canonical source repo this recipe builds from, when
+  /// it builds from source — what maintain mode's fork backup forks, and the
+  /// `canonicalRepo` half of an install-provenance record. Absent for a recipe
+  /// that installs a signed download rather than cloning source. Mirrors the
+  /// macOS guide's `sourceOwner`/`sourceRepo`, folded into one field because a
+  /// recipe (unlike a guide) never shows the two apart.
+  readonly canonicalRepo?: string;
+  /// The exact source commit this recipe pins to — the base a maintain-mode
+  /// patch diffs against until the patch queue advances it, the `pinnedCommit`
+  /// half of an install-provenance record. Mirrors the macOS guide's
+  /// `sourceCommit`. Absent when the recipe does not build from a pinned clone.
+  readonly pinnedCommit?: string;
   readonly steps: readonly RecipeStep[];
 }
 
@@ -108,4 +120,16 @@ export function totalSteps(recipe: InstallRecipe): number {
 /// (git clone, npm ci) are identical across platforms.
 export function commandForPlatform(step: RecipeStep, platform: NodeJS.Platform): string | undefined {
   return platform === "win32" ? step.command : step.posixCommand ?? step.command;
+}
+
+/// Whether running this recipe clones a source repo — the same test macOS's
+/// `recordInstallProvenance` makes (`steps contains a "git clone" command`) to
+/// tell a guide-source build, which maintain mode MAY patch, from a signed
+/// download, which it never may. Checks both the Windows and the posix command
+/// of every step so the answer does not depend on which host the recipe is
+/// being examined on.
+export function recipeClonesARepo(recipe: InstallRecipe): boolean {
+  return recipe.steps.some(
+    (step) => (step.command?.includes("git clone") ?? false) || (step.posixCommand?.includes("git clone") ?? false)
+  );
 }

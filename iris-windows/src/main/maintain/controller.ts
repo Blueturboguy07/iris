@@ -52,15 +52,20 @@
  *     never a separately-looked-up installed version. Wiring a real
  *     `installedVersionLookup` closure through here is additive once that
  *     service exists.
- *   - The OpenAI BYO key stays deliberately unwired: `readOpenAiApiKey` below
- *     always answers `null`, so Tier C runs on the Anthropic BYO key alone.
- *     This is policy, not an interlock — Iris is Anthropic-only (`CLAUDE.md`,
- *     "Do not reintroduce ... a non-Anthropic provider"), even though the
- *     ported `model-provider.ts` still carries the macOS `OpenAIMaintainProvider`
- *     class. Reintroducing OpenAI is a founder decision, not a wiring gap.
- *     (The GitHub device-flow token pair, by contrast, is now persisted for
- *     real through `safeStorage` — see `github-token-storage.ts` — so a
- *     connected fork-backup survives relaunch, matching macOS's Keychain pair.)
+ *   - The OpenAI BYO key is now wired for real (a founder decision, matching
+ *     `iris-macos` maintain-mode parity): `readOpenAiApiKey` below reads
+ *     `secrets.ts`'s `"openaiApiKey"` slot, so Tier C (and Tier B's patch
+ *     adapter's sibling — see `replay-engine.ts`) can run on either BYO key,
+ *     Anthropic preferred when both are present. This is scoped to maintain
+ *     mode's Tier C *fixer* only: the companion chat (`services/assistant-transport.ts`,
+ *     `main/companion.ts`) never reads this secret and stays Anthropic-only —
+ *     `CLAUDE.md`'s "Do NOT ... non-Anthropic provider" line governs the chat,
+ *     not this. The key still never reaches a publik host: `model-provider.ts`'s
+ *     `OpenAIMaintainProvider` sends it to api.openai.com only, the same
+ *     isolation property the Anthropic BYO route already proves.
+ *     (The GitHub device-flow token pair, by contrast, was already persisted
+ *     through `safeStorage` — see `github-token-storage.ts` — so a connected
+ *     fork-backup survives relaunch, matching macOS's Keychain pair.)
  *
  * Install provenance IS now recorded on a real autopilot install finish:
  * `main/autopilot-controller.ts`'s `onFinished` hands the finished install to
@@ -452,11 +457,16 @@ export class MaintainController {
   ): Promise<string | undefined> {
     const modelProvider = firstAvailableMaintainProvider({
       readAnthropicApiKey: () => readSecret("anthropicApiKey"),
-      // Deliberately null: Iris is Anthropic-only (`CLAUDE.md`), so Tier C
-      // never runs on OpenAI even though `model-provider.ts` still carries the
-      // ported provider. This is policy — see the module header — not a
-      // pending interlock.
-      readOpenAiApiKey: () => null,
+      // ENABLED (founder decision, matching `iris-macos` maintain-mode parity
+      // — see the module header and `CLAUDE.md`'s "Do NOT" scoping note).
+      // This is Tier C's BYO *fixer* key only — a from-scratch novel-fix
+      // credential, never the companion chat, which stays Anthropic-only and
+      // never calls this function. `OpenAIMaintainProvider` (`model-provider.ts`)
+      // sends it to api.openai.com only, never a publik host, so it does not
+      // touch the key-isolation rule this file's INTERLOCK note used to worry
+      // about. `firstAvailableMaintainProvider` prefers Anthropic when both
+      // keys are present and only falls back to this one.
+      readOpenAiApiKey: () => readSecret("openaiApiKey"),
     });
     if (modelProvider === undefined) {
       maintainTrace("maintain: Tier C skipped — no BYO model key configured");

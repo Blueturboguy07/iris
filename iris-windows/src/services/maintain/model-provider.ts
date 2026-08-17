@@ -29,17 +29,12 @@
  * constructed, is `() => readSecret("anthropicApiKey")` /
  * `() => readSecret("openaiApiKey")`.
  *
- * INTERLOCK — not fixed by this file: `secrets.ts`'s `SecretName` union is
- * currently `"anthropicApiKey" | "supabaseRefreshToken"` only (confirmed by
- * reading `src/main/secrets.ts` directly while porting this file). It needs
- * `"openaiApiKey"` added before `OpenAIMaintainProvider` can be wired to a
- * real stored key. That is a one-line edit to a file this task does not own
- * (`main/secrets.ts`, not `services/maintain/`); flagged here rather than
- * done silently. Until it lands, callers can still construct
- * `OpenAIMaintainProvider` with any `readOpenAiApiKey` callback they like —
- * this file does not require the interlock to be fixed to compile or to be
- * tested — but the real wiring in `main/maintain/controller.ts` has nothing
- * to pass it yet.
+ * INTERLOCK CLOSED: `secrets.ts`'s `SecretName` union now carries
+ * `"openaiApiKey"` and `main/maintain/controller.ts`'s `readOpenAiApiKey`
+ * reads it for real (a founder decision — Tier C's BYO fixer only, never the
+ * Anthropic-only companion chat). This file needed no change to make that
+ * true: it never touches a secret at rest (see below), so wiring the real key
+ * was entirely `main/`'s and `main/settings.ts`'s job.
  *
  * No `maintainTrace` calls in this file: the Swift original
  * (`MaintainModelProvider.swift`) has none either, and every dependency this

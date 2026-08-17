@@ -100,9 +100,12 @@ already renders that case honestly.
 
 ### Secrets
 
-`src/main/secrets.ts` is the only code that touches a secret at rest, and there
-are exactly two: the BYO Anthropic key and the Supabase refresh token. Both go
-through `safeStorage` (DPAPI). The access token is memory-only, per protocol §4.
+`src/main/secrets.ts` is the only code that touches a secret at rest. The set
+today: the BYO Anthropic key (companion chat + maintain mode's Tier C), the
+Supabase refresh token, maintain mode's GitHub device-flow token pair
+(fork-backup), and the BYO OpenAI key (maintain mode's Tier C fixer only — see
+"Do NOT" below). All go through `safeStorage` (DPAPI). The access token is
+memory-only, per protocol §4.
 
 `settings.json` must stay free of secrets — it is plain text and users paste it
 into bug reports. If `safeStorage.isEncryptionAvailable()` is false, refuse to
@@ -151,7 +154,13 @@ Follow the publik house style, which is `iris-macos/CLAUDE.md`'s:
 ## Do NOT
 
 - Do not add a function that takes both an API key and a URL.
-- Do not reintroduce voice, TTS, audio, or a non-Anthropic provider.
+- Do not reintroduce voice, TTS, audio, or a non-Anthropic provider **into the
+  companion chat** (`services/assistant-transport.ts`, `main/companion.ts`) —
+  that surface stays Anthropic-only, full stop. This does NOT govern maintain
+  mode's Tier C fixer, which may run on a BYO OpenAI key (api.openai.com only,
+  same key-isolation rule) alongside the Anthropic one — a founder decision,
+  matching `iris-macos` maintain-mode parity. See `main/maintain/controller.ts`
+  and `services/maintain/model-provider.ts`.
 - Do not add a second test runner. It is vitest.
 - Do not rewrite `renderer/guide/app.js` to Windows conventions.
 - Do not download Electron's Windows binaries on a dev machine — cross-building

@@ -52,7 +52,7 @@
 </head>
 <body>
   <h1>Iris</h1>
-  <div class="lede">publik's desktop companion. Text-first, Anthropic-only.</div>
+  <div class="lede">publik's desktop companion. Text-first; chat is Anthropic-only.</div>
 
   <section>
     <h2>Account</h2>
@@ -93,6 +93,25 @@
         <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5</option>
       </select>
       <div class="note">The funded tier pins its own model, so this applies only to your own key.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Maintain mode — optional OpenAI key</h2>
+    <div class="field">
+      <label for="openaiApiKey">API key (optional)</label>
+      <div class="row">
+        <input type="password" id="openaiApiKey" placeholder="sk-…">
+        <button class="accent" id="save-openai-key">Save</button>
+        <button id="clear-openai-key">Clear</button>
+      </div>
+      <div class="note" id="openai-key-note">
+        Used only for maintain mode's from-scratch (Tier C) fixes, when no pooled fix
+        exists — never for chat with Iris, which stays on your Anthropic key above.
+        Anthropic is preferred when both are set. Stored the same way, with Windows
+        DPAPI via Electron safeStorage, and <strong>never sent to publik</strong> —
+        a key only ever goes to api.openai.com.
+      </div>
     </div>
   </section>
 
@@ -146,12 +165,16 @@
       el('anthropicApiKey').placeholder = settings.hasAnthropicApiKey
         ? 'A key is stored (hidden)'
         : 'sk-ant-…';
+      el('openaiApiKey').placeholder = settings.hasOpenAiApiKey
+        ? 'A key is stored (hidden)'
+        : 'sk-… (optional)';
 
       if (!settings.secretStorageAvailable) {
         el('key-note').innerHTML =
           '<span style="color:var(--error)">Windows will not let Iris encrypt secrets on this machine, ' +
           'so a key cannot be stored safely. Iris will not fall back to plain text.</span>';
         el('save-key').disabled = true;
+        el('save-openai-key').disabled = true;
       }
     }
 
@@ -166,6 +189,20 @@
     el('clear-key').addEventListener('click', async () => {
       await window.iris.setSetting('anthropicApiKey', '');
       el('anthropicApiKey').value = '';
+      load();
+    });
+
+    el('save-openai-key').addEventListener('click', async () => {
+      const value = el('openaiApiKey').value.trim();
+      if (!value) return;
+      const stored = await window.iris.setSetting('openaiApiKey', value);
+      el('openaiApiKey').value = '';
+      if (!stored) window.alert('Iris could not encrypt that key, so it was not saved.');
+      load();
+    });
+    el('clear-openai-key').addEventListener('click', async () => {
+      await window.iris.setSetting('openaiApiKey', '');
+      el('openaiApiKey').value = '';
       load();
     });
 

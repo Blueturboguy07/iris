@@ -122,6 +122,21 @@ export class SettingsStore {
     return writeSecret("anthropicApiKey", apiKey);
   }
 
+  /** Maintain mode's Tier C BYO fixer key, distinct from the Anthropic key
+   *  above — see `secrets.ts`'s header and `main/maintain/controller.ts`.
+   *  Never read by the companion chat, which stays Anthropic-only. */
+  getOpenAiApiKey(): string | null {
+    return readSecret("openaiApiKey");
+  }
+
+  setOpenAiApiKey(apiKey: string): boolean {
+    if (!apiKey) {
+      deleteSecret("openaiApiKey");
+      return true;
+    }
+    return writeSecret("openaiApiKey", apiKey);
+  }
+
   getSupabaseRefreshToken(): string | null {
     return readSecret("supabaseRefreshToken");
   }

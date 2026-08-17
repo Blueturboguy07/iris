@@ -18,13 +18,15 @@
  *     `main/maintain/github-token-storage.ts`. These reach api.github.com only,
  *     never a publik host, so they sit alongside the Anthropic BYO key rather
  *     than violating the key-isolation rule.
+ *   - the user's own OpenAI API key, maintain mode's Tier C fixer BYO option
+ *     (a founder decision, matching `iris-macos` parity — see `CLAUDE.md`).
+ *     `services/maintain/model-provider.ts`'s `OpenAIMaintainProvider` sends
+ *     it to api.openai.com only, never a publik host — same rationale as the
+ *     GitHub pair above. This key is scoped to maintain-mode Tier C; the
+ *     companion chat stays Anthropic-only and never reads it.
  *
  * The Supabase access token is deliberately NOT here: it lives in memory only,
- * per protocol section 4. There is no OpenAI slot on purpose: Iris is
- * Anthropic-only (see `CLAUDE.md`, "Do not reintroduce ... a non-Anthropic
- * provider"), so maintain mode's Tier C fixer runs on the Anthropic BYO key
- * alone even though the ported `model-provider.ts` still carries the macOS
- * `OpenAIMaintainProvider` class.
+ * per protocol section 4.
  *
  * Neither value is ever logged. `toString()` is overridden nowhere because
  * nothing in this module ever returns a wrapper — the raw string leaves only
@@ -40,7 +42,8 @@ export type SecretName =
   | "anthropicApiKey"
   | "supabaseRefreshToken"
   | "gitHubAccessToken"
-  | "gitHubRefreshToken";
+  | "gitHubRefreshToken"
+  | "openaiApiKey";
 
 interface SecretFileContents {
   /** base64 of the DPAPI ciphertext, keyed by secret name. */

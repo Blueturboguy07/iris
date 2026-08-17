@@ -751,6 +751,9 @@ function setupIPC(): void {
     ...settings.getAll(),
     // Never the key itself — only whether one is stored.
     hasAnthropicApiKey: Boolean(settings.getAnthropicApiKey()),
+    // Maintain mode's Tier C BYO fixer key — optional, and separate from the
+    // companion-chat Anthropic key above. Same "whether, never what" rule.
+    hasOpenAiApiKey: Boolean(settings.getOpenAiApiKey()),
     secretStorageAvailable: secretStorageIsAvailable(),
     signedIn: account.isSignedIn(),
     signedInEmail: account.signedInEmail(),
@@ -760,6 +763,9 @@ function setupIPC(): void {
   ipcMain.handle("settings:set", (_event, key: string, value: unknown) => {
     if (key === "anthropicApiKey") {
       return settings.setAnthropicApiKey(String(value ?? ""));
+    }
+    if (key === "openaiApiKey") {
+      return settings.setOpenAiApiKey(String(value ?? ""));
     }
     settings.set(key as never, value as never);
     if (key === "alwaysOnTop" && chatWindow && !chatWindow.isDestroyed()) {

@@ -44,5 +44,23 @@ export default tseslint.config(
       "no-unused-vars": "off",
       "no-empty": ["error", { allowEmptyCatch: true }],
     },
+  },
+  {
+    // The headed GUI e2e harness: plain Node ESM (`.mjs`), CI-only, not part of
+    // the app or the vitest suite. Linted as Node scripts — `require` via
+    // `createRequire` is deliberate (it loads the real compiled services), and
+    // an empty catch is a legitimate best-effort cleanup here.
+    files: ["tests/gui-e2e/**/*.mjs"],
+    ...tseslint.configs.disableTypeChecked,
+    languageOptions: {
+      globals: { ...globals.node, fetch: "readonly", WebSocket: "readonly" },
+      sourceType: "module",
+      ecmaVersion: 2023,
+    },
+    rules: {
+      "no-console": "off",
+      "no-empty": ["error", { allowEmptyCatch: true }],
+      "@typescript-eslint/no-require-imports": "off",
+    },
   }
 );

@@ -12,7 +12,8 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "gui-e2e": "node tests/gui-e2e/run.mjs"
   },
   "repository": {
     "type": "git",

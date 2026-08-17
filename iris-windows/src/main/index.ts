@@ -737,6 +737,28 @@ function handleGuideCommand(command: string, args: Record<string, unknown>): unk
       // inventing an answer; `app.js` already renders that case.
       return null;
 
+    case "e2e_open_settings": {
+      // TEST-ONLY, gated behind `IRIS_E2E=1`, so it never affects shipped
+      // behaviour: outside the e2e suite this command does not exist and falls
+      // through to the same "unknown command" error as any other. The headed
+      // GUI e2e suite (`tests/gui-e2e/`) needs to open the Settings window from
+      // CDP — a native tray click is not reachable over the DevTools protocol —
+      // and there is otherwise no renderer-facing way in. See
+      // `tests/gui-e2e/README.md`.
+      if (process.env.IRIS_E2E !== "1") {
+        throw new Error(`unknown Iris command '${command}'`);
+      }
+      if (settingsWindow && !settingsWindow.isDestroyed()) {
+        settingsWindow.focus();
+      } else {
+        settingsWindow = createSettingsWindow();
+        settingsWindow.on("closed", () => {
+          settingsWindow = null;
+        });
+      }
+      return null;
+    }
+
     default:
       throw new Error(`unknown Iris command '${command}'`);
   }

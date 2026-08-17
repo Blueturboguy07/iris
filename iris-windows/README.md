@@ -43,14 +43,29 @@ so it runs identically on macOS during development and on Windows in CI. That is
 what makes it possible to work on this at all — but it also means **anything the
 suite cannot reach is unverified**. See "What has not been verified" below.
 
+The things the unit suite cannot reach — because they need a real launched app
+on a real Windows desktop — are covered instead by a separate **headed GUI
+end-to-end suite** (`tests/gui-e2e/`, its own
+[`.github/workflows/iris-windows-gui-e2e.yml`](../.github/workflows/iris-windows-gui-e2e.yml)).
+It launches the packaged app on the `windows-latest` runner, drives it over the
+Chrome DevTools Protocol, and exercises the Windows-only paths for real: the WER
+crash watcher (a genuine `Report.wer` → a live ask), the PowerShell hang probe +
+`GetForegroundWindow` P/Invoke, safeStorage/DPAPI key storage, `iris://`
+delivery, and a full autopilot install. It is **not** part of `npm test` (it
+needs a display and Windows), and it uploads screenshots + a results log. One
+test-only main-process hook (`e2e_open_settings`, gated behind `IRIS_E2E=1`)
+opens the Settings window from CDP and does nothing outside the suite. See
+`tests/gui-e2e/README.md`.
+
 ```sh
 npm install     # once
 npm test        # the suite — works on any OS
 npm run typecheck
 npm run lint
 
-npm run dev     # only meaningful on Windows
-npm run make    # builds the installer; CI's job, not a Mac's
+npm run dev      # only meaningful on Windows
+npm run make     # builds the installer; CI's job, not a Mac's
+npm run gui-e2e  # headed GUI suite; needs a packaged app + a Windows desktop (CI only)
 ```
 
 ---

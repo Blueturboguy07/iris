@@ -1,0 +1,82 @@
+name: iris-windows-gui-e2e
+
+# The "real Windows, in depth" test. The fast build/unit/smoke job lives in
+# iris-windows.yml and stays intact; this is the separate, heavier headed GUI
+# suite that launches the REAL packaged app on the windows-latest runner (a
+# genuine Windows machine with a desktop session), drives it over the Chrome
+# DevTools Protocol, exercises the Windows-only paths for real (WER crash
+# detection, the PowerShell hang probe + foreground P/Invoke, safeStorage/DPAPI,
+# iris:// delivery), and uploads screenshots + a results log.
+#
+# It is deliberately NOT `npm test`: that suite is pure and runs on the dev Mac
+# too. This one needs a launched app and a desktop, so it is Windows-CI-only.
+
+on:
+  push:
+    branches: [main, iris-assistant]
+    paths:
+      - "iris-windows/**"
+      - ".github/workflows/iris-windows-gui-e2e.yml"
+  pull_request:
+    paths:
+      - "iris-windows/**"
+      - ".github/workflows/iris-windows-gui-e2e.yml"
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: iris-windows
+
+jobs:
+  gui-e2e:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: iris-windows/package-lock.json
+
+      # Same lockfile git-URL guard as the build job — a runner has no SSH key.
+      - name: Prefer https for git dependencies
+        run: git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+
+      - name: Install
+        run: npm ci
+
+      # Compile emits dist/ (the harness requires the real compiled services for
+      # the PowerShell-seam scenario); package produces the iris.exe the suite
+      # actually launches.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Package the app
+        run: npm run package
+
+      # The headed suite. It launches the packaged app with
+      # --remote-debugging-port, drives + asserts every flow and edge case, and
+      # exits non-zero on any failed assertion — which fails the job.
+      - name: Headed GUI e2e (real Windows, in depth)
+        env:
+          IRIS_E2E_OUT: ${{ github.workspace }}/iris-windows/out/gui-e2e
+          # Corepack must not stop to ask permission to fetch pnpm in the
+          # autopilot install scenario.
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: npm run gui-e2e
+
+      # Screenshots + results log are the proof this ran on a real desktop, so
+      # they upload whether or not the suite passed — a failure is exactly the
+      # run worth inspecting the screenshots of.
+      - name: Upload GUI e2e artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iris-windows-gui-e2e
+          path: |
+            iris-windows/out/gui-e2e/**
+          if-no-files-found: warn
+          retention-days: 14

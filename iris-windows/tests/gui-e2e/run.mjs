@@ -582,9 +582,36 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  log(`FATAL: ${error?.stack || error}`);
-  results.write(OUT_DIR);
-  flushLog(OUT_DIR);
-  process.exitCode = 1;
-});
+// Hard watchdog. The suite launches a real app whose autopilot leaves a
+// `pnpm dev` server running and holds open CDP sockets; if any of that keeps
+// the event loop alive after the assertions finish, Node would hang until the
+// CI job's own timeout CANCELS the step — which discards the exit code and the
+// green/red verdict with it (that is exactly what happened once). This bounds
+// the whole run and force-exits with a failure if it is ever exceeded, so a
+// hang surfaces as an honest red instead of a silent cancel.
+const WATCHDOG_MS = 18 * 60 * 1000;
+const watchdog = setTimeout(() => {
+  log(`WATCHDOG: gui-e2e exceeded ${WATCHDOG_MS / 60000} min — forcing exit(1)`);
+  try {
+    results.write(OUT_DIR);
+    flushLog(OUT_DIR);
+  } catch {
+    // best effort — we are force-exiting regardless
+  }
+  process.exit(1);
+}, WATCHDOG_MS);
+watchdog.unref();
+
+// Force a clean exit once main resolves. Without this, an open handle (the
+// autopilot dev server, a CDP WebSocket) keeps Node alive even though every
+// check has finished — `process.exitCode` alone is not enough.
+main()
+  .then(() => {
+    process.exit(process.exitCode ?? 0);
+  })
+  .catch((error) => {
+    log(`FATAL: ${error?.stack || error}`);
+    results.write(OUT_DIR);
+    flushLog(OUT_DIR);
+    process.exit(1);
+  });

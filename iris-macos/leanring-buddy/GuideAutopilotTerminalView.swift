@@ -29,6 +29,27 @@ import SwiftUI
 // guide install AND a user-initiated on-demand edit (`OnDemandEditRunner`). The
 // guide-shaped rows (`surfaceRow`, `confirmRow`) only ever appear on states the
 // edit runner never enters, so nothing guide-specific leaks into an edit run.
+//
+// The Terminal.app palette + the auto-follow anchor live in this non-generic
+// namespace rather than as `static let`s on the view: `GuideAutopilotTerminalView`
+// is generic over its runner, and Swift forbids `static` STORED properties on a
+// generic type ("static stored properties not supported in generic types").
+private enum GuideAutopilotTerminalTheme {
+    /// The auto-follow target: an invisible row after the last transcript
+    /// entry, so "scroll to the end" survives rows changing height as the
+    /// typewriter reveals them.
+    static let transcriptBottomAnchor = "transcript-bottom-anchor"
+
+    // The Terminal.app palette, so this reads as the app the reader already
+    // trusts rather than as one more piece of Iris's chrome.
+    static let windowBackground = Color(red: 0.086, green: 0.086, blue: 0.098)
+    static let titleBarBackground = Color(red: 0.145, green: 0.145, blue: 0.161)
+    static let trafficRed = Color(red: 1.0, green: 0.373, blue: 0.341)
+    static let trafficYellow = Color(red: 0.996, green: 0.737, blue: 0.180)
+    static let trafficGreen = Color(red: 0.157, green: 0.784, blue: 0.251)
+    static let cursor = Color.white.opacity(0.82)
+}
+
 struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
     @ObservedObject var runner: Runner
     let onApproveRiskyCommand: () -> Void
@@ -50,20 +71,6 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
 
     @State private var escapeHatchIsHovered = false
 
-    /// The auto-follow target: an invisible row after the last transcript
-    /// entry, so "scroll to the end" survives rows changing height as the
-    /// typewriter reveals them.
-    private static let transcriptBottomAnchor = "transcript-bottom-anchor"
-
-    // The Terminal.app palette, so this reads as the app the reader already
-    // trusts rather than as one more piece of Iris's chrome.
-    private static let windowBackground = Color(red: 0.086, green: 0.086, blue: 0.098)
-    private static let titleBarBackground = Color(red: 0.145, green: 0.145, blue: 0.161)
-    private static let trafficRed = Color(red: 1.0, green: 0.373, blue: 0.341)
-    private static let trafficYellow = Color(red: 0.996, green: 0.737, blue: 0.180)
-    private static let trafficGreen = Color(red: 0.157, green: 0.784, blue: 0.251)
-    private static let cursor = Color.white.opacity(0.82)
-
     var body: some View {
         VStack(spacing: 0) {
             titleBar
@@ -73,7 +80,7 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
                 transcriptBody
             }
         }
-        .background(Self.windowBackground)
+        .background(GuideAutopilotTerminalTheme.windowBackground)
         .clipShape(RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
@@ -87,8 +94,8 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
         ZStack {
             HStack(spacing: 7) {
                 escapeHatchTrafficLight
-                Circle().fill(Self.trafficYellow).frame(width: 11, height: 11)
-                Circle().fill(Self.trafficGreen).frame(width: 11, height: 11)
+                Circle().fill(GuideAutopilotTerminalTheme.trafficYellow).frame(width: 11, height: 11)
+                Circle().fill(GuideAutopilotTerminalTheme.trafficGreen).frame(width: 11, height: 11)
                 Spacer(minLength: 0)
             }
             Text("iris — install")
@@ -98,7 +105,7 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
         .padding(.horizontal, 10)
         .frame(height: 24)
         .frame(maxWidth: .infinity)
-        .background(Self.titleBarBackground)
+        .background(GuideAutopilotTerminalTheme.titleBarBackground)
     }
 
     /// The red traffic light is a real button, and shows the × on hover the
@@ -106,7 +113,7 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
     private var escapeHatchTrafficLight: some View {
         Button(action: onEscapeHatch) {
             ZStack {
-                Circle().fill(Self.trafficRed).frame(width: 11, height: 11)
+                Circle().fill(GuideAutopilotTerminalTheme.trafficRed).frame(width: 11, height: 11)
                 Image(systemName: "xmark")
                     .font(.system(size: 6, weight: .heavy))
                     .foregroundColor(Color.black.opacity(0.55))
@@ -154,22 +161,22 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
 
                     Color.clear
                         .frame(height: 1)
-                        .id(Self.transcriptBottomAnchor)
+                        .id(GuideAutopilotTerminalTheme.transcriptBottomAnchor)
                 }
                 .padding(.horizontal, 11)
                 .padding(.vertical, 9)
                 .frame(maxWidth: .infinity, minHeight: 58, alignment: .topLeading)
             }
             .onChange(of: runner.transcript.count) {
-                scrollProxy.scrollTo(Self.transcriptBottomAnchor, anchor: .bottom)
+                scrollProxy.scrollTo(GuideAutopilotTerminalTheme.transcriptBottomAnchor, anchor: .bottom)
             }
             .onChange(of: runner.state) {
                 // The surface and confirm rows appear on state alone, and they
                 // carry the buttons — they must never land out of view.
-                scrollProxy.scrollTo(Self.transcriptBottomAnchor, anchor: .bottom)
+                scrollProxy.scrollTo(GuideAutopilotTerminalTheme.transcriptBottomAnchor, anchor: .bottom)
             }
             .onChange(of: runner.isExecutingACommand) {
-                scrollProxy.scrollTo(Self.transcriptBottomAnchor, anchor: .bottom)
+                scrollProxy.scrollTo(GuideAutopilotTerminalTheme.transcriptBottomAnchor, anchor: .bottom)
             }
         }
     }
@@ -258,7 +265,7 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
             Text("%")
                 .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
                 .foregroundColor(DS.Colors.accent.opacity(0.6))
-            BlinkingBlockCursor(color: Self.cursor)
+            BlinkingBlockCursor(color: GuideAutopilotTerminalTheme.cursor)
             Spacer(minLength: 0)
         }
     }

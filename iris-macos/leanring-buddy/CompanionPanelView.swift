@@ -146,7 +146,13 @@ struct CompanionPanelView: View {
                 Spacer()
                     .frame(height: 14)
 
-                AppInventorySectionView(appInventoryService: appInventoryService, appLinkService: companionManager.appLinkService)
+                AppInventorySectionView(
+                    appInventoryService: appInventoryService,
+                    appLinkService: companionManager.appLinkService,
+                    onEditApp: { installedEntry in
+                        companionManager.requestOnDemandEdit(forEntry: installedEntry)
+                    }
+                )
                     .padding(.horizontal, 16)
 
                 Spacer()

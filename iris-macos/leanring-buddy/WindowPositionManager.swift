@@ -118,25 +118,42 @@ class WindowPositionManager {
         hasAttemptedScreenRecordingSystemPromptDuringCurrentLaunch
     }
 
-    /// Quits and reopens the app so a newly granted Screen Recording permission
-    /// takes effect.
+    /// Quits and reopens IRIS ITSELF so a newly granted Screen Recording
+    /// permission takes effect.
     ///
     /// The new instance is started before this one exits, and only if the open
     /// actually succeeded — quitting first would leave the user with no app at
-    /// all if the relaunch failed.
+    /// all if the relaunch failed. This is the self-relaunch special case of the
+    /// target-bundle-keyed `launchNewInstance(ofApplicationAt:)` helper below:
+    /// launch a fresh instance of our own bundle, and only then terminate this
+    /// process.
     static func relaunchToApplyPermissions() {
+        Task { @MainActor in
+            guard await launchNewInstance(ofApplicationAt: Bundle.main.bundleURL) != nil else { return }
+            NSApp.terminate(nil)
+        }
+    }
+
+    /// Launch a fresh, distinct instance of the application bundle at `bundleURL`
+    /// and return the running instance (nil on failure). Generalized out of the
+    /// self-relaunch above so the on-demand edit tool can launch a freshly built
+    /// artifact FROM a source clone (Option A) through the same primitive —
+    /// `createsNewApplicationInstance` is what makes it a new process rather than
+    /// merely activating whatever is already running under that bundle id.
+    ///
+    /// This never terminates anything and never targets a specific install
+    /// location on the caller's behalf: it launches exactly the bundle it is
+    /// handed. Terminating the OLD instance first (when replacing a running app)
+    /// is the caller's responsibility — see `AppRelaunchService`.
+    @discardableResult
+    @MainActor
+    static func launchNewInstance(ofApplicationAt bundleURL: URL) async -> NSRunningApplication? {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.createsNewApplicationInstance = true
-
-        NSWorkspace.shared.openApplication(
-            at: Bundle.main.bundleURL,
-            configuration: configuration
-        ) { runningApplication, _ in
-            guard runningApplication != nil else { return }
-            DispatchQueue.main.async {
-                NSApp.terminate(nil)
-            }
-        }
+        configuration.activates = true
+        return try? await NSWorkspace.shared.openApplication(
+            at: bundleURL, configuration: configuration
+        )
     }
 
     /// Prompts the system dialog for Screen Recording permission.

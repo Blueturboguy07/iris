@@ -36,6 +36,12 @@ extension Notification.Name {
     /// is in front of the reader — the eye is the interface, not a settings
     /// dropdown they would have to go find after their app just vanished.
     static let clickyMaintainAskRaised = Notification.Name("clickyMaintainAskRaised")
+    /// Posted when the reader starts an on-demand edit from a place other than
+    /// the eye bar (the settings panel's "Edit this app"). The overlay opens
+    /// the eye's bar the same way a maintain ask does, so the edit card — the
+    /// describe field, the consent, the diff preview — is in front of the
+    /// reader rather than buried in a settings dropdown they just left.
+    static let clickyOnDemandEditRaised = Notification.Name("clickyOnDemandEditRaised")
 }
 
 /// Custom NSPanel subclass that can become the key window even with

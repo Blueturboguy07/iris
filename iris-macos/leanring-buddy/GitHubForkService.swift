@@ -29,6 +29,25 @@
 import Combine
 import Foundation
 
+/// What KIND of change a PR carries, so its title and body tell the truth. A
+/// crash-path fix went through the full 3-leg repro gate and may claim it; an
+/// on-demand edit went through `earnsCleanApply` only — it is "applied and
+/// rebuilt", never "verified" — and a feature must NOT borrow a bug/repro
+/// narrative it never earned (adversarial #8, #13). Threaded through the PR
+/// builders so the wording can never drift from the actual verification tier.
+enum IrisPullRequestNarrative: Sendable, Equatable {
+    /// The maintain-mode crash path: repro fails-pre / passes-post / fails-on-
+    /// revert, full suite green. The only narrative allowed to say "verified".
+    case verifiedCrashFix
+    /// A user-initiated on-demand bug fix. Applied and rebuilt, suite green;
+    /// there is no repro oracle, so it never claims "verified".
+    case onDemandBugFix
+    /// A user-initiated on-demand feature. Applied and rebuilt; makes NO
+    /// correctness claim at all — the harness can only prove "compiles + no
+    /// regression", never "does what was asked".
+    case onDemandFeature
+}
+
 /// Where the connect handshake stands, for the panel to render.
 enum GitHubConnectState: Equatable, Sendable {
     case notConnected
@@ -258,10 +277,20 @@ final class GitHubForkService: ObservableObject {
     }
 
     /// Propagate a verified fix as far as the user's rights allow.
+    ///
+    /// `narrative` defaults to `.verifiedCrashFix`, so the existing crash path
+    /// is byte-for-byte unchanged. It exists so a caller opening a PR for an
+    /// on-demand edit can pass the honest `.onDemandBugFix` / `.onDemandFeature`
+    /// narrative — a feature PR must never inherit the bug/repro story it did not
+    /// earn. NOTE: the ON-DEMAND edit tool does NOT call this — it is fork-only
+    /// (`backUp`) by decision, never a push-merge to a third party's canonical
+    /// even with push rights. This narrative-aware path is here for a future,
+    /// separately-consented "open a PR upstream" action only.
     func propagateFix(
         branch: String,
         canonicalRepo: String,
         diagnosisTitle: String,
+        narrative: IrisPullRequestNarrative = .verifiedCrashFix,
         cloneRunner: MaintainShellRunner
     ) async -> FixPropagation {
         guard let accessToken = await currentAccessToken(),
@@ -313,10 +342,10 @@ final class GitHubForkService: ObservableObject {
             path: "/repos/\(canonicalRepo)/pulls",
             token: accessToken,
             jsonBody: [
-                "title": "Iris fix: \(diagnosisTitle)",
+                "title": Self.pullRequestTitle(forNarrative: narrative, diagnosisTitle: diagnosisTitle),
                 "head": "\(login):\(branch)",
                 "base": base,
-                "body": Self.pullRequestBody(diagnosisTitle: diagnosisTitle),
+                "body": Self.pullRequestBody(forNarrative: narrative, diagnosisTitle: diagnosisTitle),
                 "maintainer_can_modify": true,
             ]
         ) else {
@@ -342,18 +371,67 @@ final class GitHubForkService: ObservableObject {
         return (permissions["push"] as? Bool ?? false) || (permissions["admin"] as? Bool ?? false)
     }
 
-    private static func pullRequestBody(diagnosisTitle: String) -> String {
-        """
-        Iris (publik's maintain mode) fixed a bug on a user's machine and \
-        verified it — the repro fails before the patch, passes after, and \
-        fails again when the patch is reverted, and the full test suite stays \
-        green. Opened for you, the owner, to review and merge.
+    /// The PR title, honest to the change's verification tier. A feature never
+    /// borrows the word "fix".
+    private static func pullRequestTitle(
+        forNarrative narrative: IrisPullRequestNarrative, diagnosisTitle: String
+    ) -> String {
+        switch narrative {
+        case .verifiedCrashFix, .onDemandBugFix:
+            return "Iris fix: \(diagnosisTitle)"
+        case .onDemandFeature:
+            return "Iris change: \(diagnosisTitle)"
+        }
+    }
 
-        Diagnosis: \(diagnosisTitle)
+    /// The PR body, honest to the change's verification tier. Only the verified
+    /// crash path asserts the repro narrative; an on-demand edit says plainly
+    /// that it is applied-and-rebuilt (not repro-verified), and a feature makes
+    /// no correctness claim at all.
+    private static func pullRequestBody(
+        forNarrative narrative: IrisPullRequestNarrative, diagnosisTitle: String
+    ) -> String {
+        switch narrative {
+        case .verifiedCrashFix:
+            return """
+            Iris (publik's maintain mode) fixed a bug on a user's machine and \
+            verified it — the repro fails before the patch, passes after, and \
+            fails again when the patch is reverted, and the full test suite stays \
+            green. Opened for you, the owner, to review and merge.
 
-        The change is scoped to the reported symptom; the verification detail \
-        is in the commit trailer.
-        """
+            Diagnosis: \(diagnosisTitle)
+
+            The change is scoped to the reported symptom; the verification detail \
+            is in the commit trailer.
+            """
+        case .onDemandBugFix:
+            return """
+            Iris (publik) applied a fix a user asked for, on their own machine, \
+            under their own model key. It builds and the full test suite stays \
+            green — but there is NO repro test, so this is "applied and rebuilt", \
+            NOT independently verified. Opened for you, the owner, to review and \
+            decide.
+
+            Requested change: \(diagnosisTitle)
+
+            The change is scoped and jailed during authoring; the detail is in the \
+            commit trailer.
+            """
+        case .onDemandFeature:
+            return """
+            Iris (publik) implemented a feature a user asked for, on their own \
+            machine, under their own model key. It compiles and the existing test \
+            suite stays green — but nothing here proves the feature does what was \
+            asked (there is no acceptance oracle Iris can trust). This is "applied \
+            and rebuilt", NOT verified. Opened for you, the owner, to review and \
+            decide.
+
+            Requested feature: \(diagnosisTitle)
+
+            The change is scoped and jailed during authoring; the detail is in the \
+            commit trailer.
+            """
+        }
     }
 
     // MARK: - Owner side: incoming fix PRs
@@ -368,7 +446,19 @@ final class GitHubForkService: ObservableObject {
         let url: String
     }
 
-    /// The `iris/fix-*` PRs open on one of the owner's repos, for their Iris
+    /// Iris's branch prefixes, both ends of the PR contract agree on this ONE
+    /// list. The engine commits crash fixes on `iris/fix-` and on-demand edits
+    /// on `iris/edit-`; `iris/feature-` is reserved so a future split of the
+    /// on-demand prefix by kind still matches here without another code change
+    /// (design §7 branch-prefix contract). Widening this is what stops the
+    /// owner-side re-verification scan from silently missing on-demand PRs.
+    private static let irisBranchPrefixes = ["iris/fix-", "iris/edit-", "iris/feature-"]
+
+    private static func branchIsAnIrisBranch(_ branch: String) -> Bool {
+        irisBranchPrefixes.contains { branch.hasPrefix($0) }
+    }
+
+    /// The Iris-authored PRs open on one of the owner's repos, for their Iris
     /// to re-verify and decide. Only PRs from Iris's branch convention are
     /// surfaced; a human contributor's PR is the owner's normal GitHub flow.
     func incomingFixPullRequests(forCanonicalRepo canonicalRepo: String) async -> [IncomingFixPR] {
@@ -387,7 +477,7 @@ final class GitHubForkService: ObservableObject {
               let array = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return [] }
         return array.compactMap { pull -> IncomingFixPR? in
             guard let branch = (pull["head"] as? [String: Any])?["ref"] as? String,
-                  branch.hasPrefix("iris/fix-"),
+                  Self.branchIsAnIrisBranch(branch),
                   let head = pull["head"] as? [String: Any],
                   let headRepo = head["repo"] as? [String: Any],
                   let cloneURL = headRepo["clone_url"] as? String,
@@ -408,7 +498,10 @@ final class GitHubForkService: ObservableObject {
         guard let (status, _) = await apiRequest(
             method: "PUT", path: "/repos/\(pr.repo)/pulls/\(pr.number)/merge",
             token: token,
-            jsonBody: ["merge_method": "squash", "commit_title": "Iris fix: \(pr.title)"]
+            // Neutral "Iris:" prefix — the PR title already carries its own
+            // honest fix/change wording, so this must not re-assert "fix" over a
+            // feature PR that came in on an iris/edit- or iris/feature- branch.
+            jsonBody: ["merge_method": "squash", "commit_title": "Iris: \(pr.title)"]
         ) else { return false }
         return status == 200
     }

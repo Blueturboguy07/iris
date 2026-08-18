@@ -26,6 +26,12 @@ struct AppInventorySectionView: View {
     /// answering" are genuinely different facts.
     @ObservedObject var appLinkService: AppLinkService
 
+    /// The reader tapped "Edit this app": kick off the on-demand edit flow for
+    /// this app. Wired by `CompanionPanelView` to `CompanionManager`, which
+    /// opens the edit card at the eye. Defaulted to a no-op so a preview or a
+    /// caller that does not offer editing still builds.
+    var onEditApp: (CatalogAppInventoryEntry) -> Void = { _ in }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Your publik apps")
@@ -122,6 +128,20 @@ struct AppInventorySectionView: View {
                 .irisTinyButton()
                 .disabled(appLinkService.isQuerying)
                 .help("\(installedEntry.name) is running. It will ask you before it answers.")
+            }
+
+            // Only shown for an app whose source Iris may edit locally — a
+            // guide-source clone with a live `.git`. A signed-download install
+            // never renders this. The provenance is advisory here and re-checked
+            // LIVE when the reader actually starts an edit.
+            if installedEntry.isLocallyEditable {
+                Button(action: {
+                    onEditApp(installedEntry)
+                }) {
+                    Text("Edit this app")
+                }
+                .irisTinyButton()
+                .help("Tell Iris what to change in \(installedEntry.name). It edits your local source under your own model key.")
             }
 
             if case .updateIsAvailable(let latestReleaseTag) = installedEntry.updateAvailability {

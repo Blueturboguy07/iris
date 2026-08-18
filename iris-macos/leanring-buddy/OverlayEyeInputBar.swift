@@ -442,8 +442,22 @@ struct OverlayEyeInputBarView: View {
 
     private var suggestionsToOffer: [String] {
         OverlayEyeSuggestions.suggestions(
-            forOpenGuideStepTitled: guideSessionController.stepTheReaderIsLookingAt?.title
+            forOpenGuideStepTitled: guideSessionController.stepTheReaderIsLookingAt?.title,
+            frontmostEditableCatalogAppNamed: frontmostEditableCatalogAppName
         )
+    }
+
+    /// The name of the catalog app the reader is looking at, IF Iris may edit it
+    /// locally — the signal that drives the Door-B "fix a bug in…" / "add a
+    /// feature to…" chips. Nil for a non-catalog app, an app in front that is a
+    /// signed download, or when no app of ours is frontmost, so the chips are
+    /// never offered for something the edit flow would then refuse.
+    private var frontmostEditableCatalogAppName: String? {
+        let inventory = companionManager.appInventoryService
+        guard let slug = inventory.frontmostCatalogAppSlug,
+              let entry = inventory.installedEntriesForDisplay.first(where: { $0.slug == slug }),
+              entry.isLocallyEditable else { return nil }
+        return entry.name
     }
 
     private var thereIsSomethingToSend: Bool {
@@ -459,8 +473,14 @@ struct OverlayEyeInputBarView: View {
     /// still true then, the under-the-card terminal pane stays suppressed and
     /// cannot flash in.
     private var theCenteredTakeoverIsCoveringTheScreen: Bool {
-        guideSessionController.autopilotIsShownAsTakeover
-            && !guideSessionController.readerHasFinishedTheGuide
+        (guideSessionController.autopilotIsShownAsTakeover
+            && !guideSessionController.readerHasFinishedTheGuide)
+            // The on-demand edit run has its own terminal takeover, and while it
+            // covers the screen the eye bar's content is a cluttered second copy
+            // of the same run — so it, too, suppresses the bar body. The moment
+            // the takeover folds away (the diff preview, a failure) the bar
+            // returns and shows the edit card.
+            || companionManager.onDemandEditTakeoverIsUp
     }
 
     var body: some View {
@@ -483,6 +503,16 @@ struct OverlayEyeInputBarView: View {
                 // the field, and observes the coordinator itself so it appears
                 // and clears without the bar being rebuilt.
                 MaintainAskCard(coordinator: companionManager.maintainIncidentCoordinator)
+
+                // The user-initiated on-demand edit card: describe → consent →
+                // review-and-keep → result. It observes its own coordinator, so
+                // it appears the moment an app is picked (from here or the
+                // settings panel) and clears itself when the flow ends. Driven
+                // by a pending-edit coordinator, NOT the maintain ask.
+                OnDemandEditCard(
+                    coordinator: companionManager.onDemandEditCoordinator,
+                    preselectedKind: companionManager.onDemandEditPreselectedKind
+                )
 
                 // The guide sits above the field, not inside the settings dropdown.
                 // The reader following instructions is doing the main thing Iris is
@@ -820,6 +850,23 @@ struct OverlayEyeInputBarView: View {
     /// this file exists to fix: a question asked at the eye is answered at the
     /// eye, a few lines below where it was typed.
     private func send(_ messageText: String) {
+        // Door B: an explicit instruction to EDIT the frontmost catalog app
+        // (a "fix a bug in…" / "add a feature to…" chip, or the same phrasing
+        // typed) opens the on-demand edit card instead of asking Iris a
+        // question. It must NOT register a chat exchange — no assistant answer
+        // is coming for it, and the bar would otherwise sit waiting on one
+        // forever.
+        if companionManager.beginOnDemandEditIfMessageIsAnEditInstruction(messageText) {
+            typedMessage = ""
+            measuredAnswerTextHeight = 0
+            // Keep the bar holding the keyboard — the edit card's describe field
+            // is what the reader types into next, and it can only take focus
+            // while this panel is still key. Only the main field's own focus is
+            // dropped, so a click into the describe field lands cleanly.
+            theTextFieldHasKeyboardFocus = false
+            return
+        }
+
         companionManager.sendUserMessage(messageText)
         exchange.registerTheReaderAsked(messageText)
         typedMessage = ""

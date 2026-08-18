@@ -154,6 +154,128 @@ final class CompanionManager: ObservableObject {
     /// Fork backup for local fixes. Dormant until the GitHub App's client id
     /// ships in Info.plist (IrisGitHubAppClientID).
     let gitHubForkService = GitHubForkService()
+    /// Rebuild → relaunch for a kept on-demand edit (design §4, Option A only):
+    /// packages a fresh, launchable artifact FROM the clone and launches it as a
+    /// distinct instance — never overwriting an installed/signed bundle.
+    private let appRelaunchService = AppRelaunchService()
+
+    /// The USER-INITIATED on-demand editor: the reader picks an installed
+    /// catalog app, says what to change (an explicit bug fix or feature), and
+    /// Iris edits the local source, verifies it, and commits it on a branch —
+    /// all under the reader's OWN model key, jailed, provenance re-checked LIVE.
+    /// It reuses the same Tier C engine the crash path drives but skips crash
+    /// detection entirely, and deliberately does NOT inherit the maintain ask's
+    /// throttle/mute machinery (that exists to stop AI nagging — wrong for an
+    /// act the reader started). Lazy so it shares the one provenance store.
+    lazy var onDemandEditCoordinator: OnDemandEditCoordinator = {
+        let coordinator = OnDemandEditCoordinator(
+            installProvenanceStore: installProvenanceStore,
+            patchQueue: PatchQueue(),
+            topRequestsForApp: { [weak self] appSlug in
+                guard let self else { return [] }
+                return await self.maintainFeatureRequests
+                    .topRequests(forAppSlug: appSlug)
+                    .map(\.request)
+            }
+        )
+        // FORK-ONLY backup — never `propagateFix`, which push-merges straight to
+        // a third party's canonical repo when the reader has push rights. An
+        // on-demand change (a model-authored edit the reader described in one
+        // line) must never reach someone else's main branch automatically; the
+        // only automatic destination is the reader's OWN fork.
+        coordinator.backUpEditBranchToMyForkOnly = { [weak self] branchName, appSlug in
+            guard let self,
+                  let record = self.installProvenanceStore.provenance(forAppSlug: appSlug),
+                  let clonePath = record.clonePath,
+                  let canonicalRepo = record.canonicalRepo,
+                  let runner = try? MaintainShellRunner(repoRootPath: clonePath) else { return nil }
+            let outcome = await self.gitHubForkService.backUp(
+                branch: branchName, canonicalRepo: canonicalRepo, cloneRunner: runner
+            )
+            switch outcome {
+            case .backedUp(let forkURL, _):
+                return "Backed up to \(forkURL)"
+            case .nameCollisionNeedsTheUser(let existingRepoURL):
+                return "A repo named that already exists at \(existingRepoURL) — rename it first"
+            case .notConnected, .failed:
+                return nil
+            }
+        }
+
+        // Rebuild → relaunch (Option A). Relaunch is offered only when the
+        // catalog supplies a REAL macBundleId (tri-state — never guessed) AND the
+        // stack produces a relaunchable macOS artifact. The two closures below
+        // package from the clone and then terminate+launch; the coordinator holds
+        // the per-clonePath lock across both so the incident path can't strip
+        // `.git` under the packaging build.
+        coordinator.relaunchIsAvailableForApp = { [weak self] appSlug in
+            guard let self else { return false }
+            let stack = Self.catalogAppStacksBySlug[appSlug] ?? .other
+            let macBundleId = self.appInventoryService.installedEntriesForDisplay
+                .first { $0.slug == appSlug }?.macBundleId
+            let hasKnownBundleId = (macBundleId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            return hasKnownBundleId
+                && AppRelaunchService.stackCanProduceARelaunchableMacArtifact(stack)
+        }
+        coordinator.packageEditedAppFromClone = { [weak self] appSlug in
+            guard let self,
+                  let clonePath = self.installProvenanceStore.provenance(forAppSlug: appSlug)?.clonePath else {
+                return .ineligible(reason: "this app's source clone isn't available to rebuild")
+            }
+            let stack = Self.catalogAppStacksBySlug[appSlug] ?? .other
+            return await self.appRelaunchService.packageFreshBuildFromClone(
+                clonePath: clonePath, appStack: stack
+            )
+        }
+        coordinator.terminateAndRelaunchEditedApp = { [weak self] appSlug, artifactPath, allowForceQuit in
+            guard let self,
+                  let macBundleId = self.appInventoryService.installedEntriesForDisplay
+                      .first(where: { $0.slug == appSlug })?.macBundleId,
+                  !macBundleId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return .ineligible(reason: "Iris doesn't have a bundle id for this app")
+            }
+            return await self.appRelaunchService.terminateRunningInstanceThenLaunchFreshBuild(
+                macBundleId: macBundleId,
+                freshBuildArtifactPath: artifactPath,
+                allowForceQuit: allowForceQuit
+            )
+        }
+
+        // PUBLIC publish (D6): recorded to publik's public fix log and, for a
+        // feature, the pooled request marked implemented. Reached ONLY from the
+        // coordinator's own explicit every-time consent — never automatically,
+        // never bundled with the fork backup above.
+        coordinator.publishEditToPublik = { [weak self] appSlug, kind, requestSummary in
+            guard let self,
+                  let canonicalRepo = self.installProvenanceStore.provenance(forAppSlug: appSlug)?.canonicalRepo else {
+                return nil
+            }
+            await self.maintainPoolClient.recordFixLog(
+                appSlug: appSlug, diagnosisTitle: requestSummary, repo: canonicalRepo
+            )
+            if kind == .feature {
+                await self.maintainFeatureRequests.markPooledRequestImplemented(
+                    requestSummary, forAppSlug: appSlug
+                )
+            }
+            return "Posted to publik's public listing for \(canonicalRepo)"
+        }
+        return coordinator
+    }()
+
+    /// True while the on-demand edit run's terminal takeover covers the screen,
+    /// so the eye bar suppresses its own body (the takeover is the surface
+    /// then). Published so the bar can read it.
+    @Published private(set) var onDemandEditTakeoverIsUp = false
+
+    /// A preselect for the edit card's fix/feature picker, taken from the
+    /// phrasing that opened the flow. Only a starting point — the reader's
+    /// explicit pick in the card always wins, because that choice drives the
+    /// honesty label and the commit trailer and must never be silently inferred.
+    @Published private(set) var onDemandEditPreselectedKind: OnDemandEditKind?
+
+    private var onDemandEditPhaseCancellable: AnyCancellable?
+
     private var crashArtifactWatcher: CrashArtifactWatcher?
     private let hangProbe = HangProbe()
     private var hangProbeTimer: Timer?
@@ -509,6 +631,8 @@ final class CompanionManager: ObservableObject {
         summonHotkeyTransitionCancellable?.cancel()
         accountStateChangeCancellable?.cancel()
         maintainAskCancellable?.cancel()
+        onDemandEditPhaseCancellable?.cancel()
+        onDemandEditTakeoverIsUp = false
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
     }
@@ -518,12 +642,32 @@ final class CompanionManager: ObservableObject {
     /// Nothing here captures a pixel or spends a token; everything funnels
     /// into the incident coordinator, whose only output is a question.
     private func startMaintainMode() {
+        // Give the inventory its slug → "may Iris edit this locally?" join BEFORE
+        // the first refresh, so the advisory `isLocallyEditable` flag is
+        // populated on the very first scan and the "Edit this app" affordance
+        // renders without waiting for a second one. The inventory stays
+        // in-memory-only; this closure is the only path from it to the
+        // provenance store, and it is read on the main actor.
+        appInventoryService.localPatchingPermittedForSlug = { [weak self] appSlug in
+            self?.installProvenanceStore.localPatchingIsPermitted(forAppSlug: appSlug) ?? false
+        }
+
         // The matcher is only as good as the inventory behind it, and until
         // now the inventory scanned when the panel opened. Maintain mode
         // watches whether anyone opens the panel or not, so it brings its
         // own refresh and its own frontmost tracking.
         Task { await appInventoryService.refreshInventory() }
         appInventoryService.startWatchingTheFrontmostApp()
+
+        // Follow the on-demand edit flow's phase so its terminal takeover is
+        // raised when a run starts and folded away the moment the run leaves the
+        // running state (a diff to preview, a failure). `$phase` also fires the
+        // current value on subscription, which is `.pickApp` — a no-op here.
+        onDemandEditPhaseCancellable = onDemandEditCoordinator.$phase
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] phase in
+                self?.reactToOnDemandEditPhase(phase)
+            }
 
         // A raised ask must SURFACE itself — the app just crashed and left
         // the screen; making the user go hunt for it is backwards. When a
@@ -549,6 +693,16 @@ final class CompanionManager: ObservableObject {
                   let record = self.installProvenanceStore.provenance(forAppSlug: appSlug),
                   let clonePath = record.clonePath,
                   let provider = MaintainModelProviderResolver.firstAvailable() else { return nil }
+            // Exclude the on-demand editor (and any second incident derivation)
+            // from the SAME clone while this novel fix strips `.git` and may
+            // revert the working tree — two such derivations at once corrupt the
+            // tree or lose an in-flight edit. If the reader is already editing
+            // this app by hand through the on-demand flow, the crash fix stands
+            // down rather than racing them; the ask has already been shown.
+            guard MaintainClonePathLock.shared.tryAcquire(
+                clonePath: clonePath, owner: "incident:\(appSlug)"
+            ) else { return nil }
+            defer { MaintainClonePathLock.shared.release(clonePath: clonePath) }
             let fixer = MaintainTierCFixer(provider: provider)
             let result = await fixer.attemptFix(
                 clonePath: clonePath, appSlug: appSlug, appStack: stack,
@@ -672,6 +826,110 @@ final class CompanionManager: ObservableObject {
         guard let entry else { return nil }
         let stack = Self.catalogAppStacksBySlug[entry.slug] ?? .other
         return (entry.slug, entry.name, stack)
+    }
+
+    // MARK: - On-demand edit
+
+    /// Start the on-demand edit flow for a catalog app the reader chose from the
+    /// settings panel's "Edit this app". Resolves the app's stack from the local
+    /// table and hands off to the shared entry point below.
+    func requestOnDemandEdit(forEntry entry: CatalogAppInventoryEntry) {
+        let stack = Self.catalogAppStacksBySlug[entry.slug] ?? .other
+        requestOnDemandEdit(forSlug: entry.slug, name: entry.name, stack: stack, preselectedKind: nil)
+    }
+
+    /// The shared on-demand edit entry point: pick the app in the coordinator
+    /// (which runs its advisory eligibility gate), bring the eye's bar forward
+    /// where the edit card renders, and leave the settings dropdown behind — the
+    /// whole flow happens at the eye. `preselectedKind` only seeds the card's
+    /// picker; the reader's explicit pick there is what binds.
+    func requestOnDemandEdit(
+        forSlug slug: String,
+        name: String,
+        stack: BreakAppStack,
+        preselectedKind: OnDemandEditKind?
+    ) {
+        onDemandEditPreselectedKind = preselectedKind
+        onDemandEditCoordinator.pickApp(slug: slug, name: name, stack: stack)
+
+        // The card lives at the eye, so the overlay has to be up — it may be
+        // hidden when the cursor is toggled off. Bring it back the same
+        // transient way a chat message does, then open the bar and drop the
+        // settings panel.
+        transientHideTask?.cancel()
+        transientHideTask = nil
+        if !isOverlayVisible {
+            overlayWindowManager.hasShownOverlayBefore = true
+            overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+            isOverlayVisible = true
+        }
+        NotificationCenter.default.post(name: .clickyOnDemandEditRaised, object: nil)
+        NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+    }
+
+    /// Door B classification. Returns true — and starts the edit flow — when the
+    /// message is an explicit instruction to EDIT the frontmost catalog app that
+    /// Iris may edit locally. Returns false for everything else (a question, a
+    /// wish to pool, an app that is not editable), which stays on the chat
+    /// pipeline. The fix/feature kind is only PRESELECTED here from the phrasing;
+    /// the reader makes the binding choice in the card, because the kind drives
+    /// the honesty label and the commit trailer and must never be inferred.
+    @discardableResult
+    func beginOnDemandEditIfMessageIsAnEditInstruction(_ messageText: String) -> Bool {
+        let trimmed = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let frontmostSlug = appInventoryService.frontmostCatalogAppSlug,
+              let entry = appInventoryService.installedEntriesForDisplay
+                  .first(where: { $0.slug == frontmostSlug }),
+              entry.isLocallyEditable,
+              let preselectedKind = OverlayEyeSuggestions.editInstructionKind(forMessage: trimmed)
+        else { return false }
+        let stack = Self.catalogAppStacksBySlug[entry.slug] ?? .other
+        requestOnDemandEdit(
+            forSlug: entry.slug, name: entry.name, stack: stack, preselectedKind: preselectedKind
+        )
+        return true
+    }
+
+    /// Raise or fold the edit run's terminal takeover as the flow moves in and
+    /// out of the running state.
+    private func reactToOnDemandEditPhase(_ phase: OnDemandEditPhase) {
+        switch phase {
+        case .running:
+            presentOnDemandEditTakeover()
+        default:
+            if onDemandEditTakeoverIsUp {
+                autopilotTakeoverController.dismiss(afterHold: false)
+                onDemandEditTakeoverIsUp = false
+            }
+        }
+    }
+
+    /// Morph the eye into the centered terminal that streams the edit run —
+    /// the same takeover a guide install uses, presented over the on-demand
+    /// runner instead. The guide-only callbacks are inert here: an edit has no
+    /// manual steps and no per-command confirm loop.
+    private func presentOnDemandEditTakeover() {
+        // Never stack on a guide install's takeover; the two do not run at once
+        // in this slice, and the controller refuses a second present regardless.
+        guard !autopilotTakeoverController.isPresented else { return }
+        autopilotTakeoverController.present(
+            runner: onDemandEditCoordinator.editRunner,
+            onApproveRiskyCommand: {},
+            onSkipRiskyCommand: {},
+            onRetrySurfacedStep: {},
+            onContinuePastSurfacedStep: {},
+            onReaderFinishedManualStep: {},
+            onEscapeHatch: { [weak self] in
+                // Background the terminal WITHOUT cancelling the run: the jailed
+                // loop keeps going and its result lands in the edit card's diff
+                // preview, so a long edit never traps the reader behind a dimmed
+                // desktop.
+                guard let self else { return }
+                self.autopilotTakeoverController.dismiss(afterHold: false)
+                self.onDemandEditTakeoverIsUp = false
+            }
+        )
+        onDemandEditTakeoverIsUp = true
     }
 
     func refreshAllPermissions() {
@@ -807,6 +1065,15 @@ final class CompanionManager: ObservableObject {
 
         latestUserMessageText = trimmedMessageText
         print("💬 Companion received message: \(trimmedMessageText)")
+
+        // Door B: an explicit instruction to EDIT the frontmost editable catalog
+        // app is not a question — it opens the on-demand edit flow instead of
+        // going to Claude. Checked FIRST, and before pooling, so an
+        // "add a feature to X" opener is not also counted as a wish, and so no
+        // chat answer is generated for it (the bar would otherwise wait on one).
+        if beginOnDemandEditIfMessageIsAnEditInstruction(trimmedMessageText) {
+            return
+        }
 
         // A wish about the app in front is demand, not a question. Pool it as
         // a signal (never interrupt — the answer pipeline runs as normal), so

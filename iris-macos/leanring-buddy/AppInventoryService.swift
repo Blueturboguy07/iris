@@ -288,6 +288,14 @@ nonisolated struct CatalogAppInventoryEntry: Identifiable, Equatable, Sendable {
     let latestReleaseTag: String?
     let installationState: CatalogAppInstallationState
     let updateAvailability: CatalogAppUpdateAvailability
+    /// Advisory only: whether this app's source is one Iris may edit locally —
+    /// a guide-source clone with a live `.git`, joined by slug against the
+    /// provenance store when the inventory is built. It gates whether the
+    /// "Edit this app" affordance is even OFFERED, so a signed-download install
+    /// never renders it. It is deliberately NOT trusted as permission: the
+    /// on-demand edit coordinator re-checks provenance LIVE the moment the
+    /// reader acts, so a stale positive here can never actually cause an edit.
+    let isLocallyEditable: Bool
 
     var id: String { slug }
 
@@ -348,6 +356,15 @@ final class AppInventoryService: ObservableObject {
     @Published private(set) var lastRefreshFailureMessage: String?
 
     private(set) var lastSuccessfulRefreshCompletedAt: Date?
+
+    /// A slug → "may Iris edit this app's local source?" join, set by
+    /// `CompanionManager` so the inventory can carry the advisory
+    /// `isLocallyEditable` flag WITHOUT this in-memory-only service ever
+    /// reaching into the provenance store (or writing anything to disk) itself.
+    /// Nil until wired; a nil lookup means nothing is offered as editable,
+    /// which is the correct fail-closed default. Read on the main actor during
+    /// a refresh, before the off-actor inventory build.
+    var localPatchingPermittedForSlug: ((String) -> Bool)?
 
     private let catalogDirectory: any CatalogAppDirectorySource
     private let installedApplicationLocator: any InstalledApplicationLocating
@@ -414,10 +431,20 @@ final class AppInventoryService: ObservableObject {
         }
 
         let installedApplicationLocator = self.installedApplicationLocator
+        // Compute the editable-slug join HERE, on the main actor, because the
+        // provenance lookup reads a main-actor store — never inside the
+        // off-actor build below. The result is a plain `Set<String>` the
+        // detached build can safely capture.
+        let locallyEditableSlugs = Set(
+            catalogDescriptors
+                .map(\.slug)
+                .filter { localPatchingPermittedForSlug?($0) == true }
+        )
         let freshInventoryEntries = await Task.detached(priority: .utility) {
             Self.buildInventoryEntries(
                 fromCatalogDescriptors: catalogDescriptors,
-                using: installedApplicationLocator
+                using: installedApplicationLocator,
+                locallyEditableSlugs: locallyEditableSlugs
             )
         }.value
 
@@ -526,7 +553,11 @@ final class AppInventoryService: ObservableObject {
 
     nonisolated static func buildInventoryEntries(
         fromCatalogDescriptors catalogDescriptors: [CatalogAppDescriptor],
-        using installedApplicationLocator: any InstalledApplicationLocating
+        using installedApplicationLocator: any InstalledApplicationLocating,
+        // The slugs whose local source Iris may edit, pre-computed on the main
+        // actor (the provenance store is main-actor). Defaulted so existing
+        // callers and tests that do not care about editability stay unchanged.
+        locallyEditableSlugs: Set<String> = []
     ) -> [CatalogAppInventoryEntry] {
         catalogDescriptors.map { catalogDescriptor in
             let installationState = installationState(
@@ -542,7 +573,8 @@ final class AppInventoryService: ObservableObject {
                 updateAvailability: updateAvailability(
                     forInstallationState: installationState,
                     latestReleaseTag: catalogDescriptor.latestReleaseTag
-                )
+                ),
+                isLocallyEditable: locallyEditableSlugs.contains(catalogDescriptor.slug)
             )
         }
     }

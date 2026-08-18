@@ -23,8 +23,14 @@
 
 import SwiftUI
 
-struct GuideAutopilotTerminalView: View {
-    @ObservedObject var runner: GuideAutopilotRunner
+// Generic over the presenter (`AutopilotTerminalPresenting`) rather than tied to
+// the concrete `GuideAutopilotRunner`, so the exact same terminal — the traffic
+// lights, the typed-out commands, the exit lines, the scroll-to-tail — renders a
+// guide install AND a user-initiated on-demand edit (`OnDemandEditRunner`). The
+// guide-shaped rows (`surfaceRow`, `confirmRow`) only ever appear on states the
+// edit runner never enters, so nothing guide-specific leaks into an edit run.
+struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
+    @ObservedObject var runner: Runner
     let onApproveRiskyCommand: () -> Void
     let onSkipRiskyCommand: () -> Void
     /// The reader tapped "Try again" on a step Iris surfaced.

@@ -475,6 +475,12 @@ struct BlueCursorView: View {
             // the top of it. Same one-screen guard, so it opens once.
             openTheInputBarFromTheSummonHotkey()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .clickyOnDemandEditRaised)) { _ in
+            // The reader tapped "Edit this app" somewhere off the eye. Open the
+            // eye's bar so the on-demand edit card is in front of them; the same
+            // one-screen guard means it opens once.
+            openTheInputBarFromTheSummonHotkey()
+        }
         .onAppear {
             // Set initial cursor position immediately before starting animation
             let mouseLocation = NSEvent.mouseLocation

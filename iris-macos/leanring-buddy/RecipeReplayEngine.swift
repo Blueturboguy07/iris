@@ -42,6 +42,10 @@ enum RecipeReplayResult: Sendable {
     case patchingNotPermittedForThisInstall
     /// The recipe's applicability range excludes this machine.
     case outsideApplicabilityRange
+    /// The on-demand editor (or another replay) already holds this clone's
+    /// lock. Both paths strip/restore `.git` and revert the tree, so they must
+    /// never run on the same clone at once — see `MaintainClonePathLock`.
+    case anotherEditInProgress
 }
 
 @MainActor
@@ -105,6 +109,17 @@ final class RecipeReplayEngine {
         guard let runner = try? MaintainShellRunner(repoRootPath: clonePath) else {
             return .patchingNotPermittedForThisInstall
         }
+
+        // Concurrency rail: the on-demand editor and this replay both strip and
+        // restore `.git` and revert the working tree. If a crash-driven replay
+        // and a user-initiated edit landed on the SAME clone at once, their two
+        // `.git` strips and reverts would race and corrupt the tree. The lock is
+        // the same one `OnDemandEditCoordinator` takes; held across the whole
+        // tree-touching span below and released on every exit via `defer`.
+        guard MaintainClonePathLock.shared.tryAcquire(clonePath: clonePath, owner: "replay") else {
+            return .anotherEditInProgress
+        }
+        defer { MaintainClonePathLock.shared.release(clonePath: clonePath) }
 
         // Tier A: the exact pooled diff.
         let exactResult = await applyVerifyAndCommit(
@@ -199,18 +214,25 @@ final class RecipeReplayEngine {
         }
 
         // Commit on a recipe-keyed branch — the fork service (M4) pushes it.
-        let dateStamp = Self.compactDateStamp()
-        let branchName = "iris/fix-\(signatureId.prefix(12))-\(dateStamp)"
+        // The branch naming, the commit script, and the trailer-block shape are
+        // shared with the Tier C loop via MaintainFixCommit; only the trailer
+        // VOCABULARY (a replayed/adapted recipe's honest claim) is ours.
         let provenanceWord = wasAdapted ? "adapted from" : "replayed"
-        let commitMessage = "Apply pooled fix recipe \(recipe.id)\n\n"
-            + "Break-Signature: \(signatureId)\n"
-            + "Fix-Recipe-Match: \(recipe.id)\(wasAdapted ? " (adapted)" : "")\n"
-            + "Verified: applied, build-green\(verification.suitePassed == true ? ", suite-green" : "")\n"
-            + "Assisted-by: iris-maintain-mode/1\n"
-            + "Modified-by: Iris (publik) — \(provenanceWord) a pooled recipe"
-        let commitScript = "git checkout -b '\(branchName)' 2>/dev/null || git checkout '\(branchName)'; "
-            + "git add -A && git commit -m '\(commitMessage.replacingOccurrences(of: "'", with: "'\\''"))' --quiet"
-        _ = try? await runner.run(commitScript, deadline: 60)
+        let branchName = await MaintainFixCommit.commitOnBranch(
+            plan: MaintainFixCommitPlan(
+                branchPrefix: "iris/fix-",
+                changeId: signatureId,
+                subject: "Apply pooled fix recipe \(recipe.id)",
+                trailerLines: [
+                    "Break-Signature: \(signatureId)",
+                    "Fix-Recipe-Match: \(recipe.id)\(wasAdapted ? " (adapted)" : "")",
+                    "Verified: applied, build-green\(verification.suitePassed == true ? ", suite-green" : "")",
+                    "Assisted-by: iris-maintain-mode/1",
+                    "Modified-by: Iris (publik) — \(provenanceWord) a pooled recipe",
+                ]
+            ),
+            runner: runner
+        )
 
         patchQueue.record(QueuedPatch(
             recipeId: recipe.id,
@@ -252,13 +274,6 @@ final class RecipeReplayEngine {
             installId: installIdentity.currentInstallId
         )
         _ = kind // the outcome route infers kind server-side in v1
-    }
-
-    private static func compactDateStamp() -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd"
-        formatter.timeZone = TimeZone(identifier: "UTC")
-        return formatter.string(from: Date())
     }
 }
 

@@ -501,6 +501,79 @@ enum OverlayEyeSuggestions {
         return whileFollowingAGuideStep(titled: trimmedStepTitle)
     }
 
+    /// The suggestions to show right now, aware of both a guide in progress AND
+    /// a catalog app the reader is looking at that Iris may edit locally.
+    ///
+    /// Order of precedence: a guide the reader is mid-way through always wins —
+    /// their question is overwhelmingly about the step in front of them. With no
+    /// guide open, a frontmost catalog app whose source Iris may edit gets the
+    /// two Door-B openers ("fix a bug in <App>", "add a feature to <App>"), so
+    /// the way to start an edit is one tap from the eye. Otherwise the plain
+    /// starters. Pass `frontmostEditableCatalogAppName` only for an app that
+    /// actually passed the advisory editability gate — never for one Iris cannot
+    /// edit, or the chip would offer something the flow then refuses.
+    static func suggestions(
+        forOpenGuideStepTitled stepTitle: String?,
+        frontmostEditableCatalogAppNamed frontmostEditableCatalogAppName: String?
+    ) -> [String] {
+        // A guide is the most specific context; keep its behavior exactly.
+        if let stepTitle {
+            let trimmedStepTitle = stepTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedStepTitle.isEmpty {
+                return whileFollowingAGuideStep(titled: trimmedStepTitle)
+            }
+        }
+        if let appName = frontmostEditableCatalogAppName?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !appName.isEmpty {
+            return frontmostCatalogAppEditChips(forAppNamed: appName)
+        }
+        return whenNothingElseIsOpen
+    }
+
+    // MARK: - Door B: editing the frontmost catalog app
+
+    /// The verb the "fix a bug" chip and its detector share, so the string the
+    /// chip shows can never drift from the string the classifier matches.
+    static let fixChipVerb = "fix a bug in"
+    /// The verb the "add a feature" chip and its detector share.
+    static let featureChipVerb = "add a feature to"
+
+    /// The two openers for a catalog app the reader is looking at and Iris may
+    /// edit. Tapping one sends its text, which `CompanionManager.sendUserMessage`
+    /// classifies as an edit instruction (below) and routes to the edit card
+    /// rather than to a chat answer.
+    static func frontmostCatalogAppEditChips(forAppNamed appName: String) -> [String] {
+        ["\(fixChipVerb) \(appName)", "\(featureChipVerb) \(appName)"]
+    }
+
+    /// Recognizes a typed or tapped instruction to EDIT the frontmost catalog
+    /// app, and preselects bug-fix vs feature from the phrasing. Returns nil for
+    /// anything that does not open with an edit verb — an ordinary question
+    /// about the app ("why does it keep crashing?") is never mistaken for a
+    /// build request, which is what keeps the chat pipeline the default.
+    ///
+    /// The returned kind is ONLY a preselect for the card's picker — the reader
+    /// still makes an explicit fix/feature choice there, because that choice
+    /// drives the honesty label and the commit trailer and must never be
+    /// silently inferred.
+    static func editInstructionKind(forMessage message: String) -> OnDemandEditKind? {
+        let lowered = message
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Feature openers — deliberately narrow, matching the chip and its close
+        // free-text variants only.
+        for opener in ["add a feature", "add the feature", "add feature", "build a feature"]
+        where lowered.hasPrefix(opener) {
+            return .feature
+        }
+        // Fix openers — likewise narrow.
+        for opener in ["fix a bug", "fix the bug", "fix bug"]
+        where lowered.hasPrefix(opener) {
+            return .bugFix
+        }
+        return nil
+    }
+
     /// What the bar says while Iris is working, which is a different sentence
     /// depending on which part of the work is happening.
     ///

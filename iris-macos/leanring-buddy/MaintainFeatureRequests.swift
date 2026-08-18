@@ -118,6 +118,32 @@ final class MaintainFeatureRequests {
         return normalized
     }
 
+    /// Marks a pooled request implemented, closing the demand loop
+    /// (`implementedCount`). This is a PUBLIC write to the shared demand pool, so
+    /// it must only ever be called behind an explicit, every-time user consent
+    /// (D6) — never automatically because a change happened to be backed up. Fire
+    /// and forget, keyed by the same normalized signature `poolWish` uses so it
+    /// increments the right row.
+    func markPooledRequestImplemented(_ requestText: String, forAppSlug appSlug: String) async {
+        let normalized = Self.normalizedRequest(from: requestText)
+        guard !normalized.isEmpty else { return }
+        let signature = Self.signature(appSlug: appSlug, normalizedRequest: normalized)
+
+        let url = publikBaseURL.appendingPathComponent("api/iris/feature-requests")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "appSlug": appSlug,
+            "signature": signature,
+            "request": normalized,
+            "implemented": true,
+            "installId": installIdentity.currentInstallId.uuidString.lowercased(),
+        ] as [String: Any])
+        _ = try? await urlSession.data(for: request)
+        irisTrace("maintain: marked a pooled feature request implemented for \(appSlug)")
+    }
+
     /// The top requests for an app, k>=5-gated server-side. For a proactive
     /// "most people who run this also wanted…" suggestion.
     func topRequests(forAppSlug appSlug: String) async -> [PooledFeatureRequest] {

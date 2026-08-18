@@ -88,9 +88,15 @@ final class GuideAutopilotTakeoverController {
     var isPresented: Bool { terminalPanel != nil }
 
     /// Bring up the takeover: dim the desktop, and morph the eye into the
-    /// centered terminal that `runner` streams the install into.
-    func present(
-        runner: GuideAutopilotRunner,
+    /// centered terminal that `runner` streams the work into.
+    ///
+    /// Generic over the presenter so the SAME morph hosts either a guide's
+    /// `GuideAutopilotRunner` or an on-demand edit's `OnDemandEditRunner`. The
+    /// guide-only callbacks (`onReaderFinishedManualStep`, the risky-command
+    /// gate) are simply never triggered by the edit runner, which has no manual
+    /// steps and no per-command confirm loop.
+    func present<Runner: AutopilotTerminalPresenting>(
+        runner: Runner,
         onApproveRiskyCommand: @escaping () -> Void,
         onSkipRiskyCommand: @escaping () -> Void,
         onRetrySurfacedStep: @escaping () -> Void,
@@ -392,9 +398,9 @@ private struct GuideAutopilotTakeoverBackdrop: View {
 /// the Windows renderer's `.stage`/`.stage.as-terminal`. The window itself grows
 /// and shrinks around this (driven by the controller), so the scale here is only
 /// the finishing touch on a morph the window size is doing most of.
-private struct GuideAutopilotTakeoverView: View {
+private struct GuideAutopilotTakeoverView<Runner: AutopilotTerminalPresenting>: View {
     @ObservedObject var model: GuideAutopilotTakeoverModel
-    @ObservedObject var runner: GuideAutopilotRunner
+    @ObservedObject var runner: Runner
     let onApproveRiskyCommand: () -> Void
     let onSkipRiskyCommand: () -> Void
     let onRetrySurfacedStep: () -> Void

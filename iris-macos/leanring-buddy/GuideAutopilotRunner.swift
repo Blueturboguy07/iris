@@ -75,8 +75,14 @@ struct GuideAutopilotGuideContext {
     let hostsReachedByTheGuide: Set<String>
 }
 
+// The conformance to `AutopilotTerminalPresenting` (declared in
+// OnDemandEditRunner.swift) is a no-op in behavior: this runner already
+// publishes `state`, `transcript`, and `isExecutingACommand` exactly as the
+// protocol requires. It exists so the terminal view and the takeover controller
+// can be generic over ANY presenter — this one for a guide install, and
+// `OnDemandEditRunner` for a user-initiated edit — and reuse the same renderer.
 @MainActor
-final class GuideAutopilotRunner: ObservableObject {
+final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting {
 
     // MARK: - Budgets (see docs/iris-assistant-protocol.md §8)
 

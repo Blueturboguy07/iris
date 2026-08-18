@@ -334,6 +334,8 @@ final class MaintainIncidentCoordinator: ObservableObject {
                 self.fixStatusLine = "A code fix exists, but this install isn't a source build Iris may patch."
             case .outsideApplicabilityRange:
                 self.fixStatusLine = "A fix exists for other versions, but not yours yet. Filed."
+            case .anotherEditInProgress:
+                self.fixStatusLine = "Iris is already editing this app — it'll retry the fix once that finishes."
             }
         }
     }

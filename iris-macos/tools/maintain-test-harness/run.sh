@@ -80,6 +80,8 @@ swiftc -o "$BIN" -swift-version 5 -default-isolation MainActor \
   "$ENGINE/VerificationHarness.swift" \
   "$ENGINE/MaintainShellRunner.swift" \
   "$ENGINE/MaintainSandbox.swift" \
+  "$ENGINE/MaintainBuildScriptGuard.swift" \
+  "$ENGINE/MaintainFixCommit.swift" \
   "$ENGINE/MaintainTierCFixer.swift" \
   "$REPOS/shim.swift" \
   "$HERE/main.swift" 2>&1 | grep -E "error:" && { echo "COMPILE FAILED"; exit 2; }

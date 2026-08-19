@@ -19,6 +19,7 @@ import type { InstallRecipe, RecipeOutput, RecipeStep, StepCheck, StepKind } fro
 import { commandForPlatform } from "./recipe";
 import type { ApprovedCommand, Provenance } from "./risk";
 import { approve, approveAfterAReaderTap, assess } from "./risk";
+import { friendlyLabel } from "./friendly-label";
 import {
   DEFAULT_COMMAND_TIMEOUT_MS,
   LONG_RUNNING_GRACE_MS,
@@ -32,7 +33,9 @@ const RECIPE_PROVENANCE: Provenance = "vetted_recipe";
 /// straight to the renderer over IPC.
 export type AutopilotEvent =
   | { readonly type: "stepStarted"; readonly index: number; readonly total: number; readonly title: string; readonly kind: StepKind }
-  | { readonly type: "commandStarted"; readonly text: string }
+  /// `friendlyLabel` is the plain-English line the terminal shows above the raw
+  /// `text`, for a non-technical reader (see `friendly-label.ts`).
+  | { readonly type: "commandStarted"; readonly text: string; readonly friendlyLabel: string }
   | { readonly type: "commandFinished"; readonly exitCode: number; readonly output: string }
   /// The main process should open this URL/app; opening it is the whole step.
   | { readonly type: "openRequested"; readonly href: string }
@@ -78,6 +81,12 @@ export class AutopilotRunner {
   constructor(
     private readonly recipe: InstallRecipe,
     private readonly platform: NodeJS.Platform = process.platform,
+    // The one-time "Let Iris take control" grant. When true, the gate runs every
+    // command that is not in the catastrophe floor without a tap. The controller
+    // only constructs a runner with `true` after the reader has consented, so in
+    // production an autopilot run is always granted; kept a parameter (default
+    // false) so the un-granted three-tier behavior stays unit-testable.
+    private readonly autonomyGranted: boolean = false,
   ) {}
 
   private commandFor(step: RecipeStep): string | undefined {
@@ -187,7 +196,7 @@ export class AutopilotRunner {
     if (!approved) {
       return this.surface("You skipped this command, so Iris stopped here.", command);
     }
-    const approvedCommand = approveAfterAReaderTap(command, RECIPE_PROVENANCE);
+    const approvedCommand = approveAfterAReaderTap(command, RECIPE_PROVENANCE, this.autonomyGranted);
     if (approvedCommand === undefined) {
       return this.surface("Iris won't run this command automatically.", command);
     }
@@ -206,9 +215,9 @@ export class AutopilotRunner {
     if (command === undefined) {
       return { kind: "blocked", status: this.surface("This step has no command to run.") };
     }
-    const verdict = assess(command, RECIPE_PROVENANCE);
+    const verdict = assess(command, RECIPE_PROVENANCE, this.autonomyGranted);
     if (verdict.tier === "runs_without_asking") {
-      const approved = approve(command, RECIPE_PROVENANCE)!;
+      const approved = approve(command, RECIPE_PROVENANCE, this.autonomyGranted)!;
       return this.execute(approved, step, shell);
     }
     if (verdict.tier === "needs_a_confirm_tap") {
@@ -230,7 +239,7 @@ export class AutopilotRunner {
     shell: ShellSession,
   ): Promise<StepProgress> {
     const rawCommand = this.commandFor(step) ?? "";
-    this.emit({ type: "commandStarted", text: rawCommand });
+    this.emit({ type: "commandStarted", text: rawCommand, friendlyLabel: friendlyLabel(rawCommand) });
     const outcome: CommandOutcome = step.longRunning
       ? await shell.runLongRunning(approved, step.readyWhen, LONG_RUNNING_GRACE_MS)
       : await shell.run(approved, DEFAULT_COMMAND_TIMEOUT_MS);

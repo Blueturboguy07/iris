@@ -157,6 +157,36 @@ body {
   color: var(--amber);
 }
 
+/* The plain-English lead line — the prominent one — with the raw command it
+   describes shown dimmed beneath it. */
+.line.friendly {
+  color: var(--text);
+  font-weight: 500;
+  margin-top: 8px;
+}
+
+.line.command {
+  opacity: 0.55;
+}
+
+.line.friendly .spin {
+  display: inline-block;
+  margin-right: 7px;
+  color: var(--prompt);
+  animation: spin 0.8s linear infinite;
+}
+
+/* Stops turning once the command finishes (the .running class is removed). */
+.line.friendly:not(.running) .spin {
+  animation: none;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .line.output {
   color: var(--dim);
   font-size: 12px;

@@ -48,6 +48,12 @@ export interface FinishedInstall {
 /// Everything the autopilot needs from the app, injected so the controller is
 /// testable without Electron.
 export interface AutopilotHost {
+  /// The one-time "Let Iris take control of your PC?" consent. Returns true if
+  /// the reader has already granted it (remembered across installs) or grants it
+  /// now; false if they decline. The real host reads/writes the persisted
+  /// `autopilotAutonomyGranted` setting and shows a dialog when it is not yet
+  /// set; a test returns a fixed answer. `start` refuses to run when it is false.
+  ensureAutonomyGranted(): Promise<boolean>;
   /// Forward a runner event to the renderer (the animated terminal).
   emitEvent(event: AutopilotEvent): void;
   /// Open a URL or app the reader should land in.
@@ -89,10 +95,23 @@ export class AutopilotController {
     if (recipe === undefined) {
       throw new Error(`Iris has no Windows recipe for '${slug}'.`);
     }
+    // The one-time "Let Iris take control?" consent, remembered across installs.
+    // Asked before any shell is started; a decline stops here rather than
+    // running an install the reader did not agree to.
+    const autonomyGranted = await this.host.ensureAutonomyGranted();
+    if (!autonomyGranted) {
+      return {
+        type: "surfaced",
+        stepIndex: 0,
+        reason: "Iris needs your go-ahead to run installs on your PC. Start it again when you're ready.",
+      };
+    }
     this.dispose();
     this.shell = this.makeShell();
     this.recipe = recipe;
-    this.runner = new AutopilotRunner(recipe);
+    // Granted, so the runner runs the whole vetted install hands-off (only the
+    // catastrophe floor can still stop a command).
+    this.runner = new AutopilotRunner(recipe, process.platform, true);
     return this.pump(await this.runner.runUntilBlocked(this.shell));
   }
 

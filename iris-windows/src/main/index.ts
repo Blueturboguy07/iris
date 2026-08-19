@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, screen, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, screen, shell } from "electron";
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { createTray } from "./tray";
@@ -615,6 +615,28 @@ function maintainHost(): MaintainHost {
 function autopilotController(): AutopilotController {
   if (autopilot) return autopilot;
   autopilot = new AutopilotController({
+    // The one-time "Let Iris take control?" consent, remembered across installs
+    // via the persisted `autopilotAutonomyGranted` setting (revocable from the
+    // settings window). Once granted, the whole vetted install runs hands-off.
+    ensureAutonomyGranted: async () => {
+      if (settings.get("autopilotAutonomyGranted")) return true;
+      const options = {
+        type: "question" as const,
+        buttons: ["Let Iris take control", "Not now"],
+        defaultId: 0,
+        cancelId: 1,
+        message: "Let Iris take control of your PC?",
+        detail:
+          "Iris will run this install itself — installing the tools it needs, building the app, and setting it up — without asking you to approve each step. It never runs anything that would erase your disk, and you can turn this off anytime in Iris's settings.",
+      };
+      const parent = autopilotWindow && !autopilotWindow.isDestroyed() ? autopilotWindow : null;
+      const result = parent
+        ? await dialog.showMessageBox(parent, options)
+        : await dialog.showMessageBox(options);
+      const granted = result.response === 0;
+      if (granted) settings.set("autopilotAutonomyGranted", true);
+      return granted;
+    },
     emitEvent: (event) => broadcast("autopilot:event", event),
     openExternal: (url) => openExternalSafely(url),
     floatToGate: (instruction, href) => {

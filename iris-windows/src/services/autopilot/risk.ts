@@ -55,22 +55,11 @@ function rule(source: string, reason: string): Rule {
   return { pattern: new RegExp(source, "i"), reason };
 }
 
-// Refused outright: no tap can make these informed.
-const REFUSAL_RULES: readonly Rule[] = [
-  // Download-and-run without anyone reading it — the Windows shapes
-  // (`irm … | iex`, DownloadString + Invoke-Expression) and the Unix one.
-  rule(
-    String.raw`\b(irm|iwr|invoke-restmethod|invoke-webrequest)\b[^\n|]*\|[^\n]*\b(iex|invoke-expression)\b`,
-    "This downloads a script and runs it without anyone reading it first.",
-  ),
-  rule(
-    String.raw`\bdownloadstring\b[^\n]*\|\s*(iex|invoke-expression)\b`,
-    "This downloads a script and runs it without anyone reading it first.",
-  ),
-  rule(
-    String.raw`\b(curl|wget)\b[^\n|]*\|[^\n]*\b(sh|bash|zsh)\b`,
-    "This downloads a script and runs it without anyone reading it first.",
-  ),
+// The catastrophe floor: refused EVEN under the autonomy grant. Whole-disk /
+// whole-profile destruction that no install ever needs — keeping it absolute is
+// what lets "Let Iris take control" be safe to grant once. A hallucinated
+// model-proposed fix that reaches for one is stopped here with no tap.
+const CATASTROPHE_RULES: readonly Rule[] = [
   // Wipe a disk.
   rule(String.raw`\bformat-volume\b`, "This reformats a disk."),
   rule(String.raw`\bformat\s+[a-z]:`, "This reformats a disk."),
@@ -84,6 +73,27 @@ const REFUSAL_RULES: readonly Rule[] = [
   rule(
     String.raw`\brm\b[^\n]*\s-[a-z]*(rf|fr)[a-z]*\s+(/|/\*|~|~/|\$home)\s*(\n|$|;|&)`,
     "This deletes the root of the disk or the whole home folder.",
+  ),
+];
+
+// Refused WITHOUT the grant, but run WITH it: download-and-run one-liners
+// (`irm … | iex`, DownloadString + Invoke-Expression, `curl … | sh`) cannot be
+// read before they run, so without the grant no tap can make them informed. With
+// the grant they run — that shape is how half of all prerequisites install, and
+// refusing it is the biggest reason a package install used to bounce the reader
+// out to a web page.
+const DOWNLOAD_AND_RUN_RULES: readonly Rule[] = [
+  rule(
+    String.raw`\b(irm|iwr|invoke-restmethod|invoke-webrequest)\b[^\n|]*\|[^\n]*\b(iex|invoke-expression)\b`,
+    "This downloads a script and runs it without anyone reading it first.",
+  ),
+  rule(
+    String.raw`\bdownloadstring\b[^\n]*\|\s*(iex|invoke-expression)\b`,
+    "This downloads a script and runs it without anyone reading it first.",
+  ),
+  rule(
+    String.raw`\b(curl|wget)\b[^\n|]*\|[^\n]*\b(sh|bash|zsh)\b`,
+    "This downloads a script and runs it without anyone reading it first.",
   ),
 ];
 
@@ -152,11 +162,26 @@ function firstMatch(rules: readonly Rule[], command: string): string | undefined
   return undefined;
 }
 
-/// The verdict for a command of a given provenance.
-export function assess(command: string, provenance: Provenance): Risk {
-  const refused = firstMatch(REFUSAL_RULES, command);
-  if (refused !== undefined) {
-    return { tier: "refused_outright", reason: refused };
+/// The verdict for a command of a given provenance. When `autonomyGranted` is
+/// true (the reader granted "Let Iris take control" once), everything that is
+/// not in the catastrophe floor runs without asking — a per-command tap on a
+/// vetted install is exactly the friction the grant removes. When it is false
+/// (the default, and every existing caller/test), the original three-tier
+/// behavior is unchanged.
+export function assess(command: string, provenance: Provenance, autonomyGranted = false): Risk {
+  // The catastrophe floor is absolute — refused even under the grant.
+  const catastrophe = firstMatch(CATASTROPHE_RULES, command);
+  if (catastrophe !== undefined) {
+    return { tier: "refused_outright", reason: catastrophe };
+  }
+
+  if (autonomyGranted) {
+    return { tier: "runs_without_asking" };
+  }
+
+  const downloadAndRun = firstMatch(DOWNLOAD_AND_RUN_RULES, command);
+  if (downloadAndRun !== undefined) {
+    return { tier: "refused_outright", reason: downloadAndRun };
   }
   const confirm = firstMatch(CONFIRM_RULES, command);
   if (confirm !== undefined) {
@@ -172,9 +197,14 @@ export function assess(command: string, provenance: Provenance): Risk {
 }
 
 /// Approves a command the gate waves through. Undefined for anything that needs
-/// a tap or is refused — callers surface those, never force them through.
-export function approve(command: string, provenance: Provenance): ApprovedCommand | undefined {
-  return assess(command, provenance).tier === "runs_without_asking" ? mint(command) : undefined;
+/// a tap or is refused — callers surface those, never force them through. Honors
+/// the same autonomy grant `assess` does.
+export function approve(
+  command: string,
+  provenance: Provenance,
+  autonomyGranted = false,
+): ApprovedCommand | undefined {
+  return assess(command, provenance, autonomyGranted).tier === "runs_without_asking" ? mint(command) : undefined;
 }
 
 /// Approves a confirm-tier command after the reader's explicit tap. Refused-tier
@@ -182,7 +212,8 @@ export function approve(command: string, provenance: Provenance): ApprovedComman
 export function approveAfterAReaderTap(
   command: string,
   provenance: Provenance,
+  autonomyGranted = false,
 ): ApprovedCommand | undefined {
-  const tier = assess(command, provenance).tier;
+  const tier = assess(command, provenance, autonomyGranted).tier;
   return tier === "runs_without_asking" || tier === "needs_a_confirm_tap" ? mint(command) : undefined;
 }

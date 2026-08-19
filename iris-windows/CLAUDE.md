@@ -140,6 +140,22 @@ tap / run) that mirrors the macOS `GuideAutopilotRiskAssessment.swift`, and an
 un-forgeable `ApprovedCommand` the shell is the only thing that will run. If you
 add a recipe or loosen the gate, keep those three intact and update the tests.
 
+**Autonomy grant (mirrors the macOS side).** For a vetted, pinned recipe the
+per-command taps are friction, so the reader grants "Let Iris take control of
+your PC?" ONCE (persisted `autopilotAutonomyGranted` in `settings.ts`, remembered
+across installs, revocable from the settings window). `assess`/`approve` take an
+`autonomyGranted` flag (default false, so existing callers/tests are unchanged):
+when true, everything runs no-tap EXCEPT the `CATASTROPHE_RULES` floor (whole-disk
+/ whole-profile destruction) that is refused even under the grant. The `download-
+and-run` shapes (`irm … | iex`, `curl … | sh`) move from refused to run-under-
+grant. `AutopilotController.start` asks the host's `ensureAutonomyGranted()` (an
+Electron dialog in `index.ts`) before any shell starts — a decline stops the run
+— then constructs the runner with `autonomyGranted: true`, so the confirm path is
+not reached in production (still unit-tested at the runner level). The terminal
+shows a plain-English `friendlyLabel` per command (`friendly-label.ts`) with the
+raw command dimmed, and a spinner while running. Keep every risk pattern literal
+present in `risk.ts` — the web guide tests grep for them.
+
 ## Style
 
 Follow the publik house style, which is `iris-macos/CLAUDE.md`'s:

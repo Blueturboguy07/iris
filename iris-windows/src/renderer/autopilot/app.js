@@ -41,6 +41,24 @@
     return line;
   }
 
+  // The plain-English lead line above a command, with a spinner that turns while
+  // the command runs — the "Iris is working right now" signal for a reader who
+  // does not read raw output. `stopRunningFriendlyLine` removes the spinner when
+  // the command finishes (or the step is handed back / surfaced).
+  function addFriendlyLine(label) {
+    const line = document.createElement("div");
+    line.className = "line friendly running";
+    const spin = document.createElement("span");
+    spin.className = "spin";
+    spin.textContent = "◐";
+    const text = document.createElement("span");
+    text.textContent = label;
+    line.append(spin, text);
+    scrollback.appendChild(line);
+    scrollToBottom();
+    return line;
+  }
+
   // A command line: a coloured prompt, then the command typed out, then a
   // blinking cursor that stays until the command finishes.
   async function typeCommandLine(text) {
@@ -101,7 +119,17 @@
   const queue = [];
   let draining = false;
   let runningCursor = null;
+  let runningFriendlyLine = null;
   let commandShownAt = 0;
+
+  function stopRunningFriendlyLine() {
+    if (runningFriendlyLine) {
+      runningFriendlyLine.classList.remove("running");
+      const spin = runningFriendlyLine.querySelector(".spin");
+      if (spin) spin.remove();
+      runningFriendlyLine = null;
+    }
+  }
 
   function enqueue(event) {
     queue.push(event);
@@ -125,6 +153,7 @@
         break;
 
       case "commandStarted":
+        runningFriendlyLine = addFriendlyLine(event.friendlyLabel || event.text);
         runningCursor = await typeCommandLine(event.text);
         commandShownAt = Date.now();
         break;
@@ -136,6 +165,7 @@
           runningCursor.remove();
           runningCursor = null;
         }
+        stopRunningFriendlyLine();
         const trimmed = (event.output || "").trim();
         if (trimmed) addLine(trimmed, "output");
         if (event.exitCode === 0) addLine("✓ done", "exit-ok");
@@ -153,6 +183,7 @@
           runningCursor.remove();
           runningCursor = null;
         }
+        stopRunningFriendlyLine();
         showTray(
           event.instruction,
           [{ label: "I did it — carry on", primary: true, onClick: () => resume("autopilot_reader_done") }],
@@ -172,6 +203,7 @@
           runningCursor.remove();
           runningCursor = null;
         }
+        stopRunningFriendlyLine();
         addLine(`⚠ ${event.reason}`, "info");
         if (event.failingCommand) addLine(event.failingCommand, "output");
         showTray("Iris couldn't finish this one on its own — take it from here.", [

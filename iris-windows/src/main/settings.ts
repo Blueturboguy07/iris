@@ -24,6 +24,12 @@ export interface SettingsSchema {
   alwaysOnTop: boolean;
   cursorBuddyEnabled: boolean;
 
+  /** The one-time "Let Iris take control of your PC?" grant. Once true, the
+   *  autopilot runs a vetted install hands-off (no per-command taps, only the
+   *  catastrophe floor in `services/autopilot/risk.ts`), and it is remembered
+   *  across every future install until the reader turns it off in settings. */
+  autopilotAutonomyGranted: boolean;
+
   /** The last guide the user opened, so the panel can offer to resume it. */
   lastGuideSlug: string;
 }
@@ -33,6 +39,7 @@ const defaults: SettingsSchema = {
   claudeModel: "claude-sonnet-4-5-20250929",
   alwaysOnTop: false,
   cursorBuddyEnabled: true,
+  autopilotAutonomyGranted: false,
   lastGuideSlug: "",
 };
 

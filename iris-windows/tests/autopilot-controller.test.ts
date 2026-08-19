@@ -16,7 +16,14 @@ class RecordingHost implements AutopilotHost {
   readonly opened: string[] = [];
   readonly floated: Array<{ instruction: string; href: string | undefined }> = [];
   finishedInstall: FinishedInstall | undefined;
+  /** What the one-time consent answers, and how often it was asked. */
+  autonomyAnswer = true;
+  autonomyAsked = 0;
 
+  async ensureAutonomyGranted(): Promise<boolean> {
+    this.autonomyAsked += 1;
+    return this.autonomyAnswer;
+  }
   emitEvent(event: AutopilotEvent): void {
     this.events.push(event);
   }
@@ -48,6 +55,27 @@ const localWebRecipe: InstallRecipe = {
 };
 
 describe("the autopilot controller", () => {
+  it("asks for the one-time autonomy consent and runs the install once granted", async () => {
+    const { controller, host, shell } = controllerFor(localWebRecipe);
+
+    const status = await controller.start("web");
+
+    expect(host.autonomyAsked).toBe(1);
+    expect(status.type).toBe("finished");
+    expect(shell.commandsRun).toContain("git clone https://example.com/x.git");
+  });
+
+  it("runs nothing when the reader declines the autonomy consent", async () => {
+    const { controller, host, shell } = controllerFor(localWebRecipe);
+    host.autonomyAnswer = false;
+
+    const status = await controller.start("web");
+
+    expect(host.autonomyAsked).toBe(1);
+    expect(status.type).toBe("surfaced");
+    expect(shell.commandsRun).toEqual([]); // no shell spun up, nothing executed
+  });
+
   it("streams events, opens an open step's link, and reports the finished output", async () => {
     const { controller, host, shell } = controllerFor(localWebRecipe);
 
@@ -118,7 +146,11 @@ describe("the autopilot controller", () => {
     expect(shell.commandsRun).toEqual(["npm run setup"]);
   });
 
-  it("waits for a confirm without floating, then runs on approval", async () => {
+  it("runs a confirm-tier command straight through under the autonomy grant (no pause, no float)", async () => {
+    // Under the grant (the host's default answer), a command that WITHOUT the
+    // grant would pause for a tap now just runs — that is the whole point of the
+    // grant. The not-granted confirm path is covered at the runner level in
+    // autopilot-autonomy.test.ts.
     const riskyRecipe: InstallRecipe = {
       slug: "risky",
       appName: "Risky",
@@ -127,14 +159,10 @@ describe("the autopilot controller", () => {
     };
     const { controller, host, shell } = controllerFor(riskyRecipe);
 
-    const blocked = await controller.start("risky");
-    expect(blocked.type).toBe("needsConfirm");
+    const status = await controller.start("risky");
+    expect(status.type).toBe("finished");
     expect(host.floated).toHaveLength(0);
-    expect(shell.commandsRun).toHaveLength(0);
-
-    const done = await controller.confirm(true);
-    expect(done.type).toBe("finished");
-    expect(shell.commandsRun).toHaveLength(1);
+    expect(shell.commandsRun).toEqual(["Set-ExecutionPolicy Bypass -Scope Process"]);
   });
 
   it("knows which apps it can install", () => {

@@ -125,6 +125,11 @@
       <input type="checkbox" id="cursorBuddyEnabled">
       <label for="cursorBuddyEnabled">Show the cursor companion</label>
     </div>
+
+    <div class="checkbox">
+      <input type="checkbox" id="autopilotAutonomyGranted">
+      <label for="autopilotAutonomyGranted">Let Iris run installs automatically, without approving each step</label>
+    </div>
   </section>
 
   <section>
@@ -144,6 +149,7 @@
       el('claudeModel').value = settings.claudeModel || 'claude-sonnet-4-5-20250929';
       el('alwaysOnTop').checked = Boolean(settings.alwaysOnTop);
       el('cursorBuddyEnabled').checked = Boolean(settings.cursorBuddyEnabled);
+      el('autopilotAutonomyGranted').checked = Boolean(settings.autopilotAutonomyGranted);
 
       const accountStatus = el('account-status');
       if (settings.signedIn) {
@@ -212,6 +218,8 @@
       window.iris.setSetting('alwaysOnTop', event.target.checked));
     el('cursorBuddyEnabled').addEventListener('change', (event) =>
       window.iris.setSetting('cursorBuddyEnabled', event.target.checked));
+    el('autopilotAutonomyGranted').addEventListener('change', (event) =>
+      window.iris.setSetting('autopilotAutonomyGranted', event.target.checked));
 
     el('signin-google').addEventListener('click', () => window.iris.signIn('google'));
     el('signin-github').addEventListener('click', () => window.iris.signIn('github'));

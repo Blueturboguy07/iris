@@ -619,6 +619,11 @@ function autopilotController(): AutopilotController {
     // via the persisted `autopilotAutonomyGranted` setting (revocable from the
     // settings window). Once granted, the whole vetted install runs hands-off.
     ensureAutonomyGranted: async () => {
+      // The headed GUI e2e drives the autopilot with no one to click a modal, so
+      // it pre-grants via IRIS_E2E (the same flag that unlocks the e2e-only guide
+      // hook). The real granted/declined logic is unit-tested in
+      // autopilot-controller.test.ts; a modal cannot be exercised headlessly.
+      if (process.env.IRIS_E2E === "1") return true;
       if (settings.get("autopilotAutonomyGranted")) return true;
       const options = {
         type: "question" as const,

@@ -22,7 +22,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 
 import { waitForDebuggerEndpoint, attach, hasTarget, waitForTarget, CdpSession } from "./cdp.mjs";
@@ -490,12 +490,9 @@ async function scenarioAutopilot(exePath) {
   rmrf(userDataDir);
   // Start clean so the clone step is exercised, not skipped.
   rmrf(join(homedir(), "OpenASCII"));
-  // Pre-grant the one-time "Let Iris take control of your PC?" consent by
-  // seeding settings.json, simulating a reader who already said yes on a prior
-  // install. Without this, the autopilot's first run blocks on the consent
-  // dialog — which no one can click headlessly — and the install never starts.
-  mkdirSync(userDataDir, { recursive: true });
-  writeFileSync(join(userDataDir, "settings.json"), JSON.stringify({ autopilotAutonomyGranted: true }));
+  // The one-time "Let Iris take control?" consent is auto-granted here via the
+  // IRIS_E2E flag in `baseEnv` (see `ensureAutonomyGranted` in main/index.ts) —
+  // otherwise the autopilot's first run blocks on a modal no one can click.
 
   await withApp(
     {

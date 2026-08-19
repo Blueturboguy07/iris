@@ -505,7 +505,7 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
             _ = await longRunningSession.run(approved, deadline: GuideAutopilotShellSession.defaultCommandDeadline)
         }
         transcript.append(.explanation(
-            text: "\(guideContext.appName) is starting in Iris's terminal. Quitting Iris stops it."
+            text: "\(guideContext.appName) is starting from source. The red button stops it and hands the step to you."
         ))
         return .longRunningStarted
     }
@@ -566,6 +566,13 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         confirmationContinuation?.resume(returning: false)
         confirmationContinuation = nil
         await shellSession.cancelTheRunningCommand()
+        // The step being stopped may be a run-from-source step (`npm run app`,
+        // a dev server) that Iris started on the LONG-RUNNING session and never
+        // awaited — `cancelTheRunningCommand()` above only reaches the main
+        // session, so without this the red button could not kill a run-from-source
+        // step and the reader was stuck (they had to quit Iris). Cancel the
+        // long-running session too so the escape hatch really stops the setup.
+        await longRunningSession.cancelTheRunningCommand()
     }
 
     // MARK: - Failure context assembly

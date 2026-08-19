@@ -27,6 +27,9 @@ struct GuideAutopilotRunnerTests {
         /// Scripted outcomes, consumed in order; the last repeats.
         var outcomes: [GuideAutopilotCommandOutcome]
         private(set) var commandsRun: [String] = []
+        /// How many times the escape hatch asked this session to cancel — the
+        /// red button must reach BOTH the main and the long-running session.
+        private(set) var cancelCount = 0
 
         init(outcomes: [GuideAutopilotCommandOutcome]) {
             self.outcomes = outcomes
@@ -34,7 +37,7 @@ struct GuideAutopilotRunnerTests {
 
         func start() async -> Bool { true }
         func endSession() async {}
-        func cancelTheRunningCommand() async {}
+        func cancelTheRunningCommand() async { cancelCount += 1 }
         func tailForTheModel() -> String { modelTail }
 
         func run(
@@ -70,12 +73,13 @@ struct GuideAutopilotRunnerTests {
 
     private static func runner(
         shell: FakeShellSession,
+        longRunning: FakeShellSession? = nil,
         proposer: FakeFixProposer? = nil
     ) -> GuideAutopilotRunner {
         let proposer = proposer ?? FakeFixProposer()
         return GuideAutopilotRunner(
             shellSession: shell,
-            longRunningSession: FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")]),
+            longRunningSession: longRunning ?? FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")]),
             fixProposer: proposer,
             guideContext: GuideAutopilotGuideContext(
                 slug: "whimprflow", version: 3, appName: "WhimprFlow",
@@ -99,6 +103,23 @@ struct GuideAutopilotRunnerTests {
             command: command,
             watch: sensitive ? IrisStepWatch(expect: [], sensitive: true) : nil
         )
+    }
+
+    // MARK: - The escape hatch
+
+    @Test func theRedButtonCancelsBothTheMainAndTheLongRunningSession() async {
+        // A run-from-source step (`npm run app`, a dev server) runs on the
+        // LONG-RUNNING session. The escape hatch must reach it, not only the
+        // main session — otherwise the red button cannot stop the setup and the
+        // reader is stuck (the NitroAI `npm run app` freeze).
+        let main = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")])
+        let long = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")])
+        let runner = Self.runner(shell: main, longRunning: long)
+
+        await runner.abortTheCurrentStepBecauseTheReaderAskedToStop()
+
+        #expect(main.cancelCount == 1)
+        #expect(long.cancelCount == 1, "the red button must cancel the long-running session too")
     }
 
     // MARK: - Pacing

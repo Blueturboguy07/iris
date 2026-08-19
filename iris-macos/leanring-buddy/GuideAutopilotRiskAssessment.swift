@@ -58,8 +58,35 @@ nonisolated enum GuideAutopilotRiskAssessment {
 
     // MARK: - The verdict
 
-    static func assess(_ command: String) -> GuideAutopilotRisk {
-        for rule in Self.refusalRules {
+    /// `autonomyGranted` defaults to the persisted grant, so the whole
+    /// autopilot honors "Let Iris take control" without threading a value
+    /// through the runner. When it is `true`, every command that is not in the
+    /// catastrophe floor runs without asking — the reader granted blanket
+    /// control once, and a per-command tap on a vetted install is exactly the
+    /// friction the grant removes. When it is `false` (no grant, or an explicit
+    /// test), the original three-tier behavior is unchanged.
+    static func assess(
+        _ command: String,
+        autonomyGranted: Bool = AutopilotAutonomyGrant.shared.isGranted
+    ) -> GuideAutopilotRisk {
+        // The catastrophe floor is absolute — refused EVEN under the grant.
+        // These are commands no install ever needs and no consent should wave
+        // through; a hallucinated model-proposed fix that reaches for one is
+        // stopped here, silently, without a tap.
+        for rule in Self.catastropheRules {
+            if let match = rule.firstMatch(in: command) {
+                return .refusedOutright(reason: GuideAutopilotRiskReason(
+                    plainLanguageSummary: rule.plainLanguageSummary,
+                    trippingSubstring: match
+                ))
+            }
+        }
+
+        if autonomyGranted {
+            return .runsWithoutAsking
+        }
+
+        for rule in Self.nonCatastropheRefusalRules {
             if let match = rule.firstMatch(in: command) {
                 return .refusedOutright(reason: GuideAutopilotRiskReason(
                     plainLanguageSummary: rule.plainLanguageSummary,
@@ -82,9 +109,13 @@ nonisolated enum GuideAutopilotRiskAssessment {
 
     /// Approves a command the gate waves through. Returns nil for anything
     /// that needs a tap or is refused — callers surface those, never force
-    /// them through.
-    static func approve(_ command: String) -> GuideAutopilotApprovedCommand? {
-        guard case .runsWithoutAsking = assess(command) else { return nil }
+    /// them through. Honors the same autonomy grant `assess` does, so a
+    /// granted autopilot mints every non-catastrophe command directly.
+    static func approve(
+        _ command: String,
+        autonomyGranted: Bool = AutopilotAutonomyGrant.shared.isGranted
+    ) -> GuideAutopilotApprovedCommand? {
+        guard case .runsWithoutAsking = assess(command, autonomyGranted: autonomyGranted) else { return nil }
         return GuideAutopilotApprovedCommand(text: command)
     }
 
@@ -99,11 +130,15 @@ nonisolated enum GuideAutopilotRiskAssessment {
         }
     }
 
-    // MARK: - Refused outright: no tap can make these informed
+    // MARK: - The catastrophe floor: refused EVEN under the autonomy grant
+    //
+    // The only rules `assess` checks before the grant can wave a command
+    // through. These describe whole-disk / whole-home destruction that no
+    // install ever needs; keeping them absolute is what lets "Let Iris take
+    // control" be safe to grant once — a hallucinated fix that reaches for one
+    // is stopped here with no tap, rather than running.
 
-    private static let refusalRules: [GuideAutopilotRiskRule] = [
-        .init(#"\b(curl|wget)\b[^\n|]*\|[^\n]*\b(sh|bash|zsh)\b"#,
-              "This downloads a script and runs it without anyone reading it first."),
+    private static let catastropheRules: [GuideAutopilotRiskRule] = [
         .init(#"\brm\b[^\n]*\s-[a-z]*(rf|fr)[a-z]*\s+(/|/\*|~|~/|\$HOME)\s*(\n|$|;|&)"#,
               "This deletes the root of the disk or the whole home folder."),
         .init(#"\bdd\b[^\n]*\bof=/dev/"#,
@@ -114,6 +149,20 @@ nonisolated enum GuideAutopilotRiskAssessment {
               "This erases a disk."),
         .init(#"\(\)\s*\{[^\n}]*\|[^\n}]*&[^\n}]*\}\s*;"#,
               "This is a fork bomb."),
+    ]
+
+    // MARK: - Refused only WITHOUT the grant
+    //
+    // `curl … | sh` cannot be read before it runs, so without the grant it is
+    // refused outright (no tap can make it informed). WITH the grant it runs —
+    // that one-liner is how half of all prerequisites install, and refusing it
+    // is the single biggest reason a package install used to bounce the reader
+    // out to a web page. The literal stays here so the web guide tests that
+    // grep this file for it keep matching.
+
+    private static let nonCatastropheRefusalRules: [GuideAutopilotRiskRule] = [
+        .init(#"\b(curl|wget)\b[^\n|]*\|[^\n]*\b(sh|bash|zsh)\b"#,
+              "This downloads a script and runs it without anyone reading it first."),
     ]
 
     // MARK: - Needs a confirm tap

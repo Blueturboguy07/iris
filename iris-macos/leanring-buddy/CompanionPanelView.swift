@@ -37,6 +37,12 @@ struct CompanionPanelView: View {
     /// Zero (looking straight ahead) whenever the pointer is elsewhere.
     @State private var eyeLook: CGSize = .zero
 
+    /// Mirrors the persisted "Let Iris take control" grant so the settings row
+    /// re-renders when the reader toggles it here. Seeded from the real grant
+    /// when the panel appears; the row's button is the revoke the consent alert
+    /// promises exists.
+    @State private var autopilotAutonomyGranted = AutopilotAutonomyGrant.shared.isGranted
+
     /// The BYO key while the user is typing it. Cleared the moment it is saved
     /// and never repopulated — a saved key is never echoed back into the UI.
     @State private var anthropicAPIKeyInput: String = ""
@@ -135,6 +141,12 @@ struct CompanionPanelView: View {
                     .frame(height: 12)
 
                 modelPickerRow
+                    .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 10)
+
+                autopilotAutonomyRow
                     .padding(.horizontal, 16)
 
                 Spacer()
@@ -451,6 +463,46 @@ struct CompanionPanelView: View {
 
     /// The `.platform-switch` control from the pill: a soft trough holding
     /// equal-width segments, the chosen one lit with a white overlay.
+    /// The revoke for the one-time "Let Iris take control of your Mac?" grant.
+    /// Mirrors `modelPickerRow`'s shape. Turning it on here is the same grant
+    /// the install alert sets; turning it off makes the next install ask again.
+    private var autopilotAutonomyRow: some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Auto-install")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(DS.Colors.muted)
+                Text("Let Iris run installs itself, without approving each step")
+                    .font(.system(size: 9))
+                    .foregroundColor(DS.Colors.muted.opacity(0.7))
+            }
+
+            Spacer()
+
+            Button(action: {
+                let grant = AutopilotAutonomyGrant.shared
+                if autopilotAutonomyGranted {
+                    grant.revoke()
+                } else {
+                    grant.grant()
+                }
+                autopilotAutonomyGranted.toggle()
+            }) {
+                Text(autopilotAutonomyGranted ? "On" : "Off")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(autopilotAutonomyGranted ? DS.Colors.ink : DS.Colors.muted)
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 22)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(autopilotAutonomyGranted ? Color.white.opacity(0.12) : Color.white.opacity(0.055))
+                    )
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.vertical, 4)
+    }
+
     private var modelPickerRow: some View {
         HStack {
             Text("Model")

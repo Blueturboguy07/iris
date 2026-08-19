@@ -534,6 +534,26 @@ final class CompanionManager: ObservableObject {
             self?.appInventoryService.installedApplicationURL(forBundleIdentifier: bundleId) != nil
         }
 
+        // The one-time "Let Iris take control of your Mac?" consent, shown the
+        // first time the reader starts an autopilot install and then remembered
+        // across installs. A modal here (not in the controller, which stays
+        // AppKit-free) — activate first so the alert comes to front for an
+        // app that lives in the menu bar with no dock icon.
+        guideSessionController.confirmAutonomousControl = {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "Let Iris take control of your Mac?"
+            alert.informativeText = """
+            Iris will run this install itself — installing the tools it needs, \
+            building the app, and setting it up — without asking you to approve \
+            each step. It never runs anything that would erase your disk, and you \
+            can turn this off anytime in Iris's settings.
+            """
+            alert.addButton(withTitle: "Let Iris take control")
+            alert.addButton(withTitle: "Not now")
+            return alert.runModal() == .alertFirstButtonReturn
+        }
+
         guideSessionController.onAutopilotDidStart = { [weak self] in
             self?.presentAutopilotTakeover()
         }

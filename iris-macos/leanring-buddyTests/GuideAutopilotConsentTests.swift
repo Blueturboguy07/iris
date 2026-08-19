@@ -105,6 +105,14 @@ struct GuideAutopilotConsentTests {
         )
         #expect(controller.autopilotIsRunning == false)
 
+        // Autopilot now needs the one-time "Let Iris take control" grant. Inject
+        // it over an isolated suite (never the reader's real preference) and a
+        // consent closure that says yes, so the start gesture proceeds.
+        controller.autonomyGrant = AutopilotAutonomyGrant(
+            userDefaults: try #require(UserDefaults(suiteName: "iris.autonomy.tests.\(UUID().uuidString)"))
+        )
+        controller.confirmAutonomousControl = { true }
+
         // The one gesture that consents to execution.
         controller.startAutopilot()
         #expect(controller.autopilotIsRunning == true)

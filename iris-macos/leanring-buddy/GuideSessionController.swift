@@ -251,6 +251,20 @@ final class GuideSessionController: ObservableObject {
     var onAutopilotDidStart: (() -> Void)?
     var onAutopilotDidStop: (() -> Void)?
 
+    /// Asks the reader the one-time "Let Iris take control of your Mac?"
+    /// question the first time they start an autopilot install, returning true
+    /// if they grant it. Injected (a modal the panel/`CompanionManager` owns)
+    /// so this controller stays ignorant of AppKit. Consulted only while the
+    /// grant is not yet set; once granted it is remembered across installs and
+    /// this is never called again (see `startAutopilot`).
+    var confirmAutonomousControl: (() -> Bool)?
+
+    /// The persisted "Let Iris take control" grant `startAutopilot` reads and
+    /// sets. Settable (not just `.shared`) so a test can inject one over an
+    /// isolated `UserDefaults` suite and never touch the reader's real
+    /// preference — the same isolation `guideService()` already uses.
+    var autonomyGrant = AutopilotAutonomyGrant.shared
+
     /// Fired when autopilot reaches a manual step it cannot run for the reader
     /// (a download, a drag, a permission, a sign-in): the takeover terminal
     /// parks to a corner so the eye — already flying to the step's control — and
@@ -946,6 +960,15 @@ final class GuideSessionController: ObservableObject {
               let branch = selectedBranch,
               let makeAutopilotRunner else {
             return
+        }
+        // One-time "Let Iris take control of your Mac?" consent, then remembered
+        // across every future install. A vetted publik guide runs hands-off; the
+        // reader grants blanket control once (revocable in settings) instead of
+        // approving each command. If they decline, autopilot simply does not
+        // start — the guide stays open for them to follow by hand.
+        if !autonomyGrant.isGranted {
+            guard confirmAutonomousControl?() == true else { return }
+            autonomyGrant.grant()
         }
         let context = GuideAutopilotGuideContext(
             slug: guide.appSlug,

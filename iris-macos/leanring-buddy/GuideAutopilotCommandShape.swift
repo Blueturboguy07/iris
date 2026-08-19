@@ -18,9 +18,19 @@ nonisolated enum GuideAutopilotCommandShape {
     /// Dev servers and watchers never exit; running one on the main session
     /// would queue every later step behind it forever. The rehearsal harness
     /// checks npm start / npm run dev; autopilot meets the wider world.
+    ///
+    /// The package-manager script alternation covers the RUN-FROM-SOURCE family,
+    /// not just `dev`/`start`: a guide that runs the app from source with a
+    /// project-specific script name (`npm run app`, `yarn app`, `npm run serve`,
+    /// `npm run electron`, …) holds the shell open exactly the same way. Missing
+    /// one of these is not cosmetic — it runs a never-returning command on the
+    /// MAIN session, which blocks every later build/install step and times the
+    /// whole install out (the NitroAI `npm run app` incident). Keep this list a
+    /// superset of the run-from-source script names any shipped guide uses;
+    /// `tests/iris-guides.test.ts` mirrors it and fails a guide that adds a new one.
     static func holdsTheShellOpen(_ command: String) -> Bool {
         let patterns = [
-            #"\b(npm|pnpm|yarn|bun)\s+(run\s+)?(start|dev|watch)\b"#,
+            #"\b(npm|pnpm|yarn|bun)\s+(run\s+)?(start|dev|watch|serve|preview|app|electron)\b"#,
             #"\bnext\s+dev\b"#,
             #"(^|\s|/)vite(\s|$)"#,
             #"\bdocker\s+compose\s+up\b(?![^\n]*\s-d\b)"#,

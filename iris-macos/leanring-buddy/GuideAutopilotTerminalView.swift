@@ -191,12 +191,18 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
                 .padding(.top, 3)
 
         case .commandFromTheGuide(let text):
-            commandRow(text, prompt: DS.Colors.accent, indented: false, label: nil, searchedTheWeb: false)
+            commandRow(
+                text, prompt: DS.Colors.accent, indented: false, label: nil, searchedTheWeb: false,
+                friendlyLabel: GuideAutopilotFriendlyLabel.label(for: text)
+            )
 
-        case .commandFromAFix(let text, let attempt, let searchedTheWeb, _):
+        case .commandFromAFix(let text, let attempt, let searchedTheWeb, let whatItDoes):
             commandRow(
                 text, prompt: DS.Colors.amber, indented: true,
-                label: "↻ Iris's fix · attempt \(attempt)", searchedTheWeb: searchedTheWeb
+                label: "↻ Iris's fix · attempt \(attempt)", searchedTheWeb: searchedTheWeb,
+                // A fix already carries the model's own plain-English "what it
+                // does"; fall back to the command heuristic only if it is blank.
+                friendlyLabel: whatItDoes.isEmpty ? GuideAutopilotFriendlyLabel.label(for: text) : whatItDoes
             )
 
         case .output(let line):
@@ -232,7 +238,8 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
     // MARK: - Command rows
 
     private func commandRow(
-        _ text: String, prompt: Color, indented: Bool, label: String?, searchedTheWeb: Bool
+        _ text: String, prompt: Color, indented: Bool, label: String?, searchedTheWeb: Bool,
+        friendlyLabel: String
     ) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             if let label {
@@ -250,21 +257,37 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
                     }
                 }
             }
+            // The plain-English line the reader actually reads — what this step
+            // is doing, in words. The real command follows, de-emphasised, so
+            // the terminal still reads as technical work rather than a toy.
+            Text(friendlyLabel)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(Color.white.opacity(0.92))
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
             HStack(alignment: .top, spacing: 7) {
                 Text("%")
                     .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
                     .foregroundColor(prompt)
                 TypewriterCommandText(fullText: text)
             }
+            .opacity(0.55)
         }
         .padding(.leading, indented ? 12 : 0)
     }
 
     private var runningCursorLine: some View {
         HStack(spacing: 7) {
-            Text("%")
-                .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                .foregroundColor(DS.Colors.accent.opacity(0.6))
+            // A real spinner while the shell is busy — the clearest "Iris is
+            // working right now" signal for a reader who does not read output.
+            ProgressView()
+                .controlSize(.small)
+                .scaleEffect(0.6)
+                .frame(width: 12, height: 12)
+                .tint(Color.white.opacity(0.75))
+            Text("Working…")
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundColor(Color.white.opacity(0.6))
             BlinkingBlockCursor(color: GuideAutopilotTerminalTheme.cursor)
             Spacer(minLength: 0)
         }

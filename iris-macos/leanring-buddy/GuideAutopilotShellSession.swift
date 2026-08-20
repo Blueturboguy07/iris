@@ -120,6 +120,15 @@ protocol GuideAutopilotShellSessionDriving: AnyObject {
     func cancelTheRunningCommand() async
     func endSession() async
     func tailForTheModel() -> String
+    /// Off-queue hard stop for the escape hatch: SIGKILL the running command's
+    /// process group immediately, without waiting on the (often output-flooded)
+    /// command queue. The real pty session overrides this; fakes need do
+    /// nothing, so it carries a default no-op below.
+    func killTheRunningProcessGroupImmediately()
+}
+
+extension GuideAutopilotShellSessionDriving {
+    func killTheRunningProcessGroupImmediately() {}
 }
 
 @MainActor
@@ -169,6 +178,10 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
         }
     }
 
+    func killTheRunningProcessGroupImmediately() {
+        state.killTheRunningProcessGroupImmediately()
+    }
+
     func endSession() async {
         await withCheckedContinuation { continuation in
             state.enqueueEnd { continuation.resume() }
@@ -196,6 +209,16 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
         private let startingDirectory: String
 
         private var terminal: GuideAutopilotPseudoTerminal?
+        /// A mirror of `terminal` kept behind a lock so the escape hatch can
+        /// SIGKILL the running command's process group WITHOUT going through
+        /// `queue`. A heavy build (electron-builder dumping its whole dependency
+        /// tree) floods `queue` with `ingest` blocks, so a cancel enqueued
+        /// behind them lands far too late — and the build ignores the Ctrl-C the
+        /// normal cancel would send anyway. Written on `queue` alongside
+        /// `terminal`; read off it, under the lock, by
+        /// `killTheRunningProcessGroupImmediately()`.
+        private let killHandleLock = NSLock()
+        private var terminalForImmediateKill: GuideAutopilotPseudoTerminal?
         private var buffer = GuideAutopilotOutputBuffer()
         private var workingDirectory: String
         private var searchPath: String?
@@ -277,8 +300,8 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
                 // queue; hop onto ours so all state stays confined here.
                 self?.queue.async { self?.ingest(bytes) }
             }
-            terminal.onProcessExit = { [weak self] _ in
-                self?.queue.async { self?.noteShellExited() }
+            terminal.onProcessExit = { [weak self, weak terminal] _ in
+                self?.queue.async { self?.noteShellExited(from: terminal) }
             }
 
             do {
@@ -297,6 +320,7 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
                 return
             }
             self.terminal = terminal
+            rememberTerminalForImmediateKill(terminal)
             shellHasExited = false
             preambleHasBeenSent = false
             displayIsSuppressedUntilShellIsReady = true
@@ -542,7 +566,13 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             }
         }
 
-        private func noteShellExited() {
+        private func noteShellExited(from exitedTerminal: GuideAutopilotPseudoTerminal?) {
+            // A late exit from a terminal we have already replaced must not mark
+            // the fresh shell dead. The escape hatch SIGKILLs the old terminal
+            // off-queue and then rebuilds; that old terminal's process-exit can
+            // land on the queue after the new shell is already running, and
+            // without this guard it would set `shellHasExited` on the new one.
+            guard exitedTerminal === terminal else { return }
             shellHasExited = true
             markerToken = nil
             commandGeneration += 1
@@ -613,30 +643,33 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
         }
 
         private func cancelRunningCommand(_ completion: @escaping @Sendable () -> Void) {
-            guard finishRunning != nil else {
-                completion()
-                return
-            }
+            // The escape hatch, and the reader wants out NOW. The process group
+            // has usually already been SIGKILLed off-queue
+            // (`killTheRunningProcessGroupImmediately`) to beat a flood of build
+            // output that jams this queue; here we settle the bookkeeping and
+            // hand back a FRESH shell so "Try again" has somewhere to run.
+            //
+            // There is deliberately no gentle Ctrl-C-and-wait path: a build that
+            // ignores SIGINT (electron-builder does, mid-package) would sit
+            // through it, which is exactly the wedge that left the reader unable
+            // to stop the setup. Rebuilding drops this step's `cd`/env, but the
+            // escape hatch has already handed the step back to the reader, so
+            // there is nothing left in this shell to preserve.
             cancellationWasRequested = true
-            let generationWhenCancelled = commandGeneration
-            terminal?.sendInterrupt()
-            queue.asyncAfter(deadline: .now() + 3) { [weak self] in
-                guard let self else { return completion() }
-                if self.finishRunning != nil, self.commandGeneration == generationWhenCancelled {
-                    self.terminal?.sendInterrupt()
-                }
-                self.queue.asyncAfter(deadline: .now() + 3) { [weak self] in
-                    guard let self else { return completion() }
-                    if let finish = self.finishRunning,
-                       self.commandGeneration == generationWhenCancelled {
-                        self.finishRunning = nil
-                        self.markerToken = nil
-                        self.rebuildShell()
-                        finish(.cancelled)
-                    }
-                    completion()
-                }
+            let pending = finishRunning
+            finishRunning = nil
+            markerToken = nil
+            // Belt-and-suspenders: kill the group here too in case a caller
+            // reached cancel without the off-queue kill. `killProcessGroup` is a
+            // no-op on an already-reaped pid.
+            terminal?.killProcessGroup()
+            pending?(.cancelled)
+            // Only a session that actually had a shell needs a fresh one; the
+            // long-running session may never have been started for this step.
+            if terminal != nil {
+                rebuildShell()
             }
+            completion()
         }
 
         private func rebuildShell() {
@@ -646,7 +679,30 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             terminal?.onProcessExit = nil
             terminal?.killProcessGroup()
             terminal = nil
+            rememberTerminalForImmediateKill(nil)
             startShell { _ in }
+        }
+
+        /// Mirrors the live terminal into the lock-guarded handle the escape
+        /// hatch reads off-queue. Always called on `queue`, wherever `terminal`
+        /// is assigned or cleared.
+        private func rememberTerminalForImmediateKill(_ terminal: GuideAutopilotPseudoTerminal?) {
+            killHandleLock.lock()
+            terminalForImmediateKill = terminal
+            killHandleLock.unlock()
+        }
+
+        /// Off-queue: SIGKILL the running command's whole process group right
+        /// now. Safe from any thread — it touches only the lock-guarded handle,
+        /// and `killProcessGroup` guards a reaped pid. The queue-confined
+        /// cleanup (resolve the pending command, rebuild the shell) still runs;
+        /// this only makes the process die immediately instead of behind a
+        /// flood of its own output.
+        func killTheRunningProcessGroupImmediately() {
+            killHandleLock.lock()
+            let terminal = terminalForImmediateKill
+            killHandleLock.unlock()
+            terminal?.killProcessGroup()
         }
 
         private func endShell(_ completion: @escaping @Sendable () -> Void) {
@@ -662,6 +718,7 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             terminal?.write("exit\n")
             let terminalToClose = terminal
             terminal = nil
+            rememberTerminalForImmediateKill(nil)
             shellHasExited = true
             queue.asyncAfter(deadline: .now() + 0.5) {
                 terminalToClose?.killProcessGroup()

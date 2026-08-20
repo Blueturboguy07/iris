@@ -565,6 +565,15 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         )
         confirmationContinuation?.resume(returning: false)
         confirmationContinuation = nil
+        // Kill the process group IMMEDIATELY and off the command queue, before
+        // the async cancels below. A heavy build (electron-builder) floods that
+        // queue with its output, so an enqueued cancel lands far too late — and
+        // the Ctrl-C it would send is ignored by the build anyway. This direct
+        // SIGKILL is what actually makes the red button stop the setup; the
+        // `cancelTheRunningCommand` calls that follow then settle the bookkeeping
+        // and rebuild a fresh shell for "Try again".
+        shellSession.killTheRunningProcessGroupImmediately()
+        longRunningSession.killTheRunningProcessGroupImmediately()
         await shellSession.cancelTheRunningCommand()
         // The step being stopped may be a run-from-source step (`npm run app`,
         // a dev server) that Iris started on the LONG-RUNNING session and never

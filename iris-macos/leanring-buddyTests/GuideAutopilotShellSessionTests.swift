@@ -126,6 +126,44 @@ struct GuideAutopilotShellSessionTests {
         }
     }
 
+    @Test func theOffQueueKillStopsARunningCommandAndTheSessionRecovers() async throws {
+        // The escape hatch's real teardown: SIGKILL the process group off the
+        // command queue (so a flood of build output cannot delay it), then the
+        // async cancel settles the bookkeeping and rebuilds. What the reader
+        // needs afterwards is a session they can Try Again on.
+        try await Self.withStartedSession { session in
+            let startedAt = Date()
+            async let running = session.run(try Self.approved("sleep 30"))
+            try await Task.sleep(nanoseconds: 500_000_000)
+
+            // This is the escape-hatch sequence the runner performs.
+            session.killTheRunningProcessGroupImmediately()
+            await session.cancelTheRunningCommand()
+
+            let outcome = await running
+            // Either the cancel resolved it, or the off-queue kill's process
+            // exit did — both are a clean stop, neither is "still running".
+            #expect(outcome == .cancelled || outcome == .sessionFailed,
+                    "the stopped command must not report success, got \(outcome)")
+            #expect(Date().timeIntervalSince(startedAt) < 15,
+                    "the kill must not wait out the sleep")
+
+            // The session rebuilt a fresh shell, so the next command runs once
+            // that shell finishes coming up. A real reader taps "Try again"
+            // seconds later, well after it is ready; the test retries briefly to
+            // cover the just-rebuilt window rather than racing it.
+            var recovered = false
+            for _ in 0..<20 where !recovered {
+                if case .succeeded = await session.run(try Self.approved("echo recovered")) {
+                    recovered = true
+                } else {
+                    try await Task.sleep(nanoseconds: 300_000_000)
+                }
+            }
+            #expect(recovered, "the session should be usable again after the escape hatch")
+        }
+    }
+
     @Test func hugeOutputStaysBounded() async throws {
         try await Self.withStartedSession { session in
             let outcome = await session.run(

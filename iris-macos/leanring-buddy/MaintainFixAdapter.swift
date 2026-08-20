@@ -112,7 +112,9 @@ final class MaintainFixAdapter: MaintainFixAdapting {
             }
             return .adaptedPatch(unifiedDiff: adapted)
         } catch {
-            return .modelCouldNotAdapt(reason: error.localizedDescription)
+            // Same reader-actionable wording the Tier C loop uses: a transport
+            // error's `userFacingMessage` over the opaque bridged NSError text.
+            return .modelCouldNotAdapt(reason: MaintainTierCFixer.modelCallFailureReason(for: error))
         }
     }
 

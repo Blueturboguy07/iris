@@ -145,6 +145,14 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// than a nagging interrogation.
     @Published private(set) var clarificationQuestions: [ClarificationQuestion] = []
 
+    /// True while the request probe (the two model-derived §7 triggers —
+    /// self-consistency ambiguity and the irreversible-action classifier) runs
+    /// between the reader's Continue tap and the clarify-or-plan step. The
+    /// describe card shows a working line and holds the Continue button while
+    /// this is up; the flow stays in `.describe` so a slow probe never strands
+    /// the reader outside their own text field.
+    @Published private(set) var isAssessingRequest: Bool = false
+
     /// The short pre-edit plan shown at `.presentingPlan` (plan §7): the files
     /// Iris expects to touch, the approach, the resolved recipe in reader-facing
     /// words, and the honesty rung it expects to reach. Nil until a plan is
@@ -194,6 +202,19 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// The pooled "what others also wanted" prefills for an app. Injected so
     /// the coordinator does not have to own the feature-request transport.
     private let topRequestsForApp: (_ appSlug: String) async -> [String]
+
+    /// Runs the two model-derived clarification triggers (plan §7: the
+    /// self-consistency ambiguity check and the irreversible-action classifier)
+    /// against the scrubbed request, between Continue and the clarify-or-plan
+    /// step. Injected so tests can script a verdict without a model; production
+    /// resolves the reader's own provider live and runs
+    /// `FeatureEditRequestProbe.probe` — at most three small calls on the
+    /// reader's key, failing open to `.allQuiet` (the pre-probe behavior) on
+    /// any miss.
+    private let probeRequestTriggers: (
+        _ scrubbedRequest: String,
+        _ clonePath: String?
+    ) async -> FeatureEditRequestProbeVerdict
 
     /// Runs the actual on-demand edit — the jailed loop + verify + commit — and
     /// returns the engine's result. Injected so the whole machine is testable
@@ -287,6 +308,17 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// own selection UI and submits the whole batch at once.
     private var clarificationAnswersByQuestionId: [String: String] = [:]
 
+    /// Monotonic id for the in-flight request probe, so a probe result (or its
+    /// watchdog) that lands after the reader re-submitted, cancelled, or moved
+    /// on is dropped instead of advancing a flow it no longer describes.
+    private var requestProbeGeneration = 0
+
+    /// How long the describe step will wait on the request probe before
+    /// proceeding with the fail-open all-quiet verdict — the probe may only
+    /// ever ADD a question, so a stalled network must never strand the reader
+    /// behind a spinner.
+    private static let probeWatchdogNanoseconds: UInt64 = 20_000_000_000
+
     /// The optional seams default INSIDE the `@MainActor` init body rather than
     /// in the parameter list: a default argument referencing a `@MainActor`
     /// static (`.shared`, `defaultPerformOnDemandEdit`) is evaluated in a
@@ -297,6 +329,12 @@ final class OnDemandEditCoordinator: ObservableObject {
         patchQueue: PatchQueue,
         clonePathLock: MaintainClonePathLock? = nil,
         topRequestsForApp: @escaping (_ appSlug: String) async -> [String] = { _ in [] },
+        probeRequestTriggers: (
+            (
+                _ scrubbedRequest: String,
+                _ clonePath: String?
+            ) async -> FeatureEditRequestProbeVerdict
+        )? = nil,
         performOnDemandEdit: (
             (
                 _ resolvedClonePath: String,
@@ -312,7 +350,30 @@ final class OnDemandEditCoordinator: ObservableObject {
         self.patchQueue = patchQueue
         self.clonePathLock = clonePathLock ?? .shared
         self.topRequestsForApp = topRequestsForApp
+        self.probeRequestTriggers = probeRequestTriggers ?? Self.defaultProbeRequestTriggers
         self.performOnDemandEdit = performOnDemandEdit ?? Self.defaultPerformOnDemandEdit
+    }
+
+    /// The production probe: the reader's own model provider (never the funded
+    /// proxy — same D4/D5 rule as the engine), a small slice of the offline
+    /// repo map so the code can settle what the request means where it can, and
+    /// the fail-open `FeatureEditRequestProbe`. No provider connected means no
+    /// probe — the all-quiet verdict, exactly the pre-probe behavior; the
+    /// missing-key refusal itself still comes from the eligibility gate.
+    static let defaultProbeRequestTriggers: (
+        String, String?
+    ) async -> FeatureEditRequestProbeVerdict = { scrubbedRequest, clonePath in
+        guard let provider = MaintainModelProviderResolver.firstAvailable() else {
+            return .allQuiet
+        }
+        let repoMapSummary = clonePath.map {
+            FeatureEditRepoMap.summarize(repoRootPath: $0, tokenBudget: 600)
+        } ?? ""
+        return await FeatureEditRequestProbe.probe(
+            scrubbedRequest: scrubbedRequest,
+            repoMapSummary: repoMapSummary,
+            provider: provider
+        )
     }
 
     /// The production performer: resolve the reader's own model provider LIVE
@@ -434,21 +495,65 @@ final class OnDemandEditCoordinator: ObservableObject {
 
         // The clarification pass (plan §7) runs BEFORE any edit and BEFORE the
         // start-consent gate: decide whether Iris must ask a couple of decisive
-        // questions first. Two of the four triggers are model-derived
-        // (self-consistency ambiguity, an irreversible-action classifier) and
-        // are NOT available on this synchronous, no-network path, so they are
-        // passed as `false` — a conservative default that never ADDS a refusal
-        // versus today and defers those triggers to the loop-upgrade milestone.
-        // The two signals Iris can adjudicate statically — an unresolved build
-        // recipe and the runtime shape — are wired live from the derived recipe,
-        // so the "unknown stack" case now ASKS how to build (turning the old wall
-        // into a capability) instead of hard-refusing.
+        // questions first. Two of the four triggers are model-derived —
+        // self-consistency ambiguity and the irreversible-action classifier —
+        // so the probe runs off this synchronous path and the flow advances
+        // when its verdict (or the fail-open watchdog) lands. The probe can
+        // only ever ADD a question, never a refusal: any miss produces the
+        // same all-quiet verdict the pre-probe hardcoded `false` did. The two
+        // statically-adjudicated signals — an unresolved build recipe and the
+        // runtime shape — are read live from the derived recipe at advance
+        // time, so the "unknown stack" case still ASKS how to build (turning
+        // the old wall into a capability) instead of hard-refusing.
+        requestProbeGeneration += 1
+        let probeGeneration = requestProbeGeneration
+        isAssessingRequest = true
+        statusLine = nil
+        let clonePathForProbe = provenanceClonePath(forAppSlug: activeAppSlug ?? "")
+
+        Task { [weak self] in
+            guard let self else { return }
+            let probeVerdict = await self.probeRequestTriggers(scrubbed, clonePathForProbe)
+            self.advanceFromDescribe(
+                afterProbeGeneration: probeGeneration, verdict: probeVerdict, kind: kind
+            )
+        }
+        // The watchdog: a stalled probe (a network black hole inside the
+        // provider's own long timeout) proceeds all-quiet rather than holding
+        // the reader behind a spinner. A late real verdict is then dropped by
+        // the generation guard.
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.probeWatchdogNanoseconds)
+            self?.advanceFromDescribe(
+                afterProbeGeneration: probeGeneration, verdict: .allQuiet, kind: kind
+            )
+        }
+        return true
+    }
+
+    /// The second half of the describe step, entered when the request probe's
+    /// verdict (or its fail-open watchdog) lands: fold the model-derived
+    /// triggers together with the statically-derived ones into the batched
+    /// question set, then clarify or go straight to the plan. Guarded so only
+    /// the CURRENT probe for a flow still sitting in `.describe` may advance
+    /// it — a stale verdict after a re-submit, cancel, or stop is dropped.
+    private func advanceFromDescribe(
+        afterProbeGeneration probeGeneration: Int,
+        verdict: FeatureEditRequestProbeVerdict,
+        kind: OnDemandEditKind
+    ) {
+        guard phase == .describe,
+              isAssessingRequest,
+              requestProbeGeneration == probeGeneration,
+              let scrubbed = scrubbedRequest else { return }
+        isAssessingRequest = false
+
         let clarificationQuestionBatch = FeatureEditClarificationLogic.questions(
             forRequest: scrubbed,
-            requestLooksAmbiguous: false,
+            requestLooksAmbiguous: verdict.requestLooksAmbiguous,
             recipeIsUnknown: !(derivedRepoRecipe?.hasABuildableRecipe ?? false),
             runtimeShape: derivedRuntimeShape ?? .unknown,
-            impliesIrreversibleAction: false
+            impliesIrreversibleAction: verdict.impliesIrreversibleAction
         )
 
         if clarificationQuestionBatch.isEmpty {
@@ -460,7 +565,6 @@ final class OnDemandEditCoordinator: ObservableObject {
             phase = .clarifying
             statusLine = "A couple of quick questions before Iris starts."
         }
-        return true
     }
 
     // MARK: - Step 4 & 5: clarify → present plan → approve (plan §7)
@@ -728,8 +832,12 @@ final class OnDemandEditCoordinator: ObservableObject {
             // tree; it is released in keepChange() / discardChange().
 
         case .couldNotComplete(let reason):
-            let mapped = mappedFailure(reason: reason)
+            let mapped = Self.mappedFailure(reason: reason)
             blockedByBuildScriptEdit = mapped.wasBuildScriptBlock
+            // A rejected credential is the one mid-run failure the reader can
+            // clear themselves, so the failed card offers the same settings
+            // shortcut the missing-key refusal does.
+            refusalOffersModelKeySetup = mapped.offersModelKeySetup
             editRunner.recordVerificationResult(passed: false, over: elapsed)
             editRunner.note(mapped.userFacing)
             editRunner.finishStopped()
@@ -1185,24 +1293,43 @@ final class OnDemandEditCoordinator: ObservableObject {
     }
 
     /// Maps the engine's internal failure reason to an honest, distinct
-    /// user-facing message — separating "too large / out of budget" and a
-    /// blocked build-script edit from a generic verification failure, so the
-    /// reader knows whether to narrow the request, and so a burnt loop budget
-    /// reads differently from an attempt that genuinely failed.
-    private func mappedFailure(reason: String) -> (userFacing: String, wasBuildScriptBlock: Bool) {
+    /// user-facing message — separating "too large / out of budget", a blocked
+    /// build-script edit, and a rejected model credential from a generic
+    /// verification failure, so the reader knows whether to narrow the request,
+    /// reconnect their credential, or accept that the attempt genuinely failed.
+    /// `offersModelKeySetup` is true only for the credential rejection — the
+    /// one mid-run failure a settings tap actually fixes. Static and
+    /// nonisolated so the mapping is unit-testable as the pure text function
+    /// it is.
+    nonisolated static func mappedFailure(
+        reason: String
+    ) -> (userFacing: String, wasBuildScriptBlock: Bool, offersModelKeySetup: Bool) {
+        // The Tier C loop's `modelCallFailureReason` prefix for an Anthropic
+        // 401 on the reader's own credential. The commonest way here is an
+        // IMPORTED Claude Code login: Claude Code rotates its token, the
+        // snapshot Iris holds lapses, and every later call is turned down.
+        if reason.contains("model credential rejected") {
+            return (
+                "Anthropic turned down your model credential, so Iris couldn't run the edit — nothing changed. "
+                    + "An imported Claude Code login stops working when Claude Code refreshes its token; "
+                    + "reconnect with \"Sign in with Claude Code\" (durable) or paste an API key in settings, then try again.",
+                false,
+                true
+            )
+        }
         if reason.contains("build-script") {
-            return ("This change would edit files that run during the build (like build.rs or package.json scripts), which Iris won't run unreviewed — it stopped before building. Nothing changed.", true)
+            return ("This change would edit files that run during the build (like build.rs or package.json scripts), which Iris won't run unreviewed — it stopped before building. Nothing changed.", true, false)
         }
         if reason.contains("ran out of steps") {
-            return ("This turned out to be too large for Iris to finish in its budget — nothing was applied. Try a smaller, more specific change.", false)
+            return ("This turned out to be too large for Iris to finish in its budget — nothing was applied. Try a smaller, more specific change.", false, false)
         }
         if reason.contains("changed nothing") {
-            return ("Iris couldn't find a change to make for that — nothing was applied.", false)
+            return ("Iris couldn't find a change to make for that — nothing was applied.", false, false)
         }
         if reason.contains("failed verification") {
-            return ("Iris made a change but it didn't build or pass the tests, so it reverted everything. Nothing changed.", false)
+            return ("Iris made a change but it didn't build or pass the tests, so it reverted everything. Nothing changed.", false, false)
         }
-        return ("Iris couldn't complete that edit — nothing changed. (\(reason))", false)
+        return ("Iris couldn't complete that edit — nothing changed. (\(reason))", false, false)
     }
 
     private func failRun(reason: String, resolvedClonePath: String) {
@@ -1238,6 +1365,10 @@ final class OnDemandEditCoordinator: ObservableObject {
         derivedRepoRecipe = nil
         derivedRuntimeShape = nil
         clarificationAnswersByQuestionId = [:]
+        // Invalidate any in-flight request probe: its verdict (and watchdog)
+        // must not advance a flow that has been reset out from under it.
+        requestProbeGeneration += 1
+        isAssessingRequest = false
         // resolvedClonePath is only cleared alongside a lock release, so a lock
         // is never orphaned by a reset mid-run.
     }

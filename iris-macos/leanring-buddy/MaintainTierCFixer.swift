@@ -92,6 +92,24 @@ final class MaintainTierCFixer {
     static let maximumLoopSteps = 20
     static let maximumOutputTokensPerStep = 1200
 
+    /// The reason string for a thrown model call, in words the reader can act
+    /// on. A transport error's own `userFacingMessage` says what to DO
+    /// ("anthropic turned that key down. check it's still active…"), where the
+    /// bridged NSError text says nothing ("The operation couldn't be completed.
+    /// (Iris.AssistantTransportError error 8.)") — which is exactly what a
+    /// reader saw when their imported Claude Code token lapsed mid-run. A
+    /// rejected credential gets its own prefix so the coordinator can offer the
+    /// settings shortcut for the one failure a settings tap actually fixes.
+    nonisolated static func modelCallFailureReason(for error: Error) -> String {
+        guard let transportError = error as? AssistantTransportError else {
+            return "model call failed: \(error.localizedDescription)"
+        }
+        if transportError == .bringYourOwnKeyRejected {
+            return "model credential rejected: \(transportError.userFacingMessage)"
+        }
+        return "model call failed: \(transportError.userFacingMessage)"
+    }
+
     /// Stop the loop when the working tree has gone unchanged for this many
     /// CONSECUTIVE steps AFTER the model has begun editing (plan §6 no-progress
     /// detector). Exploration BEFORE the first edit is expected and never counts —
@@ -385,7 +403,7 @@ final class MaintainTierCFixer {
                 )
             } catch {
                 await restoreGit()
-                return .couldNotFix(reason: "model call failed: \(error.localizedDescription)")
+                return .couldNotFix(reason: Self.modelCallFailureReason(for: error))
             }
             conversation.append(MaintainChatTurn(role: "assistant", text: reply))
 

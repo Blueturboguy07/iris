@@ -184,6 +184,20 @@ struct OnDemandEditCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            // The request probe (the two model-derived §7 triggers) runs
+            // between Continue and clarify-or-plan; the flow stays here in
+            // describe, so this row is what tells the reader Iris is working
+            // and not ignoring the tap.
+            if coordinator.isAssessingRequest {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Sizing up the request…")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(DS.Colors.textSecondary)
+                }
+            }
+
             HStack(spacing: 8) {
                 Button("Cancel") { coordinator.cancel() }
                     .irisTextButton()
@@ -192,7 +206,10 @@ struct OnDemandEditCard: View {
                     coordinator.describeRequest(describeText, kind: selectedKind)
                 }
                 .irisPrimaryPill(isFullWidth: false, isCompact: true)
-                .disabled(describeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(
+                    describeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || coordinator.isAssessingRequest
+                )
             }
         }
     }
@@ -757,20 +774,21 @@ struct OnDemandEditCard: View {
     // MARK: - Terminal message (failed / not eligible)
 
     private func terminalMessageCard(reason: String, isRefusal: Bool) -> some View {
-        // The missing-model-key refusal is the only one a reader can clear in a
-        // tap, so it gets its own softer framing — a key rather than a raised
-        // hand, and copy that reads as "here's the one thing to do" — plus a
-        // button straight into settings. Every other refusal (provenance,
-        // sandbox, no rebuild recipe) stays a plain honest dead-end, because a
-        // settings tap would not fix it.
-        let offersModelKeySetup = isRefusal && coordinator.refusalOffersModelKeySetup
+        // The missing-model-key refusal and a mid-run credential rejection are
+        // the two terminal states a reader can clear in a tap, so they get a
+        // key icon and a button straight into settings. Every other refusal or
+        // failure (provenance, sandbox, no rebuild recipe, a genuinely failed
+        // edit) stays a plain honest dead-end, because a settings tap would
+        // not fix it. The coordinator decides — it sets the flag only for
+        // those two cases.
+        let offersModelKeySetup = coordinator.refusalOffersModelKeySetup
         return card {
             header(
                 icon: offersModelKeySetup
                     ? "key.fill"
                     : (isRefusal ? "hand.raised" : "exclamationmark.triangle"),
                 title: offersModelKeySetup
-                    ? "Connect a model to edit apps"
+                    ? (isRefusal ? "Connect a model to edit apps" : "Your model credential stopped working")
                     : (isRefusal ? "Iris can't edit this" : "That didn't work")
             )
 

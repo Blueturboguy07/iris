@@ -431,6 +431,93 @@ struct OnDemandEditEngineTests {
         #expect(FileManager.default.fileExists(atPath: repo + "/.git"))
     }
 
+    /// Replays canned turns like `ScriptedProvider`, but throws the given
+    /// error for each of the first `throwCount` calls. The rate-limit ride-out
+    /// exists exactly for this shape: a transient 429, then normal service.
+    final class ThrowingThenScriptedProvider: MaintainModelProviding {
+        let displayName = "throwing-then-scripted-mock"
+        let isAvailable = true
+        private let turns: [String]
+        private let errorToThrow: Error
+        private var remainingThrows: Int
+        private var index = 0
+        init(throwing errorToThrow: Error, times throwCount: Int, then turns: [String]) {
+            self.errorToThrow = errorToThrow
+            self.remainingThrows = throwCount
+            self.turns = turns
+        }
+        func respond(
+            systemPrompt: String, conversation: [MaintainChatTurn], maximumOutputTokens: Int
+        ) async throws -> String {
+            if remainingThrows > 0 {
+                remainingThrows -= 1
+                throw errorToThrow
+            }
+            defer { index += 1 }
+            return index < turns.count ? turns[index] : "DONE"
+        }
+    }
+
+    /// A transient 429 mid-run is waited out (Retry-After honored, here 0s so
+    /// the test is instant) instead of reverting the whole run — the shape a
+    /// Claude Code login hits constantly, since that credential shares the
+    /// subscription's limit with Claude Code itself.
+    @Test func aRateLimitedModelCallIsRiddenOutNotReverted() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo()
+        defer { Self.removeRepo(repo) }
+
+        let fixer = MaintainTierCFixer(provider: ThrowingThenScriptedProvider(
+            throwing: AssistantTransportError.rateLimited(retryAfterSeconds: 0),
+            times: MaintainTierCFixer.maximumRateLimitWaitsPerRun,
+            then: [
+                "```bash\nprintf 'FIXED\\n' > app.txt\n```",
+                "DONE",
+            ]
+        ))
+        let result = await fixer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "bbbbbbbbbbbbbbbbcccccccccccccccc",
+            request: "please make the app say FIXED", kind: .feature,
+            verificationCommandsOverride: Self.fastCommands()
+        )
+
+        guard case .appliedAndRebuilt = result else {
+            Issue.record("expected .appliedAndRebuilt after riding out the 429s, got \(result)")
+            return
+        }
+        #expect(Self.fileContents(repo, "app.txt") == "FIXED")
+    }
+
+    /// One 429 more than the run will wait out fails honestly — with the
+    /// Tier-C rate-limit wording, not the funded tier's "add your own key".
+    @Test func aPersistentRateLimitFailsWithActionableWording() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo()
+        defer { Self.removeRepo(repo) }
+
+        let fixer = MaintainTierCFixer(provider: ThrowingThenScriptedProvider(
+            throwing: AssistantTransportError.rateLimited(retryAfterSeconds: 0),
+            times: MaintainTierCFixer.maximumRateLimitWaitsPerRun + 1,
+            then: ["DONE"]
+        ))
+        let result = await fixer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "ddddddddddddddddeeeeeeeeeeeeeeee",
+            request: "please make the app say FIXED", kind: .feature,
+            verificationCommandsOverride: Self.fastCommands()
+        )
+
+        guard case .couldNotComplete(let reason) = result else {
+            Issue.record("expected .couldNotComplete on a persistent 429, got \(result)")
+            return
+        }
+        #expect(reason.contains("rate-limiting"))
+        // The revert left the tree exactly as it started, `.git` restored.
+        #expect(Self.fileContents(repo, "app.txt") == "BROKEN")
+        #expect(FileManager.default.fileExists(atPath: repo + "/.git"))
+    }
+
     /// A model edit to a build-script file (here `package.json`) is a jail
     /// escape — it would run un-jailed during the verification build — so it is
     /// blocked BEFORE any build runs and the tree is reverted. Nothing is

@@ -209,6 +209,29 @@ private final class ScriptedProbeProvider: MaintainModelProviding {
         #expect(reason == "model call failed: boom")
     }
 
+    @Test func aRateLimitGetsTierCWordingNotTheFundedTiersAdvice() {
+        let reason = MaintainTierCFixer.modelCallFailureReason(
+            for: AssistantTransportError.rateLimited(retryAfterSeconds: 60)
+        )
+        #expect(reason.contains("rate-limiting"))
+        // The transport's own message ends "add your own anthropic key" —
+        // nonsense advice for a loop that already runs on the reader's key.
+        #expect(!reason.contains("add your own anthropic key"))
+    }
+
+    @Test func theRateLimitWaitHonorsRetryAfterWithinItsClamp() {
+        // The server's own Retry-After wins when it sent one…
+        #expect(MaintainTierCFixer.rateLimitWaitSeconds(retryAfterSeconds: 5) == 5)
+        // …the default fills in when it did not…
+        #expect(MaintainTierCFixer.rateLimitWaitSeconds(retryAfterSeconds: nil)
+            == MaintainTierCFixer.defaultRateLimitWaitSeconds)
+        // …and the clamp keeps a zero or an hour-long answer inside what a
+        // watched run should ever stall for.
+        #expect(MaintainTierCFixer.rateLimitWaitSeconds(retryAfterSeconds: 0) == 1)
+        #expect(MaintainTierCFixer.rateLimitWaitSeconds(retryAfterSeconds: 3600)
+            == MaintainTierCFixer.maximumRateLimitWaitSeconds)
+    }
+
     @Test func theCoordinatorMapsACredentialRejectionToTheSettingsOffer() {
         let mapped = OnDemandEditCoordinator.mappedFailure(
             reason: "model credential rejected: anthropic turned that key down. check it's still active and paste it again."

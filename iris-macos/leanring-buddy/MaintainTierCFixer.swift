@@ -92,6 +92,23 @@ final class MaintainTierCFixer {
     static let maximumLoopSteps = 20
     static let maximumOutputTokensPerStep = 1200
 
+    /// How many 429s one run will wait out before giving up. Two waits rides
+    /// out a burst limit without letting a genuinely exhausted quota hold the
+    /// reader (and their revert) hostage for many minutes.
+    static let maximumRateLimitWaitsPerRun = 2
+    /// The wait when Anthropic sent no `Retry-After`.
+    static let defaultRateLimitWaitSeconds = 20
+    /// The cap on any single wait — a `Retry-After` above this means the quota
+    /// is exhausted for far longer than a watched run should stall, so the run
+    /// fails honestly instead.
+    static let maximumRateLimitWaitSeconds = 120
+
+    /// How long to wait out one 429: the server's own `Retry-After` when it
+    /// sent one, clamped to [1, cap]; the default when it did not.
+    nonisolated static func rateLimitWaitSeconds(retryAfterSeconds: Int?) -> Int {
+        min(max(retryAfterSeconds ?? defaultRateLimitWaitSeconds, 1), maximumRateLimitWaitSeconds)
+    }
+
     /// The reason string for a thrown model call, in words the reader can act
     /// on. A transport error's own `userFacingMessage` says what to DO
     /// ("anthropic turned that key down. check it's still active…"), where the
@@ -100,12 +117,20 @@ final class MaintainTierCFixer {
     /// reader saw when their imported Claude Code token lapsed mid-run. A
     /// rejected credential gets its own prefix so the coordinator can offer the
     /// settings shortcut for the one failure a settings tap actually fixes.
+    /// A rate limit gets Tier-C-specific wording: the transport's own message
+    /// ends "…add your own anthropic key to keep going", which is advice for
+    /// the funded tier — this loop ALREADY runs on the reader's own credential.
     nonisolated static func modelCallFailureReason(for error: Error) -> String {
         guard let transportError = error as? AssistantTransportError else {
             return "model call failed: \(error.localizedDescription)"
         }
         if transportError == .bringYourOwnKeyRejected {
             return "model credential rejected: \(transportError.userFacingMessage)"
+        }
+        if case .rateLimited = transportError {
+            return "model call failed: anthropic is rate-limiting your credential right now — "
+                + "wait a few minutes and try again. (A connected Claude Code login shares "
+                + "its limit with Claude Code itself.)"
         }
         return "model call failed: \(transportError.userFacingMessage)"
     }
@@ -393,6 +418,12 @@ final class MaintainTierCFixer {
         var consecutiveNoProgressStepCount = 0
 
         var declaredDone = false
+        // A 429 is transient by definition, and on a Claude Code login the
+        // credential SHARES the subscription's limit with Claude Code itself —
+        // so a rate limit mid-run is common and must not revert a long run the
+        // way a real failure does. Bounded: at most this many waits per run,
+        // each capped, then the failure is surfaced honestly.
+        var rateLimitWaitsRemaining = Self.maximumRateLimitWaitsPerRun
         for step in 1...Self.maximumLoopSteps {
             let reply: String
             do {
@@ -401,6 +432,16 @@ final class MaintainTierCFixer {
                     conversation: conversation,
                     maximumOutputTokens: Self.maximumOutputTokensPerStep
                 )
+            } catch AssistantTransportError.rateLimited(let retryAfterSeconds)
+                where rateLimitWaitsRemaining > 0 {
+                rateLimitWaitsRemaining -= 1
+                let waitSeconds = Self.rateLimitWaitSeconds(retryAfterSeconds: retryAfterSeconds)
+                irisTrace("maintain: tier-c rate-limited at step \(step), waiting \(waitSeconds)s (\(rateLimitWaitsRemaining) waits left)")
+                try? await Task.sleep(nanoseconds: UInt64(waitSeconds) * 1_000_000_000)
+                // Nothing was appended to the conversation, so re-entering the
+                // loop retries the SAME request; the burned step keeps the run
+                // bounded by the step cap exactly as before.
+                continue
             } catch {
                 await restoreGit()
                 return .couldNotFix(reason: Self.modelCallFailureReason(for: error))

@@ -473,11 +473,6 @@ final class OnDemandEditCoordinator: ObservableObject {
             statusLine = "Tell Iris what you'd like changed first."
             return false
         }
-        if OnDemandEditScopeEstimate.requestLooksTooLargeForOneEdit(trimmed) {
-            statusLine = "That's a big change — Iris makes small, single edits (a bug fix or one small feature). Try narrowing it to one thing."
-            return false
-        }
-
         // Scrub secrets on the SAME egress path all model-bound text uses,
         // BEFORE the request becomes any part of a prompt. The changeId is
         // derived from the further-normalized scrubbed text (path/number/PII
@@ -1321,7 +1316,10 @@ final class OnDemandEditCoordinator: ObservableObject {
             return ("This change would edit files that run during the build (like build.rs or package.json scripts), which Iris won't run unreviewed — it stopped before building. Nothing changed.", true, false)
         }
         if reason.contains("ran out of steps") {
-            return ("This turned out to be too large for Iris to finish in its budget — nothing was applied. Try a smaller, more specific change.", false, false)
+            // With budgeting removed, "ran out of steps" only happens when the
+            // loop stopped making progress or hit the distant runaway backstop
+            // — not because a budget expired.
+            return ("Iris worked at this for a while but couldn't converge on a finished change, so it stopped — nothing was applied. A more specific request may land better.", false, false)
         }
         if reason.contains("changed nothing") {
             return ("Iris couldn't find a change to make for that — nothing was applied.", false, false)
@@ -1371,57 +1369,5 @@ final class OnDemandEditCoordinator: ObservableObject {
         isAssessingRequest = false
         // resolvedClonePath is only cleared alongside a lock release, so a lock
         // is never orphaned by a reset mid-run.
-    }
-}
-
-// MARK: - Up-front scope estimate
-
-/// A conservative, pure pre-flight guess at whether a request is too large for
-/// one jailed edit (≤12 files, ≤12 loop steps, 1200 output tokens/step). It
-/// refuses the obviously-broad up front — rather than letting the reader wait
-/// through a run that hits the step cap mid-implementation and reverts — while
-/// staying conservative so it never blocks a legitimate small edit. It only
-/// reads the text; it never runs the model.
-enum OnDemandEditScopeEstimate {
-
-    static func requestLooksTooLargeForOneEdit(_ request: String) -> Bool {
-        // Three or more enumerated items reads as a batch of changes, not one.
-        if enumeratedItemCount(in: request) >= 3 { return true }
-        // Several distinct asks conjoined into one sentence.
-        if conjoinedAskCount(in: request.lowercased()) >= 2 { return true }
-        // A very long free-text request is a proxy for a broad change; the
-        // engine only forwards the first 3000 chars to the model anyway.
-        if request.count > 1200 { return true }
-        return false
-    }
-
-    private static func enumeratedItemCount(in request: String) -> Int {
-        regularExpressionMatchCount(
-            pattern: #"(?m)^\s*(?:\d+[\.\)]|[-*•])\s+\S"#, in: request
-        )
-    }
-
-    private static func conjoinedAskCount(in loweredRequest: String) -> Int {
-        var count = 0
-        for connector in [" and also ", " as well as ", "; also ", " plus also ", " and then also "] {
-            count += occurrenceCount(of: connector, in: loweredRequest)
-        }
-        return count
-    }
-
-    private static func occurrenceCount(of needle: String, in haystack: String) -> Int {
-        guard !needle.isEmpty else { return 0 }
-        var count = 0
-        var searchRange = haystack.startIndex..<haystack.endIndex
-        while let found = haystack.range(of: needle, range: searchRange) {
-            count += 1
-            searchRange = found.upperBound..<haystack.endIndex
-        }
-        return count
-    }
-
-    private static func regularExpressionMatchCount(pattern: String, in text: String) -> Int {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return 0 }
-        return regex.numberOfMatches(in: text, range: NSRange(text.startIndex..., in: text))
     }
 }

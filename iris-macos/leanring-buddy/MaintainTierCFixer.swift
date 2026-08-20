@@ -18,8 +18,9 @@
 //    - BYO/OpenAI only (the funded proxy structurally can't run this, and its
 //      budget couldn't sustain it — Agentless-shaped novel fixes still cost
 //      ~15x a replay).
-//    - A hard step cap. An agent that hasn't found it in a dozen jailed
-//      commands is not about to.
+//    - No step budget (founder decision, Aug 20 2026): the loop runs until
+//      the model declares DONE or the no-progress detector calls it stuck,
+//      under a distant runaway backstop that is not a budget.
 //    - Every command runs in the Seatbelt jail: writes confined to the repo,
 //      no network. Fetch-and-run and exfiltration are off the table during
 //      exploration; the network-needing build happens after, outside the
@@ -85,33 +86,26 @@ enum MaintainOnDemandEditResult: Sendable {
 @MainActor
 final class MaintainTierCFixer {
 
-    // Raised from 12 to the researched ~15–20 band (plan §6, decision 6c: the
-    // reader pays via their own CLI login, so the richer loop is affordable). The
-    // step cap is no longer the ONLY governor — the no-progress detector and the
-    // action-dedup below stop a spinning loop well before it burns the cap.
-    static let maximumLoopSteps = 20
-    /// A feature is inherently larger than a crash-shaped bug fix — the first
-    /// real-Mac dogfoods burned all 20 steps making steady progress (every
-    /// command exit 0, no stalls) and still ran out — so a feature gets more
-    /// headroom. Still hard-capped; the no-progress detector governs both.
-    static let maximumLoopStepsForAFeature = 30
-
-    /// The step budget for one task. The model is TOLD this number and shown
-    /// a per-turn countdown (see the command-result turn), because a model
-    /// that does not know its budget explores like it has forever and gets
-    /// cut off mid-work instead of pacing itself to DONE.
-    static func maximumLoopSteps(for task: MaintainEditTask) -> Int {
-        switch task {
-        case .crashFix, .onDemand(_, .bugFix):
-            return maximumLoopSteps
-        case .onDemand(_, .feature):
-            return maximumLoopStepsForAFeature
-        }
-    }
+    // Budgeting was removed by founder decision (Aug 20 2026): the loop runs
+    // until the model declares DONE or genuinely stalls. This ceiling is NOT a
+    // budget — it is a runaway backstop, set far beyond any legitimate run, so
+    // a model that never says DONE cannot spin on the reader's subscription
+    // forever. The real governors are the no-progress detector and the
+    // action-dedup below, which only ever stop a loop that is stuck.
+    static let runawayStepCeiling = 500
 
     // 1200 could not hold one medium heredoc file-write, which forced real
-    // edits to split across many small append steps and burn the step budget.
+    // edits to split across many small append steps.
     static let maximumOutputTokensPerStep = 4000
+
+    /// How many recent conversation turns are replayed to the model once a
+    /// run grows long. An unbounded run replaying its whole transcript every
+    /// step would eventually overflow the model's context window and fail
+    /// with a request error mid-run — so past this size, the model sees the
+    /// opening turn (task, repo map, preflight) plus the most recent turns,
+    /// with a bridge note standing in for the omitted middle. The full
+    /// transcript is still kept locally; only what is SENT is windowed.
+    static let replayedConversationTurnWindow = 80
 
     /// How many 429s one run will wait out before giving up. Two waits rides
     /// out a burst limit without letting a genuinely exhausted quota hold the
@@ -445,13 +439,12 @@ final class MaintainTierCFixer {
         // way a real failure does. Bounded: at most this many waits per run,
         // each capped, then the failure is surfaced honestly.
         var rateLimitWaitsRemaining = Self.maximumRateLimitWaitsPerRun
-        let stepBudget = Self.maximumLoopSteps(for: task)
-        for step in 1...stepBudget {
+        for step in 1...Self.runawayStepCeiling {
             let reply: String
             do {
                 reply = try await provider.respond(
                     systemPrompt: Self.systemPrompt(for: task),
-                    conversation: conversation,
+                    conversation: Self.conversationWindowedForSending(conversation),
                     maximumOutputTokens: Self.maximumOutputTokensPerStep
                 )
             } catch AssistantTransportError.rateLimited(let retryAfterSeconds)
@@ -506,14 +499,9 @@ final class MaintainTierCFixer {
             let result = try? await runner.run(jailed.invocation, deadline: 120)
             let output = String((result?.outputTail ?? "(no output)").suffix(4000))
             irisTrace("maintain: tier-c step \(step) ran a jailed command, exit=\(result?.exitCode ?? -1)")
-            // The countdown keeps the model honest about its budget: without
-            // it, dogfoods showed steady exploration right up to the cap and a
-            // guillotine mid-work instead of a paced landing on DONE.
-            let stepsRemaining = stepBudget - step
             conversation.append(MaintainChatTurn(
                 role: "user",
-                text: "Command exit \(result?.exitCode ?? -1). Output:\n\(output)\n\n"
-                    + "\(stepsRemaining) of your \(stepBudget) commands remain. Next command, or DONE."
+                text: "Command exit \(result?.exitCode ?? -1). Output:\n\(output)\n\nNext command, or DONE."
             ))
 
             // No-progress detector (plan §6). A fingerprint that CHANGED means the
@@ -818,20 +806,38 @@ final class MaintainTierCFixer {
     """
 
     private static func systemPrompt(for task: MaintainEditTask) -> String {
-        let taskSystemPrompt: String
         switch task {
         case .crashFix, .onDemand(_, .bugFix):
-            taskSystemPrompt = bugFixSystemPrompt
+            return bugFixSystemPrompt
         case .onDemand(_, .feature):
-            taskSystemPrompt = featureSystemPrompt
+            return featureSystemPrompt
         }
-        // The budget is stated up front (and counted down every turn) so the
-        // model paces itself to DONE instead of exploring like it has forever
-        // and being cut off mid-work at the cap.
-        return taskSystemPrompt + "\n\nYou have a HARD budget of "
-            + "\(maximumLoopSteps(for: task)) commands for the whole job — each turn "
-            + "tells you how many remain. Budget them: explore briefly, start "
-            + "editing early, and reply DONE with commands to spare."
+    }
+
+    /// What the model actually sees on a long run: the opening turn (the task,
+    /// repo map, and preflight addendum) plus the most recent turns, with a
+    /// bridge note standing in for the omitted middle. Alternation-safe: the
+    /// kept tail always starts with an assistant turn so roles keep
+    /// alternating after the merged opening user turn.
+    static func conversationWindowedForSending(
+        _ conversation: [MaintainChatTurn]
+    ) -> [MaintainChatTurn] {
+        guard conversation.count > replayedConversationTurnWindow + 1,
+              let openingTurn = conversation.first else {
+            return conversation
+        }
+        var keptTail = Array(conversation.suffix(replayedConversationTurnWindow))
+        if keptTail.first?.role != "assistant" {
+            keptTail.removeFirst()
+        }
+        let omittedTurnCount = conversation.count - 1 - keptTail.count
+        let bridgedOpeningTurn = MaintainChatTurn(
+            role: openingTurn.role,
+            text: openingTurn.text
+                + "\n\n[\(omittedTurnCount) earlier turns of this session are omitted "
+                + "from the transcript below; trust the most recent results.]"
+        )
+        return [bridgedOpeningTurn] + keptTail
     }
 
     /// The opening user turn. Composed of the original task-driven message
@@ -887,7 +893,7 @@ final class MaintainTierCFixer {
             App: \(appSlug). A user of this app reported a bug and asked Iris to \
             fix it. In their words:
 
-            \(String(request.prefix(3000)))
+            \(request)
 
             Find the cause in the code and fix it. Start by locating the relevant \
             source.
@@ -897,7 +903,7 @@ final class MaintainTierCFixer {
             App: \(appSlug). A user of this app asked Iris to add a feature. In \
             their words:
 
-            \(String(request.prefix(3000)))
+            \(request)
 
             Implement it as a small, self-contained change that follows the app's \
             existing patterns. Start by locating the relevant source.

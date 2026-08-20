@@ -188,30 +188,45 @@ import Testing
         #expect(branch.range(of: "^iris/edit-abcdef012345-[0-9]{8}$", options: .regularExpression) != nil)
     }
 
-    // MARK: - Up-front "too large" refusal
+    // MARK: - Conversation windowing on a long run
 
-    @Test func anObviouslyBroadRequestIsRefusedUpFront() {
-        // Three or more enumerated items = a batch, not one edit.
-        #expect(OnDemandEditScopeEstimate.requestLooksTooLargeForOneEdit(
-            "1. add dark mode\n2. add a share button\n3. add export"
-        ))
-        // Several asks conjoined into one sentence.
-        #expect(OnDemandEditScopeEstimate.requestLooksTooLargeForOneEdit(
-            "add a dark mode and also add a share sheet"
-        ))
-        // A very long request is a proxy for a broad change.
-        #expect(OnDemandEditScopeEstimate.requestLooksTooLargeForOneEdit(
-            String(repeating: "make it better ", count: 120)
-        ))
+    @Test func aShortConversationIsSentWholeAndUntouched() {
+        let conversation = (0..<20).map { turnIndex in
+            MaintainChatTurn(
+                role: turnIndex.isMultiple(of: 2) ? "user" : "assistant",
+                text: "turn \(turnIndex)"
+            )
+        }
+        let sent = MaintainTierCFixer.conversationWindowedForSending(conversation)
+        #expect(sent.count == conversation.count)
+        #expect(sent.first?.text == "turn 0")
+        #expect(sent.last?.text == "turn 19")
     }
 
-    @Test func aNormalSingleRequestIsNotRefused() {
-        #expect(!OnDemandEditScopeEstimate.requestLooksTooLargeForOneEdit(
-            "add a dark mode toggle to the settings screen"
-        ))
-        #expect(!OnDemandEditScopeEstimate.requestLooksTooLargeForOneEdit(
-            "fix the crash when I tap export"
-        ))
+    @Test func aLongRunKeepsTheOpeningTurnBridgesTheMiddleAndAlternatesCleanly() {
+        // 201 turns: user opening, then assistant/user pairs — the shape the
+        // real loop produces. Well past the window, so the middle must fold.
+        var conversation = [MaintainChatTurn(role: "user", text: "the task")]
+        for turnIndex in 0..<200 {
+            conversation.append(MaintainChatTurn(
+                role: turnIndex.isMultiple(of: 2) ? "assistant" : "user",
+                text: "turn \(turnIndex)"
+            ))
+        }
+        let sent = MaintainTierCFixer.conversationWindowedForSending(conversation)
+
+        // The opening turn survives, carrying the bridge note for the fold.
+        #expect(sent.first?.role == "user")
+        #expect(sent.first?.text.hasPrefix("the task") == true)
+        #expect(sent.first?.text.contains("omitted") == true)
+        // The most recent turn is always the last thing the model sees.
+        #expect(sent.last?.text == conversation.last?.text)
+        // Bounded, and alternation-safe: after the opening user turn comes an
+        // assistant turn, and roles alternate all the way down.
+        #expect(sent.count <= MaintainTierCFixer.replayedConversationTurnWindow + 1)
+        for (adjacentIndex, laterTurn) in sent.dropFirst().enumerated() {
+            #expect(laterTurn.role != sent[adjacentIndex].role)
+        }
     }
 
     // MARK: - Fix/feature classification (always a preselect, never binding)

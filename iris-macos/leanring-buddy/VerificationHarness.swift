@@ -24,6 +24,24 @@
 //  build + suite, never a `verified` outcome without the full gate. The
 //  outcome vocabulary keeps those separate on purpose.
 //
+//  Two additive final steps run AFTER every leg above passes (Feature Engine
+//  plan §9), never in place of them:
+//
+//    cheat   scan the applied diff for the tamper signatures a self-grading
+//            agent reaches for (FeatureEditVerificationAudit) — tautological
+//            asserts, swallowed catches, focused/skipped tests, re-recorded
+//            snapshots, a test mocking the module under test, a test/assert
+//            count drop. A hit blocks exactly as hard as the weakens-tests
+//            check it generalizes.
+//    ladder  translate the signals the legs ALREADY collected into an honest
+//            evidence log + the highest rung that evidence earns
+//            (FeatureEditVerificationLadder). The rung is OBSERVED facts, never
+//            a self-rated number, and is attached only after the cheat scan is
+//            clean so a blocked run can never carry a rung implying it wasn't.
+//
+//  The binary earnsVerifiedFix/earnsCleanApply verdicts are untouched — the
+//  rung and evidence log are added ALONGSIDE them, never in their place.
+//
 
 import Foundation
 
@@ -39,6 +57,37 @@ struct VerificationOutcome: Sendable {
     /// diagnosis record — never shown raw to the user.
     var blockedStage: String?
     var blockedOutputTail: String?
+
+    // ── Feature Engine verification ladder (plan §9), additive ─────────────
+    // These are populated by the final ladder step, only after every gate
+    // above passes. They stand ALONGSIDE the binary verdicts below — nothing
+    // here changes what earnsVerifiedFix / earnsCleanApply mean.
+
+    /// The per-signal evidence the run collected, translated from the legs'
+    /// own results. nil until the ladder step runs (i.e. nil on any blocked
+    /// run), so a rung is never implied where the gates did not all pass.
+    var verificationEvidence: VerificationEvidence?
+
+    /// The highest rung the collected evidence honestly earns. nil on a
+    /// blocked run for the same reason as `verificationEvidence`.
+    var verificationRung: VerificationRung?
+
+    /// The honest evidence-log rows (`VerificationEvidence.evidenceLogLines()`)
+    /// for the reader-facing card and the commit trailer. Empty until the
+    /// ladder step runs — never a confidence number, only observed facts.
+    var evidenceLog: [String] = []
+
+    /// The rung this change must reach to auto-commit, scaled by blast radius
+    /// (ratified decision 5a). Set only when the caller supplied a runtime
+    /// shape. Data only — this harness never gates on it; the coordinator that
+    /// owns the commit does, exactly as it already gates on earnsCleanApply.
+    var requiredRungForAutoCommit: VerificationRung?
+
+    /// Cheat signatures the applied diff tripped (plan §9 anti-gaming). Empty
+    /// means the diff was scanned and carried none; a non-empty list also
+    /// BLOCKS the run (blockedStage == "cheat-signature"), mirroring the
+    /// weakens-tests check inside enforceDiffScope.
+    var cheatSignatureFindings: [String] = []
 
     /// The full three-legged standard: every leg present and correct.
     var earnsVerifiedFix: Bool {
@@ -122,7 +171,11 @@ enum VerificationHarness {
     static func verifyAppliedPatch(
         runner: MaintainShellRunner,
         commands: VerificationCommands,
-        reproCommand: String?
+        reproCommand: String?,
+        // Optional and defaulted so every existing caller is untouched. When a
+        // caller knows how this app runs, the ladder step also records the rung
+        // required to auto-commit (ratified decision 5a) — data only.
+        runtimeShape: RecipeRuntimeShape? = nil
     ) async -> VerificationOutcome {
         var outcome = VerificationOutcome()
 
@@ -198,7 +251,150 @@ enum VerificationHarness {
             }
         }
 
+        // ── Feature Engine verification ladder (plan §9) ───────────────────
+        // Every leg above has passed. Two additive steps run now, both hard.
+        //
+        // Step 1 — cheat-signature scan of the applied diff. enforceDiffScope
+        // already blocked the crudest tamper (a test file that deletes more
+        // than it adds); this generalizes that to the named cheat signatures a
+        // self-grading agent reaches for. A hit blocks exactly as hard as the
+        // weakens-tests check it extends — the findings are recorded on the
+        // outcome first so a blocked run still carries WHY it was blocked.
+        let appliedUnifiedDiff = await readAppliedUnifiedDiff(runner: runner)
+        let cheatSignatureFindings = FeatureEditVerificationAudit.cheatSignatures(inUnifiedDiff: appliedUnifiedDiff)
+        outcome.cheatSignatureFindings = cheatSignatureFindings
+        guard cheatSignatureFindings.isEmpty else {
+            return blocked(
+                &outcome,
+                stage: "cheat-signature",
+                tail: "applied diff trips cheat signatures: "
+                    + cheatSignatureFindings.joined(separator: "; ")
+            )
+        }
+
+        // Step 2 — translate the signals the legs ALREADY collected into an
+        // honest evidence log + the highest rung that evidence earns. Attached
+        // only after the cheat scan came back clean, so a blocked run never
+        // carries a rung implying it was honest. Never a self-rated number —
+        // FeatureEditVerificationLadder climbs strictly and stops at the first
+        // missing signal, so no rung is ever claimed above its evidence.
+        let collectedEvidence = evidenceFromCollectedSignals(outcome: outcome, commands: commands)
+        outcome.verificationEvidence = collectedEvidence
+        outcome.verificationRung = FeatureEditVerificationLadder.highestEarnedRung(from: collectedEvidence)
+        outcome.evidenceLog = collectedEvidence.evidenceLogLines()
+        // When the caller told us how this app runs, also record the rung it
+        // must reach to auto-commit (ratified decision 5a). Data only — this
+        // harness does not gate on it; the caller does.
+        if let runtimeShape {
+            outcome.requiredRungForAutoCommit =
+                FeatureEditVerificationLadder.requiredRung(forRuntimeShape: runtimeShape)
+        }
+
         return outcome
+    }
+
+    /// Translate the signals the verification legs already collected into the
+    /// ladder's per-signal evidence. Deliberately conservative and honest:
+    ///
+    ///   - L1 `compileClean` is earned ONLY when a real build command existed
+    ///     AND succeeded. The "no build vocabulary for this stack" case sets
+    ///     `buildSucceeded = true` to mean "stage absent, not failed" — that is
+    ///     not a compile, so it must not be reported as one.
+    ///   - L2 `existingSuiteGreen` is earned only when the full suite actually
+    ///     ran and was green (`suitePassed == true`); a skipped suite (nil) is
+    ///     no evidence, never a silent green.
+    ///   - L3 `newTestPasses` is earned only when the three-leg repro proved a
+    ///     targeted test that failed before the patch, passed after, and failed
+    ///     again on revert — a test shown to actually see the change. A replay
+    ///     or feature edit carries no repro (legs skipped), so this stays false
+    ///     and the change honestly caps below L3, exactly as the plan intends.
+    ///
+    /// L4–L6 (mutation, live smoke, adversarial review) are not signals this
+    /// harness collects, so they remain unearned — the run reports the honest
+    /// floor rather than a fabricated ceiling.
+    private static func evidenceFromCollectedSignals(
+        outcome: VerificationOutcome,
+        commands: VerificationCommands
+    ) -> VerificationEvidence {
+        var evidence = VerificationEvidence()
+
+        let aRealBuildRanAndPassed = commands.buildCommand != nil && outcome.buildSucceeded
+        if aRealBuildRanAndPassed {
+            evidence.compileClean = true
+            evidence.compileCleanEvidence = "build command exited 0"
+        }
+
+        if outcome.suitePassed == true {
+            evidence.existingSuiteGreen = true
+            evidence.existingSuiteGreenEvidence = "existing suite exited 0"
+        }
+
+        let reproProvedTheChange = outcome.reproFailedBeforePatch == true
+            && outcome.reproPassedAfterPatch == true
+            && outcome.reproFailedOnRevert == true
+        if reproProvedTheChange {
+            evidence.newTestPasses = true
+            evidence.newTestPassesEvidence =
+                "repro failed before the patch, passed after it, and failed again on revert (3-leg)"
+        }
+
+        return evidence
+    }
+
+    /// Reads the applied patch as a unified diff for the cheat-signature scan.
+    /// Best-effort by design — a diff we cannot read must never fabricate a
+    /// clean scan, but it also must not crash a run whose gates already passed;
+    /// the scan is an ADDED net, not a load-bearing gate on its own.
+    ///
+    ///   • `git diff HEAD` captures every TRACKED modification the patch made
+    ///     (an edited test that gained a tautological assert, a swallowed
+    ///     catch, a re-recorded snapshot). It exits 0 with changes present.
+    ///   • Untracked NEW files are invisible to `git diff HEAD`, yet a brand-
+    ///     new all-green tautological test file is precisely a cheat — so each
+    ///     new file is rendered as an add-diff via `git diff --no-index` and
+    ///     appended. `--exclude-standard` drops gitignored build output; a cap
+    ///     guards against a misconfigured repo spewing artifacts here (scope was
+    ///     already vetted pre-build by enforceDiffScope).
+    private static func readAppliedUnifiedDiff(runner: MaintainShellRunner) async -> String {
+        var combinedUnifiedDiff = ""
+
+        if let trackedDiff = try? await runner.run("git diff HEAD", deadline: 120),
+           trackedDiff.succeeded {
+            combinedUnifiedDiff += trackedDiff.outputTail
+        }
+
+        let untrackedNewFiles = (try? await runner.run("git ls-files --others --exclude-standard", deadline: 60))?
+            .outputTail
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty } ?? []
+
+        // More new files than a single fix could plausibly add means this is
+        // post-build artifact spew, not the patch — scan the tracked diff only.
+        if untrackedNewFiles.count <= maximumFilesTouched {
+            for newFilePath in untrackedNewFiles {
+                // `git diff --no-index` exits non-zero BY DESIGN when the two
+                // sides differ (they always do here — /dev/null vs a real
+                // file), so read its output regardless of the exit code.
+                if let addDiff = try? await runner.run(
+                    "git diff --no-index -- /dev/null \(shellSingleQuoted(newFilePath))",
+                    deadline: 60
+                ) {
+                    if !combinedUnifiedDiff.isEmpty { combinedUnifiedDiff += "\n" }
+                    combinedUnifiedDiff += addDiff.outputTail
+                }
+            }
+        }
+
+        return combinedUnifiedDiff
+    }
+
+    /// Single-quote a path for safe use in a POSIX shell command, so a filename
+    /// with spaces or metacharacters cannot alter the diff command. Embedded
+    /// single quotes are closed, escaped, and reopened — the standard `'\''`
+    /// trick, matching FeatureEditVerificationAudit's own quoting.
+    private static func shellSingleQuoted(_ raw: String) -> String {
+        "'" + raw.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     /// Reads the applied (uncommitted) diff and blocks a fix that touches too

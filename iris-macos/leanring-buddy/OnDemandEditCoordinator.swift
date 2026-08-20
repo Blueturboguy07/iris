@@ -64,6 +64,21 @@ enum OnDemandEditPhase: Equatable, Sendable {
     case pickApp
     /// An app is chosen and eligible; the reader is describing the change.
     case describe
+    /// The request is captured and classified, and the clarification pass
+    /// (plan §7) fired at least one question. The reader answers a compact,
+    /// tappable batch (held in `clarificationQuestions`) BEFORE any edit — the
+    /// should-I-ask decision is decoupled from the edit loop so Iris asks a
+    /// couple of decisive questions, never a chat interrogation. The associated
+    /// data lives in a published property (like `.previewDiff`'s diff) rather
+    /// than on the case, keeping the phase enum's `Equatable` synthesis intact.
+    case clarifying
+    /// No clarification was needed (or every question is answered); Iris shows
+    /// the short pre-edit PLAN (held in `presentedPlan`: the files it expects to
+    /// touch, the approach, the resolved build/test recipe + confidence, and the
+    /// honesty rung it expects to reach). Approving the plan is the consent that
+    /// unlocks the edit — "ask once, then commit" (plan §7) — and it routes
+    /// through the SAME LIVE eligibility re-check the start tap always did.
+    case presentingPlan
     /// The request is captured, scrubbed, and classified; awaiting the reader's
     /// explicit "start" tap (Consent #1).
     case awaitingStartConsent
@@ -123,6 +138,20 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// pool answers, and never one person's wish echoed back.
     @Published private(set) var suggestedRequests: [String] = []
 
+    /// The batched clarification questions (plan §7) the reader answers before
+    /// the plan is drawn. Empty unless `phase == .clarifying`. Populated ONLY by
+    /// `FeatureEditClarificationLogic.questions(...)`, whose closed set of four
+    /// triggers is what keeps this to a couple of high-value questions rather
+    /// than a nagging interrogation.
+    @Published private(set) var clarificationQuestions: [ClarificationQuestion] = []
+
+    /// The short pre-edit plan shown at `.presentingPlan` (plan §7): the files
+    /// Iris expects to touch, the approach, the resolved recipe in reader-facing
+    /// words, and the honesty rung it expects to reach. Nil until a plan is
+    /// built. Approving it leads into the LIVE eligibility re-check + run — the
+    /// plan itself is informational and never bypasses that binding gate.
+    @Published private(set) var presentedPlan: FeatureEditPlan?
+
     /// The committed diff, shown at the preview gate. Never raw model output —
     /// it is the real `git diff` of what landed on the branch.
     @Published private(set) var proposedDiffText: String?
@@ -131,6 +160,14 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// file that would run un-jailed during the verification build. Surfaced
     /// loudly rather than buried in the generic failure copy.
     @Published private(set) var blockedByBuildScriptEdit: Bool = false
+
+    /// True only when the current `.notEligible` refusal is the one the reader
+    /// can clear themselves — no model key connected. The refusal card reads
+    /// this to offer an "Open settings" button that lands on the account
+    /// section, instead of leaving the reader to hunt for where a key goes. Any
+    /// other refusal (provenance, sandbox, no rebuild recipe) is not something a
+    /// settings tap fixes, so the button stays hidden for those.
+    @Published private(set) var refusalOffersModelKeySetup: Bool = false
 
     /// The engine's own result, kept so the card can distinguish "applied and
     /// rebuilt" (never "verified") and read the kind / suite result honestly.
@@ -233,6 +270,23 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// consent so the heavy build never runs twice for one relaunch.
     private var packagedArtifactPath: String?
 
+    /// The per-repo build/run recipe DERIVED by reading the clone when the app
+    /// was picked (plan §4), cached so the clarification pass and the plan reuse
+    /// it without re-deriving. Nil until an eligible app is picked. It is pure
+    /// static inspection — reading files only; no command in it has run.
+    private var derivedRepoRecipe: RepoRecipe?
+
+    /// The §8 runtime shape of the picked app, taken from `derivedRepoRecipe`.
+    /// Feeds the runtime-shape clarification trigger and the honesty rung the
+    /// plan expects. Nil until an eligible app is picked.
+    private var derivedRuntimeShape: RecipeRuntimeShape?
+
+    /// The reader's selected answers to the clarification batch, keyed by
+    /// question id, held until the plan is built so the plan and the later edit
+    /// prompt can honor the reader's choices. Not published — the card owns its
+    /// own selection UI and submits the whole batch at once.
+    private var clarificationAnswersByQuestionId: [String: String] = [:]
+
     /// The optional seams default INSIDE the `@MainActor` init body rather than
     /// in the parameter list: a default argument referencing a `@MainActor`
     /// static (`.shared`, `defaultPerformOnDemandEdit`) is evaluated in a
@@ -297,9 +351,23 @@ final class OnDemandEditCoordinator: ObservableObject {
         proposedDiffText = nil
         blockedByBuildScriptEdit = false
         lastResult = nil
+        clarificationQuestions = []
+        presentedPlan = nil
 
         switch eligibility(forAppSlug: slug, appStack: stack) {
         case .eligible:
+            refusalOffersModelKeySetup = false
+            // Derive the per-repo build/run recipe by READING the clone (plan
+            // §4/§8) so the clarification pass and the plan can reason about how
+            // THIS specific app builds and runs — not the coarse catalog stack
+            // label. Pure static inspection: it only reads files, executes
+            // nothing from the repo, and touches no network. Eligibility already
+            // proved this clone path resolves, so a nil here is purely defensive.
+            if let clonePath = provenanceClonePath(forAppSlug: slug) {
+                let recipe = RepoRecipeService.deriveRecipe(repoRootPath: clonePath)
+                derivedRepoRecipe = recipe
+                derivedRuntimeShape = recipe.runtimeShape
+            }
             phase = .describe
             statusLine = nil
             // Prefill "others also wanted…" while the reader types. Best-effort;
@@ -310,7 +378,8 @@ final class OnDemandEditCoordinator: ObservableObject {
                 guard self.activeAppSlug == slug else { return }
                 self.suggestedRequests = requests
             }
-        case .refused(let reason):
+        case .refused(let reason, let offersModelKeySetup):
+            refusalOffersModelKeySetup = offersModelKeySetup
             phase = .notEligible(reason: reason)
             statusLine = reason
         }
@@ -330,9 +399,11 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// UP-FRONT scope estimate (refusing a too-large change here rather than
     /// discovering it at step 12, after the reader waited and spent their key),
     /// scrubs the request on the model-egress path, synthesizes the changeId,
-    /// and advances to the start-consent gate. Returns false (staying in
-    /// `.describe`, with a `statusLine` reason) when the request is empty or too
-    /// large, so the reader can revise it.
+    /// and advances to the clarification pass (plan §7) — which either asks a
+    /// couple of decisive questions (`.clarifying`) or goes straight to the
+    /// pre-edit plan (`.presentingPlan`) before the start-consent gate. Returns
+    /// false (staying in `.describe`, with a `statusLine` reason) when the
+    /// request is empty or too large, so the reader can revise it.
     @discardableResult
     func describeRequest(_ rawRequest: String, kind: OnDemandEditKind) -> Bool {
         guard phase == .describe else { return false }
@@ -360,9 +431,159 @@ final class OnDemandEditCoordinator: ObservableObject {
         scrubbedRequest = scrubbed
         changeId = synthesizedChangeId
         classifiedKind = kind
+
+        // The clarification pass (plan §7) runs BEFORE any edit and BEFORE the
+        // start-consent gate: decide whether Iris must ask a couple of decisive
+        // questions first. Two of the four triggers are model-derived
+        // (self-consistency ambiguity, an irreversible-action classifier) and
+        // are NOT available on this synchronous, no-network path, so they are
+        // passed as `false` — a conservative default that never ADDS a refusal
+        // versus today and defers those triggers to the loop-upgrade milestone.
+        // The two signals Iris can adjudicate statically — an unresolved build
+        // recipe and the runtime shape — are wired live from the derived recipe,
+        // so the "unknown stack" case now ASKS how to build (turning the old wall
+        // into a capability) instead of hard-refusing.
+        let clarificationQuestionBatch = FeatureEditClarificationLogic.questions(
+            forRequest: scrubbed,
+            requestLooksAmbiguous: false,
+            recipeIsUnknown: !(derivedRepoRecipe?.hasABuildableRecipe ?? false),
+            runtimeShape: derivedRuntimeShape ?? .unknown,
+            impliesIrreversibleAction: false
+        )
+
+        if clarificationQuestionBatch.isEmpty {
+            // Nothing to ask — go straight to the pre-edit plan, then consent.
+            buildAndPresentPlan(kind: kind)
+        } else {
+            clarificationQuestions = clarificationQuestionBatch
+            presentedPlan = nil
+            phase = .clarifying
+            statusLine = "A couple of quick questions before Iris starts."
+        }
+        return true
+    }
+
+    // MARK: - Step 4 & 5: clarify → present plan → approve (plan §7)
+
+    /// The reader answered the clarification batch (plan §7). A "Stop" choice is
+    /// an explicit abort — nothing has been touched, so it returns to the
+    /// describe step for a revise rather than proceeding with an unclear or
+    /// unwanted change. Otherwise it records the answers and builds the pre-edit
+    /// plan, advancing to the plan-approval gate.
+    func submitClarificationAnswers(_ answersByQuestionId: [String: String]) {
+        guard phase == .clarifying, let kind = classifiedKind else { return }
+        clarificationAnswersByQuestionId = answersByQuestionId
+
+        // Any option beginning with "Stop" is the reader declining after seeing
+        // the question. The safe, additive response is to make NOTHING happen
+        // and hand control back — never to proceed on an ambiguous or refused
+        // change. (The clarification options are a fixed, code-authored set, so
+        // matching their "Stop…" prefix is a reliable signal, not a guess.)
+        let readerChoseToStop = answersByQuestionId.values.contains { selectedOption in
+            selectedOption.lowercased().hasPrefix("stop")
+        }
+        if readerChoseToStop {
+            clarificationQuestions = []
+            phase = .describe
+            statusLine = "Stopped — nothing was changed. Revise your request, or pick a different app."
+            return
+        }
+
+        buildAndPresentPlan(kind: kind)
+    }
+
+    /// Build the short pre-edit PLAN (plan §7) from the derived recipe, the
+    /// runtime shape, and the reader's request, and show it for approval. The
+    /// plan is informational: the single binding safety gate is still
+    /// `confirmStartAndRun()`, reached only when the reader approves the plan.
+    private func buildAndPresentPlan(kind: OnDemandEditKind) {
+        let appName = activeAppName ?? (activeAppSlug ?? "this app")
+        let requestText = scrubbedRequest ?? "the requested change"
+        let verb = kind == .feature ? "add this feature to" : "fix this in"
+
+        presentedPlan = FeatureEditPlan(
+            // An honest empty estimate: the loop's offline repo map fills the
+            // real file list, and the diff-scope gate is the hard cap downstream.
+            filesToTouch: [],
+            approachSummary: "Iris will \(verb) \(appName): “\(requestText)”. It makes the "
+                + "smallest change that does it, on a new branch under your own model key, "
+                + "then verifies it before showing you the diff.",
+            resolvedRecipeSummary: recipeSummaryText(derivedRepoRecipe),
+            // The clarification round (if any) was already answered in the
+            // `.clarifying` step, so nothing is left open at plan time.
+            openQuestions: [],
+            expectedRung: expectedRungText(
+                recipe: derivedRepoRecipe,
+                runtimeShape: derivedRuntimeShape ?? .unknown,
+                kind: kind
+            )
+        )
+        clarificationQuestions = []
+        phase = .presentingPlan
+        statusLine = "Here's Iris's plan — review it, then start."
+    }
+
+    /// The reader approved the pre-edit plan (Consent #1, plan §7's "ask once,
+    /// then commit"). This advances to the start-consent gate and immediately
+    /// runs it, so the LIVE eligibility re-check + per-clonePath lock in
+    /// `confirmStartAndRun()` — the single binding safety gate — still run
+    /// exactly as before. Approving the plan never bypasses them.
+    func confirmPlanAndStart() {
+        guard phase == .presentingPlan, let kind = classifiedKind else { return }
         phase = .awaitingStartConsent
         statusLine = startConsentPrompt(kind: kind)
-        return true
+        confirmStartAndRun()
+    }
+
+    /// The derived recipe in reader-facing words for the plan card, so approving
+    /// the plan is informed consent to what will later run un-jailed. Honest
+    /// about unresolved fields ("Iris couldn't work out how to build it")
+    /// instead of inventing a command.
+    private func recipeSummaryText(_ recipe: RepoRecipe?) -> String {
+        guard let recipe else {
+            return "Iris couldn't derive how this app builds from its source."
+        }
+        var summaryParts: [String] = ["Detected stack: \(recipe.ecosystemIdentifier)."]
+        if let build = recipe.build {
+            summaryParts.append("Build: `\(build.commandLine)`.")
+        } else if let install = recipe.install {
+            summaryParts.append("Prepare: `\(install.commandLine)` (no separate build step).")
+        } else {
+            summaryParts.append("Build: Iris couldn't work out how to build it — it'll ask you.")
+        }
+        if let test = recipe.test {
+            summaryParts.append("Tests: `\(test.commandLine)`.")
+        } else {
+            summaryParts.append("Tests: this app has no test suite Iris can run.")
+        }
+        return summaryParts.joined(separator: " ")
+    }
+
+    /// The §9 evidence-ladder rung the plan honestly expects to reach, from the
+    /// runtime shape (ratified 5a: L2 for pure-local, L5 for anything with a
+    /// server/persistence/tenancy) tempered by whether there is a suite to run
+    /// at all. Stated up front so the reader knows the verification bar BEFORE
+    /// approving the edit. `kind` is accepted so a later slice can lower a
+    /// feature's ceiling (a feature can never be "verified") without changing
+    /// this signature.
+    private func expectedRungText(
+        recipe: RepoRecipe?,
+        runtimeShape: RecipeRuntimeShape,
+        kind: OnDemandEditKind
+    ) -> String {
+        // With no test suite the ladder cannot clear "no regression", so it is
+        // honestly capped at "builds".
+        if recipe?.test == nil {
+            return "L1 — builds (this app has no test suite, so Iris can't prove no regression automatically)."
+        }
+        switch runtimeShape {
+        case .pureLocalApp:
+            return "L2 — builds and the existing test suite stays green."
+        case .localSingleInstanceService, .builtForScale:
+            return "L5 — builds, tests stay green, and the app boots exercising the change (a server or persistence change earns the higher bar)."
+        case .unknown:
+            return "to be decided once you confirm how this app runs."
+        }
     }
 
     /// The exact one line the start-consent card shows above its single tap. It
@@ -392,11 +613,13 @@ final class OnDemandEditCoordinator: ObservableObject {
         // 1) Re-check eligibility LIVE — a cached render flag is advisory only,
         //    and `.git` can have been deleted/moved since the offer.
         switch eligibility(forAppSlug: slug, appStack: stack) {
-        case .refused(let reason):
+        case .refused(let reason, let offersModelKeySetup):
+            refusalOffersModelKeySetup = offersModelKeySetup
             phase = .notEligible(reason: reason)
             statusLine = reason
             return
         case .eligible:
+            refusalOffersModelKeySetup = false
             break
         }
 
@@ -821,15 +1044,22 @@ final class OnDemandEditCoordinator: ObservableObject {
         suggestedRequests = []
         proposedDiffText = nil
         blockedByBuildScriptEdit = false
+        refusalOffersModelKeySetup = false
         lastResult = nil
         isAwaitingPublishConsent = false
+        clarificationQuestions = []
+        presentedPlan = nil
     }
 
     // MARK: - Eligibility (fail-closed)
 
     private enum Eligibility {
         case eligible
-        case refused(reason: String)
+        /// `offersModelKeySetup` is true only for the missing-key refusal — the
+        /// one a reader clears by connecting a model in settings. Every other
+        /// refusal leaves it false, so the card never offers a settings tap that
+        /// would not actually fix the problem.
+        case refused(reason: String, offersModelKeySetup: Bool = false)
     }
 
     /// Every gate the design ratified, evaluated LIVE against the world right
@@ -847,9 +1077,16 @@ final class OnDemandEditCoordinator: ObservableObject {
             return .refused(reason: "this app's source clone isn't in a location Iris may edit.")
         }
         // A BYO model key: nil is the honest funded-tier ceiling. Iris never
-        // routes an on-demand edit around it onto the funded proxy.
+        // routes an on-demand edit around it onto the funded proxy. This is the
+        // one refusal the reader can clear themselves in a tap, so the copy
+        // explains WHY editing needs a key (chat is funded, editing real code is
+        // not) rather than reading as an accusation — and the card offers a
+        // button straight into settings, driven by `refusalOffersModelKeySetup`.
         guard MaintainModelProviderResolver.firstAvailable() != nil else {
-            return .refused(reason: "add your own Anthropic or OpenAI key in settings — Iris edits code under your key, never the funded tier.")
+            return .refused(
+                reason: "Editing an app changes its real code, which runs on your own model key — not the funded tier that covers chat. Connect a model in settings to turn this on.",
+                offersModelKeySetup: true
+            )
         }
         // The Seatbelt jail every model-authored command runs inside.
         guard MaintainSandbox.isAvailable else {
@@ -865,11 +1102,25 @@ final class OnDemandEditCoordinator: ObservableObject {
         return .eligible
     }
 
-    /// True when the stack's default verification vocabulary yields a real build
-    /// command against this repo — computed LIVE, so a missing package.json
-    /// build script refuses just like a `.other` stack does.
+    /// True when Iris knows a real way to rebuild this repo — computed LIVE.
+    ///
+    /// Primary path (plan §4): DERIVE a per-repo recipe by reading the actual
+    /// clone. `RepoRecipeService.hasBuildableRecipe` is true whenever the repo
+    /// has a resolvable build OR install command — which retires the coarse
+    /// "unknown stack" wall for the vast majority of repos (an interpreted stack
+    /// with install-but-no-build is still perfectly rebuildable).
+    ///
+    /// Fallback ONLY (never removed, so nothing that was eligible before becomes
+    /// ineligible now): the original catalog-stack verification vocabulary. Any
+    /// app that the old lookup could build stays buildable here — the derivation
+    /// only ever ADDS stacks, it never subtracts one — and an app that clears
+    /// eligibility solely on this fallback (the recipe stayed unknown) is exactly
+    /// the case the clarification pass (§7) then asks how to build.
     private func stackHasARealRebuildRecipe(_ stack: BreakAppStack, clonePath: String) -> Bool {
-        VerificationCommands.defaults(for: stack, repoRootPath: clonePath).buildCommand != nil
+        if RepoRecipeService.hasBuildableRecipe(repoRootPath: clonePath) {
+            return true
+        }
+        return VerificationCommands.defaults(for: stack, repoRootPath: clonePath).buildCommand != nil
     }
 
     // MARK: - Helpers
@@ -984,6 +1235,9 @@ final class OnDemandEditCoordinator: ObservableObject {
         originalHeadCommit = nil
         originalHeadRef = nil
         packagedArtifactPath = nil
+        derivedRepoRecipe = nil
+        derivedRuntimeShape = nil
+        clarificationAnswersByQuestionId = [:]
         // resolvedClonePath is only cleared alongside a lock release, so a lock
         // is never orphaned by a reset mid-run.
     }

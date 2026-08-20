@@ -52,6 +52,13 @@ struct OnDemandEditCard: View {
     /// from the previous edit into a new one.
     @State private var selectedKind: OnDemandEditKind = .bugFix
 
+    /// The reader's single-select answer to each clarification question (plan
+    /// §7), keyed by the question's stable id. Local because it is UI-only until
+    /// the whole batch is submitted at once, at which point the coordinator takes
+    /// ownership. Cleared whenever the question set changes so a stale answer from
+    /// one batch can never leak into the next.
+    @State private var clarificationSelectionsByQuestionId: [String: String] = [:]
+
     var body: some View {
         Group {
             switch coordinator.phase {
@@ -60,6 +67,10 @@ struct OnDemandEditCard: View {
                 EmptyView()
             case .describe:
                 describeCard
+            case .clarifying:
+                clarifyingCard
+            case .presentingPlan:
+                planCard
             case .awaitingStartConsent:
                 startConsentCard
             case .running:
@@ -96,6 +107,14 @@ struct OnDemandEditCard: View {
         .onChange(of: coordinator.activeAppSlug) { _, _ in
             describeText = ""
             selectedKind = preselectedKind ?? .bugFix
+            clarificationSelectionsByQuestionId = [:]
+        }
+        // The clarification batch is recomputed per request; whenever the set of
+        // questions changes (a new batch, or the batch clearing as the flow
+        // leaves `.clarifying`), drop any prior selections so an answer from one
+        // batch can never carry into another.
+        .onChange(of: coordinator.clarificationQuestions) { _, _ in
+            clarificationSelectionsByQuestionId = [:]
         }
         .onAppear {
             selectedKind = preselectedKind ?? .bugFix
@@ -205,6 +224,194 @@ struct OnDemandEditCard: View {
         .pointerCursor()
     }
 
+    // MARK: - Clarify (plan §7)
+
+    /// The batched clarification questions (plan §7), rendered as a compact,
+    /// tappable set — a couple of decisive questions answered in ONE round before
+    /// any edit, never a chat interrogation. Each question is single-select; the
+    /// whole batch submits at once so the coordinator gets the reader's answers
+    /// together (including a "Stop…" option, which the coordinator treats as an
+    /// explicit abort back to the describe step — nothing here has been touched).
+    private var clarifyingCard: some View {
+        card {
+            header(icon: "questionmark.circle", title: "A couple of questions")
+
+            Text(coordinator.statusLine ?? "Before Iris starts, help it get this right.")
+                .font(.system(size: 11))
+                .foregroundColor(DS.Colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ForEach(coordinator.clarificationQuestions) { question in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(question.prompt)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundColor(DS.Colors.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    // Options can be full sentences (a build-command escape hatch,
+                    // a rollout posture), so each is a wrapping full-width row, not
+                    // an inline pill that would clip.
+                    ForEach(question.options, id: \.self) { option in
+                        clarificationOptionRow(question: question, option: option)
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                Button("Cancel") { coordinator.cancel() }
+                    .irisTextButton()
+                Spacer(minLength: 0)
+                Button("Continue") {
+                    coordinator.submitClarificationAnswers(clarificationSelectionsByQuestionId)
+                }
+                .irisPrimaryPill(isFullWidth: false, isCompact: true)
+                // Only enabled once EVERY question has an answer — a half-answered
+                // batch would leave the plan reasoning about a choice never made.
+                .disabled(!everyClarificationQuestionIsAnswered)
+            }
+        }
+    }
+
+    /// True only when the reader has selected an option for every question in the
+    /// current batch, so "Continue" cannot submit a partial set of answers.
+    private var everyClarificationQuestionIsAnswered: Bool {
+        coordinator.clarificationQuestions.allSatisfy { question in
+            clarificationSelectionsByQuestionId[question.id] != nil
+        }
+    }
+
+    /// One tappable answer to a clarification question, drawn as a wrapping
+    /// full-width row with a radio mark. The selected one carries the accent so
+    /// the current choice is unmistakable before the reader taps Continue.
+    private func clarificationOptionRow(
+        question: ClarificationQuestion, option: String
+    ) -> some View {
+        let isSelected = clarificationSelectionsByQuestionId[question.id] == option
+        return Button(action: {
+            clarificationSelectionsByQuestionId[question.id] = option
+        }) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                    .font(.system(size: 11))
+                    .foregroundColor(isSelected ? DS.Colors.accent : DS.Colors.textTertiary)
+                Text(option)
+                    .font(.system(size: 11))
+                    .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
+                    .fill(isSelected ? DS.Colors.accent.opacity(0.12) : DS.Colors.surfaceRaised)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
+                            .strokeBorder(
+                                isSelected ? DS.Colors.accent.opacity(0.5) : DS.Colors.line,
+                                lineWidth: 1
+                            )
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+
+    // MARK: - Plan (plan §7 — "ask once, then commit")
+
+    /// The short pre-edit PLAN (plan §7): the files Iris expects to touch, the
+    /// approach, the resolved build/test recipe in reader-facing words, any still-
+    /// open questions, and the honesty rung it expects to reach — all shown BEFORE
+    /// the reader approves. Approving is Consent #1: `confirmPlanAndStart()` routes
+    /// through the SAME live eligibility re-check the start tap always did, so the
+    /// plan is informational and never bypasses that binding gate.
+    private var planCard: some View {
+        card {
+            header(icon: "list.bullet.rectangle", title: "Iris's plan")
+
+            if let plan = coordinator.presentedPlan {
+                Text(plan.approachSummary)
+                    .font(.system(size: 11.5))
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                // The file estimate is a courtesy for the reader's judgment, not a
+                // cage (the diff-scope gate is the hard cap downstream). Only shown
+                // when the plan actually carries one — an empty estimate stays
+                // silent rather than rendering an empty heading.
+                if !plan.filesToTouch.isEmpty {
+                    planSection(title: "Files Iris expects to touch") {
+                        ForEach(plan.filesToTouch, id: \.self) { path in
+                            Text(path)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(DS.Colors.commandText)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+
+                // The derived recipe in plain words — informed consent to what
+                // will later run un-jailed during verification.
+                planSection(title: "How Iris will build and check it") {
+                    Text(plan.resolvedRecipeSummary)
+                        .font(.system(size: 10.5))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                // Normally empty — the batch was already answered in `.clarifying`
+                // — but rendered when present so a leftover open question is never
+                // hidden behind the consent tap.
+                if !plan.openQuestions.isEmpty {
+                    planSection(title: "Still open") {
+                        ForEach(plan.openQuestions) { question in
+                            Text(question.prompt)
+                                .font(.system(size: 10.5))
+                                .foregroundColor(DS.Colors.amber)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+
+                // The §9 honesty rung it expects to reach, stated up front so the
+                // reader knows the verification bar BEFORE approving the edit.
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "checkmark.seal")
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.accent)
+                    Text("Expected verification: \(plan.expectedRung)")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            HStack(spacing: 8) {
+                Button("Cancel") { coordinator.cancel() }
+                    .irisTextButton()
+                Spacer(minLength: 0)
+                Button("Start editing") { coordinator.confirmPlanAndStart() }
+                    .irisPrimaryPill(isFullWidth: false, isCompact: true)
+            }
+        }
+    }
+
+    /// A titled subsection of the plan card — a quiet caption over its content,
+    /// matching the "Others also wanted" grouping in the describe card.
+    private func planSection<Content: View>(
+        title: String, @ViewBuilder _ content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundColor(DS.Colors.textTertiary)
+            content()
+        }
+    }
+
     // MARK: - Start consent (Consent #1)
 
     private var startConsentCard: some View {
@@ -263,6 +470,19 @@ struct OnDemandEditCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            // The earned §9 verification RUNG + its evidence log — the honest
+            // "what was actually observed" alongside the diff. Deliberately a rung
+            // label + a row of observed facts, NEVER a confidence number: a number
+            // invites treating a guess as a measurement, and the ladder caps the
+            // rung at the first missing signal so nothing is ever claimed above
+            // its evidence.
+            if let earnedVerification = earnedVerificationForLastResult {
+                verificationEvidenceBlock(
+                    earnedRung: earnedVerification.rung,
+                    evidenceLogLines: earnedVerification.evidenceLogLines
+                )
+            }
+
             if let diffText = coordinator.proposedDiffText, !diffText.isEmpty {
                 ScrollView(.vertical) {
                     Text(diffText)
@@ -310,6 +530,80 @@ struct OnDemandEditCard: View {
         case .none:
             return "\(subject) builds. This app has no test suite for Iris to run, so it's applied and rebuilt — not verified. Try the relaunched app to confirm it does what you asked."
         }
+    }
+
+    /// The earned §9 verification rung and its evidence-log lines, DERIVED from
+    /// the engine's own result — never a self-rated confidence number. This first
+    /// slice's result carries only the compile/build fact and the existing-suite
+    /// outcome, so the ladder can honestly earn at most L2 (builds + existing
+    /// tests green); the ladder's own "stop at the first missing signal" rule
+    /// guarantees no rung is ever reported above the evidence actually collected.
+    /// Nil unless the last result is an applied-and-rebuilt change, so this only
+    /// surfaces where there is a real committed change to describe.
+    private var earnedVerificationForLastResult: (rung: VerificationRung, evidenceLogLines: [String])? {
+        guard case .appliedAndRebuilt(_, _, _, let suitePassed)? = coordinator.lastResult else {
+            return nil
+        }
+        // "Applied and rebuilt" means the change compiled/built clean — L1 is
+        // earned. The existing-suite result (green, red, or absent) decides
+        // whether L2 is earned on top; nothing higher is derivable here.
+        var collectedEvidence = VerificationEvidence()
+        collectedEvidence.compileClean = true
+        collectedEvidence.compileCleanEvidence = "the app built"
+        switch suitePassed {
+        case .some(true):
+            collectedEvidence.existingSuiteGreen = true
+            collectedEvidence.existingSuiteGreenEvidence = "existing tests stayed green"
+        case .some(false):
+            // Reachable only defensively — the engine blocks a red suite before
+            // committing — but stated honestly rather than as "no evidence".
+            collectedEvidence.existingSuiteGreenEvidence = "existing suite did not pass"
+        case .none:
+            collectedEvidence.existingSuiteGreenEvidence = "no test suite to run"
+        }
+        let earnedRung = FeatureEditVerificationLadder.highestEarnedRung(from: collectedEvidence)
+        return (earnedRung, collectedEvidence.evidenceLogLines())
+    }
+
+    /// The rung label over its evidence log, in a quiet raised block beside the
+    /// diff. The rung reads as a fact ("L2 — builds, existing tests green") and
+    /// each evidence row is one observed line; an unearned signal still shows its
+    /// row ("no evidence collected") so a partial run can never read as a
+    /// complete one.
+    private func verificationEvidenceBlock(
+        earnedRung: VerificationRung, evidenceLogLines: [String]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark.seal.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.accent)
+                Text(earnedRung.humanReadableLabel)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(evidenceLogLines, id: \.self) { evidenceLine in
+                    Text(evidenceLine)
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
+                .fill(DS.Colors.surfaceRaised)
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
+                        .strokeBorder(DS.Colors.line, lineWidth: 1)
+                )
+        )
     }
 
     // MARK: - Relaunch consent (Consent #3, DESTRUCTIVE)
@@ -463,10 +757,21 @@ struct OnDemandEditCard: View {
     // MARK: - Terminal message (failed / not eligible)
 
     private func terminalMessageCard(reason: String, isRefusal: Bool) -> some View {
-        card {
+        // The missing-model-key refusal is the only one a reader can clear in a
+        // tap, so it gets its own softer framing — a key rather than a raised
+        // hand, and copy that reads as "here's the one thing to do" — plus a
+        // button straight into settings. Every other refusal (provenance,
+        // sandbox, no rebuild recipe) stays a plain honest dead-end, because a
+        // settings tap would not fix it.
+        let offersModelKeySetup = isRefusal && coordinator.refusalOffersModelKeySetup
+        return card {
             header(
-                icon: isRefusal ? "hand.raised" : "exclamationmark.triangle",
-                title: isRefusal ? "Iris can't edit this" : "That didn't work"
+                icon: offersModelKeySetup
+                    ? "key.fill"
+                    : (isRefusal ? "hand.raised" : "exclamationmark.triangle"),
+                title: offersModelKeySetup
+                    ? "Connect a model to edit apps"
+                    : (isRefusal ? "Iris can't edit this" : "That didn't work")
             )
 
             Text(reason)
@@ -474,12 +779,26 @@ struct OnDemandEditCard: View {
                 .foregroundColor(DS.Colors.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            HStack {
+            HStack(spacing: 8) {
                 Spacer(minLength: 0)
                 Button("Done") { coordinator.cancel() }
                     .irisTextButton()
+                if offersModelKeySetup {
+                    Button("Open settings") { openSettingsToConnectAModel() }
+                        .irisPrimaryPill(isFullWidth: false, isCompact: true)
+                }
             }
         }
+    }
+
+    /// Opens Iris's settings panel — where a model is connected, by key or by CLI
+    /// login — and clears this refusal, so the reader lands where the fix is
+    /// rather than being told to go find it. `cancel()` returns the flow to the
+    /// app picker, so re-tapping the edit chip after connecting a model re-runs
+    /// eligibility cleanly.
+    private func openSettingsToConnectAModel() {
+        NotificationCenter.default.post(name: .clickyShowPanel, object: nil)
+        coordinator.cancel()
     }
 
     // MARK: - Shared chrome

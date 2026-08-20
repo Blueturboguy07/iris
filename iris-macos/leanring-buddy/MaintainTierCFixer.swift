@@ -85,8 +85,20 @@ enum MaintainOnDemandEditResult: Sendable {
 @MainActor
 final class MaintainTierCFixer {
 
-    static let maximumLoopSteps = 12
+    // Raised from 12 to the researched ~15–20 band (plan §6, decision 6c: the
+    // reader pays via their own CLI login, so the richer loop is affordable). The
+    // step cap is no longer the ONLY governor — the no-progress detector and the
+    // action-dedup below stop a spinning loop well before it burns the cap.
+    static let maximumLoopSteps = 20
     static let maximumOutputTokensPerStep = 1200
+
+    /// Stop the loop when the working tree has gone unchanged for this many
+    /// CONSECUTIVE steps AFTER the model has begun editing (plan §6 no-progress
+    /// detector). Exploration BEFORE the first edit is expected and never counts —
+    /// a fix that reads many files before writing must not be killed for it — so
+    /// this only bites once the agent is actually mutating the tree and then
+    /// stalls, which is the real "spinning" signal.
+    static let noProgressStepThreshold = 5
 
     private let provider: MaintainModelProviding
 
@@ -142,6 +154,13 @@ final class MaintainTierCFixer {
             // The crash path is unchanged: it does not add the on-demand
             // build-script block, so its behavior is byte-for-byte what it was.
             blockBuildScriptEdits: false,
+            // The crash path keeps its exact verify/commit identity: it derives
+            // no Feature-Engine recipe (it still verifies through
+            // VerificationCommands.defaults), injects no runtime-shape addendum,
+            // and offers no model-authored build-command escape hatch. Only the
+            // on-demand Feature Engine opts into those.
+            deriveFeatureEngineRecipe: false,
+            modelAuthoredBuildCommand: nil,
             commitVocabulary: { suitePassed in
                 (
                     subject: "Novel fix for \(appSlug)",
@@ -190,6 +209,15 @@ final class MaintainTierCFixer {
         // it. The coordinator may pass true only after an explicit user
         // approval of that specific risk.
         allowBuildScriptEdits: Bool = false,
+        // Decision 1b (opt-in, OFF by default). A build command the MODEL authored
+        // — permitted only after the reader's extra, every-time explicit approval
+        // in the coordinator. When non-nil it is screened by the SAME
+        // catastrophe/risk classifier the autopilot uses BEFORE it can run
+        // un-jailed; a command that trips the gate is surfaced and the edit is
+        // abandoned, never run. nil (the default) keeps the code-adjudicated
+        // recipe as the only source of the un-jailed build command, so the default
+        // behavior is unchanged.
+        modelAuthoredBuildCommand: String? = nil,
         verificationCommandsOverride: VerificationCommands? = nil
     ) async -> MaintainOnDemandEditResult {
         let changeKindTrailer = kind == .feature ? "on-demand-feature" : "on-demand-bug-fix"
@@ -201,6 +229,12 @@ final class MaintainTierCFixer {
             appStack: appStack,
             branchPrefix: "iris/edit-",
             blockBuildScriptEdits: !allowBuildScriptEdits,
+            // The on-demand path IS the Feature Engine: derive a per-repo recipe
+            // (plan §4) for the post-DONE verification and the runtime-shape
+            // preflight addendum (plan §8), and honor the opt-in model-authored
+            // build command (decision 1b).
+            deriveFeatureEngineRecipe: true,
+            modelAuthoredBuildCommand: modelAuthoredBuildCommand,
             commitVocabulary: { suitePassed in
                 (
                     subject: kind == .feature
@@ -257,6 +291,16 @@ final class MaintainTierCFixer {
         appStack: BreakAppStack,
         branchPrefix: String,
         blockBuildScriptEdits: Bool,
+        // Feature Engine switches (plan §4/§8), both OFF for the crash path so its
+        // verify/commit identity stays byte-for-byte. When
+        // `deriveFeatureEngineRecipe` is true the loop derives a per-repo recipe
+        // from DECLARATIVE signals, injects the runtime-shape preflight addendum,
+        // and verifies through the recipe's build/test (falling back to
+        // VerificationCommands.defaults). `modelAuthoredBuildCommand`, when non-nil,
+        // is the decision-1b escape hatch, screened by the risk classifier before
+        // it can run un-jailed.
+        deriveFeatureEngineRecipe: Bool,
+        modelAuthoredBuildCommand: String?,
         commitVocabulary: (_ suitePassed: Bool?) -> (subject: String, trailerLines: [String]),
         verificationCommandsOverride: VerificationCommands?
     ) async -> EditLoopOutcome {
@@ -283,9 +327,52 @@ final class MaintainTierCFixer {
             )
         }
 
+        // Feature Engine recipe (plan §4/§8), on-demand only so the crash path's
+        // verify/commit identity is untouched. Derived from DECLARATIVE repo
+        // signals (manifests, CI workflows) — never model-authored — and read here
+        // BEFORE the loop edits, since its build/test vocabulary and runtime shape
+        // come from config files the edit is not permitted to change (the
+        // build-script guard). `.git` is already stripped, but the recipe reads
+        // manifests and `.github/workflows`, not `.git`, so it is unaffected.
+        let derivedFeatureEngineRecipe: RepoRecipe? = deriveFeatureEngineRecipe
+            ? RepoRecipeService.deriveRecipe(repoRootPath: clonePath)
+            : nil
+
+        // The offline repo map (plan §6): a cheap, model-call-free symbol summary
+        // that helps the agent localize code and grounds it against hallucinated
+        // APIs. It is CONTEXT ONLY — it changes no safety behavior, no branch, and
+        // no trailer — so injecting it leaves the jail/.git-strip/restore/verify/
+        // commit spine (and the crash path's identity) byte-for-byte intact. It is
+        // "" for a repo with no recognized declarations, in which case the opening
+        // message is exactly what it was.
+        let repoMapSummary = FeatureEditRepoMap.summarize(repoRootPath: clonePath)
+
+        // The runtime-shape preflight addendum (plan §8) is on-demand only: it
+        // tells the codegen model, up front, to write idempotent / crash-safe /
+        // tenant-scoped / flag-gated code appropriate to how THIS app runs. The
+        // crash path derives no recipe, so it adds nothing here.
+        let runtimeShapePreflightAddendum: String? = derivedFeatureEngineRecipe.map { recipe in
+            FeatureEditRuntimeChecklist.preflightPromptAddendum(forRuntimeShape: recipe.runtimeShape)
+        }
+
         var conversation: [MaintainChatTurn] = [
-            MaintainChatTurn(role: "user", text: Self.openingMessage(appSlug: appSlug, task: task)),
+            MaintainChatTurn(role: "user", text: Self.openingMessage(
+                appSlug: appSlug,
+                task: task,
+                repoMapSummary: repoMapSummary,
+                runtimeShapePreflightAddendum: runtimeShapePreflightAddendum
+            )),
         ]
+
+        // Loop governance OUTSIDE the model (plan §6): action-dedup and a
+        // no-progress detector. Both can only STOP EARLY or SKIP a duplicate —
+        // never turn a successful outcome into a failure — so the spine is intact.
+        // `commandsAlreadyRun` holds every exact command the model has already run;
+        // the fingerprint tracks whether the working tree is actually advancing.
+        var commandsAlreadyRun: Set<String> = []
+        var workingTreeFingerprintFromPreviousStep = Self.workingTreeFingerprint(repoRootPath: clonePath)
+        var theModelHasEditedTheTreeAtLeastOnce = false
+        var consecutiveNoProgressStepCount = 0
 
         var declaredDone = false
         for step in 1...Self.maximumLoopSteps {
@@ -313,6 +400,21 @@ final class MaintainTierCFixer {
                 ))
                 continue
             }
+
+            // Action-dedup (plan §6): the model already ran this EXACT command, so
+            // re-running it would only spin. Skip it and steer toward something
+            // new. The step still counts, so a model that keeps repeating itself is
+            // still bounded by the step cap.
+            if commandsAlreadyRun.contains(command) {
+                irisTrace("maintain: tier-c skipped a repeated identical command at step \(step)")
+                conversation.append(MaintainChatTurn(
+                    role: "user",
+                    text: "You already ran that exact command earlier and its result has not changed. Run a DIFFERENT command that makes progress, or reply DONE."
+                ))
+                continue
+            }
+            commandsAlreadyRun.insert(command)
+
             guard let jailed = MaintainSandbox.jailedInvocation(
                 forCommand: command, repoRootPath: clonePath
             ) else {
@@ -327,6 +429,29 @@ final class MaintainTierCFixer {
                 role: "user",
                 text: "Command exit \(result?.exitCode ?? -1). Output:\n\(output)\n\nNext command, or DONE."
             ))
+
+            // No-progress detector (plan §6). A fingerprint that CHANGED means the
+            // model edited the tree — real progress — so the counter resets and we
+            // remember that editing has begun. A fingerprint UNCHANGED after the
+            // model has already started editing is a stall; enough consecutive
+            // stalls and we stop rather than burn the whole step budget spinning.
+            // Pure read/inspect steps before the first edit are expected and never
+            // counted, so a fix that explores widely before writing is not killed.
+            if let latestFingerprint = Self.workingTreeFingerprint(repoRootPath: clonePath) {
+                if let previousFingerprint = workingTreeFingerprintFromPreviousStep,
+                   latestFingerprint != previousFingerprint {
+                    theModelHasEditedTheTreeAtLeastOnce = true
+                    consecutiveNoProgressStepCount = 0
+                } else if theModelHasEditedTheTreeAtLeastOnce {
+                    consecutiveNoProgressStepCount += 1
+                }
+                workingTreeFingerprintFromPreviousStep = latestFingerprint
+
+                if consecutiveNoProgressStepCount >= Self.noProgressStepThreshold {
+                    irisTrace("maintain: tier-c stopping early — no working-tree progress for \(consecutiveNoProgressStepCount) steps")
+                    break
+                }
+            }
         }
 
         // The loop made its edits with no network; verification (build+suite)
@@ -362,8 +487,53 @@ final class MaintainTierCFixer {
             }
         }
 
-        let commands = verificationCommandsOverride
-            ?? VerificationCommands.defaults(for: appStack, repoRootPath: clonePath)
+        // Select the verification vocabulary (plan §4/§5). Precedence:
+        //   1. an explicit test override (the adversarial harness's seam) — wins,
+        //      so the existing engine tests keep exercising exactly what they pass.
+        //   2. the derived Feature-Engine recipe's build/test — on-demand, when it
+        //      resolved something the coarse per-stack default would have missed.
+        //      This is what retires the "unknown stack" refusal for real repos.
+        //   3. the code-authored VerificationCommands.defaults — the crash path's
+        //      unchanged source, and the on-demand fallback when the recipe found
+        //      nothing (never DOWNGRADE a working default to an empty recipe).
+        var commands: VerificationCommands
+        if let verificationCommandsOverride {
+            commands = verificationCommandsOverride
+        } else {
+            commands = VerificationCommands.defaults(for: appStack, repoRootPath: clonePath)
+            if let derivedFeatureEngineRecipe {
+                let recipeCommands = Self.verificationCommands(fromDerivedRecipe: derivedFeatureEngineRecipe)
+                if recipeCommands.buildCommand != nil || recipeCommands.testCommand != nil {
+                    commands = recipeCommands
+                }
+            }
+        }
+
+        // Decision 1b (opt-in): a model-authored build command may run un-jailed
+        // ONLY after passing the SAME catastrophe/risk classifier the autopilot
+        // uses. `autonomyGranted: false` demands the FULL three-tier scrutiny, so a
+        // command that is anything other than plainly safe (catastrophe, curl|sh,
+        // sudo, rm -rf, a system-folder write, obfuscation, …) is rejected and the
+        // edit is abandoned — the dangerous string is never run. Absent (nil) the
+        // default behavior is untouched, and an explicit test override is never
+        // overridden by this escape hatch.
+        if let modelAuthoredBuildCommand, verificationCommandsOverride == nil {
+            guard case .runsWithoutAsking = GuideAutopilotRiskAssessment.assess(
+                modelAuthoredBuildCommand, autonomyGranted: false
+            ) else {
+                _ = try? await runner.run("git checkout -- . && git clean -fd --quiet", deadline: 120)
+                irisTrace("maintain: on-demand model-authored build command REJECTED by the risk classifier")
+                return .couldNotFix(
+                    reason: "the model-authored build command was rejected by the safety classifier and was not run"
+                )
+            }
+            commands = VerificationCommands(
+                buildCommand: modelAuthoredBuildCommand,
+                testCommand: commands.testCommand,
+                commandSubdirectory: commands.commandSubdirectory
+            )
+        }
+
         let verification = await VerificationHarness.verifyAppliedPatch(
             runner: runner, commands: commands, reproCommand: nil
         )
@@ -402,6 +572,124 @@ final class MaintainTierCFixer {
         let tracked = await linesFrom("git diff --name-only HEAD")
         let untracked = await linesFrom("git ls-files --others --exclude-standard")
         return tracked + untracked
+    }
+
+    // MARK: - Feature Engine helpers (plan §4/§6)
+
+    /// Map a derived `RepoRecipe` (plan §4) onto the harness's build/test
+    /// vocabulary. The un-jailed verification build runs a build command then a
+    /// test command, so:
+    ///   - buildCommand = the recipe's build, or its install when there is no
+    ///     compile step (interpreted stacks are install-but-no-build, and a clean
+    ///     `install` is the meaningful build-level check for them).
+    ///   - testCommand  = the recipe's test (nil = no suite, honestly skipped —
+    ///     never a silent green).
+    /// `VerificationCommands` carries a SINGLE working subdirectory for both legs,
+    /// so the build/install command's subdirectory is used, falling back to the
+    /// test command's — the common case where build and test share a directory.
+    // TODO(iris-feature-engine): a monorepo whose build and test live in DIFFERENT
+    // subdirectories is not captured by this single-subdirectory flattening;
+    // thread per-command subdirectories through the harness to verify each leg in
+    // its own directory.
+    private static func verificationCommands(fromDerivedRecipe recipe: RepoRecipe) -> VerificationCommands {
+        let buildOrInstallCommand = recipe.build ?? recipe.install
+        return VerificationCommands(
+            buildCommand: buildOrInstallCommand?.commandLine,
+            testCommand: recipe.test?.commandLine,
+            commandSubdirectory: buildOrInstallCommand?.workingSubdirectory
+                ?? recipe.test?.workingSubdirectory
+        )
+    }
+
+    /// Directory names the no-progress fingerprint never descends into:
+    /// dependency caches and build outputs are GENERATED, not authored, so a build
+    /// the model never touched must not make the tree look "changed" — and walking
+    /// node_modules/target every step would make the "cheap" fingerprint anything
+    /// but. Dot-directories are skipped separately below, which additionally
+    /// excludes the temporary `.git` backup and Iris's own `.iris` notes.
+    private static let fingerprintIgnoredDirectoryNames: Set<String> = [
+        "node_modules", "target", "build", "dist", "out",
+        "vendor", "Pods", "DerivedData", "__pycache__", "coverage",
+    ]
+
+    /// A cheap, in-process fingerprint of the working tree's AUTHORED files — the
+    /// state hash behind the plan §6 no-progress detector. It folds each file's
+    /// repo-relative path, byte size, and modification time into a SHA-256 (NOT
+    /// the full file contents, which would be far heavier), so it changes whenever
+    /// the model writes, grows, or deletes a file and stays identical across pure
+    /// read/inspect steps. Generated/dependency directories, dot-directories, and
+    /// symlinks are skipped so a stray build output never reads as progress, the
+    /// walk stays fast and bounded, and no link can walk it out of the clone.
+    /// Returns nil only when the repo root is unreadable, which the caller treats
+    /// as "unknown — do not arm the detector".
+    private static func workingTreeFingerprint(repoRootPath: String) -> String? {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: repoRootPath) else { return nil }
+
+        let resourceKeys: [URLResourceKey] = [
+            .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey,
+        ]
+
+        // A generous ceiling that keeps a pathological tree from turning the
+        // per-step fingerprint into an unbounded scan (the same reasoning as the
+        // repo map's own file-scan limit).
+        let fileScanLimit = 20_000
+
+        var hasher = SHA256()
+        var scannedFileCount = 0
+        var directoryStack: [(url: URL, relativePath: String)] = [
+            (URL(fileURLWithPath: repoRootPath), ""),
+        ]
+
+        while let currentDirectory = directoryStack.popLast() {
+            guard let entryURLs = try? fileManager.contentsOfDirectory(
+                at: currentDirectory.url,
+                includingPropertiesForKeys: resourceKeys,
+                options: []
+            ) else { continue }
+
+            // Sort by name so the fold order is deterministic for the same tree —
+            // otherwise an unchanged tree could hash differently between steps.
+            let sortedEntryURLs = entryURLs.sorted { leftURL, rightURL in
+                leftURL.lastPathComponent < rightURL.lastPathComponent
+            }
+
+            for entryURL in sortedEntryURLs {
+                let entryName = entryURL.lastPathComponent
+                let entryRelativePath = currentDirectory.relativePath.isEmpty
+                    ? entryName
+                    : currentDirectory.relativePath + "/" + entryName
+
+                let resourceValues = try? entryURL.resourceValues(forKeys: Set(resourceKeys))
+
+                // Never follow a symlink (cycle + escape guard).
+                if resourceValues?.isSymbolicLink == true { continue }
+
+                if resourceValues?.isDirectory == true {
+                    // Skip dot-directories (covers `.git`, `.iris`, tooling caches)
+                    // and the generated/dependency directories above.
+                    if entryName.hasPrefix(".")
+                        || fingerprintIgnoredDirectoryNames.contains(entryName) { continue }
+                    directoryStack.append((url: entryURL, relativePath: entryRelativePath))
+                    continue
+                }
+
+                // A regular file (including a root-level dotfile like `.env`):
+                // fold its identity + size + mtime into the running hash.
+                let byteSize = resourceValues?.fileSize ?? 0
+                let modificationTime = resourceValues?.contentModificationDate?.timeIntervalSince1970 ?? 0
+                hasher.update(data: Data("\(entryRelativePath)|\(byteSize)|\(modificationTime)\n".utf8))
+
+                scannedFileCount += 1
+                if scannedFileCount >= fileScanLimit {
+                    let digest = hasher.finalize()
+                    return digest.map { String(format: "%02x", $0) }.joined()
+                }
+            }
+        }
+
+        let digest = hasher.finalize()
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: - Prompt and parsing
@@ -452,7 +740,43 @@ final class MaintainTierCFixer {
         }
     }
 
-    private static func openingMessage(appSlug: String, task: MaintainEditTask) -> String {
+    /// The opening user turn. Composed of the original task-driven message
+    /// (`baseOpeningMessage`, unchanged) plus, appended around it, the offline
+    /// repo map (plan §6, context only) and — on-demand only — the runtime-shape
+    /// preflight addendum (plan §8). Both extras are additive context: they alter
+    /// no branch, trailer, gate, or the verify/commit spine, and an empty repo map
+    /// / nil addendum reproduce the original message exactly.
+    private static func openingMessage(
+        appSlug: String,
+        task: MaintainEditTask,
+        repoMapSummary: String,
+        runtimeShapePreflightAddendum: String?
+    ) -> String {
+        var sections: [String] = [baseOpeningMessage(appSlug: appSlug, task: task)]
+
+        if !repoMapSummary.isEmpty {
+            sections.append("""
+            Repo map (an offline, heuristic symbol summary to help you locate \
+            code — always confirm the real declaration at the call site before you \
+            rely on it):
+
+            \(repoMapSummary)
+            """)
+        }
+
+        if let runtimeShapePreflightAddendum, !runtimeShapePreflightAddendum.isEmpty {
+            sections.append(runtimeShapePreflightAddendum)
+        }
+
+        return sections.joined(separator: "\n\n")
+    }
+
+    /// The original task-driven opening message, kept verbatim — factored out so
+    /// the enriched `openingMessage` above can append the repo map and runtime
+    /// addendum around it without disturbing this wording. The crash path receives
+    /// only the context-only repo map (no runtime addendum), and its safety
+    /// identity — branch, trailers, gates, verify/commit — is unchanged.
+    private static func baseOpeningMessage(appSlug: String, task: MaintainEditTask) -> String {
         switch task {
         case .crashFix(let evidence):
             return """

@@ -48,11 +48,26 @@ enum AssistantTransport: Sendable {
     /// deliberately absent: it is a constant inside this file.
     case bringYourOwnKey(anthropicAPIKey: String)
 
+    /// The user's own Claude Code OAuth token (`sk-ant-oat…`), going straight to
+    /// Anthropic. Same isolation property as the API key — the URL is a constant
+    /// inside this file — but it authenticates with `Authorization: Bearer` plus
+    /// the OAuth beta header rather than `x-api-key`, which is how Anthropic
+    /// accepts a Claude Code token on the Messages API.
+    case bringYourOwnOAuthToken(anthropicOAuthToken: String)
+
     /// The only host the BYO key may ever reach.
     static let anthropicAPIHost = "api.anthropic.com"
 
     /// The Anthropic Messages API version every direct request must declare.
     static let anthropicAPIVersion = "2023-06-01"
+
+    /// The `anthropic-beta` value that makes Anthropic accept a Claude Code
+    /// OAuth token on the Messages API. This is the public value Claude Code
+    /// itself sends; it is NOT something Iris can verify from inside this
+    /// process, so if Anthropic rotates it, an OAuth-token request starts
+    /// failing with 401 and this constant is the one line to update.
+    /// UNVERIFIED against a live token — see the CLI-login notes.
+    static let anthropicOAuthBetaHeaderValue = "oauth-2025-04-20"
 
     /// Where publik lives when nothing overrides it.
     static let defaultPublikBaseURLString = "https://publikhq.com"
@@ -69,6 +84,8 @@ enum AssistantTransport: Sendable {
             return "publik account"
         case .bringYourOwnKey:
             return "your Anthropic key"
+        case .bringYourOwnOAuthToken:
+            return "your Claude Code login"
         }
     }
 
@@ -80,7 +97,7 @@ enum AssistantTransport: Sendable {
         switch self {
         case .funded:
             return false
-        case .bringYourOwnKey:
+        case .bringYourOwnKey, .bringYourOwnOAuthToken:
             return true
         }
     }
@@ -107,6 +124,11 @@ enum AssistantTransport: Sendable {
         case .bringYourOwnKey(let anthropicAPIKey):
             return try Self.validatedRequest(
                 Self.anthropicDirectChatRequest(anthropicAPIKey: anthropicAPIKey)
+            )
+
+        case .bringYourOwnOAuthToken(let anthropicOAuthToken):
+            return try Self.validatedRequest(
+                Self.anthropicDirectOAuthChatRequest(anthropicOAuthToken: anthropicOAuthToken)
             )
         }
     }
@@ -143,6 +165,27 @@ enum AssistantTransport: Sendable {
         return directRequest
     }
 
+    /// The BYO OAuth-token route, and the only place an `Authorization: Bearer`
+    /// header is paired with the OAuth `anthropic-beta` header.
+    ///
+    /// Like the API-key builder, it takes no URL: the destination is the same
+    /// constant Anthropic host, so a caller cannot ask this function to send the
+    /// token anywhere else. The `anthropic-beta: oauth-…` header it stamps is
+    /// also what `validatedRequest` keys off to guarantee an OAuth token can
+    /// only ever reach Anthropic — the funded route's Bearer header never
+    /// carries it, so the two Bearers can never be confused.
+    private static func anthropicDirectOAuthChatRequest(anthropicOAuthToken: String) -> URLRequest {
+        let anthropicMessagesURL = URL(string: "https://\(anthropicAPIHost)/v1/messages")!
+        var directRequest = URLRequest(url: anthropicMessagesURL)
+        directRequest.httpMethod = "POST"
+        directRequest.timeoutInterval = 120
+        directRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        directRequest.setValue("Bearer \(anthropicOAuthToken)", forHTTPHeaderField: "Authorization")
+        directRequest.setValue(anthropicOAuthBetaHeaderValue, forHTTPHeaderField: "anthropic-beta")
+        directRequest.setValue(anthropicAPIVersion, forHTTPHeaderField: "anthropic-version")
+        return directRequest
+    }
+
     // MARK: - The last gate before a request leaves
 
     /// Refuses any request whose credentials and destination do not match.
@@ -155,7 +198,23 @@ enum AssistantTransport: Sendable {
         let destinationHost = candidateRequest.url?.host?.lowercased()
         let carriesBringYourOwnKey = candidateRequest.value(forHTTPHeaderField: "x-api-key") != nil
 
-        if carriesBringYourOwnKey {
+        // A BYO OAuth token is identified by the OAuth `anthropic-beta` header
+        // its builder stamps. This is deliberately NOT "any Authorization:
+        // Bearer": the funded route also sends a Bearer (the Supabase token) and
+        // is SUPPOSED to reach a publik host, so keying off the OAuth beta header
+        // is what separates the user's own token from the publik-issued one.
+        let anthropicBetaHeader = candidateRequest.value(forHTTPHeaderField: "anthropic-beta")
+        let carriesBringYourOwnOAuthToken =
+            anthropicBetaHeader?.contains("oauth") == true
+
+        // Either shape of the user's own Anthropic credential — the API key or
+        // the OAuth token — may only ever reach Anthropic. Stated both as
+        // "carries a credential ⇒ host must be Anthropic" and its contrapositive
+        // so the check reads as the rule, not an implementation detail of it.
+        let carriesEitherBringYourOwnCredential =
+            carriesBringYourOwnKey || carriesBringYourOwnOAuthToken
+
+        if carriesEitherBringYourOwnCredential {
             guard destinationHost == anthropicAPIHost else {
                 throw AssistantTransportError.bringYourOwnKeyWouldLeaveAnthropic(
                     attemptedHost: destinationHost ?? "an unknown host"
@@ -163,9 +222,7 @@ enum AssistantTransport: Sendable {
             }
         }
 
-        // Stated from the other direction as well, so the check reads as the
-        // rule rather than as an implementation detail of the rule.
-        if destinationHost != anthropicAPIHost && carriesBringYourOwnKey {
+        if destinationHost != anthropicAPIHost && carriesEitherBringYourOwnCredential {
             throw AssistantTransportError.bringYourOwnKeyWouldLeaveAnthropic(
                 attemptedHost: destinationHost ?? "an unknown host"
             )
@@ -186,6 +243,7 @@ enum AssistantTransport: Sendable {
         isSignedIn: Bool,
         publikBaseURL: URL,
         storedAnthropicAPIKey: String?,
+        storedAnthropicOAuthToken: String? = nil,
         currentAccessTokenProvider: @escaping @Sendable () async -> String?
     ) -> Result<AssistantTransport, AssistantTransportError> {
         if isSignedIn {
@@ -195,8 +253,15 @@ enum AssistantTransport: Sendable {
             ))
         }
 
+        // A pasted API key wins over a Claude Code token when both are present:
+        // the API key is the plainer, more reliable credential (an OAuth token
+        // depends on the beta header staying valid), so it is the safer default.
         if let storedAnthropicAPIKey, !storedAnthropicAPIKey.isEmpty {
             return .success(.bringYourOwnKey(anthropicAPIKey: storedAnthropicAPIKey))
+        }
+
+        if let storedAnthropicOAuthToken, !storedAnthropicOAuthToken.isEmpty {
+            return .success(.bringYourOwnOAuthToken(anthropicOAuthToken: storedAnthropicOAuthToken))
         }
 
         return .failure(.noCredentialsAvailable)

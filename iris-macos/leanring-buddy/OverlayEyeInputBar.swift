@@ -637,6 +637,63 @@ struct OverlayEyeInputBarView: View {
     // MARK: The field
 
     private var textFieldRow: some View {
+        // The model picker rides in the same glass shell as the field, on a thin
+        // row just above it. The bar is only 320pt wide, so a segmented control
+        // beside the field, close, and send buttons would squeeze the field to
+        // nothing — stacking it keeps both fully usable, and it reads as part of
+        // the input area rather than a floating strip. Mirrors the settings
+        // panel's model picker so the same choice is reachable without opening
+        // settings.
+        VStack(alignment: .leading, spacing: 8) {
+            modelSelectorRow
+            fieldAndSendRow
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(IrisShellBackground(cornerRadius: DS.CornerRadius.extraLarge))
+    }
+
+    /// The Sonnet/Opus toggle, trailing-aligned above the field. Bound straight
+    /// to `companionManager.selectedModel`, the same state the settings panel
+    /// writes, so switching here and switching there are one setting.
+    private var modelSelectorRow: some View {
+        HStack(spacing: 6) {
+            Spacer(minLength: 0)
+            Text("Model")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(DS.Colors.quiet)
+            HStack(spacing: 3) {
+                barModelOption(label: "Sonnet", modelID: "claude-sonnet-4-6")
+                barModelOption(label: "Opus", modelID: "claude-opus-4-6")
+            }
+            .padding(3)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color.white.opacity(0.055))
+            )
+        }
+    }
+
+    private func barModelOption(label: String, modelID: String) -> some View {
+        let isSelected = companionManager.selectedModel == modelID
+        return Button {
+            companionManager.setSelectedModel(modelID)
+        } label: {
+            Text(label)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundColor(isSelected ? DS.Colors.ink : DS.Colors.muted)
+                .padding(.horizontal, 8)
+                .frame(minHeight: 20)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(isSelected ? Color.white.opacity(0.12) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+
+    private var fieldAndSendRow: some View {
         HStack(spacing: 8) {
             TextField(fieldPlaceholder, text: $typedMessage)
                 .textFieldStyle(.plain)
@@ -677,9 +734,6 @@ struct OverlayEyeInputBarView: View {
             .pointerCursor(isEnabled: thereIsSomethingToSend)
             .disabled(!thereIsSomethingToSend)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(IrisShellBackground(cornerRadius: DS.CornerRadius.extraLarge))
     }
 
     /// "Ask Iris…" the first time and "Ask something else…" afterwards, because

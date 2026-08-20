@@ -49,13 +49,15 @@ final class AnthropicMaintainProvider: MaintainModelProviding {
     let displayName = "Anthropic (your key)"
 
     private lazy var byoOnlyAPI = ClaudeAPI(resolveTransport: {
-        guard let key = KeychainStore.readSecret(ofKind: .anthropicAPIKey), !key.isEmpty else {
+        // The reader's own credential in either shape — a pasted API key or a
+        // connected Claude Code OAuth token — never the funded proxy (D4/D5).
+        guard let transport = AnthropicBringYourOwnCredential.currentTransport() else {
             return .failure(.noCredentialsAvailable)
         }
-        return .success(.bringYourOwnKey(anthropicAPIKey: key))
+        return .success(transport)
     })
 
-    var isAvailable: Bool { KeychainStore.hasSecret(ofKind: .anthropicAPIKey) }
+    var isAvailable: Bool { AnthropicBringYourOwnCredential.isAvailable }
 
     func respond(
         systemPrompt: String,

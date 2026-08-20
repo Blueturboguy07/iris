@@ -179,6 +179,11 @@ final class AccountService: ObservableObject {
     /// key: once saved, the key is never read back into the UI layer.
     @Published private(set) var hasStoredAnthropicAPIKey: Bool = false
 
+    /// Whether a Claude Code OAuth token is connected (the CLI-login path). Like
+    /// the key flag, a Bool and never the token itself. The panel reads this to
+    /// show the CLI-login as connected and offer disconnect.
+    @Published private(set) var hasConnectedClaudeCodeLogin: Bool = false
+
     /// True while the BYO key field is being checked against Anthropic.
     @Published private(set) var isValidatingAnthropicAPIKey = false
 
@@ -208,6 +213,7 @@ final class AccountService: ObservableObject {
     init(urlSession: URLSession = .shared) {
         self.urlSession = urlSession
         self.hasStoredAnthropicAPIKey = KeychainStore.hasSecret(ofKind: .anthropicAPIKey)
+        self.hasConnectedClaudeCodeLogin = KeychainStore.hasSecret(ofKind: .anthropicOAuthToken)
     }
 
     // MARK: - Restoring a previous session
@@ -645,6 +651,7 @@ final class AccountService: ObservableObject {
             isSignedIn: signedInAccount != nil,
             publikBaseURL: publikBaseURL,
             storedAnthropicAPIKey: storedAnthropicAPIKey(),
+            storedAnthropicOAuthToken: KeychainStore.readSecret(ofKind: .anthropicOAuthToken),
             currentAccessTokenProvider: { [weak self] in
                 guard let self else { return nil }
                 return await self.currentAccessTokenRefreshingIfNeeded()
@@ -660,7 +667,35 @@ final class AccountService: ObservableObject {
         if hasStoredAnthropicAPIKey {
             return "your Anthropic key"
         }
+        if hasConnectedClaudeCodeLogin {
+            return "your Claude Code login"
+        }
         return nil
+    }
+
+    // MARK: - Claude Code CLI login
+
+    /// Re-reads whether a Claude Code OAuth token is connected. Called by the
+    /// panel after a `setup-token` capture or an import so the connected state
+    /// updates without reconstructing the service.
+    func refreshClaudeCodeLoginState() {
+        hasConnectedClaudeCodeLogin = ClaudeCodeLogin.isConnected
+    }
+
+    /// Imports the token from an existing `claude login`, then refreshes state.
+    /// Returns the outcome so the panel can show the right message.
+    @discardableResult
+    func importClaudeCodeLogin() -> ClaudeCodeLogin.ImportOutcome {
+        let outcome = ClaudeCodeLogin.importFromExistingClaudeLogin()
+        refreshClaudeCodeLoginState()
+        return outcome
+    }
+
+    /// Forgets the connected Claude Code token. The pasted API key, a separate
+    /// credential, is untouched.
+    func disconnectClaudeCodeLogin() {
+        ClaudeCodeLogin.disconnect()
+        refreshClaudeCodeLoginState()
     }
 
     // MARK: - The user's own Anthropic key

@@ -161,6 +161,60 @@ struct AssistantTransportTests {
         }
     }
 
+    // MARK: - The bring-your-own OAuth-token route (Claude Code login)
+
+    /// Shaped like a real long-lived Claude Code token; never sent anywhere here.
+    private static let fakeAnthropicOAuthToken = "sk-ant-oat01-not-a-real-token-000000000000000000"
+
+    @Test func theOAuthTokenTransportTargetsAnthropicWithBearerAndTheOAuthBeta() async throws {
+        let directRequest = try await AssistantTransport
+            .bringYourOwnOAuthToken(anthropicOAuthToken: Self.fakeAnthropicOAuthToken)
+            .makeChatRequest()
+
+        #expect(directRequest.url?.absoluteString == "https://api.anthropic.com/v1/messages")
+        // The OAuth token authenticates as a Bearer, NOT x-api-key.
+        #expect(directRequest.value(forHTTPHeaderField: "Authorization")
+            == "Bearer \(Self.fakeAnthropicOAuthToken)")
+        #expect(directRequest.value(forHTTPHeaderField: "x-api-key") == nil)
+        // The beta header is what makes Anthropic accept the token, and what the
+        // gate keys off to keep it away from any publik host.
+        #expect(directRequest.value(forHTTPHeaderField: "anthropic-beta")
+            == AssistantTransport.anthropicOAuthBetaHeaderValue)
+        #expect(directRequest.value(forHTTPHeaderField: "anthropic-version") == "2023-06-01")
+        #expect(AssistantTransport
+            .bringYourOwnOAuthToken(anthropicOAuthToken: Self.fakeAnthropicOAuthToken)
+            .shouldSendModelInRequestBody)
+    }
+
+    /// THE PROPERTY, for the OAuth token: it is the user's own credential too, so
+    /// a request carrying the OAuth beta header may only ever reach Anthropic.
+    @Test func anOAuthTokenRequestIsRefusedIfItWouldLeaveAnthropic() async throws {
+        for publikHostTheTokenMustNeverReach in Self.everyPublikHostTheKeyMustNeverReach {
+            var smuggledRequest = URLRequest(
+                url: URL(string: "\(publikHostTheTokenMustNeverReach)/api/assistant/chat")!
+            )
+            smuggledRequest.httpMethod = "POST"
+            smuggledRequest.setValue("Bearer \(Self.fakeAnthropicOAuthToken)", forHTTPHeaderField: "Authorization")
+            smuggledRequest.setValue(
+                AssistantTransport.anthropicOAuthBetaHeaderValue, forHTTPHeaderField: "anthropic-beta"
+            )
+
+            #expect(throws: AssistantTransportError.self) {
+                _ = try AssistantTransport.validatedRequest(smuggledRequest)
+            }
+        }
+
+        // And the legitimate one still passes.
+        var anthropicRequest = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
+        anthropicRequest.setValue("Bearer \(Self.fakeAnthropicOAuthToken)", forHTTPHeaderField: "Authorization")
+        anthropicRequest.setValue(
+            AssistantTransport.anthropicOAuthBetaHeaderValue, forHTTPHeaderField: "anthropic-beta"
+        )
+        #expect(throws: Never.self) {
+            _ = try AssistantTransport.validatedRequest(anthropicRequest)
+        }
+    }
+
     // MARK: - Choosing a route
 
     @Test func fundedWinsWhenSignedInAndTheStoredKeyIsTheFallback() async throws {
@@ -186,6 +240,48 @@ struct AssistantTransportTests {
             return
         }
         #expect(selectedKey == Self.fakeAnthropicAPIKey)
+    }
+
+    @Test func aClaudeCodeOAuthTokenIsTheBYOFallbackBelowAPastedKey() async throws {
+        // Signed out, only an OAuth token connected → the OAuth route.
+        let oauthOnlySelection = AssistantTransport.selectTransport(
+            isSignedIn: false,
+            publikBaseURL: Self.publikBaseURL,
+            storedAnthropicAPIKey: nil,
+            storedAnthropicOAuthToken: Self.fakeAnthropicOAuthToken,
+            currentAccessTokenProvider: { nil }
+        )
+        guard case .success(.bringYourOwnOAuthToken(let selectedToken)) = oauthOnlySelection else {
+            Issue.record("a connected Claude Code token should be used when it is the only credential")
+            return
+        }
+        #expect(selectedToken == Self.fakeAnthropicOAuthToken)
+
+        // Both present → the pasted key wins (it is the plainer credential).
+        let bothSelection = AssistantTransport.selectTransport(
+            isSignedIn: false,
+            publikBaseURL: Self.publikBaseURL,
+            storedAnthropicAPIKey: Self.fakeAnthropicAPIKey,
+            storedAnthropicOAuthToken: Self.fakeAnthropicOAuthToken,
+            currentAccessTokenProvider: { nil }
+        )
+        guard case .success(.bringYourOwnKey) = bothSelection else {
+            Issue.record("a pasted API key should win over an OAuth token when both are present")
+            return
+        }
+
+        // Signed in → still funded, regardless of a connected token.
+        let signedInSelection = AssistantTransport.selectTransport(
+            isSignedIn: true,
+            publikBaseURL: Self.publikBaseURL,
+            storedAnthropicAPIKey: nil,
+            storedAnthropicOAuthToken: Self.fakeAnthropicOAuthToken,
+            currentAccessTokenProvider: { Self.fakeSupabaseAccessToken }
+        )
+        guard case .success(.funded) = signedInSelection else {
+            Issue.record("funded should still win for a signed-in user even with a connected token")
+            return
+        }
     }
 
     @Test func neitherCredentialIsAStateTheUserIsToldAboutRatherThanASilentFailure() async throws {

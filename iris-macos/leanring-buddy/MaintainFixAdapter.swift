@@ -44,14 +44,16 @@ final class MaintainFixAdapter: MaintainFixAdapting {
     /// AccountService, no funded fallback — absence of a key is a terminal
     /// answer, not a reason to try publik's proxy.
     private lazy var bringYourOwnOnlyAPI = ClaudeAPI(resolveTransport: {
-        guard let key = KeychainStore.readSecret(ofKind: .anthropicAPIKey), !key.isEmpty else {
+        // Either shape of the reader's own Anthropic credential — a pasted API
+        // key or a connected Claude Code OAuth token — never the funded proxy.
+        guard let transport = AnthropicBringYourOwnCredential.currentTransport() else {
             return .failure(.noCredentialsAvailable)
         }
-        return .success(.bringYourOwnKey(anthropicAPIKey: key))
+        return .success(transport)
     })
 
     var bringYourOwnKeyIsAvailable: Bool {
-        KeychainStore.hasSecret(ofKind: .anthropicAPIKey)
+        AnthropicBringYourOwnCredential.isAvailable
     }
 
     func adaptPatch(

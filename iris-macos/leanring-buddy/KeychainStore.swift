@@ -2,8 +2,9 @@
 //  KeychainStore.swift
 //  leanring-buddy
 //
-//  The only place in this app that touches the macOS Keychain. Exactly four
-//  secrets are ever stored: the user's own Anthropic API key (the BYO tier),
+//  The only place in this app that touches the macOS Keychain. A small, fixed
+//  set of secrets is ever stored: the user's own Anthropic API key and the
+//  Claude Code OAuth token (two shapes of the BYO tier), the user's OpenAI key,
 //  the Supabase refresh token (the funded tier), and the GitHub App token
 //  pair (maintain mode's fork backup). None is ever printed, logged, written
 //  to UserDefaults, or included in a crash report — the whole reason this
@@ -40,6 +41,14 @@ enum KeychainSecretKind: String, CaseIterable, Sendable {
     /// for maintain mode's Tier C novel fixes when they choose OpenAI. Like
     /// the Anthropic key, it never reaches a publik host.
     case openAIAPIKey = "openai-api-key"
+    /// A Claude Code OAuth token (`sk-ant-oat…`), obtained either from
+    /// `claude setup-token` (long-lived) or imported from an existing
+    /// `claude login`. It is a second shape of the user's OWN Anthropic
+    /// credential — sent only to `api.anthropic.com`, and with an
+    /// `Authorization: Bearer` + `anthropic-beta` pair rather than `x-api-key`
+    /// (see `AssistantTransport`). Like the API key, it never reaches a publik
+    /// host.
+    case anthropicOAuthToken = "anthropic-oauth-token"
 }
 
 enum KeychainStoreError: Error, Equatable, Sendable {

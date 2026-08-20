@@ -50,6 +50,17 @@ struct CompanionPanelView: View {
     @State private var emailAddressInput: String = ""
     @State private var passwordInput: String = ""
 
+    /// The interactive `claude setup-token` capture, shown in a sheet. Its own
+    /// object so its published phase drives the sheet without the panel owning
+    /// any of the pty details.
+    @StateObject private var claudeCodeSetupSession = ClaudeCodeSetupTokenSession()
+    /// Whether the inline `claude setup-token` terminal is showing.
+    @State private var isShowingClaudeCodeSetup = false
+    /// What the reader types into the inline setup terminal, forwarded to the CLI.
+    @State private var claudeCodeSetupInput: String = ""
+    /// The one-line result of the last "Import from Claude Code" attempt.
+    @State private var claudeCodeImportMessage: String?
+
     init(companionManager: CompanionManager) {
         self.companionManager = companionManager
         _accountService = ObservedObject(wrappedValue: companionManager.accountService)
@@ -599,6 +610,19 @@ struct CompanionPanelView: View {
                     .font(.system(size: 10))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                Divider()
+                    .background(DS.Colors.borderSubtle)
+
+                // Chat is funded while signed in, but editing an app runs on the
+                // reader's OWN model — so the credential options must be reachable
+                // here too, not only when signed out. This is where the on-demand
+                // edit refusal's "Open settings" button lands a signed-in reader.
+                Text("To edit apps, connect your own model")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+
+                bringYourOwnCredentialSection
             }
         }
     }
@@ -635,7 +659,7 @@ struct CompanionPanelView: View {
             Divider()
                 .background(DS.Colors.borderSubtle)
 
-            bringYourOwnKeyRows
+            bringYourOwnCredentialSection
         }
     }
 
@@ -784,6 +808,203 @@ struct CompanionPanelView: View {
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    /// The pasted-key rows and the Claude Code CLI-login rows, shown together.
+    /// Rendered in BOTH the signed-out account section (a chat fallback) and the
+    /// signed-in one (where it is the only way to power app editing, since chat
+    /// is funded but editing runs on the reader's own model).
+    private var bringYourOwnCredentialSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            bringYourOwnKeyRows
+            claudeCodeLoginRows
+            if isShowingClaudeCodeSetup {
+                claudeCodeSetupInlineView
+            }
+        }
+    }
+
+    // MARK: Claude Code CLI login
+
+    @ViewBuilder
+    private var claudeCodeLoginRows: some View {
+        if accountService.hasConnectedClaudeCodeLogin {
+            HStack(spacing: 8) {
+                Image(systemName: "terminal.fill")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(DS.Colors.textTertiary)
+
+                Text("Connected via Claude Code")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+
+                Spacer()
+
+                Button(action: {
+                    accountService.disconnectClaudeCodeLogin()
+                    claudeCodeImportMessage = nil
+                }) {
+                    Text("Disconnect")
+                }
+                .irisTextButton(fontSize: 10, isDanger: true)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Or sign in with a CLI")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+
+                HStack(spacing: 8) {
+                    Button(action: { startClaudeCodeSetup() }) {
+                        Text("Sign in with Claude Code")
+                    }
+                    .irisTinyButton()
+
+                    Button(action: { importExistingClaudeCodeLogin() }) {
+                        Text("Import login")
+                    }
+                    .irisTinyButton()
+                }
+
+                if let claudeCodeImportMessage {
+                    Text(claudeCodeImportMessage)
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Text("Uses your Claude Code login (via `claude setup-token`), sent only to api.anthropic.com. A Claude subscription token can be rate-limited for third-party use — a pasted API key is the most reliable option.")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// The inline `claude setup-token` terminal — shown in the panel rather than a
+    /// sheet, because the menu-bar panel is a non-activating NSPanel where a
+    /// SwiftUI sheet does not reliably present.
+    private var claudeCodeSetupInlineView: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            switch claudeCodeSetupSession.phase {
+            case .claudeNotFound:
+                Text("Claude Code isn't installed where Iris can find it. Install it, run `claude login`, or paste an API key above.")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.destructiveText)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .running:
+                Text("Complete the sign-in Claude Code opened in your browser. Iris captures the token automatically.")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .captured:
+                Text("Connected! Iris will use your Claude Code login.")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.success)
+            case .finishedWithoutToken:
+                Text("That finished without a token. Try again, or paste an API key above.")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.destructiveText)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .failed(let reason):
+                Text(reason)
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.destructiveText)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .idle:
+                EmptyView()
+            }
+
+            if !claudeCodeSetupSession.visibleTranscript.isEmpty {
+                ScrollView {
+                    Text(claudeCodeSetupSession.visibleTranscript)
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(height: 130)
+                .padding(8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(DS.Colors.surfaceRaised)
+                )
+            }
+
+            if claudeCodeSetupSession.isRunning {
+                HStack(spacing: 8) {
+                    TextField("Type here if the CLI asks for input…", text: $claudeCodeSetupInput)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11))
+                        .foregroundColor(DS.Colors.ink)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(DS.Colors.surfaceRaised)
+                        )
+                        .onSubmit { sendClaudeCodeSetupInput() }
+
+                    Button(action: { sendClaudeCodeSetupInput() }) {
+                        Text("Send")
+                    }
+                    .irisTinyButton()
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button(action: { endClaudeCodeSetup() }) {
+                    Text(claudeCodeSetupSession.phase == .captured ? "Done" : "Cancel")
+                }
+                .irisTextButton(fontSize: 10)
+            }
+        }
+        .onChange(of: claudeCodeSetupSession.phase) { _, newPhase in
+            // A capture connects the credential the instant it lands.
+            if newPhase == .captured {
+                accountService.refreshClaudeCodeLoginState()
+            }
+            NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+        }
+    }
+
+    private func startClaudeCodeSetup() {
+        claudeCodeImportMessage = nil
+        isShowingClaudeCodeSetup = true
+        claudeCodeSetupSession.start()
+        NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+    }
+
+    private func sendClaudeCodeSetupInput() {
+        let trimmed = claudeCodeSetupInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            claudeCodeSetupSession.sendReturn()
+            return
+        }
+        claudeCodeSetupSession.sendLine(trimmed)
+        claudeCodeSetupInput = ""
+    }
+
+    private func endClaudeCodeSetup() {
+        claudeCodeSetupSession.cancel()
+        isShowingClaudeCodeSetup = false
+        claudeCodeSetupInput = ""
+        NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+    }
+
+    private func importExistingClaudeCodeLogin() {
+        let outcome = accountService.importClaudeCodeLogin()
+        switch outcome {
+        case .imported:
+            claudeCodeImportMessage = "Connected using your Claude Code login."
+        case .noClaudeCodeLoginFound:
+            claudeCodeImportMessage = "No Claude Code login found. Run `claude login`, or use Sign in with Claude Code."
+        case .couldNotReadKeychain:
+            claudeCodeImportMessage = "Iris couldn't read the Claude Code login — you may have denied the Keychain prompt."
+        case .loginHadNoUsableToken:
+            claudeCodeImportMessage = "That Claude Code login has no token Iris can use — try Sign in with Claude Code."
         }
     }
 

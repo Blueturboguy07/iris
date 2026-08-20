@@ -534,4 +534,68 @@ struct AssistantTransportTests {
         #expect(GuideService.normalizedAPIBase("https://publikhq.com.attacker.example") == nil)
         #expect(GuideService.normalizedAPIBase("http://localhost:3000") == "http://localhost:3000")
     }
+
+    // MARK: - The system field, per route
+
+    // Anthropic accepts a Claude Code OAuth token only when the request's
+    // system prompt LEADS with Claude Code's own identity sentence; anything
+    // else is rejected with a synthetic `rate_limit_error` 429 that carries no
+    // quota headers. Verified live 2026-08-20 — the identical request flips
+    // 429 → 200 on this block alone.
+
+    @Test func theOAuthTokenRouteLeadsWithClaudeCodesOwnIdentityBlock() {
+        let systemFieldValue = ClaudeAPI.systemFieldValue(
+            for: .bringYourOwnOAuthToken(anthropicOAuthToken: "sk-ant-oat01-fake"),
+            systemPrompt: "You are a careful software-maintenance agent."
+        )
+
+        let systemBlocks = systemFieldValue as? [[String: Any]]
+        #expect(systemBlocks?.count == 2)
+        #expect(systemBlocks?.first?["type"] as? String == "text")
+        #expect(
+            systemBlocks?.first?["text"] as? String
+                == AssistantTransport.claudeCodeIdentitySystemBlockText
+        )
+        #expect(
+            systemBlocks?.last?["text"] as? String
+                == "You are a careful software-maintenance agent."
+        )
+    }
+
+    @Test func anEmptySystemPromptOnTheOAuthRouteStillSendsTheIdentityBlockAlone() {
+        // A bare request (no system prompt at all) is rejected the same way,
+        // so the identity block must go out even when the caller has nothing
+        // to say.
+        let systemFieldValue = ClaudeAPI.systemFieldValue(
+            for: .bringYourOwnOAuthToken(anthropicOAuthToken: "sk-ant-oat01-fake"),
+            systemPrompt: ""
+        )
+
+        let systemBlocks = systemFieldValue as? [[String: Any]]
+        #expect(systemBlocks?.count == 1)
+        #expect(
+            systemBlocks?.first?["text"] as? String
+                == AssistantTransport.claudeCodeIdentitySystemBlockText
+        )
+    }
+
+    @Test func theKeyAndFundedRoutesKeepThePlainStringSystemField() async throws {
+        // A pasted API key carries no Claude-Code-only restriction, and the
+        // funded server prepends its own system block — neither route should
+        // impersonate Claude Code.
+        let keyRouteSystemField = ClaudeAPI.systemFieldValue(
+            for: .bringYourOwnKey(anthropicAPIKey: Self.fakeAnthropicAPIKey),
+            systemPrompt: "You are Iris."
+        )
+        #expect(keyRouteSystemField as? String == "You are Iris.")
+
+        let fundedRouteSystemField = ClaudeAPI.systemFieldValue(
+            for: .funded(
+                publikBaseURL: URL(string: "https://publikhq.com")!,
+                currentAccessTokenProvider: { "fake-supabase-token" }
+            ),
+            systemPrompt: "You are Iris."
+        )
+        #expect(fundedRouteSystemField as? String == "You are Iris.")
+    }
 }

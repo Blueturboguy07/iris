@@ -158,7 +158,7 @@ class ClaudeAPI {
     ) -> [String: Any] {
         var requestBody: [String: Any] = [
             "max_tokens": maximumOutputTokens,
-            "system": systemPrompt,
+            "system": Self.systemFieldValue(for: transport, systemPrompt: systemPrompt),
             "messages": messages,
         ]
         if shouldStream {
@@ -178,6 +178,32 @@ class ClaudeAPI {
             requestBody["tool_choice"] = toolChoice
         }
         return requestBody
+    }
+
+    /// The value of the request body's `system` field for this transport.
+    ///
+    /// On the OAuth-token route Anthropic accepts the request only when the
+    /// system prompt LEADS with Claude Code's own identity sentence (see
+    /// `AssistantTransport.claudeCodeIdentitySystemBlockText`), so there the
+    /// field becomes an array of text blocks — the identity first, the
+    /// caller's actual system prompt second. Everywhere else the field stays
+    /// the plain string it has always been. An empty caller prompt on the
+    /// OAuth route still sends the identity block alone, because a request
+    /// with no system prompt at all is rejected the same way.
+    static func systemFieldValue(
+        for transport: AssistantTransport,
+        systemPrompt: String
+    ) -> Any {
+        guard transport.shouldPrependClaudeCodeIdentitySystemBlock else {
+            return systemPrompt
+        }
+        var systemBlocks: [[String: Any]] = [
+            ["type": "text", "text": AssistantTransport.claudeCodeIdentitySystemBlockText]
+        ]
+        if !systemPrompt.isEmpty {
+            systemBlocks.append(["type": "text", "text": systemPrompt])
+        }
+        return systemBlocks
     }
 
     /// Turns a non-2xx response into the user-visible state for that route.

@@ -69,6 +69,33 @@ enum AssistantTransport: Sendable {
     /// UNVERIFIED against a live token — see the CLI-login notes.
     static let anthropicOAuthBetaHeaderValue = "oauth-2025-04-20"
 
+    /// The system-prompt sentence Anthropic requires at the head of every
+    /// request made with a Claude Code OAuth token. Anthropic enforces that an
+    /// `sk-ant-oat…` credential is only used by Claude Code, and it recognizes
+    /// Claude Code by this exact first system block — a request without it is
+    /// rejected with a synthetic `rate_limit_error` 429 (no `Retry-After`, no
+    /// quota headers), which reads like a quota problem but is not one.
+    /// Verified live on 2026-08-20: the identical request flips 429 → 200 on
+    /// this block alone. Like `anthropicOAuthBetaHeaderValue`, this is the
+    /// public value Claude Code itself sends and cannot be verified from
+    /// inside this process — if Anthropic changes it, OAuth-token requests
+    /// start failing again and this constant is the one line to update.
+    static let claudeCodeIdentitySystemBlockText =
+        "You are Claude Code, Anthropic's official CLI for Claude."
+
+    /// Whether the request body's `system` field must lead with
+    /// `claudeCodeIdentitySystemBlockText`. Only the OAuth-token route: the
+    /// funded server prepends its own system block, and a pasted API key
+    /// carries no Claude-Code-only restriction.
+    var shouldPrependClaudeCodeIdentitySystemBlock: Bool {
+        switch self {
+        case .funded, .bringYourOwnKey:
+            return false
+        case .bringYourOwnOAuthToken:
+            return true
+        }
+    }
+
     /// Where publik lives when nothing overrides it.
     static let defaultPublikBaseURLString = "https://publikhq.com"
 

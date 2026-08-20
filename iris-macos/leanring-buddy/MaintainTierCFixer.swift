@@ -90,7 +90,28 @@ final class MaintainTierCFixer {
     // step cap is no longer the ONLY governor — the no-progress detector and the
     // action-dedup below stop a spinning loop well before it burns the cap.
     static let maximumLoopSteps = 20
-    static let maximumOutputTokensPerStep = 1200
+    /// A feature is inherently larger than a crash-shaped bug fix — the first
+    /// real-Mac dogfoods burned all 20 steps making steady progress (every
+    /// command exit 0, no stalls) and still ran out — so a feature gets more
+    /// headroom. Still hard-capped; the no-progress detector governs both.
+    static let maximumLoopStepsForAFeature = 30
+
+    /// The step budget for one task. The model is TOLD this number and shown
+    /// a per-turn countdown (see the command-result turn), because a model
+    /// that does not know its budget explores like it has forever and gets
+    /// cut off mid-work instead of pacing itself to DONE.
+    static func maximumLoopSteps(for task: MaintainEditTask) -> Int {
+        switch task {
+        case .crashFix, .onDemand(_, .bugFix):
+            return maximumLoopSteps
+        case .onDemand(_, .feature):
+            return maximumLoopStepsForAFeature
+        }
+    }
+
+    // 1200 could not hold one medium heredoc file-write, which forced real
+    // edits to split across many small append steps and burn the step budget.
+    static let maximumOutputTokensPerStep = 4000
 
     /// How many 429s one run will wait out before giving up. Two waits rides
     /// out a burst limit without letting a genuinely exhausted quota hold the
@@ -424,7 +445,8 @@ final class MaintainTierCFixer {
         // way a real failure does. Bounded: at most this many waits per run,
         // each capped, then the failure is surfaced honestly.
         var rateLimitWaitsRemaining = Self.maximumRateLimitWaitsPerRun
-        for step in 1...Self.maximumLoopSteps {
+        let stepBudget = Self.maximumLoopSteps(for: task)
+        for step in 1...stepBudget {
             let reply: String
             do {
                 reply = try await provider.respond(
@@ -484,9 +506,14 @@ final class MaintainTierCFixer {
             let result = try? await runner.run(jailed.invocation, deadline: 120)
             let output = String((result?.outputTail ?? "(no output)").suffix(4000))
             irisTrace("maintain: tier-c step \(step) ran a jailed command, exit=\(result?.exitCode ?? -1)")
+            // The countdown keeps the model honest about its budget: without
+            // it, dogfoods showed steady exploration right up to the cap and a
+            // guillotine mid-work instead of a paced landing on DONE.
+            let stepsRemaining = stepBudget - step
             conversation.append(MaintainChatTurn(
                 role: "user",
-                text: "Command exit \(result?.exitCode ?? -1). Output:\n\(output)\n\nNext command, or DONE."
+                text: "Command exit \(result?.exitCode ?? -1). Output:\n\(output)\n\n"
+                    + "\(stepsRemaining) of your \(stepBudget) commands remain. Next command, or DONE."
             ))
 
             // No-progress detector (plan §6). A fingerprint that CHANGED means the
@@ -791,12 +818,20 @@ final class MaintainTierCFixer {
     """
 
     private static func systemPrompt(for task: MaintainEditTask) -> String {
+        let taskSystemPrompt: String
         switch task {
         case .crashFix, .onDemand(_, .bugFix):
-            return bugFixSystemPrompt
+            taskSystemPrompt = bugFixSystemPrompt
         case .onDemand(_, .feature):
-            return featureSystemPrompt
+            taskSystemPrompt = featureSystemPrompt
         }
+        // The budget is stated up front (and counted down every turn) so the
+        // model paces itself to DONE instead of exploring like it has forever
+        // and being cut off mid-work at the cap.
+        return taskSystemPrompt + "\n\nYou have a HARD budget of "
+            + "\(maximumLoopSteps(for: task)) commands for the whole job — each turn "
+            + "tells you how many remain. Budget them: explore briefly, start "
+            + "editing early, and reply DONE with commands to spare."
     }
 
     /// The opening user turn. Composed of the original task-driven message

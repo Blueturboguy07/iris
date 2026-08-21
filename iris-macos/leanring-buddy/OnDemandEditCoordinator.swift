@@ -911,6 +911,20 @@ final class OnDemandEditCoordinator: ObservableObject {
             showStatus(stepNumber == 1
                 ? "Reading the code and deciding where to start…"
                 : "Step \(stepNumber): deciding what to do next…")
+        case .agentNarration(let text, _):
+            // The agent's OWN sentence for this step — what it says it is
+            // doing and why. The most direct "what is Iris doing right now"
+            // there is, so it leads both the transcript and the status line.
+            editRunner.note(text)
+            showStatus(String(text.prefix(140)))
+        case .editedFiles(let paths, _):
+            let shownPaths = paths.prefix(5).joined(separator: ", ")
+            let overflowCount = paths.count - min(paths.count, 5)
+            let line = overflowCount > 0
+                ? "Changed: \(shownPaths) (+\(overflowCount) more)"
+                : "Changed: \(shownPaths)"
+            editRunner.note(line)
+            showStatus(line)
         case .runningJailedCommand(let command, _):
             editRunner.recordExecutedCommand(command)
             showStatus(GuideAutopilotFriendlyLabel.label(for: command))

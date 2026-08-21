@@ -93,11 +93,22 @@ enum MaintainOnDemandEditResult: Sendable {
 enum MaintainTierCProgressEvent: Sendable, Equatable {
     /// The loop is waiting on the model to decide its next action.
     case waitingOnTheModel(stepNumber: Int)
+    /// The agent's OWN words for this step — the plain-English sentence it
+    /// wrote before its command (or before DONE, where it summarizes what it
+    /// changed). This is the "what is the agent doing and why" line the
+    /// on-demand prompts explicitly ask for; scrubbed and capped before
+    /// emission. Absent when a reply carried no prose.
+    case agentNarration(text: String, stepNumber: Int)
     /// A model-authored command is about to run inside the Seatbelt jail.
     case runningJailedCommand(command: String, stepNumber: Int)
     /// The jailed command finished. `outputTailLines` is a short,
     /// control-sequence-stripped, secret-scrubbed tail for display only.
     case jailedCommandFinished(exitCode: Int32, duration: TimeInterval, outputTailLines: [String])
+    /// The step actually changed these repo-relative files (written, resized,
+    /// or deleted — derived from the same per-file walk the no-progress
+    /// detector uses, since `.git` is stripped mid-loop and cannot be asked).
+    /// Capped; the reader sees exactly WHERE the agent is working.
+    case editedFiles(paths: [String], stepNumber: Int)
     /// A 429 landed and the loop is waiting it out before retrying.
     case waitingOutARateLimit(waitSeconds: Int)
     /// A model call dropped mid-flight (a timeout or a lost connection) and
@@ -196,6 +207,50 @@ final class MaintainTierCFixer {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
         return nonEmptyLines.suffix(4).map { String($0.prefix(220)) }
+    }
+
+    /// The agent's own prose from one reply — everything OUTSIDE the fenced
+    /// command block, minus the bare DONE line — flattened to one scrubbed,
+    /// capped paragraph for the live surface. Nil when the reply carried no
+    /// prose (old-style replies, or a model ignoring the narration ask), so
+    /// the caller emits nothing rather than an empty row.
+    nonisolated static func narrationText(fromModelReply reply: String) -> String? {
+        var proseOnly = reply
+        // Strip the first fenced block, matching extractBashCommand's fence
+        // detection so the two never disagree about where the command was.
+        if let fenceStart = proseOnly.range(of: "```bash") ?? proseOnly.range(of: "```sh")
+            ?? proseOnly.range(of: "```") {
+            let afterFence = proseOnly[fenceStart.upperBound...]
+            if let fenceEnd = afterFence.range(of: "```") {
+                proseOnly = String(proseOnly[..<fenceStart.lowerBound])
+                    + String(proseOnly[fenceEnd.upperBound...])
+            } else {
+                proseOnly = String(proseOnly[..<fenceStart.lowerBound])
+            }
+        }
+        let flattened = GuideAutopilotOutputBuffer.scrubbed(proseOnly)
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && $0 != "DONE" }
+            .joined(separator: " ")
+        guard !flattened.isEmpty else { return nil }
+        return String(flattened.prefix(400))
+    }
+
+    /// The repo-relative paths whose state differs between two per-file walks:
+    /// written (state changed), created (new key), or deleted (key gone).
+    /// Sorted for a stable display, capped so a mass edit can't flood a row.
+    nonisolated static func changedPathsBetween(
+        previous: [String: String], latest: [String: String]
+    ) -> [String] {
+        var changedPaths: Set<String> = []
+        for (path, state) in latest where previous[path] != state {
+            changedPaths.insert(path)
+        }
+        for path in previous.keys where latest[path] == nil {
+            changedPaths.insert(path)
+        }
+        return changedPaths.sorted().prefix(20).map { $0 }
     }
 
     /// How long to wait out one 429: the server's own `Retry-After` when it
@@ -541,9 +596,10 @@ final class MaintainTierCFixer {
         // no-progress detector. Both can only STOP EARLY or SKIP a duplicate —
         // never turn a successful outcome into a failure — so the spine is intact.
         // `commandsAlreadyRun` holds every exact command the model has already run;
-        // the fingerprint tracks whether the working tree is actually advancing.
+        // the per-file snapshot tracks whether the working tree is actually
+        // advancing AND names the files each step changed (the transparency line).
         var commandsAlreadyRun: Set<String> = []
-        var workingTreeFingerprintFromPreviousStep = Self.workingTreeFingerprint(repoRootPath: clonePath)
+        var fileStatesFromPreviousStep = Self.workingTreeFileStates(repoRootPath: clonePath)
         var theModelHasEditedTheTreeAtLeastOnce = false
         var consecutiveNoProgressStepCount = 0
 
@@ -597,6 +653,14 @@ final class MaintainTierCFixer {
                 return .couldNotFix(reason: Self.modelCallFailureReason(for: error))
             }
             conversation.append(MaintainChatTurn(role: "assistant", text: reply))
+
+            // The agent's own sentence for this step — what it says it is
+            // doing and why (the on-demand prompts ask for exactly one). This
+            // is the reader's window into the agent itself, not just its
+            // commands; a reply with no prose emits nothing.
+            if let narration = Self.narrationText(fromModelReply: reply) {
+                progressHandler?(.agentNarration(text: narration, stepNumber: step))
+            }
 
             if reply.range(of: #"(?m)^\s*DONE\s*$"#, options: .regularExpression) != nil {
                 declaredDone = true
@@ -653,22 +717,27 @@ final class MaintainTierCFixer {
                 text: "Command exit \(result?.exitCode ?? -1). Output:\n\(output)\n\nNext command, or DONE."
             ))
 
-            // No-progress detector (plan §6). A fingerprint that CHANGED means the
-            // model edited the tree — real progress — so the counter resets and we
-            // remember that editing has begun. A fingerprint UNCHANGED after the
-            // model has already started editing is a stall; enough consecutive
-            // stalls and we stop rather than burn the whole step budget spinning.
-            // Pure read/inspect steps before the first edit are expected and never
-            // counted, so a fix that explores widely before writing is not killed.
-            if let latestFingerprint = Self.workingTreeFingerprint(repoRootPath: clonePath) {
-                if let previousFingerprint = workingTreeFingerprintFromPreviousStep,
-                   latestFingerprint != previousFingerprint {
+            // No-progress detector (plan §6), now file-aware. A snapshot diff
+            // that names changed paths means the model edited the tree — real
+            // progress — so the counter resets, editing is remembered, and the
+            // changed paths are surfaced to the reader (the "where is the
+            // agent working" line). An UNCHANGED snapshot after the model has
+            // already started editing is a stall; enough consecutive stalls
+            // and we stop rather than burn steps spinning. Pure read/inspect
+            // steps before the first edit are expected and never counted, so a
+            // fix that explores widely before writing is not killed.
+            if let latestFileStates = Self.workingTreeFileStates(repoRootPath: clonePath) {
+                let changedPaths = fileStatesFromPreviousStep.map { previousFileStates in
+                    Self.changedPathsBetween(previous: previousFileStates, latest: latestFileStates)
+                }
+                if let changedPaths, !changedPaths.isEmpty {
                     theModelHasEditedTheTreeAtLeastOnce = true
                     consecutiveNoProgressStepCount = 0
+                    progressHandler?(.editedFiles(paths: changedPaths, stepNumber: step))
                 } else if theModelHasEditedTheTreeAtLeastOnce {
                     consecutiveNoProgressStepCount += 1
                 }
-                workingTreeFingerprintFromPreviousStep = latestFingerprint
+                fileStatesFromPreviousStep = latestFileStates
 
                 if consecutiveNoProgressStepCount >= Self.noProgressStepThreshold {
                     irisTrace("maintain: tier-c stopping early — no working-tree progress for \(consecutiveNoProgressStepCount) steps")
@@ -855,17 +924,21 @@ final class MaintainTierCFixer {
         "vendor", "Pods", "DerivedData", "__pycache__", "coverage",
     ]
 
-    /// A cheap, in-process fingerprint of the working tree's AUTHORED files — the
-    /// state hash behind the plan §6 no-progress detector. It folds each file's
-    /// repo-relative path, byte size, and modification time into a SHA-256 (NOT
-    /// the full file contents, which would be far heavier), so it changes whenever
-    /// the model writes, grows, or deletes a file and stays identical across pure
-    /// read/inspect steps. Generated/dependency directories, dot-directories, and
-    /// symlinks are skipped so a stray build output never reads as progress, the
-    /// walk stays fast and bounded, and no link can walk it out of the clone.
-    /// Returns nil only when the repo root is unreadable, which the caller treats
-    /// as "unknown — do not arm the detector".
-    private static func workingTreeFingerprint(repoRootPath: String) -> String? {
+    /// A cheap, in-process per-file snapshot of the working tree's AUTHORED
+    /// files — the state behind the plan §6 no-progress detector AND the
+    /// "which files did the agent just change" transparency line. Maps each
+    /// repo-relative path to "byte size|modification time" (NOT file contents,
+    /// which would be far heavier), so a diff of two snapshots names exactly
+    /// the files a step wrote, grew, or deleted, and an identical snapshot
+    /// means a pure read/inspect step. Generated/dependency directories,
+    /// dot-directories, and symlinks are skipped so a stray build output never
+    /// reads as progress, the walk stays fast and bounded, and no link can
+    /// walk it out of the clone. (This replaced a single SHA-256 fold of the
+    /// same fields — same sensitivity, but a hash could only say THAT the tree
+    /// changed, never WHERE, and `.git` is stripped mid-loop so git cannot be
+    /// asked.) Returns nil only when the repo root is unreadable, which the
+    /// caller treats as "unknown — do not arm the detector".
+    private static func workingTreeFileStates(repoRootPath: String) -> [String: String]? {
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: repoRootPath) else { return nil }
 
@@ -874,12 +947,11 @@ final class MaintainTierCFixer {
         ]
 
         // A generous ceiling that keeps a pathological tree from turning the
-        // per-step fingerprint into an unbounded scan (the same reasoning as the
+        // per-step snapshot into an unbounded scan (the same reasoning as the
         // repo map's own file-scan limit).
         let fileScanLimit = 20_000
 
-        var hasher = SHA256()
-        var scannedFileCount = 0
+        var fileStatesByRelativePath: [String: String] = [:]
         var directoryStack: [(url: URL, relativePath: String)] = [
             (URL(fileURLWithPath: repoRootPath), ""),
         ]
@@ -891,13 +963,7 @@ final class MaintainTierCFixer {
                 options: []
             ) else { continue }
 
-            // Sort by name so the fold order is deterministic for the same tree —
-            // otherwise an unchanged tree could hash differently between steps.
-            let sortedEntryURLs = entryURLs.sorted { leftURL, rightURL in
-                leftURL.lastPathComponent < rightURL.lastPathComponent
-            }
-
-            for entryURL in sortedEntryURLs {
+            for entryURL in entryURLs {
                 let entryName = entryURL.lastPathComponent
                 let entryRelativePath = currentDirectory.relativePath.isEmpty
                     ? entryName
@@ -918,21 +984,18 @@ final class MaintainTierCFixer {
                 }
 
                 // A regular file (including a root-level dotfile like `.env`):
-                // fold its identity + size + mtime into the running hash.
+                // record its size + mtime as this path's state.
                 let byteSize = resourceValues?.fileSize ?? 0
                 let modificationTime = resourceValues?.contentModificationDate?.timeIntervalSince1970 ?? 0
-                hasher.update(data: Data("\(entryRelativePath)|\(byteSize)|\(modificationTime)\n".utf8))
+                fileStatesByRelativePath[entryRelativePath] = "\(byteSize)|\(modificationTime)"
 
-                scannedFileCount += 1
-                if scannedFileCount >= fileScanLimit {
-                    let digest = hasher.finalize()
-                    return digest.map { String(format: "%02x", $0) }.joined()
+                if fileStatesByRelativePath.count >= fileScanLimit {
+                    return fileStatesByRelativePath
                 }
             }
         }
 
-        let digest = hasher.finalize()
-        return digest.map { String(format: "%02x", $0) }.joined()
+        return fileStatesByRelativePath
     }
 
     // MARK: - Prompt and parsing
@@ -974,12 +1037,31 @@ final class MaintainTierCFixer {
     yourself.
     """
 
+    /// Appended to the ON-DEMAND prompts only (the crash path's prompt stays
+    /// byte-for-byte): the person who asked for the change is watching the run
+    /// live, so every reply leads with one sentence of narration. It carves an
+    /// explicit exception into the base prompts' "and nothing else" so the two
+    /// instructions cannot read as contradictory, and it re-pins the DONE
+    /// discipline so narration never smuggles a stray DONE line into a reply
+    /// that also carries a command.
+    static let onDemandNarrationPromptAddendum = """
+    One exception to "nothing else": the person who asked for this change is \
+    watching you work live, so begin EVERY reply with exactly one short \
+    plain-English sentence saying what you are doing and why — before the \
+    ```bash block (e.g. "Opening the settings view to see how toggles are \
+    wired."), or before DONE (there, one sentence summarizing what you \
+    changed and where). One sentence only, no headings or lists — and never \
+    write the word DONE anywhere in a reply that also contains a command.
+    """
+
     private static func systemPrompt(for task: MaintainEditTask) -> String {
         switch task {
-        case .crashFix, .onDemand(_, .bugFix):
+        case .crashFix:
             return bugFixSystemPrompt
+        case .onDemand(_, .bugFix):
+            return bugFixSystemPrompt + "\n\n" + onDemandNarrationPromptAddendum
         case .onDemand(_, .feature):
-            return featureSystemPrompt
+            return featureSystemPrompt + "\n\n" + onDemandNarrationPromptAddendum
         }
     }
 

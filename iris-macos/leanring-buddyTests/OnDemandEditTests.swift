@@ -360,6 +360,34 @@ import Testing
         ))
     }
 
+    /// The agent's narration is the reply's prose with the fenced command and
+    /// any bare DONE line removed, flattened to one line — and a reply with no
+    /// prose yields nil, never an empty row.
+    @Test func narrationIsTheReplyProseWithoutTheCommandOrDone() {
+        #expect(MaintainTierCFixer.narrationText(
+            fromModelReply: "Opening the settings view to see how toggles are wired.\n```bash\ncat src/settings.tsx\n```"
+        ) == "Opening the settings view to see how toggles are wired.")
+        #expect(MaintainTierCFixer.narrationText(
+            fromModelReply: "All done — the toggle persists now.\nDONE"
+        ) == "All done — the toggle persists now.")
+        // Old-style replies (command only, or bare DONE) carry no prose.
+        #expect(MaintainTierCFixer.narrationText(
+            fromModelReply: "```bash\nls\n```"
+        ) == nil)
+        #expect(MaintainTierCFixer.narrationText(fromModelReply: "DONE") == nil)
+    }
+
+    /// The per-file snapshot diff names writes, creations, and deletions, and
+    /// an identical snapshot names nothing — the pair of facts the no-progress
+    /// detector and the "Changed: …" transparency line both stand on.
+    @Test func changedPathsNameWritesCreationsAndDeletions() {
+        let previous = ["a.txt": "3|100.0", "b.txt": "5|100.0", "gone.txt": "1|100.0"]
+        let latest = ["a.txt": "9|200.0", "b.txt": "5|100.0", "new.txt": "2|200.0"]
+        #expect(MaintainTierCFixer.changedPathsBetween(previous: previous, latest: latest)
+            == ["a.txt", "gone.txt", "new.txt"])
+        #expect(MaintainTierCFixer.changedPathsBetween(previous: previous, latest: previous).isEmpty)
+    }
+
     /// The live-transcript output tail is display-safe: control sequences
     /// stripped, blank lines dropped, at most four lines, each line capped so
     /// one long compiler line can't flood a terminal row.
@@ -667,9 +695,11 @@ struct OnDemandEditEngineTests {
         defer { Self.removeRepo(repo) }
 
         let editCommand = "printf 'FIXED\\n' > app.txt"
+        // Replies in the shape the on-demand narration addendum asks for: one
+        // plain-English sentence of intent, then the command (or DONE).
         let fixer = MaintainTierCFixer(provider: ScriptedProvider([
-            "```bash\n\(editCommand)\n```",
-            "DONE",
+            "Writing FIXED into app.txt, which is what the request asks for.\n```bash\n\(editCommand)\n```",
+            "All done — app.txt now says FIXED.\nDONE",
         ]))
         var observedEvents: [MaintainTierCProgressEvent] = []
         let result = await fixer.attemptOnDemandEdit(
@@ -685,6 +715,14 @@ struct OnDemandEditEngineTests {
             return
         }
         #expect(observedEvents.first == .waitingOnTheModel(stepNumber: 1))
+        // The agent's OWN words stream out — both the step's intent sentence
+        // (with the fenced command stripped) and the DONE summary.
+        #expect(observedEvents.contains(.agentNarration(
+            text: "Writing FIXED into app.txt, which is what the request asks for.", stepNumber: 1
+        )))
+        #expect(observedEvents.contains(.agentNarration(
+            text: "All done — app.txt now says FIXED.", stepNumber: 2
+        )))
         #expect(observedEvents.contains(
             .runningJailedCommand(command: editCommand, stepNumber: 1)
         ))
@@ -692,6 +730,8 @@ struct OnDemandEditEngineTests {
             if case .jailedCommandFinished(let exitCode, _, _) = event { return exitCode == 0 }
             return false
         })
+        // The step's tree diff names exactly the file the agent wrote.
+        #expect(observedEvents.contains(.editedFiles(paths: ["app.txt"], stepNumber: 1)))
         #expect(observedEvents.contains(
             .verifyingTheChange(buildCommand: "true", testCommand: "grep -q OK health.txt")
         ))

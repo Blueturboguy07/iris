@@ -19,13 +19,14 @@
 //
 //  It is deliberately NOT the full autopilot state machine: an on-demand edit
 //  has no risk-gated per-command confirm loop, no fix ladder, no dev servers.
-//  The jailed ReAct loop lives inside MaintainTierCFixer and is a black box to
-//  the UI — so this runner NARRATES the coordinator's phases (locating source,
-//  building + testing, the finished diff) into the transcript as Iris's own
-//  prose and a single verification result line. It never fabricates shell
-//  commands that did not run — that would be dishonest theater — so it uses
-//  `.explanation` rows (Iris talking) and one real `.exitStatus`, not fake
-//  `.commandFromTheGuide` rows.
+//  The jailed ReAct loop lives inside MaintainTierCFixer; this runner renders
+//  the coordinator's prose (`.explanation` rows — Iris talking) AND, since the
+//  transparency pass (Aug 21 2026), the engine's own live progress events: the
+//  REAL jailed commands the model runs, their real output tails, and their
+//  real exit codes, streamed row by row as they happen. The founding rule is
+//  unchanged — it never fabricates a shell command that did not run (that
+//  would be dishonest theater); every `.commandFromTheGuide` row here is a
+//  command the jail actually executed.
 //
 
 import Combine
@@ -80,6 +81,29 @@ final class OnDemandEditRunner: ObservableObject, AutopilotTerminalPresenting {
     /// always tell Iris from the machine.
     func note(_ prose: String) {
         transcript.append(.explanation(text: prose))
+    }
+
+    // MARK: - The engine's live activity (real commands only, never theater)
+
+    /// A command the jailed loop is ACTUALLY running right now. Rendered
+    /// exactly like a guide command — a plain-English label over the
+    /// de-emphasised raw command — because it carries the same honesty: the
+    /// shell really ran it.
+    func recordExecutedCommand(_ commandText: String) {
+        transcript.append(.commandFromTheGuide(text: commandText))
+    }
+
+    /// The short display tail of that command's real output (already stripped
+    /// and secret-scrubbed by the engine before it gets here).
+    func recordCommandOutputTail(_ outputLines: [String]) {
+        for outputLine in outputLines {
+            transcript.append(.output(line: outputLine))
+        }
+    }
+
+    /// The command's real exit line, same rendering as a guide command's.
+    func recordCommandExit(exitCode: Int32, duration: TimeInterval) {
+        transcript.append(.exitStatus(code: exitCode, duration: duration))
     }
 
     /// The single honest verification result line for the whole edit: the

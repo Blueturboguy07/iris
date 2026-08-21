@@ -461,10 +461,28 @@ struct OnDemandEditCard: View {
                     .controlSize(.small)
                     .scaleEffect(0.62)
                     .frame(width: 13, height: 13)
+                // The status line is live now — the coordinator updates it with
+                // each real step the engine takes (the command being run, a
+                // rate-limit wait, the verification build), so this card shows
+                // what Iris is doing RIGHT NOW, not one frozen sentence.
                 Text(coordinator.statusLine ?? "Working on it under your model key…")
                     .font(.system(size: 11.5))
                     .foregroundColor(DS.Colors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // The reader can always stop a running edit. The stop lands at the
+            // next safe boundary: Iris finishes the step in flight, reverts
+            // everything it made, and ends with "nothing was changed" — so the
+            // button flips to a disabled "Stopping…" the moment it's tapped.
+            HStack(spacing: 8) {
+                Button(coordinator.readerAskedToStopTheRun ? "Stopping…" : "Stop") {
+                    coordinator.stopRunningEdit()
+                }
+                .irisTextButton(isDanger: true)
+                .disabled(coordinator.readerAskedToStopTheRun)
+                .help("Stops the edit at the next safe point and puts the app's source back exactly as it was.")
+                Spacer(minLength: 0)
             }
         }
     }

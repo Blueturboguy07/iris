@@ -328,6 +328,53 @@ import Testing
         #expect(Self.refusalReason(coordinator.phase) != nil)
     }
 
+    // MARK: - Reader stop + transparency (pure pieces)
+
+    /// A stop the READER chose must never read as a failure: the mapped copy is
+    /// the calm "stopped, nothing changed" sentence, with no build-script flag
+    /// and no settings offer (there is nothing to fix).
+    @Test func aReaderStopReasonMapsToACalmSentence() {
+        let mapped = OnDemandEditCoordinator.mappedFailure(
+            reason: MaintainTierCFixer.stoppedByReaderReason
+        )
+        #expect(mapped.userFacing == "Stopped at your request — nothing was changed.")
+        #expect(!mapped.wasBuildScriptBlock)
+        #expect(!mapped.offersModelKeySetup)
+    }
+
+    /// Only a DROPPED call (a timeout, a lost connection) is retried
+    /// identically — a refusal (bad credential, 429) would just refuse again,
+    /// and each has its own handling.
+    @Test func onlyTransportDropsCountAsTransient() {
+        #expect(MaintainTierCFixer.errorLooksLikeATransientTransportDrop(
+            AssistantTransportError.transportFailure(reason: "The request timed out.")
+        ))
+        #expect(MaintainTierCFixer.errorLooksLikeATransientTransportDrop(
+            URLError(.timedOut)
+        ))
+        #expect(!MaintainTierCFixer.errorLooksLikeATransientTransportDrop(
+            AssistantTransportError.bringYourOwnKeyRejected
+        ))
+        #expect(!MaintainTierCFixer.errorLooksLikeATransientTransportDrop(
+            AssistantTransportError.rateLimited(retryAfterSeconds: 5)
+        ))
+    }
+
+    /// The live-transcript output tail is display-safe: control sequences
+    /// stripped, blank lines dropped, at most four lines, each line capped so
+    /// one long compiler line can't flood a terminal row.
+    @Test func displayableOutputTailLinesAreStrippedAndCapped() {
+        let rawOutput = "\u{1B}[31mred error\u{1B}[0m\n\n"
+            + "line two\nline three\nline four\nline five\n"
+            + String(repeating: "x", count: 500) + "\n"
+        let tailLines = MaintainTierCFixer.displayableOutputTailLines(fromRawOutput: rawOutput)
+        #expect(tailLines.count == 4)
+        #expect(tailLines.allSatisfy { !$0.contains("\u{1B}") })
+        #expect(tailLines.allSatisfy { $0.count <= 220 })
+        // The tail keeps the END of the output — where the error usually is.
+        #expect(tailLines.last?.hasPrefix("xxxx") == true)
+    }
+
     // MARK: - Helpers
 
     private static func makeCoordinator(provenanceStore: InstallProvenanceStore) -> OnDemandEditCoordinator {
@@ -563,6 +610,92 @@ struct OnDemandEditEngineTests {
         #expect(Self.fileContents(repo, "package.json") == "{\"name\":\"x\"}")
         #expect(!Self.git(["branch", "--list", "iris/edit-*"], in: repo)
             .trimmingCharacters(in: .whitespacesAndNewlines).contains("iris/edit-"))
+    }
+
+    /// The reader's Stop is honored at the next step boundary and undoes
+    /// EVERYTHING: the model's tracked edit reverted, its untracked file
+    /// removed, `.git` restored, no branch created — and the result is the
+    /// dedicated stopped reason, never a generic failure.
+    @Test func aReaderStopRevertsEverythingAndEndsCalmly() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo()
+        defer { Self.removeRepo(repo) }
+
+        let fixer = MaintainTierCFixer(provider: ScriptedProvider([
+            "```bash\nprintf 'FIXED\\n' > app.txt; printf 'scratch\\n' > junk.txt\n```",
+            "DONE",
+        ]))
+        // "The reader taps Stop right after the first command finishes": the
+        // progress stream is the trigger, so the test pins the real sequence
+        // (command runs → stop lands → next boundary reverts) without counting
+        // internal polls.
+        var readerAskedToStop = false
+        let result = await fixer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "ffffffffffffffff0000000000000000",
+            request: "please make the app say FIXED", kind: .feature,
+            progressHandler: { progressEvent in
+                if case .jailedCommandFinished = progressEvent {
+                    readerAskedToStop = true
+                }
+            },
+            cancellationCheck: { readerAskedToStop },
+            verificationCommandsOverride: Self.fastCommands()
+        )
+
+        guard case .couldNotComplete(let reason) = result else {
+            Issue.record("expected the stopped result, got \(result)")
+            return
+        }
+        #expect(reason == MaintainTierCFixer.stoppedByReaderReason)
+        // The tracked edit is reverted, the untracked scratch file is gone,
+        // `.git` is back, and nothing was committed on any iris/edit- branch.
+        #expect(Self.fileContents(repo, "app.txt") == "BROKEN")
+        #expect(!FileManager.default.fileExists(atPath: repo + "/junk.txt"))
+        #expect(FileManager.default.fileExists(atPath: repo + "/.git"))
+        #expect(!Self.git(["branch", "--list", "iris/edit-*"], in: repo)
+            .trimmingCharacters(in: .whitespacesAndNewlines).contains("iris/edit-"))
+    }
+
+    /// The progress stream narrates the REAL run in order: the model
+    /// consulted, the exact jailed command, its green exit, verification with
+    /// the real build/test commands, and the commit. This is the transparency
+    /// surface's contract — every event is something that actually happened.
+    @Test func progressEventsNarrateTheRealRunInOrder() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo()
+        defer { Self.removeRepo(repo) }
+
+        let editCommand = "printf 'FIXED\\n' > app.txt"
+        let fixer = MaintainTierCFixer(provider: ScriptedProvider([
+            "```bash\n\(editCommand)\n```",
+            "DONE",
+        ]))
+        var observedEvents: [MaintainTierCProgressEvent] = []
+        let result = await fixer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "1111111111111111aaaaaaaaaaaaaaaa",
+            request: "please make the app say FIXED", kind: .feature,
+            progressHandler: { progressEvent in observedEvents.append(progressEvent) },
+            verificationCommandsOverride: Self.fastCommands()
+        )
+
+        guard case .appliedAndRebuilt = result else {
+            Issue.record("expected .appliedAndRebuilt, got \(result)")
+            return
+        }
+        #expect(observedEvents.first == .waitingOnTheModel(stepNumber: 1))
+        #expect(observedEvents.contains(
+            .runningJailedCommand(command: editCommand, stepNumber: 1)
+        ))
+        #expect(observedEvents.contains { event in
+            if case .jailedCommandFinished(let exitCode, _, _) = event { return exitCode == 0 }
+            return false
+        })
+        #expect(observedEvents.contains(
+            .verifyingTheChange(buildCommand: "true", testCommand: "grep -q OK health.txt")
+        ))
+        #expect(observedEvents.last == .committingTheChange)
     }
 
     // MARK: - Git repo helpers

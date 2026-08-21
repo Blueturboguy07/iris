@@ -189,6 +189,14 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// bundled with the backup. Drives an explicit confirm on the done card.
     @Published private(set) var isAwaitingPublishConsent: Bool = false
 
+    /// True from the moment the reader asks a `.running` edit to stop until
+    /// the engine acknowledges (it polls this at every step boundary, reverts
+    /// everything, and returns the stopped result). Published so the Stop
+    /// button can flip to a disabled "Stopping…" and the takeover terminal
+    /// can say so — the tap is acknowledged instantly even though the stop
+    /// itself lands at the next safe boundary.
+    @Published private(set) var readerAskedToStopTheRun: Bool = false
+
     /// The "watch it work" surface, presented through the same takeover the
     /// guide autopilot uses (see `OnDemandEditRunner`).
     let editRunner = OnDemandEditRunner()
@@ -220,13 +228,18 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// returns the engine's result. Injected so the whole machine is testable
     /// without a real model, git, or sandbox. Production resolves the reader's
     /// own provider live and drives `MaintainTierCFixer.attemptOnDemandEdit`.
+    /// `progressHandler` receives the engine's live activity (real commands,
+    /// exits, waits) for the transparency surface; `cancellationCheck` is the
+    /// poll the engine honors when the reader taps Stop.
     private let performOnDemandEdit: (
         _ resolvedClonePath: String,
         _ appSlug: String,
         _ appStack: BreakAppStack,
         _ changeId: String,
         _ scrubbedRequest: String,
-        _ kind: OnDemandEditKind
+        _ kind: OnDemandEditKind,
+        _ progressHandler: @escaping MaintainTierCProgressHandler,
+        _ cancellationCheck: @escaping MaintainTierCCancellationCheck
     ) async -> MaintainOnDemandEditResult
 
     /// Backs the committed branch up to the reader's OWN fork — fork-only, never
@@ -342,7 +355,9 @@ final class OnDemandEditCoordinator: ObservableObject {
                 _ appStack: BreakAppStack,
                 _ changeId: String,
                 _ scrubbedRequest: String,
-                _ kind: OnDemandEditKind
+                _ kind: OnDemandEditKind,
+                _ progressHandler: @escaping MaintainTierCProgressHandler,
+                _ cancellationCheck: @escaping MaintainTierCCancellationCheck
             ) async -> MaintainOnDemandEditResult
         )? = nil
     ) {
@@ -378,10 +393,12 @@ final class OnDemandEditCoordinator: ObservableObject {
 
     /// The production performer: resolve the reader's own model provider LIVE
     /// (never the funded proxy) and run the jailed on-demand edit through the
-    /// shared Tier C engine, build-script edits hard-blocked before the build.
+    /// shared Tier C engine, build-script edits hard-blocked before the build,
+    /// with the engine's live progress narrated and the reader's Stop honored.
     static let defaultPerformOnDemandEdit: (
-        String, String, BreakAppStack, String, String, OnDemandEditKind
-    ) async -> MaintainOnDemandEditResult = { resolvedClonePath, appSlug, appStack, changeId, scrubbedRequest, kind in
+        String, String, BreakAppStack, String, String, OnDemandEditKind,
+        @escaping MaintainTierCProgressHandler, @escaping MaintainTierCCancellationCheck
+    ) async -> MaintainOnDemandEditResult = { resolvedClonePath, appSlug, appStack, changeId, scrubbedRequest, kind, progressHandler, cancellationCheck in
         guard let provider = MaintainModelProviderResolver.firstAvailable() else {
             return .notEligible(reason: "no model key is available for the edit engine")
         }
@@ -392,7 +409,9 @@ final class OnDemandEditCoordinator: ObservableObject {
             appStack: appStack,
             changeId: changeId,
             request: scrubbedRequest,
-            kind: kind
+            kind: kind,
+            progressHandler: progressHandler,
+            cancellationCheck: cancellationCheck
         )
     }
 
@@ -753,6 +772,7 @@ final class OnDemandEditCoordinator: ObservableObject {
 
         phase = .running
         statusLine = "Working on it under your model key…"
+        readerAskedToStopTheRun = false
         editRunner.beginRun(appName: activeAppName ?? slug, kind: kind)
 
         Task { [weak self] in
@@ -808,11 +828,37 @@ final class OnDemandEditCoordinator: ObservableObject {
 
         let startedAt = Date()
         let result = await performOnDemandEdit(
-            resolvedClonePath, slug, stack, editChangeId, scrubbed, kind
+            resolvedClonePath, slug, stack, editChangeId, scrubbed, kind,
+            // The engine's live activity — every real jailed command, exit,
+            // and wait — streamed into the terminal transcript and the status
+            // line, so the run is never a black box to the reader again.
+            { [weak self] progressEvent in
+                self?.presentEngineProgress(progressEvent)
+            },
+            // The poll the engine honors when the reader taps Stop.
+            { [weak self] in
+                self?.readerAskedToStopTheRun ?? true
+            }
         )
         let elapsed = Date().timeIntervalSince(startedAt)
         editRunner.setWorking(false)
         lastResult = result
+
+        // A READER-initiated stop is its own calm ending, not a failure: the
+        // engine has already reverted everything, so release the lock and say
+        // plainly that nothing changed — never the "That didn't work" card for
+        // an act the reader chose.
+        if case .couldNotComplete(let reason) = result,
+           reason == MaintainTierCFixer.stoppedByReaderReason {
+            editRunner.note("Stopped — nothing was kept. Your clone is exactly as it was.")
+            editRunner.finishStopped()
+            readerAskedToStopTheRun = false
+            clonePathLock.release(clonePath: resolvedClonePath)
+            self.resolvedClonePath = nil
+            statusLine = "Stopped at your request — nothing was changed."
+            phase = .done
+            return
+        }
 
         switch result {
         case .appliedAndRebuilt(let branchName, _, _, let suitePassed):
@@ -846,6 +892,66 @@ final class OnDemandEditCoordinator: ObservableObject {
             phase = .notEligible(reason: reason)
             statusLine = reason
         }
+    }
+
+    /// The engine's live activity, turned into the reader-facing surfaces: a
+    /// transcript row in the takeover terminal for everything that really
+    /// happened, and a one-line "what Iris is doing right now" in `statusLine`
+    /// (which the eye-bar running card shows when the terminal is hidden). A
+    /// pending Stop keeps its own "Stopping…" status line — the transcript
+    /// still records what the engine finishes, but the headline stays the
+    /// reader's request.
+    private func presentEngineProgress(_ progressEvent: MaintainTierCProgressEvent) {
+        let stopIsPending = readerAskedToStopTheRun
+        func showStatus(_ line: String) {
+            if !stopIsPending { statusLine = line }
+        }
+        switch progressEvent {
+        case .waitingOnTheModel(let stepNumber):
+            showStatus(stepNumber == 1
+                ? "Reading the code and deciding where to start…"
+                : "Step \(stepNumber): deciding what to do next…")
+        case .runningJailedCommand(let command, _):
+            editRunner.recordExecutedCommand(command)
+            showStatus(GuideAutopilotFriendlyLabel.label(for: command))
+        case .jailedCommandFinished(let exitCode, let duration, let outputTailLines):
+            editRunner.recordCommandOutputTail(outputTailLines)
+            editRunner.recordCommandExit(exitCode: exitCode, duration: duration)
+        case .waitingOutARateLimit(let waitSeconds):
+            let line = "Anthropic is rate-limiting your credential — waiting \(waitSeconds)s, then continuing…"
+            editRunner.note(line)
+            showStatus(line)
+        case .retryingAfterATransportDrop:
+            let line = "A model call dropped (a timeout or network hiccup) — retrying the same step…"
+            editRunner.note(line)
+            showStatus(line)
+        case .verifyingTheChange(let buildCommand, let testCommand):
+            var verificationParts: [String] = []
+            if let buildCommand { verificationParts.append("building with `\(buildCommand)`") }
+            if let testCommand { verificationParts.append("running the tests (`\(testCommand)`)") }
+            let line = verificationParts.isEmpty
+                ? "The edit is made — checking it over…"
+                : "The edit is made — now \(verificationParts.joined(separator: ", then "))…"
+            editRunner.note(line)
+            showStatus(line)
+        case .committingTheChange:
+            let line = "It checks out — committing the change on a branch…"
+            editRunner.note(line)
+            showStatus(line)
+        }
+    }
+
+    /// The reader asked a `.running` edit to stop (the Stop button, or the
+    /// takeover terminal's red escape hatch). This latches the request; the
+    /// engine polls it at every step boundary, reverts everything it did, and
+    /// returns the stopped result — which `runEdit` turns into the calm
+    /// "stopped, nothing changed" ending. Distinct from `cancel()`, which only
+    /// backs out of the flow BEFORE anything runs.
+    func stopRunningEdit() {
+        guard phase == .running, !readerAskedToStopTheRun else { return }
+        readerAskedToStopTheRun = true
+        statusLine = "Stopping — Iris is finishing the current step, then putting everything back…"
+        editRunner.note("Stopping at your request — no more changes; anything already made is being reverted.")
     }
 
     // MARK: - Step 9: preview → keep or discard
@@ -1327,6 +1433,12 @@ final class OnDemandEditCoordinator: ObservableObject {
         if reason.contains("failed verification") {
             return ("Iris made a change but it didn't build or pass the tests, so it reverted everything. Nothing changed.", false, false)
         }
+        // Defensive only: `runEdit` intercepts the reader-stop result before
+        // mapping, so this fires only if a future caller forgets to — and a
+        // stop the reader chose must never read as a failure.
+        if reason.contains(MaintainTierCFixer.stoppedByReaderReason) {
+            return ("Stopped at your request — nothing was changed.", false, false)
+        }
         return ("Iris couldn't complete that edit — nothing changed. (\(reason))", false, false)
     }
 
@@ -1363,6 +1475,7 @@ final class OnDemandEditCoordinator: ObservableObject {
         derivedRepoRecipe = nil
         derivedRuntimeShape = nil
         clarificationAnswersByQuestionId = [:]
+        readerAskedToStopTheRun = false
         // Invalidate any in-flight request probe: its verdict (and watchdog)
         // must not advance a flow that has been reset out from under it.
         requestProbeGeneration += 1

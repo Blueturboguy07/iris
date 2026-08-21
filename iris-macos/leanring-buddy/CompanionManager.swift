@@ -940,11 +940,17 @@ final class CompanionManager: ObservableObject {
             onContinuePastSurfacedStep: {},
             onReaderFinishedManualStep: {},
             onEscapeHatch: { [weak self] in
-                // Background the terminal WITHOUT cancelling the run: the jailed
-                // loop keeps going and its result lands in the edit card's diff
-                // preview, so a long edit never traps the reader behind a dimmed
-                // desktop.
+                // The red light means what it means on the guide autopilot:
+                // STOP what Iris is doing (founder decision, Aug 21 2026 —
+                // a running edit must be cancellable; before this it only
+                // backgrounded the terminal and the loop was unstoppable).
+                // The coordinator latches the stop; the engine finishes the
+                // step in flight, reverts everything, and ends with "nothing
+                // was changed". The terminal is folded away too so a slow
+                // final step never traps the reader behind a dimmed desktop —
+                // the eye bar's "Stopping…" card is the surface while it lands.
                 guard let self else { return }
+                self.onDemandEditCoordinator.stopRunningEdit()
                 self.autopilotTakeoverController.dismiss(afterHold: false)
                 self.onDemandEditTakeoverIsUp = false
             }

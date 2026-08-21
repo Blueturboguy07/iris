@@ -83,6 +83,39 @@ enum MaintainOnDemandEditResult: Sendable {
     case notEligible(reason: String)
 }
 
+/// One observable moment inside the Tier C loop, delivered to the caller so a
+/// user-initiated run can SHOW what Iris is doing right now — the loop used to
+/// be a black box behind a single "Working on it…" line for its whole
+/// multi-minute life. Every event reports something that ACTUALLY happened (a
+/// real command, a real exit code, a real wait); the transparency surface
+/// never invents theater. Delivered on the main actor, in run order. The
+/// crash path passes no handler and is byte-for-byte unchanged.
+enum MaintainTierCProgressEvent: Sendable, Equatable {
+    /// The loop is waiting on the model to decide its next action.
+    case waitingOnTheModel(stepNumber: Int)
+    /// A model-authored command is about to run inside the Seatbelt jail.
+    case runningJailedCommand(command: String, stepNumber: Int)
+    /// The jailed command finished. `outputTailLines` is a short,
+    /// control-sequence-stripped, secret-scrubbed tail for display only.
+    case jailedCommandFinished(exitCode: Int32, duration: TimeInterval, outputTailLines: [String])
+    /// A 429 landed and the loop is waiting it out before retrying.
+    case waitingOutARateLimit(waitSeconds: Int)
+    /// A model call dropped mid-flight (a timeout or a lost connection) and
+    /// the loop is retrying the same request instead of abandoning the run.
+    case retryingAfterATransportDrop(waitSeconds: Int)
+    /// The model declared DONE; the un-jailed verification (build, then the
+    /// suite when the stack has one) is running through these commands.
+    case verifyingTheChange(buildCommand: String?, testCommand: String?)
+    /// Verification passed; the change is being committed on a branch.
+    case committingTheChange
+}
+
+/// The two optional seams a caller may hand `attemptOnDemandEdit`: live
+/// narration of the run, and a poll the loop honors to stop early. Both run on
+/// the main actor (the fixer's own isolation).
+typealias MaintainTierCProgressHandler = @MainActor (MaintainTierCProgressEvent) -> Void
+typealias MaintainTierCCancellationCheck = @MainActor () -> Bool
+
 @MainActor
 final class MaintainTierCFixer {
 
@@ -117,6 +150,53 @@ final class MaintainTierCFixer {
     /// is exhausted for far longer than a watched run should stall, so the run
     /// fails honestly instead.
     static let maximumRateLimitWaitSeconds = 120
+
+    /// How many DROPPED model calls (a timeout, a lost connection — never a
+    /// credential or quota refusal) one run will retry before giving up. A
+    /// single network hiccup used to abandon an entire long run on the spot
+    /// ("model call failed: The request timed out." with everything reverted);
+    /// a genuinely persistent outage still surfaces honestly once these are
+    /// spent.
+    static let maximumTransportDropRetriesPerRun = 3
+    /// The pause before re-sending a dropped call.
+    static let transportDropRetryWaitSeconds = 5
+
+    /// The exact `couldNotComplete` reason a run returns when the READER
+    /// stopped it. The coordinator matches this to present a calm "stopped,
+    /// nothing changed" ending instead of a failure card.
+    nonisolated static let stoppedByReaderReason = "stopped at your request"
+
+    /// True for the error shapes that mean "the call itself dropped" (a
+    /// timeout, a lost connection) rather than "the provider refused" (a 401,
+    /// a 429, an unparseable body). Only a drop is worth retrying identically —
+    /// a refusal would just refuse again.
+    nonisolated static func errorLooksLikeATransientTransportDrop(_ error: Error) -> Bool {
+        if case AssistantTransportError.transportFailure = error { return true }
+        if let urlError = error as? URLError {
+            return [.timedOut, .networkConnectionLost, .cannotConnectToHost, .notConnectedToInternet]
+                .contains(urlError.code)
+        }
+        return false
+    }
+
+    /// A short, display-safe tail of a jailed command's output for the live
+    /// transparency surface: control sequences stripped, secrets scrubbed with
+    /// the same scrubber all model-bound text uses (this stays local, but the
+    /// terminal is screenshotted and screen-shared, so scrub anyway), last few
+    /// non-empty lines only, each capped so one long line can't flood a row.
+    nonisolated static func displayableOutputTailLines(fromRawOutput rawOutput: String) -> [String] {
+        // Scrub the whole blob BEFORE splitting so the multi-line private-key
+        // pattern still matches; strip control sequences per line AFTER,
+        // because the stripper is a per-pty-line helper whose final filter
+        // deletes newlines (feeding it a multi-line blob collapses everything
+        // onto one line).
+        let nonEmptyLines = GuideAutopilotOutputBuffer.scrubbed(rawOutput)
+            .components(separatedBy: .newlines)
+            .map { GuideAutopilotOutputBuffer.strippedOfControlSequences($0) }
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return nonEmptyLines.suffix(4).map { String($0.prefix(220)) }
+    }
 
     /// How long to wait out one 429: the server's own `Retry-After` when it
     /// sent one, clamped to [1, cap]; the default when it did not.
@@ -262,6 +342,15 @@ final class MaintainTierCFixer {
         changeId: String,
         request: String,
         kind: OnDemandEditKind,
+        // Live narration of the run (every real command, exit, wait, and
+        // verification stage) for the "watch it work" surface. nil narrates
+        // nothing — the pre-transparency behavior.
+        progressHandler: MaintainTierCProgressHandler? = nil,
+        // Polled at every step boundary; when it turns true the loop stops,
+        // reverts everything it did, and returns
+        // `couldNotComplete(stoppedByReaderReason)`. nil means the run cannot
+        // be stopped mid-flight — the pre-cancel behavior.
+        cancellationCheck: MaintainTierCCancellationCheck? = nil,
         // When false (the default), a model edit to a build-script file is a
         // HARD block, applied BEFORE the un-jailed verification build could run
         // it. The coordinator may pass true only after an explicit user
@@ -310,7 +399,9 @@ final class MaintainTierCFixer {
                     ]
                 )
             },
-            verificationCommandsOverride: verificationCommandsOverride
+            verificationCommandsOverride: verificationCommandsOverride,
+            progressHandler: progressHandler,
+            cancellationCheck: cancellationCheck
         )
         switch outcome {
         case .committed(let branchName, let suitePassed):
@@ -360,7 +451,11 @@ final class MaintainTierCFixer {
         deriveFeatureEngineRecipe: Bool,
         modelAuthoredBuildCommand: String?,
         commitVocabulary: (_ suitePassed: Bool?) -> (subject: String, trailerLines: [String]),
-        verificationCommandsOverride: VerificationCommands?
+        verificationCommandsOverride: VerificationCommands?,
+        // Live narration + reader-initiated stop (see `attemptOnDemandEdit`).
+        // Both default nil so the crash path's `attemptFix` call is untouched.
+        progressHandler: MaintainTierCProgressHandler? = nil,
+        cancellationCheck: MaintainTierCCancellationCheck? = nil
     ) async -> EditLoopOutcome {
         guard MaintainSandbox.isAvailable else {
             return .notEligible(reason: "the sandbox is unavailable on this machine")
@@ -383,6 +478,26 @@ final class MaintainTierCFixer {
             _ = try? await runner.run(
                 "rm -rf .git 2>/dev/null; mv '\(gitBackup)' .git 2>/dev/null || true", deadline: 60
             )
+        }
+
+        /// Undo everything for a READER-initiated stop: `.git` back, the
+        /// model's uncommitted edits reverted, untracked files it created
+        /// removed. Safe because the coordinator refuses a dirty tree up front
+        /// — the only files this can touch are ones the loop itself made.
+        func revertEverythingForAReaderStop() async -> EditLoopOutcome {
+            await restoreGit()
+            _ = try? await runner.run("git checkout -- . && git clean -fd --quiet", deadline: 120)
+            return .couldNotFix(reason: Self.stoppedByReaderReason)
+        }
+
+        /// Sleep out a wait in one-second slices, returning early the moment
+        /// the reader's stop request lands — a two-minute rate-limit wait must
+        /// never make a Stop tap feel ignored.
+        func sleepUnlessStopped(waitSeconds: Int) async {
+            for _ in 0..<max(waitSeconds, 0) {
+                if cancellationCheck?() == true { return }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
         }
 
         // Feature Engine recipe (plan §4/§8), on-demand only so the crash path's
@@ -439,7 +554,15 @@ final class MaintainTierCFixer {
         // way a real failure does. Bounded: at most this many waits per run,
         // each capped, then the failure is surfaced honestly.
         var rateLimitWaitsRemaining = Self.maximumRateLimitWaitsPerRun
+        var transportDropRetriesRemaining = Self.maximumTransportDropRetriesPerRun
         for step in 1...Self.runawayStepCeiling {
+            // The reader's stop request is honored at every step boundary:
+            // put the tree back exactly as it was and end the run — never
+            // leave a half-made edit behind.
+            if cancellationCheck?() == true {
+                return await revertEverythingForAReaderStop()
+            }
+            progressHandler?(.waitingOnTheModel(stepNumber: step))
             let reply: String
             do {
                 reply = try await provider.respond(
@@ -452,10 +575,22 @@ final class MaintainTierCFixer {
                 rateLimitWaitsRemaining -= 1
                 let waitSeconds = Self.rateLimitWaitSeconds(retryAfterSeconds: retryAfterSeconds)
                 irisTrace("maintain: tier-c rate-limited at step \(step), waiting \(waitSeconds)s (\(rateLimitWaitsRemaining) waits left)")
-                try? await Task.sleep(nanoseconds: UInt64(waitSeconds) * 1_000_000_000)
+                progressHandler?(.waitingOutARateLimit(waitSeconds: waitSeconds))
+                await sleepUnlessStopped(waitSeconds: waitSeconds)
                 // Nothing was appended to the conversation, so re-entering the
                 // loop retries the SAME request; the burned step keeps the run
                 // bounded by the step cap exactly as before.
+                continue
+            } catch where Self.errorLooksLikeATransientTransportDrop(error)
+                && transportDropRetriesRemaining > 0 {
+                // A dropped call (a timeout, a lost connection) says nothing
+                // about the credential or the work — it used to abandon the
+                // entire run on the spot. Retry the SAME request a bounded
+                // number of times before failing honestly.
+                transportDropRetriesRemaining -= 1
+                irisTrace("maintain: tier-c model call dropped at step \(step), retrying (\(transportDropRetriesRemaining) retries left)")
+                progressHandler?(.retryingAfterATransportDrop(waitSeconds: Self.transportDropRetryWaitSeconds))
+                await sleepUnlessStopped(waitSeconds: Self.transportDropRetryWaitSeconds)
                 continue
             } catch {
                 await restoreGit()
@@ -489,6 +624,12 @@ final class MaintainTierCFixer {
             }
             commandsAlreadyRun.insert(command)
 
+            // A stop that landed while the model was thinking: do not run the
+            // command it just chose — put everything back and end.
+            if cancellationCheck?() == true {
+                return await revertEverythingForAReaderStop()
+            }
+
             guard let jailed = MaintainSandbox.jailedInvocation(
                 forCommand: command, repoRootPath: clonePath
             ) else {
@@ -496,8 +637,16 @@ final class MaintainTierCFixer {
                 return .couldNotFix(reason: "could not build the sandbox for a command")
             }
             defer { try? FileManager.default.removeItem(atPath: jailed.profilePath) }
+            progressHandler?(.runningJailedCommand(command: command, stepNumber: step))
+            let commandStartedAt = Date()
             let result = try? await runner.run(jailed.invocation, deadline: 120)
+            let commandDuration = Date().timeIntervalSince(commandStartedAt)
             let output = String((result?.outputTail ?? "(no output)").suffix(4000))
+            progressHandler?(.jailedCommandFinished(
+                exitCode: result?.exitCode ?? -1,
+                duration: commandDuration,
+                outputTailLines: Self.displayableOutputTailLines(fromRawOutput: output)
+            ))
             irisTrace("maintain: tier-c step \(step) ran a jailed command, exit=\(result?.exitCode ?? -1)")
             conversation.append(MaintainChatTurn(
                 role: "user",
@@ -532,6 +681,14 @@ final class MaintainTierCFixer {
         // needs the network and runs outside the jail through the ordinary
         // runner. .git is back, so a passing tree can be committed.
         await restoreGit()
+
+        // A stop that landed during the loop's final step: nothing proceeds to
+        // verification or commit — the reader asked for their clone back.
+        // (`.git` is already restored above, so only the tree revert remains.)
+        if cancellationCheck?() == true {
+            _ = try? await runner.run("git checkout -- . && git clean -fd --quiet", deadline: 120)
+            return .couldNotFix(reason: Self.stoppedByReaderReason)
+        }
 
         guard declaredDone else {
             _ = try? await runner.run("git checkout -- . && git clean -fd --quiet", deadline: 120)
@@ -608,6 +765,9 @@ final class MaintainTierCFixer {
             )
         }
 
+        progressHandler?(.verifyingTheChange(
+            buildCommand: commands.buildCommand, testCommand: commands.testCommand
+        ))
         let verification = await VerificationHarness.verifyAppliedPatch(
             runner: runner, commands: commands, reproCommand: nil
         )
@@ -618,6 +778,15 @@ final class MaintainTierCFixer {
             )
         }
 
+        // A stop that landed during the verification build is still honored —
+        // the change is reverted, not committed. (The reader can always re-run
+        // the request; a change kept AFTER they asked to stop is worse.)
+        if cancellationCheck?() == true {
+            _ = try? await runner.run("git checkout -- . && git clean -fd --quiet", deadline: 120)
+            return .couldNotFix(reason: Self.stoppedByReaderReason)
+        }
+
+        progressHandler?(.committingTheChange)
         let vocabulary = commitVocabulary(verification.suitePassed)
         let branchName = await MaintainFixCommit.commitOnBranch(
             plan: MaintainFixCommitPlan(

@@ -46,7 +46,14 @@ enum AppRelaunchPackagingResult: Sendable {
     /// build (newer than the moment the build started, so a stale bundle from a
     /// prior build is never mistaken for the fresh one). Nothing has been
     /// terminated yet — the running app is still up and untouched.
-    case artifactReady(artifactPath: String)
+    ///
+    /// `signingSummary` is one plain-English sentence about the artifact's code
+    /// signature, and it is load-bearing for expectations rather than decoration:
+    /// macOS keys TCC grants (screen recording, camera, mic, folders) to the
+    /// SIGNATURE, so an ad-hoc-signed rebuild is a brand new app to the system
+    /// and the reader's permissions reset. The coordinator shows this sentence so
+    /// that outcome is disclosed before it surprises them.
+    case artifactReady(artifactPath: String, signingSummary: String)
     /// This stack has no relaunchable macOS artifact at all — a Next.js web app,
     /// a swiftMacOS/`.other` app with no build vocabulary, or an Electron repo
     /// that declares no macOS packaging script Iris recognizes. Honest refusal,
@@ -99,6 +106,20 @@ final class AppRelaunchService {
     /// before concluding it will not (an unsaved-work dialog is holding it).
     /// Short, because a well-behaved app quits in well under this.
     private let gracefulQuitTimeout: TimeInterval
+
+    /// How Iris gets a code-signing identity that is IDENTICAL on every rebuild,
+    /// or nil when there is none to be had. Injected rather than called directly
+    /// so packaging stays testable without a keychain, and defaulted to nil so
+    /// this service behaves exactly as it did before anything wires it up: no
+    /// signing attempt, no keychain access, no consent prompt.
+    ///
+    /// Why it matters: macOS keys TCC grants to a code signature. A packaging
+    /// build with no identity produces a different ad-hoc signature every time,
+    /// so every rebuild looks like a new app and the reader re-grants screen
+    /// recording, camera, mic and folder access each round. One stable identity
+    /// makes the rebuild the SAME app to the system. See
+    /// `IrisLocalSigningIdentity` and `scripts/deploy-iris-local.sh`.
+    var resolveSigningIdentity: (() async -> StableSigningIdentity?)?
 
     init(packagingDeadline: TimeInterval = 1500, gracefulQuitTimeout: TimeInterval = 10) {
         self.packagingDeadline = packagingDeadline
@@ -177,7 +198,70 @@ final class AppRelaunchService {
                 reason: "the build finished but Iris couldn't find a launchable app it produced"
             )
         }
-        return .artifactReady(artifactPath: artifactPath)
+
+        // Give the fresh bundle a signature that will be the same next rebuild,
+        // if an identity is available. This can only IMPROVE the artifact — a
+        // signing failure leaves the ad-hoc bundle exactly as the build produced
+        // it, so it never turns a successful package into a failed one.
+        let signingSummary = await signFreshArtifactWithAStableIdentityIfAvailable(artifactPath: artifactPath)
+        return .artifactReady(artifactPath: artifactPath, signingSummary: signingSummary)
+    }
+
+    // MARK: - Stable signing (so a rebuild is not a new app to macOS)
+
+    /// What the reader is told when the fresh build could not be given a stable
+    /// signature. Deliberately blunt: the permission reset is the consequence
+    /// they will actually notice, so it is named rather than implied.
+    static let adHocSigningSummary =
+        "ad-hoc — macOS will treat this build as a new app, so its permissions may reset"
+
+    /// Sign the packaged artifact with the injected stable identity, and return
+    /// the one-sentence summary that travels with the packaging result. With no
+    /// seam wired up (the default) this signs nothing and reports the honest
+    /// ad-hoc sentence.
+    private func signFreshArtifactWithAStableIdentityIfAvailable(artifactPath: String) async -> String {
+        guard let resolveSigningIdentity else { return Self.adHocSigningSummary }
+        guard let identity = await resolveSigningIdentity() else { return Self.adHocSigningSummary }
+        let outcome = await IrisLocalSigningIdentity.signApplicationBundle(
+            atPath: artifactPath, identity: identity
+        )
+        return Self.signingSummary(forSigningOutcome: outcome, identity: identity)
+    }
+
+    /// Pure: the sentence for a signing outcome. A failure still reports the
+    /// ad-hoc consequence FIRST — what the reader needs to know is what will
+    /// happen to their permissions, not which tool complained.
+    static func signingSummary(
+        forSigningOutcome outcome: SigningOutcome,
+        identity: StableSigningIdentity
+    ) -> String {
+        switch outcome {
+        case .signed:
+            return "signed with \(identity.codesignIdentityName) — macOS should keep this app's existing permissions"
+        case .failed(let reason):
+            return "\(adHocSigningSummary) (signing with \(identity.codesignIdentityName) failed: \(reason))"
+        }
+    }
+
+    // MARK: - Packaging-metadata verification
+
+    /// Check that the packaged artifact really carries the packaging metadata an
+    /// edit claimed to add — an Info.plist key, an entitlement. This is the
+    /// answer to packaging-metadata edits verifying as no-ops: the verification
+    /// build is a COMPILE CHECK, and a plist key added to the wrong file (or
+    /// misspelled, or added to a source template the packaging step overwrites)
+    /// compiles perfectly. Empty array = every expectation held.
+    ///
+    /// Forwards to `IrisLocalSigningIdentity`, which owns the argv-invoked tool
+    /// runner and the entitlements parsing this needs, so callers that already
+    /// think in terms of packaging can reach it here.
+    static func verifyPackagedMetadata(
+        artifactPath: String,
+        expectations: PackagingExpectations
+    ) async -> [String] {
+        await IrisLocalSigningIdentity.verifyPackagedMetadata(
+            artifactPath: artifactPath, expectations: expectations
+        )
     }
 
     // MARK: - Step 2: terminate the running instance, then launch the fresh build

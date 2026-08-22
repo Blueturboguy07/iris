@@ -256,22 +256,29 @@ import Testing
 
     // MARK: - Structural honesty of the result type
 
-    /// The on-demand result deliberately has NO "verified" case — an on-demand
-    /// edit runs with `reproCommand` nil and can only ever earn a clean apply.
-    /// This exhaustive switch is the tripwire: adding a `.verified`-style case
-    /// would make it non-exhaustive and fail to compile, forcing a re-review of
-    /// the honesty contract.
-    @Test func theResultTypeCannotRepresentAVerifiedEdit() {
+    /// The honesty contract, re-ratified Aug 22 2026 (founder decision to
+    /// enable repro legs): there is still NO standalone "verified" case. The
+    /// only verified-ness the type can express is `symptomVerifiedByRepro`
+    /// on an applied change, which DEFAULTS to false and which the engine sets
+    /// only for a BUG FIX whose model-authored repro cleared all three legs —
+    /// a feature is never repro-verified (the engine never runs one for it;
+    /// see `aFeatureNeverRunsAReproEvenWhenOffered`). This exhaustive switch
+    /// is the tripwire: a new case makes it non-exhaustive and fails to
+    /// compile, forcing a re-review of the contract.
+    @Test func theResultTypeDefaultsToUnverifiedAndHasNoStandaloneVerifiedCase() {
         let result: MaintainOnDemandEditResult = .appliedAndRebuilt(
             branchName: "iris/edit-x", changeId: "x", kind: .feature, suitePassed: true
         )
         switch result {
-        case .appliedAndRebuilt(_, _, let kind, _):
+        case .appliedAndRebuilt(_, _, let kind, _, let symptomVerifiedByRepro):
             #expect(kind == .feature)
+            #expect(symptomVerifiedByRepro == false)
         case .couldNotComplete:
             Issue.record("unexpected couldNotComplete")
         case .notEligible:
             Issue.record("unexpected notEligible")
+        case .blockedByModel:
+            Issue.record("unexpected blockedByModel")
         }
     }
 
@@ -558,6 +565,38 @@ import Testing
             > NSWindow.Level.normal.rawValue)
     }
 
+    // MARK: - Reply parsing: fences, repro, BLOCKED
+
+    /// The command parser never mistakes a tagged repro/manifest block for the
+    /// shell command — a reply carrying only a ```manifest declaration is "no
+    /// command", not "run the JSON".
+    @Test func taggedReproAndManifestBlocksAreNeverTheCommand() {
+        let replyWithManifestOnly = "Need a crate.\n```manifest\n{\"kind\":\"addCargoDependency\"}\n```"
+        #expect(MaintainTierCFixer.extractBashCommand(from: replyWithManifestOnly) == nil)
+        #expect(MaintainTierCFixer.extractFencedBlock(tagged: "manifest", from: replyWithManifestOnly)
+            == "{\"kind\":\"addCargoDependency\"}")
+
+        let replyWithBoth = "Checking.\n```repro\ngrep -q OK out.txt\n```\n```bash\ncat a.txt\n```"
+        #expect(MaintainTierCFixer.extractBashCommand(from: replyWithBoth) == "cat a.txt")
+        #expect(MaintainTierCFixer.extractFencedBlock(tagged: "repro", from: replyWithBoth) == "grep -q OK out.txt")
+
+        // Untagged and sh fences are still commands.
+        #expect(MaintainTierCFixer.extractBashCommand(from: "```\nls\n```") == "ls")
+        #expect(MaintainTierCFixer.extractBashCommand(from: "```sh\npwd\n```") == "pwd")
+    }
+
+    @Test func theBlockedVerbParsesItsSentenceAndOptionalQuestion() {
+        let withQuestion = MaintainTierCFixer.blockedDeclaration(
+            in: "Looked everywhere.\nBLOCKED: the failing code is not in this repository\nQUESTION: which account are you signed into?"
+        )
+        #expect(withQuestion?.explanation == "the failing code is not in this repository")
+        #expect(withQuestion?.question == "which account are you signed into?")
+        let withoutQuestion = MaintainTierCFixer.blockedDeclaration(in: "BLOCKED: needs a dependency you forbade")
+        #expect(withoutQuestion?.explanation == "needs a dependency you forbade")
+        #expect(withoutQuestion?.question == nil)
+        #expect(MaintainTierCFixer.blockedDeclaration(in: "```bash\nls\n```") == nil)
+    }
+
     // MARK: - Helpers
 
     private static func makeCoordinator(provenanceStore: InstallProvenanceStore) -> OnDemandEditCoordinator {
@@ -654,7 +693,7 @@ struct OnDemandEditEngineTests {
             verificationCommandsOverride: Self.fastCommands()
         )
 
-        guard case .appliedAndRebuilt(let branchName, _, let kind, let suitePassed) = result else {
+        guard case .appliedAndRebuilt(let branchName, _, let kind, let suitePassed, _) = result else {
             Issue.record("expected .appliedAndRebuilt, got \(result)")
             return
         }
@@ -1144,6 +1183,151 @@ struct OnDemandEditEngineTests {
         #expect(recordingProvider.openingImagePresenceByCall == [true, false])
         #expect(recordingProvider.openingTextByCall.allSatisfy { $0.contains("accessibility=denied") })
         #expect(recordingProvider.openingTextByCall.first?.contains("screenshot of the app's current window") == true)
+    }
+
+    /// A BLOCKED before any investigation is a dodge: it is steered ("read the
+    /// code first"), and a model that then does the work still lands the fix.
+    @Test func aBlockedBeforeInvestigatingIsSteeredNotHonored() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo()
+        defer { Self.removeRepo(repo) }
+
+        let recordingProvider = EvidenceRecordingProvider([
+            "BLOCKED: too hard",
+            "Fine, looking.\n```bash\nprintf 'FIXED\\n' > app.txt\n```",
+            "DONE",
+        ])
+        let fixer = MaintainTierCFixer(provider: recordingProvider)
+        let result = await fixer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "8888888888888888aaaaaaaaaaaaaaaa",
+            request: "make the app say FIXED", kind: .bugFix,
+            verificationCommandsOverride: Self.fastCommands()
+        )
+        guard case .appliedAndRebuilt = result else {
+            Issue.record("expected the steered run to land, got \(result)")
+            return
+        }
+        #expect(Self.fileContents(repo, "app.txt") == "FIXED")
+    }
+
+    /// After investigating, BLOCKED is honored: everything reverts and the
+    /// model's sentence + question reach the caller verbatim — the honest
+    /// alternative to a cosmetic change.
+    @Test func aBlockedAfterInvestigatingRevertsAndCarriesTheQuestion() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo()
+        defer { Self.removeRepo(repo) }
+
+        let fixer = MaintainTierCFixer(provider: ScriptedProvider([
+            "Reading.\n```bash\ncat app.txt\n```",
+            "Looked.\nBLOCKED: the failing code is not in this repository\nQUESTION: which account are you signed into?",
+        ]))
+        let result = await fixer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "9999999999999999bbbbbbbbbbbbbbbb",
+            request: "it keeps logging me out", kind: .bugFix,
+            verificationCommandsOverride: Self.fastCommands()
+        )
+        guard case .blockedByModel(let explanation, let question) = result else {
+            Issue.record("expected .blockedByModel, got \(result)")
+            return
+        }
+        #expect(explanation == "the failing code is not in this repository")
+        #expect(question == "which account are you signed into?")
+        #expect(Self.fileContents(repo, "app.txt") == "BROKEN")
+        #expect(FileManager.default.fileExists(atPath: repo + "/.git"))
+    }
+
+    /// A bug fix whose repro fails before the patch, passes after, and fails
+    /// again on revert earns "Verified" — the one honest path to the word.
+    @Test func aBugFixWithADistinguishingReproEarnsVerified() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo()
+        defer { Self.removeRepo(repo) }
+
+        let fixer = MaintainTierCFixer(provider: ScriptedProvider([
+            "Fixing.\n```bash\nprintf 'FIXED\\n' > app.txt\n```",
+            "Done — here is the check.\n```repro\ngrep -q FIXED app.txt\n```\nDONE",
+        ]))
+        var observedEvents: [MaintainTierCProgressEvent] = []
+        let result = await fixer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "aaaaaaaaaaaaaaaa1111111111111111",
+            request: "the app says BROKEN", kind: .bugFix,
+            progressHandler: { progressEvent in observedEvents.append(progressEvent) },
+            verificationCommandsOverride: Self.fastCommands()
+        )
+        guard case .appliedAndRebuilt(_, _, _, _, let symptomVerifiedByRepro) = result else {
+            Issue.record("expected .appliedAndRebuilt, got \(result)")
+            return
+        }
+        #expect(symptomVerifiedByRepro == true)
+        #expect(Self.git(["log", "-1", "--format=%B"], in: repo).contains("Verified: repro-legs"))
+        #expect(observedEvents.contains(.runningModelAuthoredRepro(command: "grep -q FIXED app.txt")))
+    }
+
+    /// A repro that passes regardless (here `true`) proves nothing: it is
+    /// discarded, the change still lands, and it is "Applied", never
+    /// "Verified" — a bad check never blocks a good fix.
+    @Test func aNonDistinguishingReproIsDiscardedAndTheChangeStaysApplied() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo()
+        defer { Self.removeRepo(repo) }
+
+        let fixer = MaintainTierCFixer(provider: ScriptedProvider([
+            "```bash\nprintf 'FIXED\\n' > app.txt\n```",
+            "```repro\ntrue\n```\nDONE",
+        ]))
+        var observedEvents: [MaintainTierCProgressEvent] = []
+        let result = await fixer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "bbbbbbbbbbbbbbbb2222222222222222",
+            request: "the app says BROKEN", kind: .bugFix,
+            progressHandler: { progressEvent in observedEvents.append(progressEvent) },
+            verificationCommandsOverride: Self.fastCommands()
+        )
+        guard case .appliedAndRebuilt(_, _, _, _, let symptomVerifiedByRepro) = result else {
+            Issue.record("expected .appliedAndRebuilt, got \(result)")
+            return
+        }
+        #expect(symptomVerifiedByRepro == false)
+        #expect(Self.git(["log", "-1", "--format=%B"], in: repo).contains("Applied:"))
+        #expect(observedEvents.contains { event in
+            if case .modelAuthoredReproDiscarded = event { return true }
+            return false
+        })
+    }
+
+    /// A FEATURE never runs a repro, even if the model offers one — it can
+    /// only ever be "applied".
+    @Test func aFeatureNeverRunsAReproEvenWhenOffered() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo()
+        defer { Self.removeRepo(repo) }
+
+        let fixer = MaintainTierCFixer(provider: ScriptedProvider([
+            "```bash\nprintf 'FIXED\\n' > app.txt\n```",
+            "```repro\ngrep -q FIXED app.txt\n```\nDONE",
+        ]))
+        var observedEvents: [MaintainTierCProgressEvent] = []
+        let result = await fixer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "cccccccccccccccc3333333333333333",
+            request: "make it say FIXED", kind: .feature,
+            progressHandler: { progressEvent in observedEvents.append(progressEvent) },
+            verificationCommandsOverride: Self.fastCommands()
+        )
+        guard case .appliedAndRebuilt(_, _, _, _, let symptomVerifiedByRepro) = result else {
+            Issue.record("expected .appliedAndRebuilt, got \(result)")
+            return
+        }
+        #expect(symptomVerifiedByRepro == false)
+        #expect(!observedEvents.contains { event in
+            if case .runningModelAuthoredRepro = event { return true }
+            return false
+        })
+        #expect(!Self.git(["log", "-1", "--format=%B"], in: repo).contains("Verified:"))
     }
 
     // MARK: - Git repo helpers

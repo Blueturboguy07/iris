@@ -217,6 +217,31 @@ final class CompanionManager: ObservableObject {
             return hasKnownBundleId
                 && AppRelaunchService.stackCanProduceARelaunchableMacArtifact(stack)
         }
+        // A STABLE signing identity for rebuilt apps (founder decision, Aug 22
+        // 2026): the user's Developer ID when one is in the keychain, else a
+        // persistent self-signed "Iris Local Code Signing" certificate created
+        // ONCE behind this consent — so macOS keeps treating each rebuild as
+        // the same app and its permissions survive. Until this seam resolves
+        // an identity, packaging is ad-hoc exactly as before.
+        appRelaunchService.resolveSigningIdentity = {
+            await IrisLocalSigningIdentity.resolveStableIdentity(
+                requestConsentToCreateLocalCertificate: {
+                    NSApp.activate(ignoringOtherApps: true)
+                    let alert = NSAlert()
+                    alert.messageText = "Create a local signing certificate on this Mac?"
+                    alert.informativeText = """
+                    Without one, macOS sees every rebuild Iris makes as a brand-new \
+                    app and its permissions (Accessibility, Screen Recording, …) reset \
+                    each time. The certificate stays on this Mac and is only used to \
+                    sign apps Iris rebuilds for you.
+                    """
+                    alert.addButton(withTitle: "Create certificate")
+                    alert.addButton(withTitle: "Not now")
+                    return alert.runModal() == .alertFirstButtonReturn
+                }
+            )
+        }
+
         coordinator.packageEditedAppFromClone = { [weak self] appSlug in
             guard let self,
                   let clonePath = self.installProvenanceStore.provenance(forAppSlug: appSlug)?.clonePath else {
@@ -239,6 +264,17 @@ final class CompanionManager: ObservableObject {
                 freshBuildArtifactPath: artifactPath,
                 allowForceQuit: allowForceQuit
             )
+        }
+
+        // Where the INSTALLED app lives, so an automatic delivery can be undone
+        // after the fact (quit the rebuilt instance, bring the installed one
+        // back). Resolved through the same bundle id the inventory row carries.
+        coordinator.installedApplicationPathForApp = { [weak self] appSlug in
+            guard let self,
+                  let macBundleId = self.appInventoryService.installedEntriesForDisplay
+                      .first(where: { $0.slug == appSlug })?.macBundleId,
+                  !macBundleId.isEmpty else { return nil }
+            return NSWorkspace.shared.urlForApplication(withBundleIdentifier: macBundleId)?.path
         }
 
         // Runtime evidence for the edit agent: a screenshot of the picked

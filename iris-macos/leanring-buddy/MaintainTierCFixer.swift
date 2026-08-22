@@ -73,11 +73,21 @@ enum MaintainOnDemandEditResult: Sendable {
     /// Applied, built, and (when the stack has a suite) suite-green, then
     /// committed on `branchName`. `suitePassed` is nil when the stack has no
     /// test command — surfaced honestly, never counted as a silent green.
-    case appliedAndRebuilt(branchName: String, changeId: String, kind: OnDemandEditKind, suitePassed: Bool?)
+    /// `symptomVerifiedByRepro` is true ONLY for a bug fix whose model-authored
+    /// repro command cleared all three legs (failed before the patch, passed
+    /// after, failed again with the patch reverted) — the one path that may
+    /// honestly say "verified". Features never set it.
+    case appliedAndRebuilt(branchName: String, changeId: String, kind: OnDemandEditKind, suitePassed: Bool?, symptomVerifiedByRepro: Bool = false)
     /// The loop ran but produced no committable, verified change — out of
     /// steps, changed nothing, edited a build-script file, or failed
     /// verification. `reason` is user-safe.
     case couldNotComplete(reason: String)
+    /// The model itself declared, after investigating, that the change cannot
+    /// be made under the harness's constraints (not a source bug, needs a fact
+    /// only the user has, …) — its own sentence verbatim, plus an optional
+    /// question the user can answer to retry. Everything is reverted. This is
+    /// the honest alternative to a cosmetic fix.
+    case blockedByModel(explanation: String, questionForUser: String?)
     /// A precondition failed before the loop even started (no sandbox, an
     /// unusable clone path).
     case notEligible(reason: String)
@@ -133,6 +143,18 @@ enum MaintainTierCProgressEvent: Sendable, Equatable {
     case verificationFailedPreparingRepair(stage: String, remainingRounds: Int)
     /// Verification passed; the change is being committed on a branch.
     case committingTheChange
+    /// A bug fix's model-authored repro check is about to run through the
+    /// three legs (fails before the patch, passes after, fails on revert).
+    case runningModelAuthoredRepro(command: String)
+    /// The repro did not distinguish broken from fixed (passed before the
+    /// patch, or passed with it reverted), so it was discarded and the change
+    /// continues as "applied", never "verified".
+    case modelAuthoredReproDiscarded(reason: String)
+    /// The model DECLARED a manifest change (it never writes build files
+    /// itself); the run is asking the reader before Iris applies it.
+    case awaitingManifestChangeApproval(summary: String)
+    /// The reader approved and Iris's own code applied the declared change.
+    case manifestChangeApplied(request: MaintainManifestChangeRequest, summary: String)
 }
 
 /// The two optional seams a caller may hand `attemptOnDemandEdit`: live
@@ -140,6 +162,10 @@ enum MaintainTierCProgressEvent: Sendable, Equatable {
 /// the main actor (the fixer's own isolation).
 typealias MaintainTierCProgressHandler = @MainActor (MaintainTierCProgressEvent) -> Void
 typealias MaintainTierCCancellationCheck = @MainActor () -> Bool
+/// The per-run consent for a model-DECLARED manifest change (a dependency, a
+/// plist key, an entitlement). Iris's own code applies it only after this
+/// returns true; nil (no seam) means "never" — the run then ends honestly.
+typealias MaintainTierCManifestChangeApproval = @MainActor (MaintainManifestChangeRequest) async -> Bool
 
 @MainActor
 final class MaintainTierCFixer {
@@ -423,7 +449,7 @@ final class MaintainTierCFixer {
             // on-demand Feature Engine opts into those.
             deriveFeatureEngineRecipe: false,
             modelAuthoredBuildCommand: nil,
-            commitVocabulary: { suitePassed in
+            commitVocabulary: { suitePassed, _, _ in
                 (
                     subject: "Novel fix for \(appSlug)",
                     trailerLines: [
@@ -438,12 +464,16 @@ final class MaintainTierCFixer {
             verificationCommandsOverride: verificationCommandsOverride
         )
         switch outcome {
-        case .committed(let branchName, _):
+        case .committed(let branchName, _, _):
             return .fixedAndVerified(branchName: branchName, wasNovel: true)
         case .couldNotFix(let reason):
             return .couldNotFix(reason: reason)
         case .notEligible(let reason):
             return .notEligible(reason: reason)
+        case .blockedByModel(let explanation, _):
+            // The crash path has no question-and-retry surface; the model's
+            // honest refusal reads as a could-not-fix with its sentence.
+            return .couldNotFix(reason: "the model declined: \(explanation)")
         }
     }
 
@@ -483,6 +513,13 @@ final class MaintainTierCFixer {
         // stripped after the first reply). Both nil = the old blind behavior.
         runtimeLogContext: String? = nil,
         appWindowScreenshotPNG: Data? = nil,
+        // Extra prompt sections for THIS run (probe vocabulary, prior-run
+        // memory); empty keeps the prompt as it was.
+        additionalPromptSections: [String] = [],
+        // The per-run consent for a model-declared manifest change (see
+        // `MaintainManifestApplier`). nil = such changes are never applied and
+        // a run that needs one ends honestly.
+        manifestChangeApproval: MaintainTierCManifestChangeApproval? = nil,
         // When false (the default), a model edit to a build-script file is a
         // HARD block, applied BEFORE the un-jailed verification build could run
         // it. The coordinator may pass true only after an explicit user
@@ -514,7 +551,7 @@ final class MaintainTierCFixer {
             // build command (decision 1b).
             deriveFeatureEngineRecipe: true,
             modelAuthoredBuildCommand: modelAuthoredBuildCommand,
-            commitVocabulary: { suitePassed in
+            commitVocabulary: { suitePassed, symptomVerifiedByRepro, appliedManifestChangeSummary in
                 (
                     subject: kind == .feature
                         ? "On-demand feature for \(appSlug)"
@@ -522,30 +559,40 @@ final class MaintainTierCFixer {
                     trailerLines: [
                         "Change-Id: \(changeId)",
                         "Change-Kind: \(changeKindTrailer)",
-                        // NEVER "Verified:" here — an on-demand edit has no
-                        // repro oracle, so the honest claim is "applied", not
-                        // "verified". The word choice is load-bearing.
-                        "Applied: build-green\(suitePassed == true ? ", suite-green" : "")",
+                        // "Verified:" ONLY when a bug fix's model-authored repro
+                        // cleared all three legs (fails before, passes after,
+                        // fails on revert) — the one honest path to the word.
+                        // Otherwise "Applied:" — build-green is not cure-proven.
+                        // A feature never earns "Verified" (no repro is ever run
+                        // for it). The word choice is load-bearing.
+                        symptomVerifiedByRepro && kind == .bugFix
+                            ? "Verified: repro-legs, build-green\(suitePassed == true ? ", suite-green" : "")"
+                            : "Applied: build-green\(suitePassed == true ? ", suite-green" : "")",
                         "Assisted-by: iris-maintain-mode/1 (tier-c, on-demand, \(self.provider.displayName))",
                         "Modified-by: Iris (publik) — implemented a user-requested change under your own model key",
-                    ]
+                    ] + (appliedManifestChangeSummary.map { ["Manifest-Change: \($0) (declared by the model, approved by the user, applied by Iris)"] } ?? [])
                 )
             },
             verificationCommandsOverride: verificationCommandsOverride,
             progressHandler: progressHandler,
             cancellationCheck: cancellationCheck,
             runtimeLogContext: runtimeLogContext,
-            appWindowScreenshotPNG: appWindowScreenshotPNG
+            appWindowScreenshotPNG: appWindowScreenshotPNG,
+            additionalPromptSections: additionalPromptSections,
+            manifestChangeApproval: manifestChangeApproval
         )
         switch outcome {
-        case .committed(let branchName, let suitePassed):
+        case .committed(let branchName, let suitePassed, let symptomVerifiedByRepro):
             return .appliedAndRebuilt(
-                branchName: branchName, changeId: changeId, kind: kind, suitePassed: suitePassed
+                branchName: branchName, changeId: changeId, kind: kind, suitePassed: suitePassed,
+                symptomVerifiedByRepro: symptomVerifiedByRepro
             )
         case .couldNotFix(let reason):
             return .couldNotComplete(reason: reason)
         case .notEligible(let reason):
             return .notEligible(reason: reason)
+        case .blockedByModel(let explanation, let questionForUser):
+            return .blockedByModel(explanation: explanation, questionForUser: questionForUser)
         }
     }
 
@@ -555,9 +602,10 @@ final class MaintainTierCFixer {
     /// result vocabulary. Keeps the loop, the revert-on-failure rules, and the
     /// commit in exactly one place.
     private enum EditLoopOutcome {
-        case committed(branchName: String, suitePassed: Bool?)
+        case committed(branchName: String, suitePassed: Bool?, symptomVerifiedByRepro: Bool)
         case couldNotFix(reason: String)
         case notEligible(reason: String)
+        case blockedByModel(explanation: String, questionForUser: String?)
     }
 
     /// The one jailed loop → `.git` restore → optional build-script block →
@@ -584,7 +632,7 @@ final class MaintainTierCFixer {
         // it can run un-jailed.
         deriveFeatureEngineRecipe: Bool,
         modelAuthoredBuildCommand: String?,
-        commitVocabulary: (_ suitePassed: Bool?) -> (subject: String, trailerLines: [String]),
+        commitVocabulary: (_ suitePassed: Bool?, _ symptomVerifiedByRepro: Bool, _ appliedManifestChangeSummary: String?) -> (subject: String, trailerLines: [String]),
         verificationCommandsOverride: VerificationCommands?,
         // Live narration + reader-initiated stop (see `attemptOnDemandEdit`).
         // Both default nil so the crash path's `attemptFix` call is untouched.
@@ -593,7 +641,9 @@ final class MaintainTierCFixer {
         // On-demand runtime evidence (see `attemptOnDemandEdit`); nil for the
         // crash path, whose evidence is the crash artifact itself.
         runtimeLogContext: String? = nil,
-        appWindowScreenshotPNG: Data? = nil
+        appWindowScreenshotPNG: Data? = nil,
+        additionalPromptSections: [String] = [],
+        manifestChangeApproval: MaintainTierCManifestChangeApproval? = nil
     ) async -> EditLoopOutcome {
         guard MaintainSandbox.isAvailable else {
             return .notEligible(reason: "the sandbox is unavailable on this machine")
@@ -707,6 +757,22 @@ final class MaintainTierCFixer {
         var rateLimitWaitsRemaining = Self.maximumRateLimitWaitsPerRun
         var transportDropRetriesRemaining = Self.maximumTransportDropRetriesPerRun
         var verificationRepairRoundsRemaining = Self.maximumVerificationRepairRoundsPerRun
+        // The model-authored repro check (bug fixes only), captured from the
+        // DONE reply and run through the three legs at verification.
+        var modelAuthoredReproCommand: String? = nil
+        // A model-DECLARED manifest change (dependency / plist key /
+        // entitlement). The model never writes the build file; after DONE the
+        // reader is asked and Iris's own code applies it. One per run.
+        var declaredManifestChange: MaintainManifestChangeRequest? = nil
+        var appliedManifestChangeSummary: String? = nil
+        // Files Iris itself wrote for an approved manifest change — exempt
+        // from the build-script guard (they are Iris-authored, not
+        // model-authored) and re-applied if a mid-loop restore touches them.
+        var irisAppliedManifestPaths: Set<String> = []
+        let taskIsAnOnDemandBugFix: Bool = {
+            if case .onDemand(_, .bugFix) = task { return true }
+            return false
+        }()
 
         // The outer repair cycle: edit loop → verify; a FAILED verification
         // feeds its output back to the model and re-enters the edit loop (a
@@ -726,7 +792,9 @@ final class MaintainTierCFixer {
             let reply: String
             do {
                 reply = try await provider.respond(
-                    systemPrompt: Self.systemPrompt(for: task),
+                    systemPrompt: Self.systemPrompt(
+                        for: task, additionalOnDemandSections: additionalPromptSections
+                    ),
                     conversation: Self.conversationWindowedForSending(conversation),
                     maximumOutputTokens: Self.maximumOutputTokensPerStep
                 )
@@ -774,7 +842,42 @@ final class MaintainTierCFixer {
                 progressHandler?(.agentNarration(text: narration, stepNumber: step))
             }
 
+            // A declared manifest change (alone in its reply, per the applier's
+            // protocol) is recorded, acknowledged, and the model continues
+            // editing SOURCE as if it were present — the reader is asked and
+            // Iris applies it after DONE. Never steered as "no command".
+            if let declaration = MaintainManifestApplier.parse(fromModelReply: reply) {
+                declaredManifestChange = declaration
+                conversation.append(MaintainChatTurn(
+                    role: "user",
+                    text: "Noted: Iris will ask the user to allow \(MaintainManifestApplier.humanReadableSummary(declaration)) once you reply DONE, and will apply it itself. Continue implementing as if it were already present. Next command, or DONE."
+                ))
+                continue
+            }
+
+            // The honest refusal verb. Rejected with a steer before any
+            // investigation (a BLOCKED at step one is a dodge); otherwise the
+            // run reverts and the model's own sentences reach the user.
+            if let blocked = Self.blockedDeclaration(in: reply) {
+                if commandsAlreadyRun.isEmpty {
+                    conversation.append(MaintainChatTurn(
+                        role: "user",
+                        text: "You have not investigated yet. Read the relevant code and evidence first; reply BLOCKED only once you have a concrete reason."
+                    ))
+                    continue
+                }
+                await restoreGit()
+                _ = try? await runner.run("git checkout -- . && git clean -fd --quiet", deadline: 120)
+                irisTrace("maintain: tier-c model declared BLOCKED at step \(step)")
+                return .blockedByModel(explanation: blocked.explanation, questionForUser: blocked.question)
+            }
+
             if reply.range(of: #"(?m)^\s*DONE\s*$"#, options: .regularExpression) != nil {
+                // A bug fix may hand over its headless repro with the DONE.
+                if taskIsAnOnDemandBugFix,
+                   let repro = Self.extractFencedBlock(tagged: "repro", from: reply) {
+                    modelAuthoredReproCommand = repro
+                }
                 declaredDone = true
                 break
             }
@@ -846,7 +949,10 @@ final class MaintainTierCFixer {
                     theModelHasEditedTheTreeAtLeastOnce = true
                     consecutiveNoProgressStepCount = 0
                     progressHandler?(.editedFiles(paths: changedPaths, stepNumber: step))
-                } else if theModelHasEditedTheTreeAtLeastOnce {
+                } else if theModelHasEditedTheTreeAtLeastOnce
+                            && !MaintainDiagnosticProbe.looksLikeADiagnosticProbe(command) {
+                    // A read-only system probe (codesign, plutil, spctl, …) is
+                    // investigation, not spinning — it never counts as a stall.
                     consecutiveNoProgressStepCount += 1
                 }
                 fileStatesFromPreviousStep = latestFileStates
@@ -859,7 +965,7 @@ final class MaintainTierCFixer {
                 // discarded for one Cargo.toml line. The guard still backstops.
                 if blockBuildScriptEdits, let changedPaths {
                     let forbiddenPaths = MaintainBuildScriptGuard.buildScriptFilePaths(
-                        inChangedPaths: changedPaths
+                        inChangedPaths: changedPaths.filter { !irisAppliedManifestPaths.contains($0) }
                     )
                     if !forbiddenPaths.isEmpty {
                         if buildScriptRestoresRemaining == 0 {
@@ -958,13 +1064,42 @@ final class MaintainTierCFixer {
         // unchanged.
         if blockBuildScriptEdits {
             let changedPaths = await Self.changedFilePaths(runner: runner)
-            let buildScriptEdits = MaintainBuildScriptGuard.buildScriptFilePaths(inChangedPaths: changedPaths)
+            let buildScriptEdits = MaintainBuildScriptGuard.buildScriptFilePaths(
+                inChangedPaths: changedPaths.filter { !irisAppliedManifestPaths.contains($0) }
+            )
             if !buildScriptEdits.isEmpty {
                 _ = try? await runner.run("git checkout -- . && git clean -fd --quiet", deadline: 120)
                 irisTrace("maintain: on-demand edit BLOCKED — touched build-script file(s)")
                 return .couldNotFix(
                     reason: "the change edits build-script files (\(buildScriptEdits.joined(separator: ", "))) that run during an unjailed build — blocked before building"
                 )
+            }
+        }
+
+        // A model-DECLARED manifest change: ask the reader ONCE, and on yes let
+        // Iris's own code apply the whitelisted insertion (never a script, a
+        // hook, or `build =`) before the un-jailed verification build runs
+        // with it. The model still authored no executed text. On no, the run
+        // ends honestly — the source edits assumed the change and are
+        // reverted. Applied once per run; repair rounds keep it.
+        if let declaration = declaredManifestChange, appliedManifestChangeSummary == nil {
+            let summary = MaintainManifestApplier.humanReadableSummary(declaration)
+            progressHandler?(.awaitingManifestChangeApproval(summary: summary))
+            let approved = await manifestChangeApproval?(declaration) ?? false
+            guard approved else {
+                _ = try? await runner.run("git checkout -- . && git clean -fd --quiet", deadline: 120)
+                irisTrace("maintain: tier-c manifest change declined by the reader")
+                return .couldNotFix(reason: "this change needs \(summary) — which you declined, so nothing was applied")
+            }
+            switch MaintainManifestApplier.applyToRepo(declaration, repoRootPath: clonePath) {
+            case .success(let appliedSummary):
+                appliedManifestChangeSummary = appliedSummary
+                irisAppliedManifestPaths.insert(declaration.filePath)
+                irisTrace("maintain: tier-c applied an approved manifest change")
+                progressHandler?(.manifestChangeApplied(request: declaration, summary: appliedSummary))
+            case .failure(let applyError):
+                _ = try? await runner.run("git checkout -- . && git clean -fd --quiet", deadline: 120)
+                return .couldNotFix(reason: "Iris couldn't apply the approved manifest change (\(applyError)) — nothing was applied")
             }
         }
 
@@ -1018,9 +1153,48 @@ final class MaintainTierCFixer {
         progressHandler?(.verifyingTheChange(
             buildCommand: commands.buildCommand, testCommand: commands.testCommand
         ))
-        let verification = await VerificationHarness.verifyAppliedPatch(
-            runner: runner, commands: commands, reproCommand: nil
+        // The model-authored repro runs un-jailed like the build, so it passes
+        // the SAME three-tier screen a model-proposed command does; anything
+        // short of plainly-safe is dropped (the change then earns only
+        // "applied"). Only a bug fix ever has one.
+        var screenedReproCommand: String? = nil
+        if let candidateRepro = modelAuthoredReproCommand {
+            if case .runsWithoutAsking = GuideAutopilotRiskAssessment.assess(
+                candidateRepro, autonomyGranted: false
+            ) {
+                screenedReproCommand = candidateRepro
+                progressHandler?(.runningModelAuthoredRepro(command: candidateRepro))
+            } else {
+                progressHandler?(.modelAuthoredReproDiscarded(
+                    reason: "the check was not plainly safe to run outside the jail"
+                ))
+                modelAuthoredReproCommand = nil
+            }
+        }
+        var verification = await VerificationHarness.verifyAppliedPatch(
+            runner: runner, commands: commands, reproCommand: screenedReproCommand
         )
+        // A repro that does not DISTINGUISH broken from fixed (passes before
+        // the patch, or passes with it reverted, or the stash plumbing failed)
+        // proves nothing about the fix — discard it and verify build+suite
+        // only, so a bad check never blocks a good change. A repro that fails
+        // AFTER the patch (leg 2) is real information — the model's own check
+        // says the fix does not work — and falls through to the repair cycle.
+        let nonDistinguishingReproStages: Set<String> = [
+            "leg1-repro-passed-prepatch", "leg3-repro-passed-on-revert",
+            "git-stash", "git-stash-pop", "git-stash-leg3", "git-stash-pop-leg3",
+        ]
+        if screenedReproCommand != nil,
+           let blockedStage = verification.blockedStage,
+           nonDistinguishingReproStages.contains(blockedStage) {
+            progressHandler?(.modelAuthoredReproDiscarded(
+                reason: "it did not distinguish the broken code from the fixed code (\(blockedStage))"
+            ))
+            modelAuthoredReproCommand = nil
+            verification = await VerificationHarness.verifyAppliedPatch(
+                runner: runner, commands: commands, reproCommand: nil
+            )
+        }
         guard verification.earnsCleanApply else {
             let failedStage = verification.blockedStage ?? "unknown"
             // The repair cycle: show the model what the compiler said and let
@@ -1066,7 +1240,8 @@ final class MaintainTierCFixer {
         }
 
         progressHandler?(.committingTheChange)
-        let vocabulary = commitVocabulary(verification.suitePassed)
+        let symptomVerifiedByRepro = taskIsAnOnDemandBugFix && verification.earnsVerifiedFix
+        let vocabulary = commitVocabulary(verification.suitePassed, symptomVerifiedByRepro, appliedManifestChangeSummary)
         let branchName = await MaintainFixCommit.commitOnBranch(
             plan: MaintainFixCommitPlan(
                 branchPrefix: branchPrefix,
@@ -1077,7 +1252,10 @@ final class MaintainTierCFixer {
             runner: runner
         )
         irisTrace("maintain: tier-c committed a change on \(branchName)")
-        return .committed(branchName: branchName, suitePassed: verification.suitePassed)
+        return .committed(
+            branchName: branchName, suitePassed: verification.suitePassed,
+            symptomVerifiedByRepro: symptomVerifiedByRepro
+        )
         } // repairRounds — every exit above is a `return`; only a failed
           // verification with rounds remaining loops back to the edit loop.
     }
@@ -1277,21 +1455,73 @@ final class MaintainTierCFixer {
     package.json, Cargo.toml, build.rs, Makefile/GNUmakefile/*.mk, \
     CMakeLists.txt/*.cmake, Rakefile, Gemfile, gruntfile.js/gulpfile.js, \
     *.podspec, *.gyp/*.gypi. An edit to any of them is rejected and your \
-    ENTIRE change is discarded. Do not add or change dependencies; implement \
-    with what the repo already has, writing any needed bindings or helpers \
-    inline in ordinary source files.
+    ENTIRE change is discarded. Prefer implementing with what the repo already \
+    has, writing any needed bindings or helpers inline in ordinary source \
+    files. When a dependency, Info.plist key, or entitlement is genuinely \
+    unavoidable, use the manifest declaration described below — never an edit.
     """
 
-    private static func systemPrompt(for task: MaintainEditTask) -> String {
+    /// On-demand BUG FIXES only: how a fix earns "verified" instead of
+    /// "applied". The model may hand Iris ONE headless repro check; Iris runs
+    /// it through the existing three legs (must fail before the patch, pass
+    /// after, fail with the patch reverted) so a self-serving or tautological
+    /// check is caught by construction. A feature never gets one.
+    static let onDemandReproPromptAddendum = """
+    When you reply DONE for this bug fix, you MAY include, before the DONE \
+    line, ONE ```repro fenced block holding a single HEADLESS shell command \
+    that exits NON-ZERO on the original broken code and ZERO once your fix is \
+    in place (run from the repo root; no network, no GUI). Iris runs it three \
+    ways — before your patch, after it, and with your patch reverted — so a \
+    check that passes regardless, or that merely asserts your own edit exists, \
+    is discarded. Include one only when a real headless check is possible (a \
+    unit test invocation, a grep of generated output, a script exercising the \
+    changed function); otherwise omit it. It is how a fix earns "verified" \
+    instead of "applied".
+    """
+
+    /// On-demand, both kinds: the honest refusal verb. Without it the loop's
+    /// only exits were DONE or a stall, so a correct "this isn't a source bug"
+    /// or "I need one fact from the user" had to masquerade as a cosmetic
+    /// change. A BLOCKED before any investigation is rejected with a steer.
+    static let onDemandBlockedPromptAddendum = """
+    If, AFTER investigating the code and the evidence, the change genuinely \
+    cannot be made under these constraints — the real cause is not in this \
+    repository, it needs a fact only the user has, or it cannot be done without \
+    something you are forbidden to do — reply with one line \
+    `BLOCKED: <one plain-English sentence of why>` and, if a user's answer \
+    would unblock you, a second line `QUESTION: <one sentence>`. Everything is \
+    reverted and the user sees your sentences verbatim. Never make a cosmetic \
+    or unrelated change just to have something to show. A BLOCKED before you \
+    have read any code is rejected — investigate first.
+    """
+
+    /// The system prompt. `additionalOnDemandSections` are extra on-demand
+    /// sections the coordinator injects per run (the diagnostic probe
+    /// vocabulary; a memory of prior runs on this app) — the fixer stays the
+    /// single place the prompt is assembled while those sections live beside
+    /// their own mechanisms. The crash path ignores them.
+    static func systemPrompt(
+        for task: MaintainEditTask, additionalOnDemandSections: [String] = []
+    ) -> String {
         switch task {
         case .crashFix:
             return bugFixSystemPrompt
         case .onDemand(_, .bugFix):
-            return bugFixSystemPrompt + "\n\n" + onDemandNarrationPromptAddendum
-                + "\n\n" + onDemandBuildScriptConstraintAddendum
+            return ([bugFixSystemPrompt, onDemandNarrationPromptAddendum,
+                     onDemandBuildScriptConstraintAddendum,
+                     MaintainManifestApplier.modelFacingProtocolPromptAddendum,
+                     MaintainDiagnosticProbe.promptSection,
+                     onDemandReproPromptAddendum,
+                     onDemandBlockedPromptAddendum] + additionalOnDemandSections)
+                .joined(separator: "\n\n")
         case .onDemand(_, .feature):
-            return featureSystemPrompt + "\n\n" + onDemandNarrationPromptAddendum
-                + "\n\n" + onDemandBuildScriptConstraintAddendum
+            return ([featureSystemPrompt, onDemandNarrationPromptAddendum,
+                     onDemandBuildScriptConstraintAddendum,
+                     MaintainManifestApplier.modelFacingProtocolPromptAddendum,
+                     MaintainDiagnosticProbe.promptSection,
+                     onDemandBlockedPromptAddendum]
+                    + additionalOnDemandSections)
+                .joined(separator: "\n\n")
         }
     }
 
@@ -1418,13 +1648,63 @@ final class MaintainTierCFixer {
         }
     }
 
+    /// Every ``` fenced block in a reply, as (tag, body) pairs in order — the
+    /// tag is the word right after the opening fence ("bash", "repro",
+    /// "manifest", or "" for an untagged fence). One scanner so the command
+    /// parser, the repro parser, and the manifest parser can never disagree
+    /// about where a block starts and ends.
+    nonisolated static func fencedBlocks(in reply: String) -> [(tag: String, body: String)] {
+        var blocks: [(tag: String, body: String)] = []
+        var searchStart = reply.startIndex
+        while let openingFence = reply.range(of: "```", range: searchStart..<reply.endIndex) {
+            let afterOpening = reply[openingFence.upperBound...]
+            // The tag runs to the first newline (or whitespace); an untagged
+            // fence has an empty tag.
+            let tagEnd = afterOpening.firstIndex(where: { $0.isNewline || $0 == " " }) ?? afterOpening.endIndex
+            let tag = String(afterOpening[..<tagEnd]).trimmingCharacters(in: .whitespaces)
+            let bodyStart = tagEnd < afterOpening.endIndex ? afterOpening.index(after: tagEnd) : tagEnd
+            guard let closingFence = reply.range(of: "```", range: bodyStart..<reply.endIndex) else { break }
+            let body = String(reply[bodyStart..<closingFence.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            blocks.append((tag: tag.lowercased(), body: body))
+            searchStart = closingFence.upperBound
+        }
+        return blocks
+    }
+
+    /// The ONE shell command in a reply: the first bash/sh/untagged fence.
+    /// Tagged repro/manifest blocks are never mistaken for a command — a reply
+    /// carrying only a ```manifest declaration is "no command", not "run the
+    /// JSON".
     static func extractBashCommand(from reply: String) -> String? {
-        guard let fenceStart = reply.range(of: "```bash") ?? reply.range(of: "```sh")
-            ?? reply.range(of: "```") else { return nil }
-        let afterFence = reply[fenceStart.upperBound...]
-        guard let fenceEnd = afterFence.range(of: "```") else { return nil }
-        let body = afterFence[..<fenceEnd.lowerBound]
-        let command = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        return command.isEmpty ? nil : command
+        let commandTags: Set<String> = ["bash", "sh", "zsh", "shell", ""]
+        guard let block = fencedBlocks(in: reply).first(where: { commandTags.contains($0.tag) }),
+              !block.body.isEmpty else { return nil }
+        return block.body
+    }
+
+    /// The body of the first fence with exactly this tag ("repro", "manifest"),
+    /// or nil.
+    nonisolated static func extractFencedBlock(tagged tag: String, from reply: String) -> String? {
+        guard let block = fencedBlocks(in: reply).first(where: { $0.tag == tag.lowercased() }),
+              !block.body.isEmpty else { return nil }
+        return block.body
+    }
+
+    /// A `BLOCKED: <sentence>` line (with an optional `QUESTION: <sentence>`
+    /// line) — the model's honest refusal verb. Nil when the reply has none.
+    nonisolated static func blockedDeclaration(in reply: String) -> (explanation: String, question: String?)? {
+        func firstLineValue(prefix: String) -> String? {
+            for rawLine in reply.components(separatedBy: .newlines) {
+                let line = rawLine.trimmingCharacters(in: .whitespaces)
+                if line.hasPrefix(prefix) {
+                    let value = line.dropFirst(prefix.count).trimmingCharacters(in: .whitespaces)
+                    return value.isEmpty ? nil : String(value.prefix(400))
+                }
+            }
+            return nil
+        }
+        guard let explanation = firstLineValue(prefix: "BLOCKED:") else { return nil }
+        return (explanation, firstLineValue(prefix: "QUESTION:"))
     }
 }

@@ -101,6 +101,23 @@ enum OnDemandEditPhase: Equatable, Sendable {
     /// running app and launching the edited build. Nothing is terminated until
     /// the artifact is proven to exist.
     case relaunching
+    /// The model declared a manifest change (a dependency, a plist key, an
+    /// entitlement) it cannot write itself; the run is paused on the reader's
+    /// Allow/Decline before Iris's own code applies it and builds with it.
+    /// `pendingManifestChangeSummary` is the one sentence to decide on.
+    case awaitingManifestConsent
+    /// FULLY AUTOMATIC delivery (founder decision, Aug 22 2026): the change is
+    /// applied, so Iris is recording it, rebuilding the app from the clone
+    /// (signed with a stable identity when one exists), and relaunching it —
+    /// no keep/relaunch taps in between. The reader's own complaint is then
+    /// re-checked in `.awaitingSymptomConfirmation`.
+    case delivering
+    /// The rebuilt app is running with the change. Iris re-gathered the
+    /// app's window + logs and now asks the reader the only question that
+    /// matters — is the thing you complained about actually fixed? — with an
+    /// undo available. The verdict is written into the run log, the memory
+    /// record, and the commit.
+    case awaitingSymptomConfirmation
     /// The running app declined to quit (an unsaved-work "Save?" dialog is
     /// holding it). Awaiting a SECOND explicit consent (Consent #3b) to force
     /// quit — Iris never SIGKILLs through a save dialog on its own, because that
@@ -113,6 +130,11 @@ enum OnDemandEditPhase: Equatable, Sendable {
     case failed(reason: String)
     /// A precondition failed before or at start. Terminal; `reason` is honest.
     case notEligible(reason: String)
+    /// The model itself declared, after investigating, that the change cannot
+    /// be made under the harness's constraints — its sentence verbatim.
+    /// Everything was reverted. The card offers "Answer and retry" when the
+    /// model asked a question (`blockedQuestionForUser`). Terminal.
+    case blockedByModel(explanation: String)
 }
 
 @MainActor
@@ -189,6 +211,60 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// bundled with the backup. Drives an explicit confirm on the done card.
     @Published private(set) var isAwaitingPublishConsent: Bool = false
 
+    /// The one-sentence summary of the manifest change the model declared,
+    /// shown on the consent card while `phase == .awaitingManifestConsent`.
+    @Published private(set) var pendingManifestChangeSummary: String?
+    /// The engine's await on the reader's Allow/Decline.
+    private var manifestConsentContinuation: CheckedContinuation<Bool, Never>?
+
+    /// The scrubbed request text of the current flow, published so the
+    /// symptom re-check card can show the reader THEIR OWN complaint verbatim
+    /// next to the verdict buttons.
+    @Published private(set) var activeRequestText: String?
+
+    /// How the rebuilt app was signed ("signed with Developer ID …" or the
+    /// honest ad-hoc warning that permissions may reset), for the symptom card.
+    @Published private(set) var freshBuildSigningSummary: String?
+
+    /// Packaging-metadata checks that FAILED on the built artifact (a plist key
+    /// or entitlement the run claimed to add is missing from the bundle).
+    /// Empty when everything the run promised reached the app.
+    @Published private(set) var packagingMetadataFailures: [String] = []
+
+    /// The manifest change Iris applied this run (after the reader allowed
+    /// it), kept so packaging can verify it reached the built app.
+    private var appliedManifestChangeRequest: MaintainManifestChangeRequest?
+
+    /// After the relaunch, what Iris observed when it looked again: a
+    /// one-line summary for the symptom card ("no new crash report; window
+    /// captured" / "a NEW crash report appeared since the relaunch").
+    @Published private(set) var symptomRecheckSummary: String?
+
+    /// Text the describe field should be prefilled with on the next show —
+    /// a retry seeded from a still-broken verdict, or a blocked question's
+    /// answer folded into the original request. The card consumes it.
+    @Published private(set) var describePrefillText: String?
+
+    /// True after a "still broken" verdict, so the done card can offer
+    /// "Try again with what Iris learned" (the memory record carries the
+    /// negative verdict into the next run).
+    @Published private(set) var offersRetryWithMemory: Bool = false
+
+    /// True while a delivered change can still be undone after the fact (the
+    /// rebuilt app is running; the installed app can be brought back and the
+    /// branch dropped).
+    @Published private(set) var deliveredChangeCanBeUndone: Bool = false
+
+    /// Where the INSTALLED app lives (the bundle the reader had before Iris
+    /// rebuilt from the clone), so an undo can bring it back. Wired by
+    /// CompanionManager from the inventory's bundle id; nil = no undo offer.
+    var installedApplicationPathForApp: ((_ appSlug: String) -> String?)?
+
+    /// The question the model asked when it declared BLOCKED (nil when it
+    /// only explained). The card shows it with an answer field; the answer
+    /// re-enters the describe step folded into the request.
+    @Published private(set) var blockedQuestionForUser: String?
+
     /// True from the moment the reader asks a `.running` edit to stop until
     /// the engine acknowledges (it polls this at every step boundary, reverts
     /// everything, and returns the stopped result). Published so the Stop
@@ -240,7 +316,9 @@ final class OnDemandEditCoordinator: ObservableObject {
         _ kind: OnDemandEditKind,
         _ progressHandler: @escaping MaintainTierCProgressHandler,
         _ cancellationCheck: @escaping MaintainTierCCancellationCheck,
-        _ runtimeEvidence: OnDemandEditRuntimeEvidence
+        _ runtimeEvidence: OnDemandEditRuntimeEvidence,
+        _ additionalPromptSections: [String],
+        _ manifestChangeApproval: @escaping MaintainTierCManifestChangeApproval
     ) async -> MaintainOnDemandEditResult
 
     /// Gathers the runtime evidence for a picked app right as the run starts —
@@ -309,6 +387,23 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// and a keep records the correct base commit.
     private var originalHeadCommit: String?
     private var originalHeadRef: String?
+    /// What THIS run touched and last said — the two facts the per-app memory
+    /// record needs so the next run can see what was tried and where.
+    private var filesTouchedThisRun: [String] = []
+    private var lastAgentNarrationThisRun: String = ""
+    /// The reader's clarification answers with their question text, kept so
+    /// they reach the model's opening message (they used to be collected and
+    /// thrown away — a plain bug).
+    private var clarificationAnswerPairsForPrompt: [(question: String, answer: String)] = []
+
+    /// True while the automatic delivery path owns the relaunch, so the shared
+    /// relaunch-result handler routes a fresh build into the symptom re-check
+    /// instead of the old "done" ending.
+    private var deliveryIsAutomatic = false
+    /// The runtime-evidence text gathered BEFORE the run, kept so the
+    /// post-relaunch re-gather can say whether a crash report is NEW.
+    private var runtimeEvidenceTextBeforeTheRun: String?
+
     /// The freshly packaged artifact's path, cached across a possible force-quit
     /// consent so the heavy build never runs twice for one relaunch.
     private var packagedArtifactPath: String?
@@ -373,7 +468,9 @@ final class OnDemandEditCoordinator: ObservableObject {
                 _ kind: OnDemandEditKind,
                 _ progressHandler: @escaping MaintainTierCProgressHandler,
                 _ cancellationCheck: @escaping MaintainTierCCancellationCheck,
-                _ runtimeEvidence: OnDemandEditRuntimeEvidence
+                _ runtimeEvidence: OnDemandEditRuntimeEvidence,
+                _ additionalPromptSections: [String],
+                _ manifestChangeApproval: @escaping MaintainTierCManifestChangeApproval
             ) async -> MaintainOnDemandEditResult
         )? = nil
     ) {
@@ -414,8 +511,8 @@ final class OnDemandEditCoordinator: ObservableObject {
     static let defaultPerformOnDemandEdit: (
         String, String, BreakAppStack, String, String, OnDemandEditKind,
         @escaping MaintainTierCProgressHandler, @escaping MaintainTierCCancellationCheck,
-        OnDemandEditRuntimeEvidence
-    ) async -> MaintainOnDemandEditResult = { resolvedClonePath, appSlug, appStack, changeId, scrubbedRequest, kind, progressHandler, cancellationCheck, runtimeEvidence in
+        OnDemandEditRuntimeEvidence, [String], @escaping MaintainTierCManifestChangeApproval
+    ) async -> MaintainOnDemandEditResult = { resolvedClonePath, appSlug, appStack, changeId, scrubbedRequest, kind, progressHandler, cancellationCheck, runtimeEvidence, additionalPromptSections, manifestChangeApproval in
         guard let provider = MaintainModelProviderResolver.firstAvailable() else {
             return .notEligible(reason: "no model key is available for the edit engine")
         }
@@ -430,7 +527,9 @@ final class OnDemandEditCoordinator: ObservableObject {
             progressHandler: progressHandler,
             cancellationCheck: cancellationCheck,
             runtimeLogContext: runtimeEvidence.runtimeLogText,
-            appWindowScreenshotPNG: runtimeEvidence.appWindowScreenshotPNG
+            appWindowScreenshotPNG: runtimeEvidence.appWindowScreenshotPNG,
+            additionalPromptSections: additionalPromptSections,
+            manifestChangeApproval: manifestChangeApproval
         )
     }
 
@@ -523,6 +622,7 @@ final class OnDemandEditCoordinator: ObservableObject {
         )
 
         scrubbedRequest = scrubbed
+        activeRequestText = scrubbed
         changeId = synthesizedChangeId
         classifiedKind = kind
 
@@ -610,6 +710,10 @@ final class OnDemandEditCoordinator: ObservableObject {
     func submitClarificationAnswers(_ answersByQuestionId: [String: String]) {
         guard phase == .clarifying, let kind = classifiedKind else { return }
         clarificationAnswersByQuestionId = answersByQuestionId
+        clarificationAnswerPairsForPrompt = clarificationQuestions.compactMap { question in
+            guard let answer = answersByQuestionId[question.id] else { return nil }
+            return (question: question.prompt, answer: answer)
+        }
 
         // Any option beginning with "Stop" is the reader declining after seeing
         // the question. The safe, additive response is to make NOTHING happen
@@ -862,6 +966,32 @@ final class OnDemandEditCoordinator: ObservableObject {
         statusLine = "Looking at \(appName)'s window and recent logs…"
         let runtimeEvidence = await gatherRuntimeEvidenceForApp?(slug)
             ?? OnDemandEditRuntimeEvidence(runtimeLogText: nil, appWindowScreenshotPNG: nil)
+        runtimeEvidenceTextBeforeTheRun = runtimeEvidence.runtimeLogText
+        filesTouchedThisRun = []
+        lastAgentNarrationThisRun = ""
+
+        // Extra prompt sections for THIS run. (1) The per-app MEMORY: what the
+        // last runs on this app tried, where, and whether the reader said it
+        // cured the complaint — framed as observations, with a still-broken
+        // verdict read as a NEGATIVE signal. This is what stops run N+1 from
+        // re-guessing what run N already learned. (2) The reader's
+        // clarification answers, which were collected and never read before.
+        var additionalPromptSections: [String] = []
+        let priorRuns = OnDemandEditRunLog.recentMemoryRecords(forAppSlug: slug)
+        if let memorySection = OnDemandEditRunLog.memoryPromptSection(fromRecords: priorRuns) {
+            additionalPromptSections.append(memorySection)
+            editRunner.note("Iris remembers \(priorRuns.count) earlier attempt\(priorRuns.count == 1 ? "" : "s") on \(appName) and is using what it learned.")
+            runLog?.record("memory: \(priorRuns.count) prior run(s) injected")
+        }
+        if !clarificationAnswerPairsForPrompt.isEmpty {
+            let answerLines = clarificationAnswerPairsForPrompt
+                .map { "- Q: \($0.question)\n  A: \($0.answer)" }
+                .joined(separator: "\n")
+            additionalPromptSections.append(
+                "The user answered these clarifying questions before the run — treat the answers as the user's decisions:\n\(answerLines)"
+            )
+        }
+        additionalPromptSections.append(contentsOf: extraPromptSectionsForEveryRun())
         var gatheredEvidenceParts: [String] = []
         if runtimeEvidence.appWindowScreenshotPNG != nil {
             gatheredEvidenceParts.append("a screenshot of its window")
@@ -892,7 +1022,13 @@ final class OnDemandEditCoordinator: ObservableObject {
             { [weak self] in
                 self?.readerAskedToStopTheRun ?? true
             },
-            runtimeEvidence
+            runtimeEvidence,
+            additionalPromptSections,
+            // The per-run manifest consent: pause the flow on a card, resume
+            // the engine with the reader's Allow/Decline.
+            { [weak self] declaration in
+                await self?.askReaderToApproveManifestChange(declaration) ?? false
+            }
         )
         let elapsed = Date().timeIntervalSince(startedAt)
         editRunner.setWorking(false)
@@ -907,6 +1043,7 @@ final class OnDemandEditCoordinator: ObservableObject {
             editRunner.note("Stopped — nothing was kept. Your clone is exactly as it was.")
             editRunner.finishStopped()
             runLog?.finish(outcome: "stopped by the reader — everything reverted")
+            recordMemory(outcome: "stopped by the reader — everything reverted", kind: kind)
             runLog = nil
             readerAskedToStopTheRun = false
             clonePathLock.release(clonePath: resolvedClonePath)
@@ -917,18 +1054,25 @@ final class OnDemandEditCoordinator: ObservableObject {
         }
 
         switch result {
-        case .appliedAndRebuilt(let branchName, _, _, let suitePassed):
+        case .appliedAndRebuilt(let branchName, _, _, let suitePassed, let symptomVerifiedByRepro):
             committedBranchName = branchName
             editRunner.recordVerificationResult(passed: true, over: elapsed)
-            editRunner.note(verificationNote(suitePassed: suitePassed, kind: kind))
-            editRunner.finishApplied()
-            runLog?.finish(outcome: "applied on branch \(branchName) (suite: \(suitePassed.map(String.init) ?? "none to run"))")
+            editRunner.note(verificationNote(
+                suitePassed: suitePassed, kind: kind, symptomVerifiedByRepro: symptomVerifiedByRepro
+            ))
+            runLog?.finish(outcome: "applied on branch \(branchName) (suite: \(suitePassed.map(String.init) ?? "none to run")"
+                + (symptomVerifiedByRepro ? ", repro-verified" : "") + ")")
             runLog = nil
+            recordMemory(
+                outcome: OnDemandEditMemoryRecord.appliedOutcome(branchName: branchName)
+                    + (symptomVerifiedByRepro ? " (repro-verified)" : ""),
+                kind: kind
+            )
             proposedDiffText = await readCommittedDiff(runner: runner)
-            phase = .previewDiff
-            statusLine = "Here's the change on branch \(branchName). Keep it?"
-            // Lock stays held: the reader may still discard, which touches the
-            // tree; it is released in keepChange() / discardChange().
+            // FULLY AUTOMATIC delivery (founder decision, Aug 22 2026): no
+            // keep/relaunch taps — record, rebuild, relaunch, then ask the
+            // only question that matters (is the symptom gone?), with undo.
+            await beginAutomaticDelivery(branchName: branchName)
 
         case .couldNotComplete(let reason):
             let mapped = Self.mappedFailure(reason: reason)
@@ -946,6 +1090,7 @@ final class OnDemandEditCoordinator: ObservableObject {
                 runLog.finish(outcome: "failed: \(reason)")
             }
             runLog = nil
+            recordMemory(outcome: OnDemandEditMemoryRecord.failedOutcome(reason: reason), kind: kind)
             editRunner.finishStopped()
             failRun(reason: mapped.userFacing, resolvedClonePath: resolvedClonePath)
 
@@ -958,6 +1103,24 @@ final class OnDemandEditCoordinator: ObservableObject {
             self.resolvedClonePath = nil
             phase = .notEligible(reason: reason)
             statusLine = reason
+
+        case .blockedByModel(let explanation, let questionForUser):
+            // The model's honest refusal, verbatim, with its question (if any)
+            // for the reader to answer and retry. Everything is already
+            // reverted; nothing is committed.
+            editRunner.note("Iris stopped on purpose: \(explanation)")
+            if let questionForUser {
+                editRunner.note("Iris needs to know: \(questionForUser)")
+            }
+            editRunner.finishStopped()
+            runLog?.finish(outcome: "blocked: \(explanation)" + (questionForUser.map { " | question: \($0)" } ?? ""))
+            runLog = nil
+            recordMemory(outcome: OnDemandEditMemoryRecord.blockedOutcome(modelSentence: explanation), kind: kind)
+            clonePathLock.release(clonePath: resolvedClonePath)
+            self.resolvedClonePath = nil
+            blockedQuestionForUser = questionForUser
+            phase = .blockedByModel(explanation: explanation)
+            statusLine = explanation
         }
     }
 
@@ -982,10 +1145,14 @@ final class OnDemandEditCoordinator: ObservableObject {
             // The agent's OWN sentence for this step — what it says it is
             // doing and why. The most direct "what is Iris doing right now"
             // there is, so it leads both the transcript and the status line.
+            lastAgentNarrationThisRun = text
             editRunner.note(text)
             runLog?.record("iris: \(text)")
             showStatus(String(text.prefix(140)))
         case .editedFiles(let paths, _):
+            for path in paths where !filesTouchedThisRun.contains(path) {
+                filesTouchedThisRun.append(path)
+            }
             let shownPaths = paths.prefix(5).joined(separator: ", ")
             let overflowCount = paths.count - min(paths.count, 5)
             let line = overflowCount > 0
@@ -1046,6 +1213,28 @@ final class OnDemandEditCoordinator: ObservableObject {
             editRunner.note(line)
             runLog?.record("committing")
             showStatus(line)
+        case .runningModelAuthoredRepro(let command):
+            let line = "Running Iris's own check for this bug three ways — before the fix, after it, and with it reverted…"
+            editRunner.note(line)
+            editRunner.recordExecutedCommand(command)
+            runLog?.record("repro check: \(command)")
+            showStatus(line)
+        case .awaitingManifestChangeApproval(let summary):
+            let line = "Iris needs permission: \(summary)"
+            editRunner.note(line)
+            runLog?.record("manifest consent requested: \(summary)")
+            showStatus(line)
+        case .manifestChangeApplied(let request, let summary):
+            appliedManifestChangeRequest = request
+            let line = "Allowed — Iris applied it itself: \(summary)"
+            editRunner.note(line)
+            runLog?.record("manifest change applied: \(summary)")
+            showStatus(line)
+        case .modelAuthoredReproDiscarded(let reason):
+            let line = "Iris's check didn't prove anything — \(reason) — so this counts as applied, not verified."
+            editRunner.note(line)
+            runLog?.record("repro discarded: \(reason)")
+            showStatus(line)
         }
     }
 
@@ -1060,6 +1249,304 @@ final class OnDemandEditCoordinator: ObservableObject {
         readerAskedToStopTheRun = true
         statusLine = "Stopping — Iris is finishing the current step, then putting everything back…"
         editRunner.note("Stopping at your request — no more changes; anything already made is being reverted.")
+    }
+
+    // MARK: - Manifest consent (the model declares; the reader allows; Iris applies)
+
+    /// Pause the run on the consent card and resume the engine with the
+    /// answer. Called BY the engine (through the seam) while it awaits.
+    private func askReaderToApproveManifestChange(_ declaration: MaintainManifestChangeRequest) async -> Bool {
+        pendingManifestChangeSummary = MaintainManifestApplier.humanReadableSummary(declaration)
+        phase = .awaitingManifestConsent
+        statusLine = "Iris needs your permission: \(pendingManifestChangeSummary ?? "a manifest change")"
+        let approved = await withCheckedContinuation { continuation in
+            manifestConsentContinuation = continuation
+        }
+        manifestConsentContinuation = nil
+        pendingManifestChangeSummary = nil
+        phase = .running
+        statusLine = approved ? "Applying it and building…" : "Declined — wrapping up…"
+        return approved
+    }
+
+    /// The reader allowed the declared manifest change (this run only).
+    func approveManifestChange() {
+        guard phase == .awaitingManifestConsent else { return }
+        manifestConsentContinuation?.resume(returning: true)
+    }
+
+    /// The reader declined; the run ends honestly with everything reverted.
+    func declineManifestChange() {
+        guard phase == .awaitingManifestConsent else { return }
+        manifestConsentContinuation?.resume(returning: false)
+    }
+
+    // MARK: - Automatic delivery → symptom re-check → verdict (founder: fully automatic)
+
+    /// Record the applied change, rebuild the app from the clone, relaunch it,
+    /// and hand off to the symptom re-check — no keep/relaunch taps. An app
+    /// Iris cannot rebuild ends honestly: the installed app still runs the
+    /// old code, and the copy says exactly that (never "relaunch to pick it
+    /// up", which was false for an unrebuilt install).
+    private func beginAutomaticDelivery(branchName: String) async {
+        guard let slug = activeAppSlug, let editChangeId = changeId else { return }
+        let appName = activeAppName ?? slug
+        phase = .delivering
+        deliveryIsAutomatic = true
+        statusLine = "Applied on branch \(branchName) — rebuilding \(appName) so you're running the fix…"
+        editRunner.note("Rebuilding \(appName) from the clone and relaunching it with the change…")
+
+        patchQueue.record(QueuedPatch(
+            recipeId: editChangeId,
+            signatureId: editChangeId,
+            appSlug: slug,
+            branchName: branchName,
+            patchText: proposedDiffText ?? "",
+            baseCommit: originalHeadCommit,
+            appliedAt: Date()
+        ))
+
+        guard relaunchIsAvailableForApp?(slug) == true,
+              let package = packageEditedAppFromClone,
+              let relaunch = terminateAndRelaunchEditedApp else {
+            editRunner.finishApplied()
+            releaseLockIfHeld()
+            statusLine = "Applied on branch \(branchName). Your installed \(appName) still runs the OLD code — Iris can't rebuild this kind of app yet, so rebuild it from the clone yourself to pick the change up."
+            phase = .done
+            return
+        }
+
+        // 1) Package + assert the artifact exists (signed with a stable identity
+        //    when one is available). Nothing is terminated yet.
+        let packaging = await package(slug)
+        guard case .artifactReady(let artifactPath, let signingSummary) = packaging else {
+            editRunner.finishApplied()
+            finishRelaunchWithoutTerminating(fromPackaging: packaging)
+            return
+        }
+        packagedArtifactPath = artifactPath
+        freshBuildSigningSummary = signingSummary
+        editRunner.note("Built a fresh \(appName) from the clone (\(signingSummary)).")
+
+        // Packaging-metadata verification: when the approved manifest change
+        // was a plist key or an entitlement, prove it actually reached the
+        // BUILT app — a purpose string that never made it into the bundle is
+        // a fix that verified green as a no-op.
+        if let appliedRequest = appliedManifestChangeRequest {
+            var expectations = PackagingExpectations()
+            switch appliedRequest.kind {
+            case .addInfoPlistKey:
+                expectations = PackagingExpectations(infoPlistKeysThatMustExist: [appliedRequest.key])
+            case .addEntitlement:
+                expectations = PackagingExpectations(entitlementKeysThatMustBeTrue: [appliedRequest.key])
+            case .addCargoDependency, .addNodeDependency:
+                break
+            }
+            if !expectations.isEmpty {
+                let failures = await AppRelaunchService.verifyPackagedMetadata(
+                    artifactPath: artifactPath, expectations: expectations
+                )
+                if failures.isEmpty {
+                    editRunner.note("Checked the built app: \(appliedRequest.key) is in it.")
+                } else {
+                    packagingMetadataFailures = failures
+                    editRunner.note("Warning — the built app does NOT carry the change as expected: \(failures.joined(separator: "; "))")
+                }
+            }
+        }
+        // 2) Quit the running app (gracefully — a save dialog still routes to
+        //    the force-quit consent, the one destructive act that can corrupt
+        //    data) and launch the fresh build.
+        statusLine = "Quitting \(appName) and opening the rebuilt one…"
+        let launch = await relaunch(slug, artifactPath, false)
+        applyRelaunchLaunchResult(launch, allowedForceQuit: false)
+    }
+
+    /// The rebuilt app is up. Give it a moment, look again (window + logs),
+    /// then ask the reader whether THEIR complaint is gone — the only
+    /// end-to-end truth signal the flow has.
+    private func beginSymptomRecheck() {
+        let appName = activeAppName ?? (activeAppSlug ?? "the app")
+        phase = .awaitingSymptomConfirmation
+        deliveredChangeCanBeUndone = true
+        symptomRecheckSummary = nil
+        statusLine = "\(appName) is running with the change. Give it a moment, then tell Iris whether it's actually fixed."
+        editRunner.note("Relaunched \(appName) with the change. Looking again in a moment…")
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            guard let self, self.phase == .awaitingSymptomConfirmation, let slug = self.activeAppSlug else { return }
+            let evidenceAfter = await self.gatherRuntimeEvidenceForApp?(slug)
+            let textAfter = evidenceAfter?.runtimeLogText ?? ""
+            let crashBefore = self.runtimeEvidenceTextBeforeTheRun?.contains("crash report") == true
+            let crashAfter = textAfter.contains("crash report")
+            var summaryParts: [String] = []
+            if crashAfter && !crashBefore {
+                summaryParts.append("a NEW crash report appeared since the relaunch — it may still be broken")
+            } else if evidenceAfter?.runtimeLogText != nil {
+                summaryParts.append("no new crash report since the relaunch")
+            }
+            if evidenceAfter?.appWindowScreenshotPNG != nil {
+                summaryParts.append("Iris captured the relaunched window")
+            }
+            if let signing = self.freshBuildSigningSummary {
+                summaryParts.append("this build is \(signing)")
+            }
+            if !self.packagingMetadataFailures.isEmpty {
+                summaryParts.append("WARNING: \(self.packagingMetadataFailures.joined(separator: "; "))")
+            }
+            self.symptomRecheckSummary = summaryParts.isEmpty
+                ? "Iris couldn't observe the relaunched app (no window or logs yet)."
+                : summaryParts.joined(separator: "; ") + "."
+            self.editRunner.note("Looked again: \(self.symptomRecheckSummary ?? "")")
+        }
+    }
+
+    /// The reader's verdict on their own complaint. Persisted where the next
+    /// run (and a human reading the branch) can see it: the commit trailer,
+    /// and the per-app memory record. "Still broken" unlocks a retry that
+    /// carries the negative verdict forward.
+    func recordSymptomVerdict(_ verdict: OnDemandEditSymptomVerdict) {
+        guard phase == .awaitingSymptomConfirmation, let slug = activeAppSlug else { return }
+        let appName = activeAppName ?? slug
+        let branchName = committedBranchName ?? "the branch"
+        editRunner.note("Your verdict: \(verdict.displayLabel).")
+        persistSymptomVerdict(verdict)
+        switch verdict {
+        case .fixed:
+            statusLine = "Fixed — \(appName) is running the change (branch \(branchName))."
+            editRunner.finishApplied()
+        case .stillBroken:
+            statusLine = "Noted — still broken. Iris has recorded what it tried so the next attempt starts from there. Undo to go back to the installed \(appName), or try again."
+            offersRetryWithMemory = true
+            editRunner.finishStopped()
+        case .cannotTell:
+            statusLine = "Left as unverified — the change is on branch \(branchName) and \(appName) is running it. You can undo any time from here."
+            editRunner.finishApplied()
+        }
+        phase = .done
+    }
+
+    /// Stamp the verdict on the commit (a trailer a human sees) and in the
+    /// per-app memory (what the next run sees).
+    private func persistSymptomVerdict(_ verdict: OnDemandEditSymptomVerdict) {
+        guard let resolved = resolvedClonePath else { return }
+        let trailerValue = verdict.trailerValue
+        Task {
+            if let runner = try? MaintainShellRunner(repoRootPath: resolved) {
+                _ = try? await runner.run(
+                    "git commit --amend --no-edit --trailer 'Symptom-Recheck: \(trailerValue)' --quiet 2>/dev/null || true",
+                    deadline: 60
+                )
+            }
+        }
+        // The per-app memory: the NEXT run on this app reads this verdict. A
+        // still-broken is the important one — it turns this attempt into a
+        // negative signal rather than something to repeat.
+        if let slug = activeAppSlug {
+            OnDemandEditRunLog.updateNewestRecordSymptomVerdict(
+                forAppSlug: slug, to: verdict.memoryRecordValue
+            )
+        }
+    }
+
+    /// Append this run's memory record (every terminal outcome writes one, so
+    /// the next run sees failures and stops, not just successes).
+    private func recordMemory(outcome: String, kind: OnDemandEditKind) {
+        guard let slug = activeAppSlug else { return }
+        OnDemandEditRunLog.appendMemoryRecord(OnDemandEditMemoryRecord(
+            appSlug: slug,
+            kind: kind == .feature ? OnDemandEditMemoryRecord.kindFeature : OnDemandEditMemoryRecord.kindBugFix,
+            scrubbedRequest: scrubbedRequest ?? "",
+            filesTouched: filesTouchedThisRun,
+            agentFinalNarration: lastAgentNarrationThisRun,
+            outcome: outcome
+        ))
+    }
+
+    /// Prompt sections every on-demand run carries regardless of app or
+    /// memory (the diagnostic probe vocabulary lands here once merged).
+    /// Overridable seam for the production wiring.
+    var extraPromptSectionsForEveryRun: () -> [String] = { [] }
+    // (The diagnostic probe vocabulary is assembled inside the fixer's own
+    // system prompt — `MaintainDiagnosticProbe.promptSection` — so it rides
+    // every on-demand run without a seam; this hook is for app-specific
+    // extras.)
+
+    /// Undo a delivered change after the fact: bring the INSTALLED app back
+    /// (quit the rebuilt instance, launch the installed bundle), drop the
+    /// branch, restore the clone to where it was, and forget the queued patch.
+    func undoDeliveredChange() {
+        guard deliveredChangeCanBeUndone,
+              let slug = activeAppSlug,
+              let branchName = committedBranchName,
+              let editChangeId = changeId,
+              let resolved = resolvedClonePath ?? provenanceResolvedClonePath(forAppSlug: slug) else { return }
+        let appName = activeAppName ?? slug
+        deliveredChangeCanBeUndone = false
+        phase = .committing
+        statusLine = "Undoing — bringing back the installed \(appName)…"
+        Task { [weak self] in
+            guard let self else { return }
+            if let installedPath = self.installedApplicationPathForApp?(slug),
+               let relaunch = self.terminateAndRelaunchEditedApp {
+                _ = await relaunch(slug, installedPath, false)
+            }
+            if let runner = try? MaintainShellRunner(repoRootPath: resolved) {
+                let restore = (self.originalHeadRef.map { $0 != "HEAD" } == true)
+                    ? "git checkout '\(self.originalHeadRef!)' --quiet"
+                    : "git checkout '\(self.originalHeadCommit ?? "HEAD")' --quiet"
+                _ = try? await runner.run(
+                    "\(restore) 2>/dev/null; git branch -D '\(branchName)' --quiet 2>/dev/null || true",
+                    deadline: 120
+                )
+            }
+            self.patchQueue.remove(appSlug: slug, recipeId: editChangeId)
+            self.editRunner.note("Undone — the installed \(appName) is back and the branch is gone.")
+            self.editRunner.finishStopped()
+            self.releaseLockIfHeld()
+            self.proposedDiffText = nil
+            self.committedBranchName = nil
+            self.offersRetryWithMemory = false
+            self.statusLine = "Undone — you're back on the installed \(appName); nothing of the change remains."
+            self.phase = .done
+        }
+    }
+
+    /// "Try again with what Iris learned": re-enter the describe step on the
+    /// same app with the same request; the memory record (which now carries
+    /// the still-broken verdict) shapes the next run's opening message.
+    func retryAfterStillBroken() {
+        guard let slug = activeAppSlug, let name = activeAppName, let stack = activeAppStack else { return }
+        let previousRequest = scrubbedRequest
+        releaseLockIfHeld()
+        pickApp(slug: slug, name: name, stack: stack)
+        describePrefillText = previousRequest
+    }
+
+    /// The reader answered the model's BLOCKED question: re-enter describe
+    /// with the answer folded into the request so the next run opens with it.
+    func retryAfterAnsweringBlockedQuestion(_ answer: String) {
+        guard case .blockedByModel = phase,
+              let slug = activeAppSlug, let name = activeAppName, let stack = activeAppStack else { return }
+        let question = blockedQuestionForUser ?? ""
+        let previousRequest = scrubbedRequest ?? ""
+        let trimmedAnswer = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        pickApp(slug: slug, name: name, stack: stack)
+        describePrefillText = question.isEmpty || trimmedAnswer.isEmpty
+            ? previousRequest
+            : "\(previousRequest)\n\n(Iris asked: \(question) — answer: \(trimmedAnswer))"
+    }
+
+    /// The card consumed the prefill; clear it so a later pick starts clean.
+    func consumeDescribePrefill() {
+        describePrefillText = nil
+    }
+
+    /// The symlink-resolved clone path for an app, for an undo that arrives
+    /// after the lock was already released.
+    private func provenanceResolvedClonePath(forAppSlug appSlug: String) -> String? {
+        guard let clonePath = provenanceClonePath(forAppSlug: appSlug) else { return nil }
+        return try? GitInspectionService.allowedRepositoryPath(clonePath)
     }
 
     // MARK: - Step 9: preview → keep or discard
@@ -1136,11 +1623,12 @@ final class OnDemandEditCoordinator: ObservableObject {
             guard let self else { return }
             // 1) Package + assert the artifact exists. Nothing is terminated yet.
             let packaging = await package(slug)
-            guard case .artifactReady(let artifactPath) = packaging else {
+            guard case .artifactReady(let artifactPath, let signingSummary) = packaging else {
                 self.finishRelaunchWithoutTerminating(fromPackaging: packaging)
                 return
             }
             self.packagedArtifactPath = artifactPath
+            self.freshBuildSigningSummary = signingSummary
             // 2) Terminate the running app (graceful only) and launch the fresh
             //    build. A refusal to quit surfaces the force-quit consent.
             self.statusLine = "Quitting \(self.activeAppName ?? slug) and opening your edited build…"
@@ -1231,6 +1719,12 @@ final class OnDemandEditCoordinator: ObservableObject {
         let branchName = committedBranchName ?? "the branch"
         switch result {
         case .relaunchedFreshBuild:
+            if deliveryIsAutomatic {
+                // The lock stays held through the re-check: an undo still
+                // touches the clone (branch drop + checkout).
+                beginSymptomRecheck()
+                return
+            }
             statusLine = "Your edited build of \(appName) is running — a fresh build straight from your source, so macOS may ask you to re-grant its permissions. The change is on branch \(branchName)."
             releaseLockIfHeld()
             packagedArtifactPath = nil
@@ -1488,8 +1982,16 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// Iris's honest one-liner after verification. A feature is "applied and
     /// rebuilt", never "verified"; a suite that didn't run (no test command) is
     /// said plainly, never counted as a silent green.
-    private func verificationNote(suitePassed: Bool?, kind: OnDemandEditKind) -> String {
+    private func verificationNote(
+        suitePassed: Bool?, kind: OnDemandEditKind, symptomVerifiedByRepro: Bool = false
+    ) -> String {
         let subject = kind == .feature ? "The feature is implemented" : "The fix is in"
+        if symptomVerifiedByRepro {
+            // The one honest path to the word: the model's own headless check
+            // failed before the patch, passed after, and failed again with the
+            // patch reverted.
+            return "\(subject) — and it is VERIFIED: Iris's own check for this bug failed before the change, passes after it, and fails again with the change reverted. It builds\(suitePassed == true ? " and the test suite stays green" : "")."
+        }
         switch suitePassed {
         case .some(true):
             return "\(subject) — it builds and the app's test suite stays green. Applied and rebuilt (not \"verified\": there's no automatic test that proves it does what you asked)."
@@ -1584,6 +2086,20 @@ final class OnDemandEditCoordinator: ObservableObject {
         derivedRuntimeShape = nil
         clarificationAnswersByQuestionId = [:]
         readerAskedToStopTheRun = false
+        deliveryIsAutomatic = false
+        freshBuildSigningSummary = nil
+        packagingMetadataFailures = []
+        appliedManifestChangeRequest = nil
+        // A consent left awaiting by an interrupted flow resolves as a decline
+        // so the engine never hangs on a dead card.
+        manifestConsentContinuation?.resume(returning: false)
+        manifestConsentContinuation = nil
+        pendingManifestChangeSummary = nil
+        runtimeEvidenceTextBeforeTheRun = nil
+        symptomRecheckSummary = nil
+        offersRetryWithMemory = false
+        deliveredChangeCanBeUndone = false
+        blockedQuestionForUser = nil
         // Defensive: a log left open by an interrupted flow is closed rather
         // than leaked (normal runs close it on their own result path).
         runLog?.finish(outcome: "flow reset")
@@ -1594,5 +2110,41 @@ final class OnDemandEditCoordinator: ObservableObject {
         isAssessingRequest = false
         // resolvedClonePath is only cleared alongside a lock release, so a lock
         // is never orphaned by a reset mid-run.
+    }
+}
+
+/// The reader's answer to "is the thing you complained about actually
+/// fixed?" after the rebuilt app relaunched — the flow's only end-to-end
+/// truth signal, recorded honestly (a walk-away is "unverified", never a
+/// claimed success).
+enum OnDemandEditSymptomVerdict: String, Sendable {
+    case fixed
+    case stillBroken
+    case cannotTell
+
+    var displayLabel: String {
+        switch self {
+        case .fixed: return "fixed"
+        case .stillBroken: return "still broken"
+        case .cannotTell: return "can't tell yet"
+        }
+    }
+
+    /// The per-app memory record's verdict vocabulary (`OnDemandEditMemoryRecord`).
+    var memoryRecordValue: String {
+        switch self {
+        case .fixed: return OnDemandEditMemoryRecord.symptomVerdictConfirmed
+        case .stillBroken: return OnDemandEditMemoryRecord.symptomVerdictStillBroken
+        case .cannotTell: return OnDemandEditMemoryRecord.symptomVerdictUnverified
+        }
+    }
+
+    /// The commit-trailer value: `Symptom-Recheck: confirmed|still-broken|unverified`.
+    var trailerValue: String {
+        switch self {
+        case .fixed: return "confirmed"
+        case .stillBroken: return "still-broken"
+        case .cannotTell: return "unverified"
+        }
     }
 }

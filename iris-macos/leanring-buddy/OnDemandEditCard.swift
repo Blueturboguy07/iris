@@ -59,6 +59,10 @@ struct OnDemandEditCard: View {
     /// one batch can never leak into the next.
     @State private var clarificationSelectionsByQuestionId: [String: String] = [:]
 
+    /// The reader's answer to the model's BLOCKED question, typed into the
+    /// blocked card before "Answer and retry".
+    @State private var blockedQuestionAnswerText: String = ""
+
     var body: some View {
         Group {
             switch coordinator.phase {
@@ -82,6 +86,12 @@ struct OnDemandEditCard: View {
                 previewCard
             case .committing:
                 committingCard
+            case .awaitingManifestConsent:
+                manifestConsentCard
+            case .delivering:
+                deliveringCard
+            case .awaitingSymptomConfirmation:
+                symptomConfirmationCard
             case .awaitingRelaunchConsent:
                 relaunchConsentCard
             case .relaunching:
@@ -94,6 +104,8 @@ struct OnDemandEditCard: View {
                 terminalMessageCard(reason: reason, isRefusal: false)
             case .notEligible(let reason):
                 terminalMessageCard(reason: reason, isRefusal: true)
+            case .blockedByModel(let explanation):
+                blockedByModelCard(explanation: explanation)
             }
         }
         // The bar this lives in re-measures its own height, but the settings
@@ -115,6 +127,14 @@ struct OnDemandEditCard: View {
         // batch can never carry into another.
         .onChange(of: coordinator.clarificationQuestions) { _, _ in
             clarificationSelectionsByQuestionId = [:]
+        }
+        // A retry (after "still broken", or after answering a BLOCKED question)
+        // re-enters describe with the field prefilled — consumed once so a
+        // later fresh pick starts clean.
+        .onChange(of: coordinator.describePrefillText) { _, prefill in
+            guard let prefill else { return }
+            describeText = prefill
+            coordinator.consumeDescribePrefill()
         }
         .onAppear {
             selectedKind = preselectedKind ?? .bugFix
@@ -553,7 +573,7 @@ struct OnDemandEditCard: View {
     /// from the engine's own result. A feature is never "verified"; a stack with
     /// no suite is said plainly rather than counted as a silent green.
     private var honestPreviewNote: String? {
-        guard case .appliedAndRebuilt(_, _, let kind, let suitePassed)? = coordinator.lastResult else {
+        guard case .appliedAndRebuilt(_, _, let kind, let suitePassed, _)? = coordinator.lastResult else {
             return nil
         }
         let subject = kind == .feature ? "This feature" : "This fix"
@@ -576,7 +596,7 @@ struct OnDemandEditCard: View {
     /// Nil unless the last result is an applied-and-rebuilt change, so this only
     /// surfaces where there is a real committed change to describe.
     private var earnedVerificationForLastResult: (rung: VerificationRung, evidenceLogLines: [String])? {
-        guard case .appliedAndRebuilt(_, _, _, let suitePassed)? = coordinator.lastResult else {
+        guard case .appliedAndRebuilt(_, _, _, let suitePassed, _)? = coordinator.lastResult else {
             return nil
         }
         // "Applied and rebuilt" means the change compiled/built clean — L1 is
@@ -639,6 +659,161 @@ struct OnDemandEditCard: View {
                         .strokeBorder(DS.Colors.line, lineWidth: 1)
                 )
         )
+    }
+
+    // MARK: - Manifest consent (the one per-run permission the model can ask for)
+
+    /// The model declared a dependency / plist key / entitlement it is not
+    /// allowed to write; Iris's own code applies it after this tap, then the
+    /// un-jailed build runs WITH it — which is exactly why it is asked.
+    private var manifestConsentCard: some View {
+        card {
+            header(icon: "shippingbox", title: "Iris needs a permission")
+
+            Text(coordinator.pendingManifestChangeSummary ?? "Iris wants to add a dependency or build setting.")
+                .font(.system(size: 11.5))
+                .foregroundColor(DS.Colors.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("Iris will apply this itself (the model never edits build files) and then build with it. A dependency's own build scripts run during that build.")
+                .font(.system(size: 10.5))
+                .foregroundColor(DS.Colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                Button("Decline") { coordinator.declineManifestChange() }
+                    .irisTextButton()
+                Spacer(minLength: 0)
+                Button("Allow") { coordinator.approveManifestChange() }
+                    .irisPrimaryPill(isFullWidth: false, isCompact: true)
+            }
+        }
+    }
+
+    // MARK: - Automatic delivery (rebuild + relaunch, no taps)
+
+    private var deliveringCard: some View {
+        card {
+            header(icon: "arrow.triangle.2.circlepath", title: "Putting the fix into \(appName)")
+            HStack(spacing: 8) {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .controlSize(.small)
+                    .scaleEffect(0.62)
+                    .frame(width: 13, height: 13)
+                Text(coordinator.statusLine ?? "Rebuilding and relaunching…")
+                    .font(.system(size: 11.5))
+                    .foregroundColor(DS.Colors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    // MARK: - Symptom re-check (the only end-to-end truth signal)
+
+    /// After the rebuilt app relaunches: the reader's OWN complaint, what Iris
+    /// observed when it looked again, and the verdict — the one question that
+    /// matters. Undo is always one tap away.
+    private var symptomConfirmationCard: some View {
+        card {
+            header(icon: "checkmark.circle", title: "Is it fixed?")
+
+            if let complaint = coordinator.activeRequestText {
+                Text("You said: “\(complaint)”")
+                    .font(.system(size: 11.5))
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 6) {
+                if coordinator.symptomRecheckSummary == nil {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(0.62)
+                        .frame(width: 13, height: 13)
+                }
+                Text(coordinator.symptomRecheckSummary ?? "\(appName) is running with the change — Iris is looking again…")
+                    .font(.system(size: 10.5))
+                    .foregroundColor(DS.Colors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 8) {
+                Button("Still broken") { coordinator.recordSymptomVerdict(.stillBroken) }
+                    .irisTextButton(isDanger: true)
+                Button("Can't tell yet") { coordinator.recordSymptomVerdict(.cannotTell) }
+                    .irisTextButton()
+                Spacer(minLength: 0)
+                Button("Fixed") { coordinator.recordSymptomVerdict(.fixed) }
+                    .irisPrimaryPill(isFullWidth: false, isCompact: true)
+            }
+
+            HStack(spacing: 8) {
+                Button("Undo this change") { coordinator.undoDeliveredChange() }
+                    .irisTinyButton()
+                    .help("Brings back the installed \(appName) and drops the branch — nothing of the change remains.")
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    // MARK: - Blocked by the model (honest refusal + question hand-back)
+
+    /// The model declared, after investigating, that it could not make the
+    /// change under its constraints — its sentence verbatim, and if it asked
+    /// something, a field to answer and retry. Nothing was changed.
+    private func blockedByModelCard(explanation: String) -> some View {
+        card {
+            header(icon: "hand.raised", title: "Iris stopped on purpose")
+
+            Text(explanation)
+                .font(.system(size: 11.5))
+                .foregroundColor(DS.Colors.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let question = coordinator.blockedQuestionForUser {
+                Text("Iris needs to know: \(question)")
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.amber)
+                    .fixedSize(horizontal: false, vertical: true)
+                TextField("Your answer", text: $blockedQuestionAnswerText, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12.5))
+                    .foregroundColor(DS.Colors.ink)
+                    .lineLimit(1...4)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
+                            .fill(DS.Colors.surfaceRaised)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
+                                    .strokeBorder(DS.Colors.line, lineWidth: 1)
+                            )
+                    )
+            }
+
+            Text("Nothing was changed.")
+                .font(.system(size: 10.5))
+                .foregroundColor(DS.Colors.textSecondary)
+
+            HStack(spacing: 8) {
+                Button("Done") { coordinator.cancel() }
+                    .irisTextButton()
+                Spacer(minLength: 0)
+                if coordinator.blockedQuestionForUser != nil {
+                    Button("Answer and retry") {
+                        coordinator.retryAfterAnsweringBlockedQuestion(blockedQuestionAnswerText)
+                        blockedQuestionAnswerText = ""
+                    }
+                    .irisPrimaryPill(isFullWidth: false, isCompact: true)
+                    .disabled(blockedQuestionAnswerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                } else {
+                    Button("Try again") { coordinator.retryAfterAnsweringBlockedQuestion("") }
+                        .irisPrimaryPill(isFullWidth: false, isCompact: true)
+                }
+            }
+        }
     }
 
     // MARK: - Relaunch consent (Consent #3, DESTRUCTIVE)
@@ -764,9 +939,21 @@ struct OnDemandEditCard: View {
                     .irisTinyButton()
                     .help("Posts to publik's public listing that this app got this change. A separate, public step — asked every time.")
             }
+            if coordinator.deliveredChangeCanBeUndone {
+                Button("Undo") { coordinator.undoDeliveredChange() }
+                    .irisTinyButton()
+                    .help("Brings back the installed app and drops the branch.")
+            }
             Spacer(minLength: 0)
-            Button("Done") { coordinator.cancel() }
-                .irisPrimaryPill(isFullWidth: false, isCompact: true)
+            if coordinator.offersRetryWithMemory {
+                // "Still broken" → the next run opens with this attempt's
+                // record marked as NOT having cured the complaint.
+                Button("Try again with what Iris learned") { coordinator.retryAfterStillBroken() }
+                    .irisPrimaryPill(isFullWidth: false, isCompact: true)
+            } else {
+                Button("Done") { coordinator.cancel() }
+                    .irisPrimaryPill(isFullWidth: false, isCompact: true)
+            }
         }
     }
 

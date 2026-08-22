@@ -109,6 +109,10 @@ enum MaintainTierCProgressEvent: Sendable, Equatable {
     /// detector uses, since `.git` is stripped mid-loop and cannot be asked).
     /// Capped; the reader sees exactly WHERE the agent is working.
     case editedFiles(paths: [String], stepNumber: Int)
+    /// The loop noticed several consecutive steps changed no files and asked
+    /// the model to either declare DONE or make its next edit, instead of
+    /// giving up. Only if the stall continues AFTER this does the run stop.
+    case nudgedTowardConvergence(stepNumber: Int)
     /// A 429 landed and the loop is waiting it out before retrying.
     case waitingOutARateLimit(waitSeconds: Int)
     /// A model call dropped mid-flight (a timeout or a lost connection) and
@@ -292,6 +296,23 @@ final class MaintainTierCFixer {
     /// this only bites once the agent is actually mutating the tree and then
     /// stalls, which is the real "spinning" signal.
     static let noProgressStepThreshold = 5
+
+    /// What the loop says to a stalled model BEFORE giving up. A real dogfood
+    /// run (Aug 22 2026) died at step 21 because the agent spent its last five
+    /// steps READING — checking its own finished work — and the detector read
+    /// that as spinning and reverted everything. Post-edit verification sprees
+    /// are legitimate, so the first stall gets this steer (folded into the
+    /// last result turn, keeping user/assistant alternation intact) and the
+    /// counter resets; only a model that stalls AGAIN after being asked
+    /// point-blank is stopped. The nudge can only ever ADD a chance to finish
+    /// — a truly stuck loop still ends, one threshold later.
+    static let convergenceNudgeMessage = """
+    Your recent commands have not changed any files. If the change is \
+    complete, reply DONE now on its own line — the verification build and \
+    tests run automatically after DONE, you must not keep checking manually. \
+    If it is not complete, say in one sentence what remains, then make the \
+    next edit.
+    """
 
     private let provider: MaintainModelProviding
 
@@ -602,6 +623,8 @@ final class MaintainTierCFixer {
         var fileStatesFromPreviousStep = Self.workingTreeFileStates(repoRootPath: clonePath)
         var theModelHasEditedTheTreeAtLeastOnce = false
         var consecutiveNoProgressStepCount = 0
+        var hasNudgedTowardConvergence = false
+        var stepsTaken = 0
 
         var declaredDone = false
         // A 429 is transient by definition, and on a Claude Code login the
@@ -612,6 +635,7 @@ final class MaintainTierCFixer {
         var rateLimitWaitsRemaining = Self.maximumRateLimitWaitsPerRun
         var transportDropRetriesRemaining = Self.maximumTransportDropRetriesPerRun
         for step in 1...Self.runawayStepCeiling {
+            stepsTaken = step
             // The reader's stop request is honored at every step boundary:
             // put the tree back exactly as it was and end the run — never
             // leave a half-made edit behind.
@@ -740,8 +764,24 @@ final class MaintainTierCFixer {
                 fileStatesFromPreviousStep = latestFileStates
 
                 if consecutiveNoProgressStepCount >= Self.noProgressStepThreshold {
-                    irisTrace("maintain: tier-c stopping early — no working-tree progress for \(consecutiveNoProgressStepCount) steps")
-                    break
+                    if hasNudgedTowardConvergence {
+                        irisTrace("maintain: tier-c stopping early — no working-tree progress for \(consecutiveNoProgressStepCount) steps even after the finish-or-continue nudge")
+                        break
+                    }
+                    // First stall: steer instead of killing (see
+                    // `convergenceNudgeMessage`). Folded into the result turn
+                    // just appended above, so user/assistant roles keep
+                    // alternating for providers that require it.
+                    hasNudgedTowardConvergence = true
+                    consecutiveNoProgressStepCount = 0
+                    if let lastTurn = conversation.last, lastTurn.role == "user" {
+                        conversation[conversation.count - 1] = MaintainChatTurn(
+                            role: "user",
+                            text: lastTurn.text + "\n\n" + Self.convergenceNudgeMessage
+                        )
+                    }
+                    irisTrace("maintain: tier-c no-progress nudge at step \(step) — asked for DONE or the next edit")
+                    progressHandler?(.nudgedTowardConvergence(stepNumber: step))
                 }
             }
         }
@@ -761,7 +801,10 @@ final class MaintainTierCFixer {
 
         guard declaredDone else {
             _ = try? await runner.run("git checkout -- . && git clean -fd --quiet", deadline: 120)
-            return .couldNotFix(reason: "ran out of steps without a fix")
+            // The step count makes the run log's failure line diagnosable at a
+            // glance; the "ran out of steps" prefix is what the coordinator's
+            // copy mapping keys on, so it stays first.
+            return .couldNotFix(reason: "ran out of steps without a fix (stopped after \(stepsTaken) steps without the model declaring the change finished)")
         }
 
         // Did the agent actually change anything?

@@ -403,6 +403,57 @@ import Testing
         #expect(tailLines.last?.hasPrefix("xxxx") == true)
     }
 
+    /// The per-run log writes a header naming the run and the request, then
+    /// timestamped lines, then the outcome — the file a failed run leaves
+    /// behind so "what did it actually try?" has an answer.
+    @Test func theRunLogPersistsTheRequestActivityAndOutcome() throws {
+        let directory = Self.makeTemporaryDirectory()
+        let runLog = OnDemandEditRunLog(
+            appSlug: "demo", kindLabel: "feature",
+            scrubbedRequest: "add a dark mode toggle",
+            directoryPath: directory
+        )
+        let unwrappedRunLog = try #require(runLog)
+        unwrappedRunLog.record("iris: Opening the settings view.")
+        unwrappedRunLog.record("$ cat src/settings.tsx")
+        unwrappedRunLog.finish(outcome: "failed: ran out of steps")
+
+        let contents = try String(contentsOfFile: unwrappedRunLog.filePath, encoding: .utf8)
+        #expect(contents.contains("demo (feature)"))
+        #expect(contents.contains("Request: add a dark mode toggle"))
+        #expect(contents.contains("iris: Opening the settings view."))
+        #expect(contents.contains("$ cat src/settings.tsx"))
+        #expect(contents.contains("outcome: failed: ran out of steps"))
+        // Closed: a record after finish writes nothing.
+        unwrappedRunLog.record("after close")
+        let contentsAfterClose = try String(contentsOfFile: unwrappedRunLog.filePath, encoding: .utf8)
+        #expect(!contentsAfterClose.contains("after close"))
+    }
+
+    /// The runs directory is pruned oldest-first so it never grows unbounded —
+    /// creating a new log keeps the total at the cap.
+    @Test func oldRunLogsArePrunedOldestFirst() throws {
+        let directory = Self.makeTemporaryDirectory()
+        // Timestamp-first names sort chronologically as plain strings; these
+        // stand in for old runs.
+        for index in 0..<(OnDemandEditRunLog.maximumKeptRunLogFiles + 5) {
+            let name = String(format: "20260801-%09d-old.log", index)
+            FileManager.default.createFile(
+                atPath: (directory as NSString).appendingPathComponent(name), contents: Data()
+            )
+        }
+        let runLog = try #require(OnDemandEditRunLog(
+            appSlug: "demo", kindLabel: "bug fix", scrubbedRequest: "r",
+            directoryPath: directory
+        ))
+        _ = runLog
+        let remaining = try FileManager.default.contentsOfDirectory(atPath: directory)
+            .filter { $0.hasSuffix(".log") }
+        #expect(remaining.count == OnDemandEditRunLog.maximumKeptRunLogFiles)
+        // The oldest files are the ones that went.
+        #expect(!remaining.contains(String(format: "20260801-%09d-old.log", 0)))
+    }
+
     // MARK: - Helpers
 
     private static func makeCoordinator(provenanceStore: InstallProvenanceStore) -> OnDemandEditCoordinator {
@@ -736,6 +787,95 @@ struct OnDemandEditEngineTests {
             .verifyingTheChange(buildCommand: "true", testCommand: "grep -q OK health.txt")
         ))
         #expect(observedEvents.last == .committingTheChange)
+    }
+
+    /// Replays a scripted edit, then endless DISTINCT read-only commands — the
+    /// exact "checking my own finished work" spree that killed a real dogfood
+    /// run — until the loop's finish-or-continue nudge appears in the
+    /// conversation, then declares DONE. `respondsToNudge: false` never
+    /// declares DONE, pinning the honest stop one threshold later.
+    final class StallsUntilNudgedProvider: MaintainModelProviding {
+        let displayName = "stalls-until-nudged"
+        let isAvailable = true
+        private let respondsToNudge: Bool
+        private var index = 0
+        private let readOnlyFillerCommands = [
+            "ls", "pwd", "cat app.txt", "cat health.txt", "echo checking",
+            "true", "echo again", "ls -la", "wc -l app.txt", "head app.txt",
+            "tail app.txt", "echo more", "date -u +%Y", "echo still", "id -u",
+        ]
+        init(respondsToNudge: Bool) { self.respondsToNudge = respondsToNudge }
+        func respond(
+            systemPrompt: String, conversation: [MaintainChatTurn], maximumOutputTokens: Int
+        ) async throws -> String {
+            if respondsToNudge, conversation.contains(where: { turn in
+                turn.role == "user" && turn.text.contains("reply DONE now")
+            }) {
+                return "The change was already complete — finishing.\nDONE"
+            }
+            defer { index += 1 }
+            if index == 0 {
+                return "Making the edit.\n```bash\nprintf 'FIXED\\n' > app.txt\n```"
+            }
+            let filler = readOnlyFillerCommands[index % readOnlyFillerCommands.count]
+            return "Checking my work.\n```bash\n\(filler)\n```"
+        }
+    }
+
+    /// The Aug 22 dogfood failure, replayed and fixed: an agent that finished
+    /// its edit and then only READ for five steps used to be killed and
+    /// reverted ("couldn't converge"). Now the loop nudges it — finish or make
+    /// the next edit — and a model that was simply done declares DONE and the
+    /// change lands.
+    @Test func aPostEditReadingSpreeIsNudgedToDoneNotKilled() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo()
+        defer { Self.removeRepo(repo) }
+
+        let fixer = MaintainTierCFixer(provider: StallsUntilNudgedProvider(respondsToNudge: true))
+        var observedEvents: [MaintainTierCProgressEvent] = []
+        let result = await fixer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "2222222222222222bbbbbbbbbbbbbbbb",
+            request: "please make the app say FIXED", kind: .bugFix,
+            progressHandler: { progressEvent in observedEvents.append(progressEvent) },
+            verificationCommandsOverride: Self.fastCommands()
+        )
+
+        guard case .appliedAndRebuilt = result else {
+            Issue.record("expected the nudge to rescue the run, got \(result)")
+            return
+        }
+        #expect(Self.fileContents(repo, "app.txt") == "FIXED")
+        #expect(observedEvents.contains { event in
+            if case .nudgedTowardConvergence = event { return true }
+            return false
+        })
+    }
+
+    /// A model that stalls straight through the nudge still stops honestly —
+    /// one threshold later — with everything reverted and the step count in
+    /// the reason for the run log.
+    @Test func aModelThatIgnoresTheNudgeStillStopsAndReverts() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo()
+        defer { Self.removeRepo(repo) }
+
+        let fixer = MaintainTierCFixer(provider: StallsUntilNudgedProvider(respondsToNudge: false))
+        let result = await fixer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "3333333333333333cccccccccccccccc",
+            request: "please make the app say FIXED", kind: .bugFix,
+            verificationCommandsOverride: Self.fastCommands()
+        )
+
+        guard case .couldNotComplete(let reason) = result else {
+            Issue.record("expected the honest stop after the ignored nudge, got \(result)")
+            return
+        }
+        #expect(reason.contains("ran out of steps"))
+        #expect(Self.fileContents(repo, "app.txt") == "BROKEN")
+        #expect(FileManager.default.fileExists(atPath: repo + "/.git"))
     }
 
     // MARK: - Git repo helpers

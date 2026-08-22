@@ -304,6 +304,12 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// consent so the heavy build never runs twice for one relaunch.
     private var packagedArtifactPath: String?
 
+    /// The persisted transcript of the CURRENT run (request, narration,
+    /// commands, exits, outcome) under ~/Library/Logs/Iris/edit-runs — the
+    /// after-the-fact diagnosis surface a failed run used to lack entirely.
+    /// Nil when logging was unavailable, which never affects the run.
+    private var runLog: OnDemandEditRunLog?
+
     /// The per-repo build/run recipe DERIVED by reading the clone when the app
     /// was picked (plan §4), cached so the clarification pass and the plan reuse
     /// it without re-deriving. Nil until an eligible app is picked. It is pure
@@ -774,6 +780,13 @@ final class OnDemandEditCoordinator: ObservableObject {
         statusLine = "Working on it under your model key…"
         readerAskedToStopTheRun = false
         editRunner.beginRun(appName: activeAppName ?? slug, kind: kind)
+        // The persisted run transcript — what makes a failed run diagnosable
+        // after the fact. Best-effort: a nil log never affects the run.
+        runLog = OnDemandEditRunLog(
+            appSlug: slug,
+            kindLabel: kind == .feature ? "feature" : "bug fix",
+            scrubbedRequest: scrubbed
+        )
 
         Task { [weak self] in
             guard let self else { return }
@@ -797,6 +810,8 @@ final class OnDemandEditCoordinator: ObservableObject {
         kind: OnDemandEditKind
     ) async {
         guard let runner = try? MaintainShellRunner(repoRootPath: resolvedClonePath) else {
+            runLog?.finish(outcome: "not started: the clone path is not usable")
+            runLog = nil
             failRun(reason: "the clone path is not usable", resolvedClonePath: resolvedClonePath)
             return
         }
@@ -810,6 +825,8 @@ final class OnDemandEditCoordinator: ObservableObject {
         if treeIsDirty {
             editRunner.note("Your clone of \(activeAppName ?? slug) has uncommitted changes, so Iris stopped — it never discards work you haven't committed.")
             editRunner.finishStopped()
+            runLog?.finish(outcome: "not started: the clone has uncommitted changes")
+            runLog = nil
             failRun(
                 reason: "your clone has uncommitted changes — commit or stash them first so Iris never touches your own work",
                 resolvedClonePath: resolvedClonePath
@@ -852,6 +869,8 @@ final class OnDemandEditCoordinator: ObservableObject {
            reason == MaintainTierCFixer.stoppedByReaderReason {
             editRunner.note("Stopped — nothing was kept. Your clone is exactly as it was.")
             editRunner.finishStopped()
+            runLog?.finish(outcome: "stopped by the reader — everything reverted")
+            runLog = nil
             readerAskedToStopTheRun = false
             clonePathLock.release(clonePath: resolvedClonePath)
             self.resolvedClonePath = nil
@@ -866,6 +885,8 @@ final class OnDemandEditCoordinator: ObservableObject {
             editRunner.recordVerificationResult(passed: true, over: elapsed)
             editRunner.note(verificationNote(suitePassed: suitePassed, kind: kind))
             editRunner.finishApplied()
+            runLog?.finish(outcome: "applied on branch \(branchName) (suite: \(suitePassed.map(String.init) ?? "none to run"))")
+            runLog = nil
             proposedDiffText = await readCommittedDiff(runner: runner)
             phase = .previewDiff
             statusLine = "Here's the change on branch \(branchName). Keep it?"
@@ -881,12 +902,21 @@ final class OnDemandEditCoordinator: ObservableObject {
             refusalOffersModelKeySetup = mapped.offersModelKeySetup
             editRunner.recordVerificationResult(passed: false, over: elapsed)
             editRunner.note(mapped.userFacing)
+            if let runLog {
+                // The pointer that makes "what did it actually try?" a
+                // question with an answer, right where the failure lands.
+                editRunner.note("Everything Iris tried is logged at \(runLog.filePath).")
+                runLog.finish(outcome: "failed: \(reason)")
+            }
+            runLog = nil
             editRunner.finishStopped()
             failRun(reason: mapped.userFacing, resolvedClonePath: resolvedClonePath)
 
         case .notEligible(let reason):
             editRunner.note("Iris couldn't start the edit: \(reason).")
             editRunner.finishStopped()
+            runLog?.finish(outcome: "not eligible: \(reason)")
+            runLog = nil
             clonePathLock.release(clonePath: resolvedClonePath)
             self.resolvedClonePath = nil
             phase = .notEligible(reason: reason)
@@ -916,6 +946,7 @@ final class OnDemandEditCoordinator: ObservableObject {
             // doing and why. The most direct "what is Iris doing right now"
             // there is, so it leads both the transcript and the status line.
             editRunner.note(text)
+            runLog?.record("iris: \(text)")
             showStatus(String(text.prefix(140)))
         case .editedFiles(let paths, _):
             let shownPaths = paths.prefix(5).joined(separator: ", ")
@@ -924,20 +955,33 @@ final class OnDemandEditCoordinator: ObservableObject {
                 ? "Changed: \(shownPaths) (+\(overflowCount) more)"
                 : "Changed: \(shownPaths)"
             editRunner.note(line)
+            runLog?.record("changed: \(paths.joined(separator: ", "))")
             showStatus(line)
         case .runningJailedCommand(let command, _):
             editRunner.recordExecutedCommand(command)
+            runLog?.record("$ \(command)")
             showStatus(GuideAutopilotFriendlyLabel.label(for: command))
         case .jailedCommandFinished(let exitCode, let duration, let outputTailLines):
             editRunner.recordCommandOutputTail(outputTailLines)
             editRunner.recordCommandExit(exitCode: exitCode, duration: duration)
+            let outputSuffix = outputTailLines.isEmpty
+                ? ""
+                : "\n" + outputTailLines.joined(separator: "\n")
+            runLog?.record("exit \(exitCode) (\(String(format: "%.1f", duration))s)\(outputSuffix)")
+        case .nudgedTowardConvergence(let stepNumber):
+            let line = "Iris hasn't changed any files for a few steps — asking it to either finish up or make its next edit…"
+            editRunner.note(line)
+            runLog?.record("nudge at step \(stepNumber): asked for DONE or the next edit")
+            showStatus(line)
         case .waitingOutARateLimit(let waitSeconds):
             let line = "Anthropic is rate-limiting your credential — waiting \(waitSeconds)s, then continuing…"
             editRunner.note(line)
+            runLog?.record("rate-limited — waiting \(waitSeconds)s")
             showStatus(line)
         case .retryingAfterATransportDrop:
             let line = "A model call dropped (a timeout or network hiccup) — retrying the same step…"
             editRunner.note(line)
+            runLog?.record("model call dropped — retrying")
             showStatus(line)
         case .verifyingTheChange(let buildCommand, let testCommand):
             var verificationParts: [String] = []
@@ -947,10 +991,12 @@ final class OnDemandEditCoordinator: ObservableObject {
                 ? "The edit is made — checking it over…"
                 : "The edit is made — now \(verificationParts.joined(separator: ", then "))…"
             editRunner.note(line)
+            runLog?.record("verifying: build=\(buildCommand ?? "none"), tests=\(testCommand ?? "none")")
             showStatus(line)
         case .committingTheChange:
             let line = "It checks out — committing the change on a branch…"
             editRunner.note(line)
+            runLog?.record("committing")
             showStatus(line)
         }
     }
@@ -1437,9 +1483,9 @@ final class OnDemandEditCoordinator: ObservableObject {
         }
         if reason.contains("ran out of steps") {
             // With budgeting removed, "ran out of steps" only happens when the
-            // loop stopped making progress or hit the distant runaway backstop
-            // — not because a budget expired.
-            return ("Iris worked at this for a while but couldn't converge on a finished change, so it stopped — nothing was applied. A more specific request may land better.", false, false)
+            // loop stopped making progress even after the finish-or-continue
+            // nudge, or hit the distant runaway backstop — never a budget.
+            return ("Iris worked at this for a while but couldn't converge on a finished change, so it stopped — nothing was applied. A more specific request may land better. (Everything it tried is logged in ~/Library/Logs/Iris/edit-runs.)", false, false)
         }
         if reason.contains("changed nothing") {
             return ("Iris couldn't find a change to make for that — nothing was applied.", false, false)
@@ -1490,6 +1536,10 @@ final class OnDemandEditCoordinator: ObservableObject {
         derivedRuntimeShape = nil
         clarificationAnswersByQuestionId = [:]
         readerAskedToStopTheRun = false
+        // Defensive: a log left open by an interrupted flow is closed rather
+        // than leaked (normal runs close it on their own result path).
+        runLog?.finish(outcome: "flow reset")
+        runLog = nil
         // Invalidate any in-flight request probe: its verdict (and watchdog)
         // must not advance a flow that has been reset out from under it.
         requestProbeGeneration += 1

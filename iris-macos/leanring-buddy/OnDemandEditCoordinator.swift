@@ -968,6 +968,12 @@ final class OnDemandEditCoordinator: ObservableObject {
                 ? ""
                 : "\n" + outputTailLines.joined(separator: "\n")
             runLog?.record("exit \(exitCode) (\(String(format: "%.1f", duration))s)\(outputSuffix)")
+        case .revertedForbiddenBuildScriptEdit(let paths, _):
+            let fileList = paths.joined(separator: ", ")
+            let line = "Iris tried to edit \(fileList) — build files are off-limits, so Iris restored \(paths.count == 1 ? "it" : "them") and is implementing without \(paths.count == 1 ? "it" : "them")."
+            editRunner.note(line)
+            runLog?.record("restored forbidden build-script edit: \(fileList)")
+            showStatus(line)
         case .nudgedTowardConvergence(let stepNumber):
             let line = "Iris hasn't changed any files for a few steps — asking it to either finish up or make its next edit…"
             editRunner.note(line)

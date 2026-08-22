@@ -659,22 +659,60 @@ struct OnDemandEditEngineTests {
         #expect(FileManager.default.fileExists(atPath: repo + "/.git"))
     }
 
-    /// A model edit to a build-script file (here `package.json`) is a jail
-    /// escape — it would run un-jailed during the verification build — so it is
-    /// blocked BEFORE any build runs and the tree is reverted. Nothing is
-    /// committed; the offending file is back exactly as it was.
-    @Test func anEditToABuildScriptFileIsBlockedBeforeBuildingAndReverted() async throws {
+    /// The Aug 22 whimprflow failure, replayed and fixed: a model that edits a
+    /// build-script file mid-run (here `package.json`) has that ONE file
+    /// restored on the spot and is steered onward — the rest of its work
+    /// survives, the run lands, and the commit carries only the legitimate
+    /// edit. Previously the end-of-run guard discarded the entire run.
+    @Test func aBuildScriptEditIsRestoredMidLoopAndTheRunStillLands() async throws {
         guard sandboxIsAvailable else { return }
         let repo = try Self.makeBuggyRepo(extraFiles: ["package.json": "{\"name\":\"x\"}\n"])
         defer { Self.removeRepo(repo) }
 
         let fixer = MaintainTierCFixer(provider: ScriptedProvider([
-            "```bash\nprintf '{\"name\":\"x\",\"scripts\":{\"build\":\"echo pwned\"}}\\n' > package.json\n```",
+            "Adding a dependency for the fix.\n```bash\nprintf '{\"name\":\"x\",\"dependencies\":{\"left-pad\":\"1\"}}\\n' > package.json\n```",
+            "Understood — implementing inline instead.\n```bash\nprintf 'FIXED\\n' > app.txt\n```",
+            "DONE",
+        ]))
+        var observedEvents: [MaintainTierCProgressEvent] = []
+        let result = await fixer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "0000000000000000aaaaaaaaaaaaaaaa",
+            request: "make the app say FIXED", kind: .bugFix,
+            progressHandler: { progressEvent in observedEvents.append(progressEvent) },
+            verificationCommandsOverride: Self.fastCommands(testCommand: "true")
+        )
+
+        guard case .appliedAndRebuilt = result else {
+            Issue.record("expected the restored run to land, got \(result)")
+            return
+        }
+        // The forbidden edit was undone, the legitimate edit survived, and the
+        // reader was shown the correction.
+        #expect(Self.fileContents(repo, "package.json") == "{\"name\":\"x\"}")
+        #expect(Self.fileContents(repo, "app.txt") == "FIXED")
+        #expect(observedEvents.contains(
+            .revertedForbiddenBuildScriptEdit(paths: ["package.json"], stepNumber: 1)
+        ))
+    }
+
+    /// A model that keeps going back to build-script files after two restores
+    /// is not going to implement without them: the run fails fast with the
+    /// honest blocked reason, everything reverted, nothing committed.
+    @Test func repeatedBuildScriptEditsFailFastBlockedAndReverted() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo(extraFiles: ["package.json": "{\"name\":\"x\"}\n"])
+        defer { Self.removeRepo(repo) }
+
+        let fixer = MaintainTierCFixer(provider: ScriptedProvider([
+            "```bash\nprintf '{\"name\":\"a\"}\\n' > package.json\n```",
+            "```bash\nprintf '{\"name\":\"b\"}\\n' > package.json\n```",
+            "```bash\nprintf '{\"name\":\"c\"}\\n' > package.json\n```",
             "DONE",
         ]))
         let result = await fixer.attemptOnDemandEdit(
             clonePath: repo, appSlug: "demo", appStack: .nextjs,
-            changeId: "0000000000000000aaaaaaaaaaaaaaaa",
+            changeId: "4444444444444444dddddddddddddddd",
             request: "add a build script", kind: .feature,
             verificationCommandsOverride: Self.fastCommands(testCommand: "true")
         )
@@ -687,6 +725,7 @@ struct OnDemandEditEngineTests {
         // The revert put package.json back exactly, and nothing was committed on
         // an iris/edit- branch.
         #expect(Self.fileContents(repo, "package.json") == "{\"name\":\"x\"}")
+        #expect(FileManager.default.fileExists(atPath: repo + "/.git"))
         #expect(!Self.git(["branch", "--list", "iris/edit-*"], in: repo)
             .trimmingCharacters(in: .whitespacesAndNewlines).contains("iris/edit-"))
     }

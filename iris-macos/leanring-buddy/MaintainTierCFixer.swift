@@ -109,6 +109,12 @@ enum MaintainTierCProgressEvent: Sendable, Equatable {
     /// detector uses, since `.git` is stripped mid-loop and cannot be asked).
     /// Capped; the reader sees exactly WHERE the agent is working.
     case editedFiles(paths: [String], stepNumber: Int)
+    /// The step edited a file the build executes (package.json, Cargo.toml,
+    /// build.rs, …). The loop restored that file on the spot and told the
+    /// model to implement without it — instead of discovering the edit at the
+    /// END and discarding the whole run, which is how a real 46-step dogfood
+    /// run died. The end-of-run guard still backstops this.
+    case revertedForbiddenBuildScriptEdit(paths: [String], stepNumber: Int)
     /// The loop noticed several consecutive steps changed no files and asked
     /// the model to either declare DONE or make its next edit, instead of
     /// giving up. Only if the stall continues AFTER this does the run stop.
@@ -313,6 +319,16 @@ final class MaintainTierCFixer {
     If it is not complete, say in one sentence what remains, then make the \
     next edit.
     """
+
+    /// How many times one run will RESTORE a forbidden build-script edit and
+    /// steer the model onward before failing fast. A real dogfood run (Aug 22
+    /// 2026, whimprflow) found the right fix but pulled it in via a new crate
+    /// — one Cargo.toml line — and the end-of-run guard then discarded all 46
+    /// steps. Catching it at the step it happens turns that into a course
+    /// correction; a model that goes back to build files a third time is
+    /// clearly not going to implement without them, so the run ends with the
+    /// same honest blocked reason instead of burning more steps.
+    static let maximumBuildScriptRestoresPerRun = 2
 
     private let provider: MaintainModelProviding
 
@@ -624,6 +640,7 @@ final class MaintainTierCFixer {
         var theModelHasEditedTheTreeAtLeastOnce = false
         var consecutiveNoProgressStepCount = 0
         var hasNudgedTowardConvergence = false
+        var buildScriptRestoresRemaining = Self.maximumBuildScriptRestoresPerRun
         var stepsTaken = 0
 
         var declaredDone = false
@@ -762,6 +779,56 @@ final class MaintainTierCFixer {
                     consecutiveNoProgressStepCount += 1
                 }
                 fileStatesFromPreviousStep = latestFileStates
+
+                // Mid-loop build-script correction: a forbidden edit is undone
+                // the step it happens (restored from the intact `.git` backup;
+                // an untracked new file is deleted) and the model is steered to
+                // implement without it — the end-of-run guard used to be the
+                // ONLY detection, which meant an entire otherwise-good run was
+                // discarded for one Cargo.toml line. The guard still backstops.
+                if blockBuildScriptEdits, let changedPaths {
+                    let forbiddenPaths = MaintainBuildScriptGuard.buildScriptFilePaths(
+                        inChangedPaths: changedPaths
+                    )
+                    if !forbiddenPaths.isEmpty {
+                        if buildScriptRestoresRemaining == 0 {
+                            // Third strike: the model is not going to implement
+                            // without build files. Fail NOW with the same honest
+                            // reason the end-guard uses, rather than burning
+                            // forty more steps toward the same rejection.
+                            await restoreGit()
+                            _ = try? await runner.run("git checkout -- . && git clean -fd --quiet", deadline: 120)
+                            irisTrace("maintain: tier-c on-demand edit BLOCKED mid-loop — kept editing build-script file(s)")
+                            return .couldNotFix(
+                                reason: "the change edits build-script files (\(forbiddenPaths.joined(separator: ", "))) that run during an unjailed build — blocked before building"
+                            )
+                        }
+                        buildScriptRestoresRemaining -= 1
+                        for forbiddenPath in forbiddenPaths {
+                            // Restore from the moved-aside `.git` (tracked file);
+                            // a file that did not exist at HEAD is model-created —
+                            // remove it.
+                            _ = try? await runner.run(
+                                "git --git-dir='\(gitBackup)' --work-tree=. checkout -- '\(forbiddenPath)' 2>/dev/null || rm -f '\(forbiddenPath)'",
+                                deadline: 60
+                            )
+                        }
+                        irisTrace("maintain: tier-c restored forbidden build-script edit(s) mid-loop (\(buildScriptRestoresRemaining) restores left)")
+                        progressHandler?(.revertedForbiddenBuildScriptEdit(
+                            paths: forbiddenPaths, stepNumber: step
+                        ))
+                        if let lastTurn = conversation.last, lastTurn.role == "user" {
+                            conversation[conversation.count - 1] = MaintainChatTurn(
+                                role: "user",
+                                text: lastTurn.text + "\n\nIris has RESTORED \(forbiddenPaths.joined(separator: ", ")) to its original content. Files the build executes (package.json, Cargo.toml, build.rs, Makefile, …) must NEVER be edited — a change that touches one is rejected outright. Do not edit it again and do not add dependencies; implement using only what the repo already has, writing any needed bindings or helpers inline in ordinary source files."
+                            )
+                        }
+                        // The restore rewrote files, so re-baseline the snapshot —
+                        // the next step's diff must not re-report the restore as
+                        // the model's own edit.
+                        fileStatesFromPreviousStep = Self.workingTreeFileStates(repoRootPath: clonePath)
+                    }
+                }
 
                 if consecutiveNoProgressStepCount >= Self.noProgressStepThreshold {
                     if hasNudgedTowardConvergence {
@@ -1097,14 +1164,32 @@ final class MaintainTierCFixer {
     write the word DONE anywhere in a reply that also contains a command.
     """
 
+    /// Appended to the ON-DEMAND prompts only, mirroring
+    /// `MaintainBuildScriptGuard`'s list: the model must KNOW the constraint
+    /// the guard enforces, or it walks into it — a real run found the right
+    /// fix, added one crate to Cargo.toml to express it, and lost all 46 steps
+    /// to the end-of-run block. (The crash path's prompt stays byte-for-byte;
+    /// its entry never blocks build-script edits.)
+    static let onDemandBuildScriptConstraintAddendum = """
+    HARD CONSTRAINT: never edit files the build toolchain executes — \
+    package.json, Cargo.toml, build.rs, Makefile/GNUmakefile/*.mk, \
+    CMakeLists.txt/*.cmake, Rakefile, Gemfile, gruntfile.js/gulpfile.js, \
+    *.podspec, *.gyp/*.gypi. An edit to any of them is rejected and your \
+    ENTIRE change is discarded. Do not add or change dependencies; implement \
+    with what the repo already has, writing any needed bindings or helpers \
+    inline in ordinary source files.
+    """
+
     private static func systemPrompt(for task: MaintainEditTask) -> String {
         switch task {
         case .crashFix:
             return bugFixSystemPrompt
         case .onDemand(_, .bugFix):
             return bugFixSystemPrompt + "\n\n" + onDemandNarrationPromptAddendum
+                + "\n\n" + onDemandBuildScriptConstraintAddendum
         case .onDemand(_, .feature):
             return featureSystemPrompt + "\n\n" + onDemandNarrationPromptAddendum
+                + "\n\n" + onDemandBuildScriptConstraintAddendum
         }
     }
 

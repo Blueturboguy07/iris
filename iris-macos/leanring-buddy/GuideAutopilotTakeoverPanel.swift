@@ -355,6 +355,18 @@ final class GuideAutopilotTakeoverController {
         )
     }
 
+    /// The takeover's window level. `.floating` deliberately, NOT
+    /// `.screenSaver`: the takeover must pop up above every ordinary window
+    /// (it is the progress surface of a menu-bar app with no windows of its
+    /// own) but must never sit above SYSTEM dialogs — at `.screenSaver`
+    /// (level 1000) the full-screen dim scrim covered macOS permission
+    /// prompts, so a TCC ask fired mid-run (a relaunched edited build
+    /// requesting Accessibility, an installed app's first launch) rendered
+    /// invisibly BEHIND the dim and read as a hang. `.floating` (level 3)
+    /// keeps the pop-to-front behavior while alerts, modal panels, and TCC
+    /// prompts (all higher) land on top where the reader can answer them.
+    static let takeoverWindowLevel: NSWindow.Level = .floating
+
     /// A borderless, non-activating, all-Spaces floating panel — the same shape
     /// the input bar uses, so the takeover behaves like the rest of Iris's
     /// chrome (never steals focus, rides above full-screen apps).
@@ -366,7 +378,7 @@ final class GuideAutopilotTakeoverController {
             defer: false
         )
         panel.isFloatingPanel = true
-        panel.level = .screenSaver
+        panel.level = takeoverWindowLevel
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false

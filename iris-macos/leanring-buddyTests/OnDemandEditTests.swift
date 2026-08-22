@@ -20,6 +20,7 @@
 //      Serialized + gated on the Seatbelt sandbox, exactly like the pty tests.
 //
 
+import AppKit
 import Foundation
 import Testing
 @testable import Iris
@@ -543,6 +544,18 @@ import Testing
         )
         #expect(both?.contains("App log tail") == true)
         #expect(both?.contains("Most recent crash report") == true)
+    }
+
+    /// The takeover (terminal + full-screen dim) must pop above ordinary
+    /// windows but stay BELOW system dialogs — at `.screenSaver` the dim
+    /// covered macOS permission prompts, so a mid-run TCC ask rendered
+    /// invisibly and the run read as hung. Pinned so the level can never
+    /// creep back above the alert band.
+    @Test func theTakeoverStaysBelowSystemDialogLevels() {
+        #expect(GuideAutopilotTakeoverController.takeoverWindowLevel.rawValue
+            < NSWindow.Level.modalPanel.rawValue)
+        #expect(GuideAutopilotTakeoverController.takeoverWindowLevel.rawValue
+            > NSWindow.Level.normal.rawValue)
     }
 
     // MARK: - Helpers

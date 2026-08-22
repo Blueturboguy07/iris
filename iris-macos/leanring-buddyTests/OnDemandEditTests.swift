@@ -1143,12 +1143,14 @@ struct OnDemandEditEngineTests {
         private var index = 0
         private(set) var openingImagePresenceByCall: [Bool] = []
         private(set) var openingTextByCall: [String] = []
+        private(set) var lastConversationSeen: [MaintainChatTurn] = []
         init(_ turns: [String]) { self.turns = turns }
         func respond(
             systemPrompt: String, conversation: [MaintainChatTurn], maximumOutputTokens: Int
         ) async throws -> String {
             openingImagePresenceByCall.append(conversation.first?.attachedImagePNGData != nil)
             openingTextByCall.append(conversation.first?.text ?? "")
+            lastConversationSeen = conversation
             defer { index += 1 }
             return index < turns.count ? turns[index] : "DONE"
         }
@@ -1328,6 +1330,169 @@ struct OnDemandEditEngineTests {
             return false
         })
         #expect(!Self.git(["log", "-1", "--format=%B"], in: repo).contains("Verified:"))
+    }
+
+    /// Live-model drift #1: several ```bash blocks in one reply. Only the
+    /// first runs and the model is TOLD the rest did not — it must never
+    /// reason from output it never saw. The run still lands.
+    @Test func aReplyWithSeveralCommandBlocksRunsOnlyTheFirstAndSaysSo() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo()
+        defer { Self.removeRepo(repo) }
+
+        let recordingProvider = EvidenceRecordingProvider([
+            "Exploring.\n```bash\ncat app.txt\n```\n```bash\ncat health.txt\n```\n```bash\nls\n```",
+            "```bash\nprintf 'FIXED\\n' > app.txt\n```",
+            "DONE",
+        ])
+        let fixer = MaintainTierCFixer(provider: recordingProvider)
+        let result = await fixer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "dddddddddddddddd4444444444444444",
+            request: "make the app say FIXED", kind: .bugFix,
+            verificationCommandsOverride: Self.fastCommands()
+        )
+        guard case .appliedAndRebuilt = result else {
+            Issue.record("expected the run to land, got \(result)")
+            return
+        }
+        // The provider saw the protocol note in the result turn after call 1.
+        #expect(recordingProvider.lastConversationSeen.contains { turn in
+            turn.role == "user" && turn.text.contains("ONLY THE FIRST ran")
+        })
+    }
+
+    /// Live-model drift #2: a command and DONE in the same reply. DONE is
+    /// ignored, the command runs, the model is told, and the run continues
+    /// to a real DONE instead of dying with "changed nothing".
+    @Test func aReplyMixingACommandWithDoneRunsTheCommandAndIgnoresDone() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo()
+        defer { Self.removeRepo(repo) }
+
+        let recordingProvider = EvidenceRecordingProvider([
+            "Fixing it.\n```bash\nprintf 'FIXED\\n' > app.txt\n```\nDONE",
+            "DONE",
+        ])
+        let fixer = MaintainTierCFixer(provider: recordingProvider)
+        let result = await fixer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "eeeeeeeeeeeeeeee5555555555555555",
+            request: "make the app say FIXED", kind: .bugFix,
+            verificationCommandsOverride: Self.fastCommands()
+        )
+        guard case .appliedAndRebuilt = result else {
+            Issue.record("expected the run to land, got \(result)")
+            return
+        }
+        #expect(Self.fileContents(repo, "app.txt") == "FIXED")
+        #expect(recordingProvider.lastConversationSeen.contains { turn in
+            turn.role == "user" && turn.text.contains("DONE was IGNORED")
+        })
+    }
+
+    /// Live-model drift #3: DONE before any file changed. Steered once (make
+    /// the edit, or reply BLOCKED); a model that then edits still lands, and
+    /// one that insists on DONE again ends with the honest "changed nothing".
+    @Test func aDoneWithoutChangesIsSteeredOnceThenHonoredAsAFailure() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo()
+        defer { Self.removeRepo(repo) }
+
+        let landsAfterSteer = MaintainTierCFixer(provider: ScriptedProvider([
+            "```bash\ncat app.txt\n```",
+            "All good.\nDONE",
+            "Right — editing.\n```bash\nprintf 'FIXED\\n' > app.txt\n```",
+            "DONE",
+        ]))
+        let landed = await landsAfterSteer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "ffffffffffffffff6666666666666666",
+            request: "make the app say FIXED", kind: .bugFix,
+            verificationCommandsOverride: Self.fastCommands()
+        )
+        guard case .appliedAndRebuilt = landed else {
+            Issue.record("expected the steered run to land, got \(landed)")
+            return
+        }
+
+        let repo2 = try Self.makeBuggyRepo()
+        defer { Self.removeRepo(repo2) }
+        let insists = MaintainTierCFixer(provider: ScriptedProvider([
+            "```bash\ncat app.txt\n```", "DONE", "DONE",
+        ]))
+        let failed = await insists.attemptOnDemandEdit(
+            clonePath: repo2, appSlug: "demo", appStack: .nextjs,
+            changeId: "1234567890abcdef1234567890abcdef",
+            request: "make the app say FIXED", kind: .bugFix,
+            verificationCommandsOverride: Self.fastCommands()
+        )
+        guard case .couldNotComplete(let reason) = failed else {
+            Issue.record("expected the honest changed-nothing failure, got \(failed)")
+            return
+        }
+        #expect(reason.contains("changed nothing"))
+    }
+
+    /// The G3 channel end to end: the model DECLARES a Cargo dependency
+    /// (never edits Cargo.toml), edits source, says DONE; the reader allows;
+    /// Iris applies it, verification builds with it, and the commit carries
+    /// the Manifest-Change trailer. A declined consent ends honestly.
+    @Test func aDeclaredManifestChangeIsAppliedByIrisAfterConsentAndLands() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo(extraFiles: [
+            "Cargo.toml": "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1\"\n",
+        ])
+        defer { Self.removeRepo(repo) }
+
+        let manifestBlock = "```manifest\n{\"kind\": \"addCargoDependency\", \"filePath\": \"Cargo.toml\", \"key\": \"notify\", \"value\": \"6\", \"reason\": \"the fix must watch a file\"}\n```"
+        let fixer = MaintainTierCFixer(provider: ScriptedProvider([
+            manifestBlock,
+            "Using the watcher.\n```bash\nprintf 'FIXED\\n' > app.txt\n```",
+            "DONE",
+        ]))
+        var observedEvents: [MaintainTierCProgressEvent] = []
+        let result = await fixer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "abcdefabcdefabcdef0123456789abcd",
+            request: "watch the config file for changes", kind: .bugFix,
+            progressHandler: { progressEvent in observedEvents.append(progressEvent) },
+            manifestChangeApproval: { _ in true },
+            verificationCommandsOverride: Self.fastCommands()
+        )
+        guard case .appliedAndRebuilt = result else {
+            Issue.record("expected the run to land with the approved dependency, got \(result)")
+            return
+        }
+        #expect(Self.fileContents(repo, "Cargo.toml").contains("notify = \"6\""))
+        #expect(Self.git(["log", "-1", "--format=%B"], in: repo).contains("Manifest-Change:"))
+        #expect(observedEvents.contains { event in
+            if case .awaitingManifestChangeApproval = event { return true }
+            return false
+        })
+
+        // Declined → honest end, everything reverted (Cargo.toml untouched).
+        let repo2 = try Self.makeBuggyRepo(extraFiles: [
+            "Cargo.toml": "[package]\nname = \"demo\"\n\n[dependencies]\nserde = \"1\"\n",
+        ])
+        defer { Self.removeRepo(repo2) }
+        let declined = MaintainTierCFixer(provider: ScriptedProvider([
+            manifestBlock, "```bash\nprintf 'FIXED\\n' > app.txt\n```", "DONE",
+        ]))
+        let declinedResult = await declined.attemptOnDemandEdit(
+            clonePath: repo2, appSlug: "demo", appStack: .nextjs,
+            changeId: "0123456789abcdef0123456789abcdef",
+            request: "watch the config file for changes", kind: .bugFix,
+            manifestChangeApproval: { _ in false },
+            verificationCommandsOverride: Self.fastCommands()
+        )
+        guard case .couldNotComplete(let reason) = declinedResult else {
+            Issue.record("expected the declined run to end honestly, got \(declinedResult)")
+            return
+        }
+        #expect(reason.contains("declined"))
+        #expect(!Self.fileContents(repo2, "Cargo.toml").contains("notify"))
+        #expect(Self.fileContents(repo2, "app.txt") == "BROKEN")
     }
 
     // MARK: - Git repo helpers

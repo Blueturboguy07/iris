@@ -52,13 +52,18 @@ nonisolated enum MaintainDiagnosticProbe {
     /// for the whole run, so it names the tool and the question it answers and
     /// stops there.
     static let promptSection = """
-    INTERROGATE THE MACHINE BEFORE YOU LOCALIZE A BUG. Many "broken on my \
-    Mac" reports are not source bugs — they are signing, permission, \
-    Gatekeeper, quarantine, preference, architecture, PATH, or \
-    data-corruption facts you can READ in seconds. Run these probes before \
-    you form a theory, and again after an edit that should change system \
-    state. All work inside your jail (no network, no writes outside this \
-    repo; these are READS):
+    SYSTEM PROBES — use them WHEN THE COMPLAINT IS ABOUT THE MACHINE. Many \
+    "broken on my Mac" reports are not source bugs — they are signing, \
+    permission, Gatekeeper, quarantine, preference, architecture, PATH, or \
+    data-corruption facts you can READ in seconds. When the complaint \
+    involves permissions, launch failures, signing, quarantine, "it worked \
+    before", PATH/tool resolution, or corrupted data, run the relevant probe \
+    against the INSTALLED APP BUNDLE before you form a theory, and again \
+    after an edit that should change system state. For an ordinary \
+    logic/UI/text bug, go straight to the source — probes are not free. \
+    Otherwise stay inside this repository: never read or search files \
+    outside it except through these probes aimed at the app. All work \
+    inside your jail (no network, no writes outside this repo; READS only):
 
     - `codesign -dvvv <app>`, `codesign -d -r- <app>`, `codesign -d \
     --entitlements :- <app>` — signing identity, designated requirement, \

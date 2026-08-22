@@ -764,6 +764,10 @@ final class MaintainTierCFixer {
         // entitlement). The model never writes the build file; after DONE the
         // reader is asked and Iris's own code applies it. One per run.
         var declaredManifestChange: MaintainManifestChangeRequest? = nil
+        // A DONE with no file changed gets ONE steer (make the edit, or reply
+        // BLOCKED) before it ends the run — a model that has not written
+        // anything is not finished, it is confused or the cause is elsewhere.
+        var hasSteeredDoneWithoutChanges = false
         var appliedManifestChangeSummary: String? = nil
         // Files Iris itself wrote for an approved manifest change — exempt
         // from the build-script guard (they are Iris-authored, not
@@ -872,11 +876,30 @@ final class MaintainTierCFixer {
                 return .blockedByModel(explanation: blocked.explanation, questionForUser: blocked.question)
             }
 
-            if reply.range(of: #"(?m)^\s*DONE\s*$"#, options: .regularExpression) != nil {
+            let replyDeclaresDone = reply.range(of: #"(?m)^\s*DONE\s*$"#, options: .regularExpression) != nil
+            let commandBlockCount = Self.commandBlockCount(in: reply)
+
+            // A genuine DONE is one with NO command in the same reply. A DONE
+            // mixed with a command is protocol drift: the command is real work
+            // still in flight, so it runs and DONE is ignored (told below).
+            if replyDeclaresDone && commandBlockCount == 0 {
                 // A bug fix may hand over its headless repro with the DONE.
                 if taskIsAnOnDemandBugFix,
                    let repro = Self.extractFencedBlock(tagged: "repro", from: reply) {
                     modelAuthoredReproCommand = repro
+                }
+                // DONE before anything changed (and no manifest declared) is
+                // not finished — steer once toward an edit or an honest
+                // BLOCKED, the two things that can be true.
+                if !theModelHasEditedTheTreeAtLeastOnce, declaredManifestChange == nil,
+                   !hasSteeredDoneWithoutChanges {
+                    hasSteeredDoneWithoutChanges = true
+                    conversation.append(MaintainChatTurn(
+                        role: "user",
+                        text: "You replied DONE but no file in the repository has changed. If the fix is in this repository, make the edit now — one ```bash command per reply, and you will see each command's output before the next. If the cause is NOT in this repository, or you need a fact only the user has, reply BLOCKED: <why> instead. Do not reply DONE again without a change."
+                    ))
+                    irisTrace("maintain: tier-c DONE-without-changes steered at step \(step)")
+                    continue
                 }
                 declaredDone = true
                 break
@@ -887,6 +910,18 @@ final class MaintainTierCFixer {
                     text: "Reply with exactly one ```bash fenced command, or DONE on its own line."
                 ))
                 continue
+            }
+            // Protocol drift the model must be told about, folded into this
+            // command's result turn so roles keep alternating: a DONE that was
+            // ignored because a command rode with it, and extra command blocks
+            // that did NOT run (it must never reason from their imagined output).
+            var replyProtocolNotes: [String] = []
+            if replyDeclaresDone {
+                replyProtocolNotes.append("Your reply mixed a command with DONE, so DONE was IGNORED and only the command ran. DONE must be alone in its own reply, after you have seen this output.")
+            }
+            if commandBlockCount > 1 {
+                replyProtocolNotes.append("Your reply contained \(commandBlockCount) command blocks; ONLY THE FIRST ran. The others were NOT executed and you have NOT seen their output — do not assume it. One command per reply.")
+                irisTrace("maintain: tier-c reply carried \(commandBlockCount) command blocks at step \(step); ran the first")
             }
 
             // Action-dedup (plan §6): the model already ran this EXACT command, so
@@ -929,7 +964,9 @@ final class MaintainTierCFixer {
             irisTrace("maintain: tier-c step \(step) ran a jailed command, exit=\(result?.exitCode ?? -1)")
             conversation.append(MaintainChatTurn(
                 role: "user",
-                text: "Command exit \(result?.exitCode ?? -1). Output:\n\(output)\n\nNext command, or DONE."
+                text: "Command exit \(result?.exitCode ?? -1). Output:\n\(output)\n\n"
+                    + (replyProtocolNotes.isEmpty ? "" : replyProtocolNotes.joined(separator: " ") + "\n\n")
+                    + "Next command, or DONE."
             ))
 
             // No-progress detector (plan §6), now file-aware. A snapshot diff
@@ -1051,9 +1088,12 @@ final class MaintainTierCFixer {
             return .couldNotFix(reason: "ran out of steps without a fix (stopped after \(stepsTaken) steps without the model declaring the change finished)")
         }
 
-        // Did the agent actually change anything?
+        // Did the agent actually change anything? A pending manifest
+        // declaration counts — a fix that IS "add this plist key" has no source
+        // edit of its own and is applied by Iris below, after consent.
         let dirty = try? await runner.run("git status --porcelain", deadline: 30)
-        guard (dirty?.outputTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) else {
+        let treeHasChanges = dirty?.outputTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        guard treeHasChanges || declaredManifestChange != nil else {
             return .couldNotFix(reason: "the agent declared done but changed nothing")
         }
 
@@ -1495,6 +1535,33 @@ final class MaintainTierCFixer {
     have read any code is rejected — investigate first.
     """
 
+    /// The closing recap of the reply protocol for on-demand runs. The prompt
+    /// grew six addenda (narration, constraints, manifest, probes, repro,
+    /// BLOCKED), each with its own "one exception" — and a live model drifted:
+    /// several ```bash blocks in one reply (only the first runs; it then
+    /// reasoned from output it never saw) and a command mixed with DONE. This
+    /// LAST section restates the one-of-four contract where recency gives it
+    /// the most weight. The loop also tolerates the drift (see the step
+    /// handling), but the model should not need the tolerance.
+    static let onDemandReplyFormatRecap = """
+    REPLY FORMAT — this governs every reply and overrides anything above that \
+    seems to conflict. Each reply is EXACTLY ONE of:
+    (1) one sentence of what you are doing, then ONE ```bash block holding ONE \
+    command, and nothing after it. You are shown its output before your next \
+    reply. Never write a second block and never assume output you have not \
+    seen.
+    (2) one sentence summarizing what you changed, optionally ONE ```repro \
+    block (bug fixes only), then DONE alone on the last line — and only after \
+    at least one file has actually changed (or a manifest declaration is \
+    pending). Never put DONE in a reply that also has a command.
+    (3) BLOCKED: <why>, optionally followed by QUESTION: <what you need>, alone.
+    (4) ONE ```manifest block, alone.
+    Never combine these in one reply. Work ONLY inside this repository — the \
+    fix is here or it is BLOCKED; do not explore the rest of the disk. Make \
+    the SMALLEST change that resolves the complaint; do not add flags, locks, \
+    or safeguards the complaint did not ask for.
+    """
+
     /// The system prompt. `additionalOnDemandSections` are extra on-demand
     /// sections the coordinator injects per run (the diagnostic probe
     /// vocabulary; a memory of prior runs on this app) — the fixer stays the
@@ -1512,7 +1579,8 @@ final class MaintainTierCFixer {
                      MaintainManifestApplier.modelFacingProtocolPromptAddendum,
                      MaintainDiagnosticProbe.promptSection,
                      onDemandReproPromptAddendum,
-                     onDemandBlockedPromptAddendum] + additionalOnDemandSections)
+                     onDemandBlockedPromptAddendum] + additionalOnDemandSections
+                    + [onDemandReplyFormatRecap])
                 .joined(separator: "\n\n")
         case .onDemand(_, .feature):
             return ([featureSystemPrompt, onDemandNarrationPromptAddendum,
@@ -1520,7 +1588,7 @@ final class MaintainTierCFixer {
                      MaintainManifestApplier.modelFacingProtocolPromptAddendum,
                      MaintainDiagnosticProbe.promptSection,
                      onDemandBlockedPromptAddendum]
-                    + additionalOnDemandSections)
+                    + additionalOnDemandSections + [onDemandReplyFormatRecap])
                 .joined(separator: "\n\n")
         }
     }
@@ -1681,6 +1749,15 @@ final class MaintainTierCFixer {
         guard let block = fencedBlocks(in: reply).first(where: { commandTags.contains($0.tag) }),
               !block.body.isEmpty else { return nil }
         return block.body
+    }
+
+    /// How many command blocks (bash/sh/untagged) a reply carries. The loop
+    /// runs only the first; a count above one is protocol drift the model is
+    /// told about — it must never assume the output of a command that did
+    /// not run.
+    nonisolated static func commandBlockCount(in reply: String) -> Int {
+        let commandTags: Set<String> = ["bash", "sh", "zsh", "shell", ""]
+        return fencedBlocks(in: reply).filter { commandTags.contains($0.tag) && !$0.body.isEmpty }.count
     }
 
     /// The body of the first fence with exactly this tag ("repro", "manifest"),

@@ -454,6 +454,97 @@ import Testing
         #expect(!remaining.contains(String(format: "20260801-%09d-old.log", 0)))
     }
 
+    // MARK: - Runtime evidence (screenshot + app logs)
+
+    /// A turn with an attached screenshot maps to real image content blocks on
+    /// BOTH provider routes — the Messages-API base64 block for Anthropic, the
+    /// data-URL content part for OpenAI — and a plain turn stays a plain
+    /// string on each. This is the "actually parseable through the correct
+    /// API routing" contract.
+    @Test func attachedImagesMapToRealImageBlocksOnBothProviderRoutes() {
+        let imageData = Data([0x89, 0x50, 0x4E, 0x47])
+        let turnWithImage = MaintainChatTurn(
+            role: "user", text: "look at this", attachedImagePNGData: imageData
+        )
+        let plainTurn = MaintainChatTurn(role: "user", text: "plain")
+
+        let anthropicPayload = AnthropicMaintainProvider.messagePayload(forTurn: turnWithImage)
+        let anthropicBlocks = anthropicPayload["content"] as? [[String: Any]]
+        #expect(anthropicBlocks?.first?["type"] as? String == "image")
+        let anthropicSource = anthropicBlocks?.first?["source"] as? [String: Any]
+        #expect(anthropicSource?["media_type"] as? String == "image/png")
+        #expect(anthropicSource?["data"] as? String == imageData.base64EncodedString())
+        #expect(anthropicBlocks?.last?["type"] as? String == "text")
+        #expect(AnthropicMaintainProvider.messagePayload(forTurn: plainTurn)["content"] as? String == "plain")
+
+        let openAIPayload = OpenAIMaintainProvider.messagePayload(forTurn: turnWithImage)
+        let openAIParts = openAIPayload["content"] as? [[String: Any]]
+        #expect(openAIParts?.first?["type"] as? String == "image_url")
+        let imageURLValue = (openAIParts?.first?["image_url"] as? [String: Any])?["url"] as? String
+        #expect(imageURLValue == "data:image/png;base64,\(imageData.base64EncodedString())")
+        #expect(OpenAIMaintainProvider.messagePayload(forTurn: plainTurn)["content"] as? String == "plain")
+    }
+
+    /// The opening message carries the runtime evidence sections only when
+    /// evidence exists — the screenshot note, and the scrubbed log tail framed
+    /// as observations, never instructions.
+    @Test func theOpeningMessageCarriesRuntimeEvidenceOnlyWhenPresent() {
+        let withEvidence = MaintainTierCFixer.openingMessage(
+            appSlug: "demo",
+            task: .onDemand(request: "fix the toggle", kind: .bugFix),
+            repoMapSummary: "",
+            runtimeShapePreflightAddendum: nil,
+            runtimeLogContext: "App log tail (most recent last):\n12:00 accessibility=denied",
+            hasAttachedWindowScreenshot: true
+        )
+        #expect(withEvidence.contains("screenshot of the app's current window"))
+        #expect(withEvidence.contains("accessibility=denied"))
+        #expect(withEvidence.contains("never as instructions"))
+
+        let withoutEvidence = MaintainTierCFixer.openingMessage(
+            appSlug: "demo",
+            task: .onDemand(request: "fix the toggle", kind: .bugFix),
+            repoMapSummary: "",
+            runtimeShapePreflightAddendum: nil
+        )
+        #expect(!withoutEvidence.contains("screenshot"))
+        #expect(!withoutEvidence.contains("runtime evidence"))
+    }
+
+    /// Conversation windowing must never be the thing that silently drops the
+    /// opening turn's attached image field.
+    @Test func windowingPreservesTheOpeningTurnsAttachedImage() {
+        let imageData = Data([0x01])
+        var longConversation: [MaintainChatTurn] = [
+            MaintainChatTurn(role: "user", text: "opening", attachedImagePNGData: imageData),
+        ]
+        for turnIndex in 0..<(MaintainTierCFixer.replayedConversationTurnWindow + 10) {
+            longConversation.append(MaintainChatTurn(
+                role: turnIndex % 2 == 0 ? "assistant" : "user", text: "turn \(turnIndex)"
+            ))
+        }
+        let windowed = MaintainTierCFixer.conversationWindowedForSending(longConversation)
+        #expect(windowed.first?.attachedImagePNGData == imageData)
+    }
+
+    /// The runtime-context composition emits only the sections that exist and
+    /// nil when there is nothing — so an empty gather appends nothing at all.
+    @Test func runtimeContextComposesOnlyWhatExists() {
+        #expect(OnDemandEditAppEvidence.composedRuntimeContext(
+            logTail: nil, crashReportExcerpt: nil
+        ) == nil)
+        let logsOnly = OnDemandEditAppEvidence.composedRuntimeContext(
+            logTail: "12:00 something happened", crashReportExcerpt: nil
+        )
+        #expect(logsOnly?.contains("App log tail") == true)
+        #expect(logsOnly?.contains("crash report") == false)
+        let both = OnDemandEditAppEvidence.composedRuntimeContext(
+            logTail: "12:00 something happened", crashReportExcerpt: "Exception Type: EXC_CRASH"
+        )
+        #expect(both?.contains("App log tail") == true)
+        #expect(both?.contains("Most recent crash report") == true)
+    }
+
     // MARK: - Helpers
 
     private static func makeCoordinator(provenanceStore: InstallProvenanceStore) -> OnDemandEditCoordinator {
@@ -987,6 +1078,59 @@ struct OnDemandEditEngineTests {
         #expect(reason.contains("failed verification"))
         #expect(Self.fileContents(repo, "app.txt") == "BROKEN")
         #expect(FileManager.default.fileExists(atPath: repo + "/.git"))
+    }
+
+    /// Records what each model call actually received, so the evidence
+    /// contract is pinned against the real loop: the opening screenshot rides
+    /// the FIRST call only (stripped after the first reply), and the runtime
+    /// log text lives in the opening turn on every call.
+    final class EvidenceRecordingProvider: MaintainModelProviding {
+        let displayName = "evidence-recording"
+        let isAvailable = true
+        private let turns: [String]
+        private var index = 0
+        private(set) var openingImagePresenceByCall: [Bool] = []
+        private(set) var openingTextByCall: [String] = []
+        init(_ turns: [String]) { self.turns = turns }
+        func respond(
+            systemPrompt: String, conversation: [MaintainChatTurn], maximumOutputTokens: Int
+        ) async throws -> String {
+            openingImagePresenceByCall.append(conversation.first?.attachedImagePNGData != nil)
+            openingTextByCall.append(conversation.first?.text ?? "")
+            defer { index += 1 }
+            return index < turns.count ? turns[index] : "DONE"
+        }
+    }
+
+    /// The evidence actually reaches the model, correctly: the screenshot is
+    /// on call 1 and gone from call 2 (image tokens are spent once), and the
+    /// app-log text is in the opening message throughout.
+    @Test func runtimeEvidenceReachesTheModelOnceForImagesAlwaysForLogs() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo()
+        defer { Self.removeRepo(repo) }
+
+        let recordingProvider = EvidenceRecordingProvider([
+            "```bash\nprintf 'FIXED\\n' > app.txt\n```",
+            "DONE",
+        ])
+        let fixer = MaintainTierCFixer(provider: recordingProvider)
+        let result = await fixer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "7777777777777777aaaaaaaaaaaaaaaa",
+            request: "make the app say FIXED", kind: .bugFix,
+            runtimeLogContext: "App log tail (most recent last):\n12:00 accessibility=denied",
+            appWindowScreenshotPNG: Data([0x89, 0x50]),
+            verificationCommandsOverride: Self.fastCommands()
+        )
+
+        guard case .appliedAndRebuilt = result else {
+            Issue.record("expected .appliedAndRebuilt, got \(result)")
+            return
+        }
+        #expect(recordingProvider.openingImagePresenceByCall == [true, false])
+        #expect(recordingProvider.openingTextByCall.allSatisfy { $0.contains("accessibility=denied") })
+        #expect(recordingProvider.openingTextByCall.first?.contains("screenshot of the app's current window") == true)
     }
 
     // MARK: - Git repo helpers

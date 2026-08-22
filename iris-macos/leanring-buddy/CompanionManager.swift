@@ -241,6 +241,20 @@ final class CompanionManager: ObservableObject {
             )
         }
 
+        // Runtime evidence for the edit agent: a screenshot of the picked
+        // app's window + a scrubbed tail of its unified log / newest crash
+        // report, gathered the moment a consented run starts. The bundle id
+        // comes from the same inventory row every other closure here uses;
+        // an app with no bundle id gathers nothing, honestly.
+        coordinator.gatherRuntimeEvidenceForApp = { [weak self] appSlug in
+            guard let self else {
+                return OnDemandEditRuntimeEvidence(runtimeLogText: nil, appWindowScreenshotPNG: nil)
+            }
+            let macBundleId = self.appInventoryService.installedEntriesForDisplay
+                .first { $0.slug == appSlug }?.macBundleId
+            return await OnDemandEditAppEvidence.gather(macBundleId: macBundleId)
+        }
+
         // PUBLIC publish (D6): recorded to publik's public fix log and, for a
         // feature, the pooled request marked implemented. Reached ONLY from the
         // coordinator's own explicit every-time consent — never automatically,

@@ -239,8 +239,17 @@ final class OnDemandEditCoordinator: ObservableObject {
         _ scrubbedRequest: String,
         _ kind: OnDemandEditKind,
         _ progressHandler: @escaping MaintainTierCProgressHandler,
-        _ cancellationCheck: @escaping MaintainTierCCancellationCheck
+        _ cancellationCheck: @escaping MaintainTierCCancellationCheck,
+        _ runtimeEvidence: OnDemandEditRuntimeEvidence
     ) async -> MaintainOnDemandEditResult
+
+    /// Gathers the runtime evidence for a picked app right as the run starts —
+    /// a screenshot of the app's window and a scrubbed tail of its recent
+    /// logs/crash report — so the agent sees what the reader sees instead of
+    /// deducing runtime behavior cold. Injected (CompanionManager wires the
+    /// real collector, which needs the app inventory's bundle id); nil or an
+    /// all-nil result simply runs the edit the old, blind way.
+    var gatherRuntimeEvidenceForApp: ((_ appSlug: String) async -> OnDemandEditRuntimeEvidence)?
 
     /// Backs the committed branch up to the reader's OWN fork — fork-only, never
     /// a push-merge to a third party's canonical repo (that would be a distinct
@@ -363,7 +372,8 @@ final class OnDemandEditCoordinator: ObservableObject {
                 _ scrubbedRequest: String,
                 _ kind: OnDemandEditKind,
                 _ progressHandler: @escaping MaintainTierCProgressHandler,
-                _ cancellationCheck: @escaping MaintainTierCCancellationCheck
+                _ cancellationCheck: @escaping MaintainTierCCancellationCheck,
+                _ runtimeEvidence: OnDemandEditRuntimeEvidence
             ) async -> MaintainOnDemandEditResult
         )? = nil
     ) {
@@ -403,8 +413,9 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// with the engine's live progress narrated and the reader's Stop honored.
     static let defaultPerformOnDemandEdit: (
         String, String, BreakAppStack, String, String, OnDemandEditKind,
-        @escaping MaintainTierCProgressHandler, @escaping MaintainTierCCancellationCheck
-    ) async -> MaintainOnDemandEditResult = { resolvedClonePath, appSlug, appStack, changeId, scrubbedRequest, kind, progressHandler, cancellationCheck in
+        @escaping MaintainTierCProgressHandler, @escaping MaintainTierCCancellationCheck,
+        OnDemandEditRuntimeEvidence
+    ) async -> MaintainOnDemandEditResult = { resolvedClonePath, appSlug, appStack, changeId, scrubbedRequest, kind, progressHandler, cancellationCheck, runtimeEvidence in
         guard let provider = MaintainModelProviderResolver.firstAvailable() else {
             return .notEligible(reason: "no model key is available for the edit engine")
         }
@@ -417,7 +428,9 @@ final class OnDemandEditCoordinator: ObservableObject {
             request: scrubbedRequest,
             kind: kind,
             progressHandler: progressHandler,
-            cancellationCheck: cancellationCheck
+            cancellationCheck: cancellationCheck,
+            runtimeLogContext: runtimeEvidence.runtimeLogText,
+            appWindowScreenshotPNG: runtimeEvidence.appWindowScreenshotPNG
         )
     }
 
@@ -841,6 +854,29 @@ final class OnDemandEditCoordinator: ObservableObject {
         originalHeadRef = (try? await runner.run("git rev-parse --abbrev-ref HEAD", deadline: 30))?
             .outputTail.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // Gather the runtime evidence — the app's window and its recent logs —
+        // so the agent sees what the reader sees. Best-effort; an all-nil
+        // result just runs the edit the old, blind way.
+        let appName = activeAppName ?? slug
+        editRunner.note("Looking at \(appName)'s window and its recent logs…")
+        statusLine = "Looking at \(appName)'s window and recent logs…"
+        let runtimeEvidence = await gatherRuntimeEvidenceForApp?(slug)
+            ?? OnDemandEditRuntimeEvidence(runtimeLogText: nil, appWindowScreenshotPNG: nil)
+        var gatheredEvidenceParts: [String] = []
+        if runtimeEvidence.appWindowScreenshotPNG != nil {
+            gatheredEvidenceParts.append("a screenshot of its window")
+        }
+        if runtimeEvidence.runtimeLogText != nil {
+            gatheredEvidenceParts.append("its recent log output")
+        }
+        if gatheredEvidenceParts.isEmpty {
+            editRunner.note("No window or recent logs were available — working from the source alone.")
+            runLog?.record("runtime evidence: none available")
+        } else {
+            editRunner.note("Attached \(gatheredEvidenceParts.joined(separator: " and ")) as evidence.")
+            runLog?.record("runtime evidence: \(gatheredEvidenceParts.joined(separator: ", "))")
+        }
+
         editRunner.note("Locating the relevant source and making the smallest change that does it…")
 
         let startedAt = Date()
@@ -855,7 +891,8 @@ final class OnDemandEditCoordinator: ObservableObject {
             // The poll the engine honors when the reader taps Stop.
             { [weak self] in
                 self?.readerAskedToStopTheRun ?? true
-            }
+            },
+            runtimeEvidence
         )
         let elapsed = Date().timeIntervalSince(startedAt)
         editRunner.setWorking(false)

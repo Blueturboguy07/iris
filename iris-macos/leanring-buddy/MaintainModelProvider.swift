@@ -20,10 +20,16 @@
 import Foundation
 
 /// One conversational turn, provider-agnostic. `role` is "user" or
-/// "assistant"; `text` is plain text (the loop is text-only, no tool API).
+/// "assistant"; `text` is plain text (the loop has no tool API).
+/// `attachedImagePNGData` carries the ONE image the on-demand opening turn may
+/// attach — a screenshot of the app's window, so the model sees what the user
+/// is looking at. `var`, because the loop strips it after the first reply
+/// (replaying a screenshot on all subsequent steps would cost image tokens on
+/// EVERY step for context the model has already absorbed).
 struct MaintainChatTurn: Sendable {
     let role: String
     let text: String
+    var attachedImagePNGData: Data? = nil
 }
 
 enum MaintainModelProviderError: Error {
@@ -64,15 +70,34 @@ final class AnthropicMaintainProvider: MaintainModelProviding {
         conversation: [MaintainChatTurn],
         maximumOutputTokens: Int
     ) async throws -> String {
-        let messages = conversation.map { turn in
-            ["role": turn.role, "content": turn.text] as [String: Any]
-        }
+        let messages = conversation.map { turn in Self.messagePayload(forTurn: turn) }
         let message = try await byoOnlyAPI.continueTextConversation(
             systemPrompt: systemPrompt,
             messages: messages,
             maximumOutputTokens: maximumOutputTokens
         )
         return message.text
+    }
+
+    /// One turn as Messages-API JSON. A turn with an attached image becomes a
+    /// content-block array (image first, then the text — the order the API
+    /// docs recommend); a plain turn stays a plain string. Static + pure so
+    /// the mapping is unit-testable without a network.
+    nonisolated static func messagePayload(forTurn turn: MaintainChatTurn) -> [String: Any] {
+        guard let attachedImagePNGData = turn.attachedImagePNGData else {
+            return ["role": turn.role, "content": turn.text]
+        }
+        return ["role": turn.role, "content": [
+            [
+                "type": "image",
+                "source": [
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": attachedImagePNGData.base64EncodedString(),
+                ],
+            ] as [String: Any],
+            ["type": "text", "text": turn.text] as [String: Any],
+        ]]
     }
 }
 
@@ -102,7 +127,7 @@ final class OpenAIMaintainProvider: MaintainModelProviding {
             throw MaintainModelProviderError.noCredential
         }
         var messages: [[String: Any]] = [["role": "system", "content": systemPrompt]]
-        messages.append(contentsOf: conversation.map { ["role": $0.role, "content": $0.text] })
+        messages.append(contentsOf: conversation.map { Self.messagePayload(forTurn: $0) })
 
         var request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
         request.httpMethod = "POST"
@@ -128,6 +153,24 @@ final class OpenAIMaintainProvider: MaintainModelProviding {
             throw MaintainModelProviderError.requestFailed("unparseable response")
         }
         return content
+    }
+
+    /// One turn as Chat-Completions JSON. A turn with an attached image
+    /// becomes the multimodal content-part array (base64 data URL); a plain
+    /// turn stays a plain string. Static + pure for unit tests.
+    nonisolated static func messagePayload(forTurn turn: MaintainChatTurn) -> [String: Any] {
+        guard let attachedImagePNGData = turn.attachedImagePNGData else {
+            return ["role": turn.role, "content": turn.text]
+        }
+        return ["role": turn.role, "content": [
+            [
+                "type": "image_url",
+                "image_url": [
+                    "url": "data:image/png;base64,\(attachedImagePNGData.base64EncodedString())",
+                ],
+            ] as [String: Any],
+            ["type": "text", "text": turn.text] as [String: Any],
+        ]]
     }
 }
 

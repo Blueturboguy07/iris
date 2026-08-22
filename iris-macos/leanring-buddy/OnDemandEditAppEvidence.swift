@@ -17,6 +17,19 @@
 //    - a scrubbed tail of the app's unified-log output plus an excerpt of its
 //      most recent crash report, appended to the opening message as text.
 //
+//  Both text sources were widened after the agent kept receiving evidence
+//  that contained no cause. The log predicate now also covers
+//  `com.apple.TCC` and `com.apple.syspolicy` — a permission denial or a
+//  Gatekeeper verdict is logged by THOSE subsystems, never by the app, which
+//  only sees a silent nil — and the read passes `--info`, without which
+//  those subsystems' lines are filtered out before the predicate sees them.
+//  The crash-report excerpt is taken around the termination/exception line
+//  rather than off the top of the file, because a modern .ips report opens
+//  with a long JSON header and the old head-of-file excerpt was routinely
+//  all header and no reason. It is also the one place the jail cannot help:
+//  `/usr/bin/log` refuses to run sandboxed, so this read happens here, on
+//  Iris's side of the jail, and travels to the model as text.
+//
 //  Privacy posture: everything model-bound is scrubbed with the same scrubber
 //  every other egress path uses, it travels ONLY on the reader's own BYO model
 //  route (the funded proxy structurally cannot run edits), and the gathering
@@ -47,6 +60,15 @@ enum OnDemandEditAppEvidence {
     /// Character caps keeping the opening message sane.
     static let maximumLogCharacters = 5000
     static let maximumCrashReportCharacters = 2500
+    /// How much of a crash report is kept around the line that says WHY the
+    /// process died. A modern .ips report opens with a long JSON header
+    /// (hardware model, OS build, timestamps, code-signing ids), so the first
+    /// 2500 characters were routinely all header and no cause — the excerpt
+    /// arrived at the model saying nothing. A window around the termination
+    /// line carries the reason, the exception, and the top of the crashing
+    /// thread's stack instead.
+    static let crashReportLinesKeptBeforeTerminationMarker = 8
+    static let crashReportLinesKeptAfterTerminationMarker = 32
     /// A crash report older than this says nothing about the current problem.
     static let crashReportMaximumAgeSeconds: TimeInterval = 24 * 60 * 60
     /// The widest the attached screenshot may be, in pixels — plenty to read
@@ -113,18 +135,46 @@ enum OnDemandEditAppEvidence {
         return macBundleId.components(separatedBy: ".").last ?? macBundleId
     }
 
+    /// The predicate `log show` runs with. Pure and nonisolated so the shape
+    /// is pinned by tests rather than by reading the command in the debugger.
+    ///
+    /// Four ORed terms, because the line that explains a failure is rarely
+    /// logged by the app itself: the app's own process and os_log subsystem,
+    /// plus `com.apple.TCC` (the subsystem that records a permission denial —
+    /// the app sees only a silent nil) and `com.apple.syspolicy` (Gatekeeper,
+    /// notarization, and quarantine verdicts, which the app never sees at
+    /// all).
+    nonisolated static func unifiedLogPredicate(
+        processName: String, macBundleId: String
+    ) -> String {
+        let terms = [
+            "process == \"\(processName)\"",
+            "subsystem == \"\(macBundleId)\"",
+            "subsystem == \"com.apple.TCC\"",
+            "subsystem == \"com.apple.syspolicy\"",
+        ]
+        return terms.joined(separator: " OR ")
+    }
+
     /// `log show` over the lookback window for this process, tail-bounded and
     /// scrubbed. The predicate ORs the process name with the bundle id as
     /// subsystem, so apps that log through os_log subsystems are caught too.
     private static func unifiedLogTail(processName: String, macBundleId: String) async -> String? {
-        let predicate = "process == \"\(processName)\" OR subsystem == \"\(macBundleId)\""
         let output = await runProcessCollectingOutput(
             executablePath: "/usr/bin/log",
             arguments: [
                 "show",
                 "--last", "\(unifiedLogLookbackMinutes)m",
                 "--style", "compact",
-                "--predicate", predicate,
+                // Without --info the unified log returns only default-level
+                // messages, and the two subsystems that explain a permission
+                // or Gatekeeper failure log almost everything at info level —
+                // so the interesting lines were being filtered out before the
+                // predicate ever saw them.
+                "--info",
+                "--predicate", unifiedLogPredicate(
+                    processName: processName, macBundleId: macBundleId
+                ),
             ],
             timeoutSeconds: 20
         )
@@ -139,8 +189,8 @@ enum OnDemandEditAppEvidence {
     }
 
     /// The newest DiagnosticReports file for this process within the age
-    /// window, excerpted from the TOP (an .ips report's header + exception
-    /// info lead the file) and scrubbed.
+    /// window, excerpted around the line that says why the process died, and
+    /// scrubbed.
     private static func recentCrashReportExcerpt(processName: String) -> String? {
         let reportsDirectory = (NSHomeDirectory() as NSString)
             .appendingPathComponent("Library/Logs/DiagnosticReports")
@@ -162,8 +212,54 @@ enum OnDemandEditAppEvidence {
               let contents = try? String(contentsOfFile: newest.path, encoding: .utf8) else {
             return nil
         }
-        return String(GuideAutopilotOutputBuffer.scrubbed(contents).prefix(maximumCrashReportCharacters))
+        let terminationRegion = terminationRegionExcerpt(fromCrashReportText: contents)
+        return String(
+            GuideAutopilotOutputBuffer.scrubbed(terminationRegion)
+                .prefix(maximumCrashReportCharacters)
+        )
     }
+
+    /// The lines of a crash report that say WHY it crashed.
+    ///
+    /// Finds the first line mentioning any termination marker and returns a
+    /// window around it. Falls back to the whole text (the caller still caps
+    /// it, so that is the old head-of-file behavior) when no marker is
+    /// present — better a header than nothing, and a report shaped in a way
+    /// this does not recognize should degrade, not disappear.
+    nonisolated static func terminationRegionExcerpt(
+        fromCrashReportText reportText: String
+    ) -> String {
+        let lines = reportText.components(separatedBy: .newlines)
+        guard let firstMarkerLineIndex = lines.firstIndex(where: { line in
+            let lowercasedLine = line.lowercased()
+            return crashReportTerminationMarkers.contains { marker in
+                lowercasedLine.contains(marker.lowercased())
+            }
+        }) else {
+            return reportText
+        }
+
+        let windowStart = max(0, firstMarkerLineIndex - crashReportLinesKeptBeforeTerminationMarker)
+        let windowEnd = min(
+            lines.count,
+            firstMarkerLineIndex + crashReportLinesKeptAfterTerminationMarker + 1
+        )
+        return lines[windowStart..<windowEnd].joined(separator: "\n")
+    }
+
+    /// The phrases that mark the part of a crash report worth reading. Every
+    /// one of them names a cause: why the OS killed it, what exception was
+    /// raised, which library failed to load, an architecture mismatch, a Rust
+    /// panic, or which thread went down.
+    nonisolated static let crashReportTerminationMarkers = [
+        "Termination Reason",
+        "Exception Type",
+        "exception",
+        "Library not loaded",
+        "incompatible architecture",
+        "panicked at",
+        "Crashed Thread",
+    ]
 
     /// A tiny direct process runner. Deliberately NOT `MaintainShellRunner`
     /// (that is the repo-confined verification runner) and not the pty shell

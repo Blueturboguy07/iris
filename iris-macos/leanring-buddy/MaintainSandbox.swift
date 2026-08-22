@@ -11,6 +11,12 @@
 //  Built on macOS's own `sandbox-exec` (Seatbelt), the same mechanism Claude
 //  Code and Codex CLI use: no install, ships with the OS. The profile:
 //    - allows reads broadly (a build has to read toolchains, headers, caches)
+//    - allows the two process-info reads (`process-info-pidinfo`,
+//      `process-info-listpids`) that let `ps`, `lsof`, and `sample` see other
+//      processes. Diagnosing a hang means asking what the running app is
+//      doing, and without these the agent gets an empty process table and
+//      concludes, wrongly, that the app is not running. They only READ
+//      process metadata — no signalling, no injection, no writes.
 //    - allows writes ONLY under the repo root and the system temp dir
 //    - DENIES all network by default — the exploration/edit phase must not
 //      exfiltrate or fetch-and-run. Dependency resolution that genuinely
@@ -54,6 +60,8 @@ enum MaintainSandbox {
         (allow sysctl-read)
         (allow mach-lookup)
         (allow file-read*)
+        (allow process-info-pidinfo)
+        (allow process-info-listpids)
         (deny network*)
         (allow file-write*
           (subpath "\(root)")

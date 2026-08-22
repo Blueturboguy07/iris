@@ -115,6 +115,65 @@ import Foundation
         #expect(finding.confidenceByField[.build] == 0.95)
     }
 
+    /// The whimprflow shape (the real Aug 22 2026 failure): NO package.json at
+    /// the repo root, the frontend package — and its `build` script — in
+    /// `ui/`, with `frontendDist` pointing there. The hook must run in `ui/`
+    /// via an inline `cd`; at the root it dies in one second with
+    /// `Command "build" not found`, which torched an entire verified-looking
+    /// run before the model's code was ever compiled.
+    @Test func aFrontendHookRunsInTheFrontendPackageDirectoryWhenTheRootHasNoManifest() throws {
+        let repoRootPath = Self.makeTemporaryRepository()
+        defer { Self.removeRepository(repoRootPath) }
+
+        Self.writeFile(
+            "src-tauri/tauri.conf.json",
+            contents: """
+            {
+              "build": {
+                "beforeBuildCommand": "pnpm build",
+                "frontendDist": "../ui/dist"
+              }
+            }
+            """,
+            intoRepo: repoRootPath
+        )
+        Self.writeFile("src-tauri/Cargo.toml", contents: "[package]\nname = \"app\"\n", intoRepo: repoRootPath)
+        Self.writeFile(
+            "ui/package.json",
+            contents: "{ \"scripts\": { \"build\": \"vite build\" } }",
+            intoRepo: repoRootPath
+        )
+
+        let finding = try #require(detector.detect(repoRootPath: repoRootPath))
+        #expect(finding.commandsByField[.build]?.commandLine
+            == "(cd 'ui' && pnpm build) && cargo build --release --manifest-path src-tauri/Cargo.toml")
+    }
+
+    /// The object hook form's explicit `cwd` is the most explicit signal and
+    /// wins outright — resolved against the tauri config's directory.
+    @Test func anExplicitHookCwdResolvesAgainstTheTauriConfigDirectory() throws {
+        let repoRootPath = Self.makeTemporaryRepository()
+        defer { Self.removeRepository(repoRootPath) }
+
+        Self.writeFile(
+            "src-tauri/tauri.conf.json",
+            contents: """
+            {
+              "build": {
+                "beforeBuildCommand": { "script": "pnpm build", "cwd": "../web" }
+              }
+            }
+            """,
+            intoRepo: repoRootPath
+        )
+        Self.writeFile("src-tauri/Cargo.toml", contents: "[package]\nname = \"app\"\n", intoRepo: repoRootPath)
+        Self.writeFile("web/package.json", contents: "{}", intoRepo: repoRootPath)
+
+        let finding = try #require(detector.detect(repoRootPath: repoRootPath))
+        #expect(finding.commandsByField[.build]?.commandLine
+            == "(cd 'web' && pnpm build) && cargo build --release --manifest-path src-tauri/Cargo.toml")
+    }
+
     @Test func aRootLevelTauriConfigBuildsWithoutAManifestPath() throws {
         let repoRootPath = Self.makeTemporaryRepository()
         defer { Self.removeRepository(repoRootPath) }

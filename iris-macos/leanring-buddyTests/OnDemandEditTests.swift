@@ -917,6 +917,78 @@ struct OnDemandEditEngineTests {
         #expect(FileManager.default.fileExists(atPath: repo + "/.git"))
     }
 
+    /// The read-the-error-and-fix-it cycle: a change that FAILS verification
+    /// is no longer reverted on the spot — the failing stage's output goes
+    /// back to the model, the edit loop re-enters, and a fixed change lands.
+    /// This was the single biggest gap to a human-driven agent: the model
+    /// used to never see the build error at all.
+    @Test func aFailedVerificationIsFedBackAndRepaired() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo()
+        defer { Self.removeRepo(repo) }
+
+        let fixer = MaintainTierCFixer(provider: ScriptedProvider([
+            "Making the change.\n```bash\nprintf 'BAD\\n' > app.txt\n```",
+            "DONE",
+            // …the verification failure comes back, and the model repairs:
+            "The build output shows the marker is wrong — correcting it.\n```bash\nprintf 'GOOD\\n' > app.txt\n```",
+            "DONE",
+        ]))
+        var observedEvents: [MaintainTierCProgressEvent] = []
+        let result = await fixer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "5555555555555555eeeeeeeeeeeeeeee",
+            request: "make the app say GOOD", kind: .bugFix,
+            progressHandler: { progressEvent in observedEvents.append(progressEvent) },
+            // The "build" only passes once app.txt says GOOD — a stand-in for
+            // a compile error the first attempt causes and the repair fixes.
+            verificationCommandsOverride: VerificationCommands(
+                buildCommand: "grep -q GOOD app.txt", testCommand: nil, commandSubdirectory: nil
+            )
+        )
+
+        guard case .appliedAndRebuilt = result else {
+            Issue.record("expected the repaired change to land, got \(result)")
+            return
+        }
+        #expect(Self.fileContents(repo, "app.txt") == "GOOD")
+        #expect(observedEvents.contains(
+            .verificationFailedPreparingRepair(stage: "build", remainingRounds: 1)
+        ))
+    }
+
+    /// A model that cannot repair (it just re-declares DONE) exhausts the
+    /// bounded repair rounds and the run ends with the honest verification
+    /// failure, everything reverted — repair never weakens the gate.
+    @Test func exhaustedRepairRoundsFailHonestlyAndRevert() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo()
+        defer { Self.removeRepo(repo) }
+
+        let fixer = MaintainTierCFixer(provider: ScriptedProvider([
+            "```bash\nprintf 'BAD\\n' > app.txt\n```",
+            "DONE",
+            "DONE",
+            "DONE",
+        ]))
+        let result = await fixer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "6666666666666666ffffffffffffffff",
+            request: "make the app say GOOD", kind: .bugFix,
+            verificationCommandsOverride: VerificationCommands(
+                buildCommand: "false", testCommand: nil, commandSubdirectory: nil
+            )
+        )
+
+        guard case .couldNotComplete(let reason) = result else {
+            Issue.record("expected the honest verification failure, got \(result)")
+            return
+        }
+        #expect(reason.contains("failed verification"))
+        #expect(Self.fileContents(repo, "app.txt") == "BROKEN")
+        #expect(FileManager.default.fileExists(atPath: repo + "/.git"))
+    }
+
     // MARK: - Git repo helpers
 
     /// A fresh repo with a real bug committed clean: app.txt=BROKEN (the loop

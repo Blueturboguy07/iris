@@ -999,6 +999,11 @@ final class OnDemandEditCoordinator: ObservableObject {
             editRunner.note(line)
             runLog?.record("verifying: build=\(buildCommand ?? "none"), tests=\(testCommand ?? "none")")
             showStatus(line)
+        case .verificationFailedPreparingRepair(let stage, let remainingRounds):
+            let line = "The \(stage) failed — Iris is reading the errors and fixing its change (\(remainingRounds) more \(remainingRounds == 1 ? "try" : "tries") after this)…"
+            editRunner.note(line)
+            runLog?.record("verification failed (\(stage)) — repair round begins (\(remainingRounds) left)")
+            showStatus(line)
         case .committingTheChange:
             let line = "It checks out — committing the change on a branch…"
             editRunner.note(line)

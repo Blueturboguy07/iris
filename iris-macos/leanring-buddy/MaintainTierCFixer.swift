@@ -127,6 +127,10 @@ enum MaintainTierCProgressEvent: Sendable, Equatable {
     /// The model declared DONE; the un-jailed verification (build, then the
     /// suite when the stack has one) is running through these commands.
     case verifyingTheChange(buildCommand: String?, testCommand: String?)
+    /// Verification FAILED and the loop is feeding the failing stage's output
+    /// back to the model for a bounded repair round — the read-the-error-and-
+    /// fix-it cycle — instead of reverting on the first red build.
+    case verificationFailedPreparingRepair(stage: String, remainingRounds: Int)
     /// Verification passed; the change is being committed on a branch.
     case committingTheChange
 }
@@ -329,6 +333,34 @@ final class MaintainTierCFixer {
     /// clearly not going to implement without them, so the run ends with the
     /// same honest blocked reason instead of burning more steps.
     static let maximumBuildScriptRestoresPerRun = 2
+
+    /// How many times one run will feed a FAILED verification's output back to
+    /// the model and let it repair, before reverting. This is the single
+    /// biggest gap between the loop and a human-driven coding agent: the model
+    /// writes code it can never compile (the jail has no network), and until
+    /// this existed its one un-jailed verification attempt was silent — a
+    /// build error it was never shown ended the run with a total revert. Now
+    /// the failing stage's output tail goes back into the conversation and the
+    /// loop re-enters (with `.git` re-stripped), exactly the read-the-error-
+    /// and-fix-it cycle a person runs.
+    static let maximumVerificationRepairRoundsPerRun = 2
+
+    /// The message that re-enters the loop after a failed verification, with
+    /// the failing stage's scrubbed output tail — the compiler speaking to the
+    /// model for the first time.
+    nonisolated static func verificationRepairMessage(stage: String, outputTail: String) -> String {
+        let scrubbedTail = GuideAutopilotOutputBuffer.scrubbed(String(outputTail.suffix(3000)))
+        return """
+        After you replied DONE, the automatic verification FAILED at the \(stage) stage. \
+        The command output ends with:
+
+        \(scrubbedTail)
+
+        Your edits are still in the working tree. Diagnose the failure from this output and \
+        fix it — edit source files only, never build-script files, and do not weaken or \
+        delete tests. When it is fixed, reply DONE again.
+        """
+    }
 
     private let provider: MaintainModelProviding
 
@@ -651,6 +683,14 @@ final class MaintainTierCFixer {
         // each capped, then the failure is surfaced honestly.
         var rateLimitWaitsRemaining = Self.maximumRateLimitWaitsPerRun
         var transportDropRetriesRemaining = Self.maximumTransportDropRetriesPerRun
+        var verificationRepairRoundsRemaining = Self.maximumVerificationRepairRoundsPerRun
+
+        // The outer repair cycle: edit loop → verify; a FAILED verification
+        // feeds its output back to the model and re-enters the edit loop (a
+        // bounded number of times) instead of reverting on the first red
+        // build. Every exit from this loop is a `return` — success returns
+        // `.committed` after the verify+commit tail at the bottom.
+        repairRounds: while true {
         for step in 1...Self.runawayStepCeiling {
             stepsTaken = step
             // The reader's stop request is honored at every step boundary:
@@ -951,9 +991,38 @@ final class MaintainTierCFixer {
             runner: runner, commands: commands, reproCommand: nil
         )
         guard verification.earnsCleanApply else {
+            let failedStage = verification.blockedStage ?? "unknown"
+            // The repair cycle: show the model what the compiler said and let
+            // it fix its own change — the read-the-error-and-fix-it loop a
+            // human runs. Bounded; a stop request or spent rounds fall through
+            // to the honest revert. The last transcript turn is the model's
+            // DONE (assistant), so appending the repair message keeps roles
+            // alternating.
+            if verificationRepairRoundsRemaining > 0, cancellationCheck?() != true {
+                verificationRepairRoundsRemaining -= 1
+                irisTrace("maintain: tier-c verification failed (\(failedStage)) — feeding the output back for a repair round (\(verificationRepairRoundsRemaining) left)")
+                progressHandler?(.verificationFailedPreparingRepair(
+                    stage: failedStage, remainingRounds: verificationRepairRoundsRemaining
+                ))
+                conversation.append(MaintainChatTurn(
+                    role: "user",
+                    text: Self.verificationRepairMessage(
+                        stage: failedStage, outputTail: verification.blockedOutputTail ?? "(no output captured)"
+                    )
+                ))
+                // Re-strip `.git` for the re-entered edit loop (the no-history
+                // rule holds in repair rounds too) and reset the round's state.
+                _ = try? await runner.run(
+                    "rm -rf '\(gitBackup)'; mv .git '\(gitBackup)' 2>/dev/null || true", deadline: 60
+                )
+                declaredDone = false
+                consecutiveNoProgressStepCount = 0
+                fileStatesFromPreviousStep = Self.workingTreeFileStates(repoRootPath: clonePath)
+                continue repairRounds
+            }
             _ = try? await runner.run("git checkout -- . && git clean -fd --quiet", deadline: 120)
             return .couldNotFix(
-                reason: "the fix failed verification (\(verification.blockedStage ?? "unknown"))"
+                reason: "the fix failed verification (\(failedStage))"
             )
         }
 
@@ -978,6 +1047,8 @@ final class MaintainTierCFixer {
         )
         irisTrace("maintain: tier-c committed a change on \(branchName)")
         return .committed(branchName: branchName, suitePassed: verification.suitePassed)
+        } // repairRounds — every exit above is a `return`; only a failed
+          // verification with rounds remaining loops back to the edit loop.
     }
 
     /// The change's touched paths — tracked changes against HEAD plus untracked

@@ -117,10 +117,27 @@ nonisolated struct RepoRecipeRustTauriDetector: EcosystemDetector {
         // compile the Rust before the frontend assets exist, so when the config
         // declares a beforeBuildCommand we run it FIRST (exactly what `tauri build`
         // does internally). Knowing the frontend hook is what raises confidence.
+        //
+        // The hook must run where the tauri CLI would run it — the FRONTEND
+        // package's directory, which is not necessarily the repo root. A real
+        // run (whimprflow, Aug 22 2026) died in one second because the derived
+        // `pnpm build && cargo build …` ran the hook at a root with NO
+        // package.json at all; the frontend (and its `build` script) lived in
+        // `ui/`. The resolved subdirectory becomes an inline `cd` so the whole
+        // composite still runs from the repo root and the cargo half's
+        // `--manifest-path` stays correct.
+        let hookWorkingSubdirectory = frontendHookWorkingSubdirectory(
+            rawBeforeBuildValue: buildSection?["beforeBuildCommand"],
+            buildSection: buildSection,
+            tauriDirectoryRelativePath: tauriDirectoryRelativePath,
+            repoRootPath: repoRootPath
+        )
         let buildCommandLine: String
         let buildConfidence: Double
         if let beforeBuildCommand {
-            buildCommandLine = "\(beforeBuildCommand) && \(cargoReleaseBuildCommandLine)"
+            let hookInvocation = hookWorkingSubdirectory
+                .map { "(cd '\($0)' && \(beforeBuildCommand))" } ?? beforeBuildCommand
+            buildCommandLine = "\(hookInvocation) && \(cargoReleaseBuildCommandLine)"
             buildConfidence = 0.95
         } else {
             buildCommandLine = cargoReleaseBuildCommandLine
@@ -162,6 +179,86 @@ nonisolated struct RepoRecipeRustTauriDetector: EcosystemDetector {
             runtimeShapeContribution: .pureLocalApp,
             matched: true
         )
+    }
+
+    /// Where the beforeBuildCommand hook runs, as a repo-relative subdirectory —
+    /// or nil when it belongs at the repo root (no `cd` needed). Resolution, most
+    /// explicit signal first, every step reading only declarative config:
+    ///   1. the hook object form's own `cwd`, resolved against the tauri
+    ///      config's directory and clamped inside the repo;
+    ///   2. the repo root, when a package.json actually exists there (the hook
+    ///      is an npm/pnpm script — a root without a manifest cannot run it);
+    ///   3. the nearest package.json-holding ancestor of `frontendDist`
+    ///      (Tauri v1 spells it `distDir`), resolved the same way — the
+    ///      frontend package is where the tauri CLI runs its hooks from.
+    /// Nothing resolved leaves nil, preserving the old root behavior.
+    private static func frontendHookWorkingSubdirectory(
+        rawBeforeBuildValue: Any?,
+        buildSection: [String: Any]?,
+        tauriDirectoryRelativePath: String,
+        repoRootPath: String
+    ) -> String? {
+        // 1. Explicit cwd on the object form.
+        if let hookObject = rawBeforeBuildValue as? [String: Any],
+           let explicitCwd = hookObject["cwd"] as? String,
+           let resolved = repoRelativeSubdirectory(
+               explicitCwd, resolvedAgainst: tauriDirectoryRelativePath
+           ) {
+            return resolved.isEmpty ? nil : resolved
+        }
+        // 2. A root package.json means the hook can run where it always did.
+        if RepoRecipeFiles.fileExists("package.json", underRepoRoot: repoRootPath) {
+            return nil
+        }
+        // 3. Walk up from frontendDist/distDir to the frontend package's home.
+        let declaredDistPath = (buildSection?["frontendDist"] as? String)
+            ?? (buildSection?["distDir"] as? String)
+        if let declaredDistPath,
+           var candidateDirectory = repoRelativeSubdirectory(
+               declaredDistPath, resolvedAgainst: tauriDirectoryRelativePath
+           ) {
+            while !candidateDirectory.isEmpty {
+                let manifestRelativePath = (candidateDirectory as NSString)
+                    .appendingPathComponent("package.json")
+                if RepoRecipeFiles.fileExists(manifestRelativePath, underRepoRoot: repoRootPath) {
+                    return candidateDirectory
+                }
+                candidateDirectory = (candidateDirectory as NSString).deletingLastPathComponent
+            }
+        }
+        return nil
+    }
+
+    /// Normalize a config-declared path (which is relative to the tauri
+    /// config's own directory, e.g. "../ui/dist") into a clean repo-relative
+    /// subdirectory. An absolute path or one that escapes the repo root
+    /// resolves to nil — a hostile or misdeclared path never widens where a
+    /// command runs.
+    private static func repoRelativeSubdirectory(
+        _ declaredPath: String, resolvedAgainst baseRelativePath: String
+    ) -> String? {
+        let trimmedDeclaredPath = declaredPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedDeclaredPath.isEmpty, !trimmedDeclaredPath.hasPrefix("/") else { return nil }
+        let joined = baseRelativePath.isEmpty
+            ? trimmedDeclaredPath
+            : (baseRelativePath as NSString).appendingPathComponent(trimmedDeclaredPath)
+        // Fold `..` by hand: NSString.standardizingPath only collapses parent
+        // references in ABSOLUTE paths, so "src-tauri/../ui" would pass through
+        // untouched and the emitted `cd` would name a directory that reads as a
+        // traversal. A `..` with nothing left to pop escapes the repo → nil.
+        var normalizedComponents: [String] = []
+        for pathComponent in (joined as NSString).pathComponents {
+            switch pathComponent {
+            case ".", "":
+                continue
+            case "..":
+                guard !normalizedComponents.isEmpty else { return nil }
+                normalizedComponents.removeLast()
+            default:
+                normalizedComponents.append(pathComponent)
+            }
+        }
+        return normalizedComponents.joined(separator: "/")
     }
 
     /// A tauri.conf.json `beforeBuildCommand` / `beforeDevCommand` is usually a

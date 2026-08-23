@@ -408,10 +408,16 @@ final class AppRelaunchService {
     private static func packageCommand(forStack stack: BreakAppStack, clonePath: String) -> String? {
         switch stack {
         case .tauri:
-            // Produces target/.../bundle/macos/<Name>.app. `cargo tauri` finds
-            // the tauri.conf.json whether the crate is at the root or under
-            // src-tauri/, so the command is the same for both layouts.
-            return "cargo tauri build"
+            // Produces target/.../bundle/macos/<Name>.app. The tauri CLI is
+            // almost always a LOCAL devDependency (@tauri-apps/cli →
+            // node_modules/.bin/tauri), not the global `cargo tauri` subcommand
+            // — a real dogfood run (whimprflow, Aug 23 2026) failed packaging
+            // with "no such command: tauri" because `cargo-tauri` was not
+            // installed while the repo's own `ui/node_modules/.bin/tauri`
+            // (used by its dev.sh) was right there. So prefer the repo's own
+            // CLI and fall back to the global cargo subcommand only if no local
+            // one exists.
+            return tauriPackagingCommand(clonePath: clonePath)
         case .electron:
             // The repo's OWN packaging script — Iris never invents an
             // electron-builder/forge invocation, it runs the one the project
@@ -421,6 +427,57 @@ final class AppRelaunchService {
         case .nextjs, .swiftMacOS, .other:
             return nil
         }
+    }
+
+    /// The best available `tauri build` invocation for THIS clone: a local
+    /// `node_modules/.bin/tauri` (the common case — `@tauri-apps/cli` is a
+    /// devDependency), else `npx --no-install tauri` when a package.json
+    /// declares that CLI, else the global `cargo tauri` subcommand. Run from
+    /// the clone root, where the CLI finds `src-tauri/tauri.conf.json` and its
+    /// `beforeBuildCommand` builds the frontend first.
+    static func tauriPackagingCommand(clonePath: String) -> String {
+        let fileManager = FileManager.default
+        // Local CLI bins, in the layouts Tauri projects actually use (root,
+        // the frontend package, and the crate dir).
+        for relativeBinPath in [
+            "node_modules/.bin/tauri",
+            "ui/node_modules/.bin/tauri",
+            "app/node_modules/.bin/tauri",
+            "frontend/node_modules/.bin/tauri",
+            "src-tauri/node_modules/.bin/tauri",
+        ] {
+            let absoluteBinPath = (clonePath as NSString).appendingPathComponent(relativeBinPath)
+            if fileManager.isExecutableFile(atPath: absoluteBinPath) {
+                // Quote the relative path so a space in the clone path is safe;
+                // run from the clone root (the runner's working directory).
+                return "'\(relativeBinPath)' build"
+            }
+        }
+        // A package.json that declares @tauri-apps/cli but whose node_modules
+        // are not installed yet: npx --no-install resolves the local bin
+        // without reaching the network (the jail is off for packaging, but we
+        // still never want an implicit download).
+        if declaresTauriCLIDependency(clonePath: clonePath) {
+            return "npx --no-install tauri build"
+        }
+        // Last resort: the global cargo subcommand (works only if the user
+        // installed tauri-cli with `cargo install`).
+        return "cargo tauri build"
+    }
+
+    /// Whether any package.json in the usual spots lists `@tauri-apps/cli`.
+    private static func declaresTauriCLIDependency(clonePath: String) -> Bool {
+        for relativeManifest in ["package.json", "ui/package.json", "app/package.json", "frontend/package.json"] {
+            let manifestPath = (clonePath as NSString).appendingPathComponent(relativeManifest)
+            guard let data = FileManager.default.contents(atPath: manifestPath),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            for field in ["dependencies", "devDependencies"] {
+                if let deps = json[field] as? [String: Any], deps["@tauri-apps/cli"] != nil {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     /// The first packaging script an Electron repo declares, in priority order.

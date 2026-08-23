@@ -155,6 +155,12 @@ enum MaintainTierCProgressEvent: Sendable, Equatable {
     case awaitingManifestChangeApproval(summary: String)
     /// The reader approved and Iris's own code applied the declared change.
     case manifestChangeApplied(request: MaintainManifestChangeRequest, summary: String)
+    /// The model edited files through the structured write/edit tool (applied
+    /// by Iris, not the jailed shell). `paths` are what changed this reply.
+    case appliedStructuredFileEdits(paths: [String])
+    /// A structured edit could not be applied (bad path, ambiguous search,
+    /// build-file); the model was told and will retry.
+    case structuredFileEditRejected(reason: String)
 }
 
 /// The two optional seams a caller may hand `attemptOnDemandEdit`: live
@@ -851,6 +857,47 @@ final class MaintainTierCFixer {
                 progressHandler?(.agentNarration(text: narration, stepNumber: step))
             }
 
+            // Structured file edits (```write / ```edit) — applied by IRIS,
+            // never the jailed shell (which is read-only for editing now).
+            // Several may ride one reply; they need no output between them.
+            let fileEditRequests = MaintainFileEditApplier.parse(fromModelReply: reply)
+            if !fileEditRequests.isEmpty {
+                var appliedPaths: [String] = []
+                var rejection: String? = nil
+                for editRequest in fileEditRequests {
+                    switch MaintainFileEditApplier.applyToRepo(editRequest, repoRootPath: clonePath) {
+                    case .success(let summary):
+                        appliedPaths.append(summary)
+                    case .failure(let applyError):
+                        rejection = applyError.readerFacingMessage
+                    }
+                }
+                if !appliedPaths.isEmpty {
+                    progressHandler?(.appliedStructuredFileEdits(paths: appliedPaths))
+                    // Re-baseline the snapshot so the no-progress detector sees
+                    // the edit as this step's progress, exactly like a manifest
+                    // apply or a mid-loop restore.
+                    if let latest = Self.workingTreeFileStates(repoRootPath: clonePath) {
+                        let changed = Self.changedPathsBetween(
+                            previous: fileStatesFromPreviousStep ?? [:], latest: latest
+                        )
+                        if !changed.isEmpty {
+                            theModelHasEditedTheTreeAtLeastOnce = true
+                            consecutiveNoProgressStepCount = 0
+                            progressHandler?(.editedFiles(paths: changed, stepNumber: step))
+                        }
+                        fileStatesFromPreviousStep = latest
+                    }
+                }
+                conversation.append(MaintainChatTurn(
+                    role: "user",
+                    text: (appliedPaths.isEmpty ? "" : "Applied: \(MaintainFileEditApplier.appliedSummary(appliedPaths)). ")
+                        + (rejection.map { "One edit was NOT applied: \($0). Fix it and resend. " } ?? "")
+                        + "Continue, or DONE when the fix is complete."
+                ))
+                continue
+            }
+
             // A declared manifest change (alone in its reply, per the applier's
             // protocol) is recorded, acknowledged, and the model continues
             // editing SOURCE as if it were present — the reader is asked and
@@ -1506,6 +1553,40 @@ final class MaintainTierCFixer {
     unavoidable, use the manifest declaration described below — never an edit.
     """
 
+    /// The structured file-editing tool — the fix for the 56-step sed-surgery
+    /// dogfood failure. The jailed shell is for READING (cat, grep, ls, find,
+    /// sed -n to view); FILE CHANGES go through these blocks, which Iris
+    /// applies itself — reliable, multi-line-safe, no line-number drift, no
+    /// shell escaping. This is prominent because a live model defaulted to
+    /// `sed -i`/`printf` surgery and never converged.
+    static let onDemandFileEditPromptAddendum = """
+    EDITING FILES — do NOT use `sed -i`, `printf >`, or heredocs to change \
+    files (heredocs fail in this sandbox and line edits corrupt the file as \
+    numbers shift). Instead emit an edit block that Iris applies for you. To \
+    replace a whole file (or create one):
+
+    ```write path/relative/to/repo/File.swift
+    <the complete new file contents>
+    ```
+
+    To change part of a file, give the EXACT existing text and its \
+    replacement (the search text must appear exactly once):
+
+    ```edit path/relative/to/repo/File.swift
+    <<<<<<< SEARCH
+    the exact existing lines
+    =======
+    the replacement lines
+    >>>>>>> REPLACE
+    ```
+
+    You may put several write/edit blocks in ONE reply (they need no output \
+    between them) — but never mix them with a ```bash command in the same \
+    reply. Use the jailed shell only to READ and SEARCH (cat, grep, ls, find, \
+    `sed -n` to view). After Iris applies your edits you are told which files \
+    changed; then continue or reply DONE.
+    """
+
     /// On-demand BUG FIXES only: how a fix earns "verified" instead of
     /// "applied". The model may hand Iris ONE headless repro check; Iris runs
     /// it through the existing three legs (must fail before the patch, pass
@@ -1551,10 +1632,11 @@ final class MaintainTierCFixer {
     static let onDemandReplyFormatRecap = """
     REPLY FORMAT — this governs every reply and overrides anything above that \
     seems to conflict. Each reply is EXACTLY ONE of:
-    (1) one sentence of what you are doing, then ONE ```bash block holding ONE \
-    command, and nothing after it. You are shown its output before your next \
-    reply. Never write a second block and never assume output you have not \
-    seen.
+    (1) one sentence of what you are doing, then EITHER one or more \
+    ```write/```edit blocks (to change files — Iris applies them) OR ONE \
+    ```bash block holding ONE read/search command (never both, and never a \
+    second bash block; you are shown a bash command's output before your \
+    next reply, so never assume output you have not seen).
     (2) one sentence summarizing what you changed, optionally ONE ```repro \
     block (bug fixes only), then DONE alone on the last line — and only after \
     at least one file has actually changed (or a manifest declaration is \
@@ -1581,6 +1663,7 @@ final class MaintainTierCFixer {
         case .onDemand(_, .bugFix):
             return ([bugFixSystemPrompt, onDemandNarrationPromptAddendum,
                      onDemandBuildScriptConstraintAddendum,
+                     onDemandFileEditPromptAddendum,
                      MaintainManifestApplier.modelFacingProtocolPromptAddendum,
                      MaintainDiagnosticProbe.promptSection,
                      onDemandReproPromptAddendum,
@@ -1590,6 +1673,7 @@ final class MaintainTierCFixer {
         case .onDemand(_, .feature):
             return ([featureSystemPrompt, onDemandNarrationPromptAddendum,
                      onDemandBuildScriptConstraintAddendum,
+                     onDemandFileEditPromptAddendum,
                      MaintainManifestApplier.modelFacingProtocolPromptAddendum,
                      MaintainDiagnosticProbe.promptSection,
                      onDemandBlockedPromptAddendum]

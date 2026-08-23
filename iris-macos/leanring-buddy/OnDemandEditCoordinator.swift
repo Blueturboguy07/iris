@@ -1230,6 +1230,14 @@ final class OnDemandEditCoordinator: ObservableObject {
             editRunner.note(line)
             runLog?.record("manifest consent requested: \(summary)")
             showStatus(line)
+        case .appliedStructuredFileEdits(let paths):
+            let line = "Edited: \(paths.joined(separator: ", "))"
+            editRunner.note(line)
+            runLog?.record("file edits applied: \(paths.joined(separator: "; "))")
+            showStatus(line)
+        case .structuredFileEditRejected(let reason):
+            editRunner.note("An edit didn't apply: \(reason)")
+            runLog?.record("file edit rejected: \(reason)")
         case .manifestChangeApplied(let request, let summary):
             appliedManifestChangeRequest = request
             let line = "Allowed — Iris applied it itself: \(summary)"

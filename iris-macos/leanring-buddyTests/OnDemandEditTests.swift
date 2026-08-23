@@ -1509,7 +1509,67 @@ struct OnDemandEditEngineTests {
         #expect(Self.fileContents(repo2, "app.txt") == "BROKEN")
     }
 
-    // MARK: - Git repo helpers
+    /// The 56-step-sed-surgery fix: the model changes a file with ONE
+    /// structured ```write block (applied by Iris, not the jailed shell) and
+    /// the run lands — no line-number thrashing, no heredoc, no printf.
+    @Test func aStructuredWriteBlockEditsTheFileAndLands() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo()
+        defer { Self.removeRepo(repo) }
+
+        var observedEvents: [MaintainTierCProgressEvent] = []
+        let fixer = MaintainTierCFixer(provider: ScriptedProvider([
+            "Reading the file.\n```bash\ncat app.txt\n```",
+            "Rewriting it cleanly.\n```write app.txt\nFIXED\n```",
+            "Done.\nDONE",
+        ]))
+        let result = await fixer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "0011223344556677889900aabbccddee",
+            request: "make the app say FIXED", kind: .bugFix,
+            progressHandler: { observedEvents.append($0) },
+            verificationCommandsOverride: Self.fastCommands()
+        )
+        guard case .appliedAndRebuilt = result else {
+            Issue.record("expected the structured write to land, got \(result)")
+            return
+        }
+        #expect(Self.fileContents(repo, "app.txt") == "FIXED")
+        #expect(observedEvents.contains { event in
+            if case .appliedStructuredFileEdits = event { return true }
+            return false
+        })
+    }
+
+    /// A ```write to a build-script file is refused (routed to the manifest
+    /// channel) — the structured tool never widens what the build executes.
+    @Test func aStructuredWriteToABuildFileIsRefusedAndSteered() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo(extraFiles: ["package.json": "{}\n"])
+        defer { Self.removeRepo(repo) }
+
+        let recordingProvider = EvidenceRecordingProvider([
+            "Adding a script.\n```write package.json\n{\"scripts\":{\"build\":\"x\"}}\n```",
+            "Fine, source only.\n```write app.txt\nFIXED\n```",
+            "DONE",
+        ])
+        let fixer = MaintainTierCFixer(provider: recordingProvider)
+        let result = await fixer.attemptOnDemandEdit(
+            clonePath: repo, appSlug: "demo", appStack: .nextjs,
+            changeId: "aabbccddeeff00112233445566778899",
+            request: "make the app say FIXED", kind: .bugFix,
+            verificationCommandsOverride: Self.fastCommands(testCommand: "true")
+        )
+        guard case .appliedAndRebuilt = result else {
+            Issue.record("expected the run to land after the build-file write was refused, got \(result)")
+            return
+        }
+        #expect(Self.fileContents(repo, "package.json") == "{}")
+        #expect(Self.fileContents(repo, "app.txt") == "FIXED")
+        #expect(recordingProvider.lastConversationSeen.contains { $0.role == "user" && $0.text.contains("build file") })
+    }
+
+    // MARK: - Git repo helpers    // MARK: - Git repo helpers
 
     /// A fresh repo with a real bug committed clean: app.txt=BROKEN (the loop
     /// fixes it to FIXED) and health.txt=OK (the suite greps for it).

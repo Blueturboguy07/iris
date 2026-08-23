@@ -987,14 +987,19 @@ struct OnDemandEditCard: View {
         // not fix it. The coordinator decides — it sets the flag only for
         // those two cases.
         let offersModelKeySetup = coordinator.refusalOffersModelKeySetup
+        let wasRateLimited = !isRefusal && coordinator.failureWasRateLimit
         return card {
             header(
-                icon: offersModelKeySetup
-                    ? "key.fill"
-                    : (isRefusal ? "hand.raised" : "exclamationmark.triangle"),
-                title: offersModelKeySetup
-                    ? (isRefusal ? "Connect a model to edit apps" : "Your model credential stopped working")
-                    : (isRefusal ? "Iris can't edit this" : "That didn't work")
+                icon: wasRateLimited
+                    ? "clock.arrow.circlepath"
+                    : (offersModelKeySetup
+                        ? "key.fill"
+                        : (isRefusal ? "hand.raised" : "exclamationmark.triangle")),
+                title: wasRateLimited
+                    ? "Rate-limited — try again shortly"
+                    : (offersModelKeySetup
+                        ? (isRefusal ? "Connect a model to edit apps" : "Your model credential stopped working")
+                        : (isRefusal ? "Iris can't edit this" : "That didn't work"))
             )
 
             Text(reason)
@@ -1006,7 +1011,10 @@ struct OnDemandEditCard: View {
                 Spacer(minLength: 0)
                 Button("Done") { coordinator.cancel() }
                     .irisTextButton()
-                if offersModelKeySetup {
+                if wasRateLimited {
+                    Button("Try again") { coordinator.retryAfterRateLimit() }
+                        .irisPrimaryPill(isFullWidth: false, isCompact: true)
+                } else if offersModelKeySetup {
                     Button("Open settings") { openSettingsToConnectAModel() }
                         .irisPrimaryPill(isFullWidth: false, isCompact: true)
                 }

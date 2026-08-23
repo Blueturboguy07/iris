@@ -191,6 +191,11 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// loudly rather than buried in the generic failure copy.
     @Published private(set) var blockedByBuildScriptEdit: Bool = false
 
+    /// True when the terminal failure was a temporary rate limit (a shared
+    /// Claude Code login hitting its rolling limit), so the failed card reads
+    /// calmly and offers a one-tap "Try again" instead of the red alarm.
+    @Published private(set) var failureWasRateLimit: Bool = false
+
     /// True only when the current `.notEligible` refusal is the one the reader
     /// can clear themselves — no model key connected. The refusal card reads
     /// this to offer an "Open settings" button that lands on the account
@@ -1077,6 +1082,7 @@ final class OnDemandEditCoordinator: ObservableObject {
         case .couldNotComplete(let reason):
             let mapped = Self.mappedFailure(reason: reason)
             blockedByBuildScriptEdit = mapped.wasBuildScriptBlock
+            failureWasRateLimit = mapped.wasRateLimited
             // A rejected credential is the one mid-run failure the reader can
             // clear themselves, so the failed card offers the same settings
             // shortcut the missing-key refusal does.
@@ -1510,6 +1516,16 @@ final class OnDemandEditCoordinator: ObservableObject {
             self.statusLine = "Undone — you're back on the installed \(appName); nothing of the change remains."
             self.phase = .done
         }
+    }
+
+    /// One-tap retry after a temporary rate limit: re-enter describe on the
+    /// same app with the same request prefilled, so the reader just taps once
+    /// more when the limit has cleared.
+    func retryAfterRateLimit() {
+        guard let slug = activeAppSlug, let name = activeAppName, let stack = activeAppStack else { return }
+        let previousRequest = scrubbedRequest
+        pickApp(slug: slug, name: name, stack: stack)
+        describePrefillText = previousRequest
     }
 
     /// "Try again with what Iris learned": re-enter the describe step on the
@@ -2014,7 +2030,20 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// it is.
     nonisolated static func mappedFailure(
         reason: String
-    ) -> (userFacing: String, wasBuildScriptBlock: Bool, offersModelKeySetup: Bool) {
+    ) -> (userFacing: String, wasBuildScriptBlock: Bool, offersModelKeySetup: Bool, wasRateLimited: Bool) {
+        // A rate limit is TEMPORARY and unrelated to the edit — a shared
+        // Claude Code login hits it constantly. It is not a failure of the
+        // change, so it reads calmly and offers a one-tap retry, never the
+        // red "That didn't work". (The engine already rode out several waits
+        // before surfacing this.)
+        if reason.contains("rate-limiting") {
+            return (
+                "Anthropic is rate-limiting your model credential right now, so Iris paused — nothing was changed. "
+                    + "A connected Claude Code login shares one limit with Claude Code itself, so this clears on its own; "
+                    + "wait a few minutes and try again.",
+                false, false, true
+            )
+        }
         // The Tier C loop's `modelCallFailureReason` prefix for an Anthropic
         // 401 on the reader's own credential. The commonest way here is an
         // IMPORTED Claude Code login: Claude Code rotates its token, the
@@ -2024,32 +2053,31 @@ final class OnDemandEditCoordinator: ObservableObject {
                 "Anthropic turned down your model credential, so Iris couldn't run the edit — nothing changed. "
                     + "An imported Claude Code login stops working when Claude Code refreshes its token; "
                     + "reconnect with \"Sign in with Claude Code\" (durable) or paste an API key in settings, then try again.",
-                false,
-                true
+                false, true, false
             )
         }
         if reason.contains("build-script") {
-            return ("This change would edit files that run during the build (like build.rs or package.json scripts), which Iris won't run unreviewed — it stopped before building. Nothing changed.", true, false)
+            return ("This change would edit files that run during the build (like build.rs or package.json scripts), which Iris won't run unreviewed — it stopped before building. Nothing changed.", true, false, false)
         }
         if reason.contains("ran out of steps") {
             // With budgeting removed, "ran out of steps" only happens when the
             // loop stopped making progress even after the finish-or-continue
             // nudge, or hit the distant runaway backstop — never a budget.
-            return ("Iris worked at this for a while but couldn't converge on a finished change, so it stopped — nothing was applied. A more specific request may land better. (Everything it tried is logged in ~/Library/Logs/Iris/edit-runs.)", false, false)
+            return ("Iris worked at this for a while but couldn't converge on a finished change, so it stopped — nothing was applied. A more specific request may land better. (Everything it tried is logged in ~/Library/Logs/Iris/edit-runs.)", false, false, false)
         }
         if reason.contains("changed nothing") {
-            return ("Iris couldn't find a change to make for that — nothing was applied.", false, false)
+            return ("Iris couldn't find a change to make for that — nothing was applied.", false, false, false)
         }
         if reason.contains("failed verification") {
-            return ("Iris made a change but it didn't build or pass the tests, so it reverted everything. Nothing changed.", false, false)
+            return ("Iris made a change but it didn't build or pass the tests, so it reverted everything. Nothing changed.", false, false, false)
         }
         // Defensive only: `runEdit` intercepts the reader-stop result before
         // mapping, so this fires only if a future caller forgets to — and a
         // stop the reader chose must never read as a failure.
         if reason.contains(MaintainTierCFixer.stoppedByReaderReason) {
-            return ("Stopped at your request — nothing was changed.", false, false)
+            return ("Stopped at your request — nothing was changed.", false, false, false)
         }
-        return ("Iris couldn't complete that edit — nothing changed. (\(reason))", false, false)
+        return ("Iris couldn't complete that edit — nothing changed. (\(reason))", false, false, false)
     }
 
     private func failRun(reason: String, resolvedClonePath: String) {
@@ -2099,6 +2127,7 @@ final class OnDemandEditCoordinator: ObservableObject {
         symptomRecheckSummary = nil
         offersRetryWithMemory = false
         deliveredChangeCanBeUndone = false
+        failureWasRateLimit = false
         blockedQuestionForUser = nil
         // Defensive: a log left open by an interrupted flow is closed rather
         // than leaked (normal runs close it on their own result path).

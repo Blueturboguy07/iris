@@ -194,9 +194,14 @@ final class MaintainTierCFixer {
     /// How many 429s one run will wait out before giving up. Two waits rides
     /// out a burst limit without letting a genuinely exhausted quota hold the
     /// reader (and their revert) hostage for many minutes.
-    static let maximumRateLimitWaitsPerRun = 2
+    // Raised from 2 to 4 (Aug 22 2026): a Claude Code login SHARES one rolling
+    // limit with Claude Code itself (and with any agent session on the same
+    // credential), so a mid-run 429 is common and can last minutes. Four waits
+    // at 30s ride out ~2 minutes of contention before the run gives up, which
+    // is far more often enough than two 20s waits were.
+    static let maximumRateLimitWaitsPerRun = 4
     /// The wait when Anthropic sent no `Retry-After`.
-    static let defaultRateLimitWaitSeconds = 20
+    static let defaultRateLimitWaitSeconds = 30
     /// The cap on any single wait — a `Retry-After` above this means the quota
     /// is exhausted for far longer than a watched run should stall, so the run
     /// fails honestly instead.

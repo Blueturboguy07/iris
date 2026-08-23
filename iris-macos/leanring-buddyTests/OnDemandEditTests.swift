@@ -348,6 +348,20 @@ import Testing
         #expect(mapped.userFacing == "Stopped at your request — nothing was changed.")
         #expect(!mapped.wasBuildScriptBlock)
         #expect(!mapped.offersModelKeySetup)
+        #expect(!mapped.wasRateLimited)
+    }
+
+    /// A rate limit is TEMPORARY and unrelated to the edit — it maps to a
+    /// calm, retryable ending, never the alarm, and never a settings offer
+    /// (a shared Claude Code login clears on its own).
+    @Test func aRateLimitMapsToACalmRetryableEnding() {
+        let mapped = OnDemandEditCoordinator.mappedFailure(
+            reason: "model call failed: anthropic is rate-limiting your credential right now — wait a few minutes and try again."
+        )
+        #expect(mapped.wasRateLimited)
+        #expect(!mapped.wasBuildScriptBlock)
+        #expect(!mapped.offersModelKeySetup)
+        #expect(mapped.userFacing.contains("wait a few minutes"))
     }
 
     /// Only a DROPPED call (a timeout, a lost connection) is retried

@@ -1189,7 +1189,10 @@ struct OnDemandEditEngineTests {
             request: "make the app say FIXED", kind: .bugFix,
             runtimeLogContext: "App log tail (most recent last):\n12:00 accessibility=denied",
             appWindowScreenshotPNG: Data([0x89, 0x50]),
-            verificationCommandsOverride: Self.fastCommands()
+            verificationCommandsOverride: Self.fastCommands(),
+            // The independent review is a separate call on the same provider;
+            // this test asserts on the ENGINE's conversation, so it stays off.
+            runsAnIndependentReview: false
         )
 
         guard case .appliedAndRebuilt = result else {
@@ -1259,12 +1262,19 @@ struct OnDemandEditEngineTests {
     /// again on revert earns "Verified" — the one honest path to the word.
     @Test func aBugFixWithADistinguishingReproEarnsVerified() async throws {
         guard sandboxIsAvailable else { return }
-        let repo = try Self.makeBuggyRepo()
+        // The repro RUNS the repo's own committed checker rather than grepping
+        // the file the patch just wrote. That distinction is the point: a check
+        // that only re-reads its own diff clears all three legs and proves
+        // nothing, so `reproMerelyReReadsTheChange` discards it. This test used
+        // to use exactly such a check and assert it earned "Verified".
+        let repo = try Self.makeBuggyRepo(extraFiles: [
+            "check.sh": "#!/bin/sh\ngrep -q FIXED app.txt\n"
+        ])
         defer { Self.removeRepo(repo) }
 
         let fixer = MaintainTierCFixer(provider: ScriptedProvider([
             "Fixing.\n```bash\nprintf 'FIXED\\n' > app.txt\n```",
-            "Done — here is the check.\n```repro\ngrep -q FIXED app.txt\n```\nDONE",
+            "Done — here is the check.\n```repro\nsh check.sh\n```\nDONE",
         ]))
         var observedEvents: [MaintainTierCProgressEvent] = []
         let result = await fixer.attemptOnDemandEdit(
@@ -1272,7 +1282,8 @@ struct OnDemandEditEngineTests {
             changeId: "aaaaaaaaaaaaaaaa1111111111111111",
             request: "the app says BROKEN", kind: .bugFix,
             progressHandler: { progressEvent in observedEvents.append(progressEvent) },
-            verificationCommandsOverride: Self.fastCommands()
+            verificationCommandsOverride: Self.fastCommands(),
+            runsAnIndependentReview: false
         )
         guard case .appliedAndRebuilt(_, _, _, _, let symptomVerifiedByRepro) = result else {
             Issue.record("expected .appliedAndRebuilt, got \(result)")
@@ -1280,7 +1291,7 @@ struct OnDemandEditEngineTests {
         }
         #expect(symptomVerifiedByRepro == true)
         #expect(Self.git(["log", "-1", "--format=%B"], in: repo).contains("Verified: repro-legs"))
-        #expect(observedEvents.contains(.runningModelAuthoredRepro(command: "grep -q FIXED app.txt")))
+        #expect(observedEvents.contains(.runningModelAuthoredRepro(command: "sh check.sh")))
     }
 
     /// A repro that passes regardless (here `true`) proves nothing: it is
@@ -1364,7 +1375,10 @@ struct OnDemandEditEngineTests {
             clonePath: repo, appSlug: "demo", appStack: .nextjs,
             changeId: "dddddddddddddddd4444444444444444",
             request: "make the app say FIXED", kind: .bugFix,
-            verificationCommandsOverride: Self.fastCommands()
+            verificationCommandsOverride: Self.fastCommands(),
+            // The independent review is a separate call on the same provider;
+            // this test asserts on the ENGINE's conversation, so it stays off.
+            runsAnIndependentReview: false
         )
         guard case .appliedAndRebuilt = result else {
             Issue.record("expected the run to land, got \(result)")
@@ -1393,7 +1407,10 @@ struct OnDemandEditEngineTests {
             clonePath: repo, appSlug: "demo", appStack: .nextjs,
             changeId: "eeeeeeeeeeeeeeee5555555555555555",
             request: "make the app say FIXED", kind: .bugFix,
-            verificationCommandsOverride: Self.fastCommands()
+            verificationCommandsOverride: Self.fastCommands(),
+            // The independent review is a separate call on the same provider;
+            // this test asserts on the ENGINE's conversation, so it stays off.
+            runsAnIndependentReview: false
         )
         guard case .appliedAndRebuilt = result else {
             Issue.record("expected the run to land, got \(result)")
@@ -1558,7 +1575,10 @@ struct OnDemandEditEngineTests {
             clonePath: repo, appSlug: "demo", appStack: .nextjs,
             changeId: "aabbccddeeff00112233445566778899",
             request: "make the app say FIXED", kind: .bugFix,
-            verificationCommandsOverride: Self.fastCommands(testCommand: "true")
+            verificationCommandsOverride: Self.fastCommands(testCommand: "true"),
+            // The independent review is a separate call on the same provider;
+            // this test asserts on the ENGINE's conversation, so it stays off.
+            runsAnIndependentReview: false
         )
         guard case .appliedAndRebuilt = result else {
             Issue.record("expected the run to land after the build-file write was refused, got \(result)")

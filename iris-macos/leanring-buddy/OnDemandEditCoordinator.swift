@@ -243,6 +243,26 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// After the relaunch, what Iris observed when it looked again: a
     /// one-line summary for the symptom card ("no new crash report; window
     /// captured" / "a NEW crash report appeared since the relaunch").
+    /// The evidence rung the verification run actually earned, straight from
+    /// `VerificationHarness` — never re-derived. Nil until a run reaches
+    /// verification. See `MaintainTierCProgressEvent.verificationLadderEarned`.
+    @Published private(set) var earnedVerification: (rung: VerificationRung, evidenceLog: [String])?
+
+    /// What the independent reviewer objected to, if anything. Shown to the
+    /// reader beside the result: the change still stands, and they get to see
+    /// what a reviewer with fresh eyes said about it.
+    @Published private(set) var adversarialReviewIssues: [String] = []
+
+    /// What Iris's own automated look at the relaunched app concluded, if it
+    /// ran. Shown beside the Fixed / Still broken buttons, never instead of
+    /// them.
+    @Published private(set) var machineSymptomRecheck: MachineSymptomRecheck?
+
+    /// True once the reader answers the symptom question themselves. Their
+    /// answer is the stronger evidence, so the automated re-check never
+    /// overwrites it — and never lands after it.
+    private var readerHasAnsweredTheSymptomQuestion = false
+
     @Published private(set) var symptomRecheckSummary: String?
 
     /// Text the describe field should be prefilled with on the next show —
@@ -334,6 +354,16 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// all-nil result simply runs the edit the old, blind way.
     var gatherRuntimeEvidenceForApp: ((_ appSlug: String) async -> OnDemandEditRuntimeEvidence)?
 
+    /// Asks a model whether the reader's own complaint survived the change,
+    /// from the before/after window and log evidence. Injected; nil leaves the
+    /// flow exactly as it was — waiting on a human tap and recording
+    /// `unverified` if none comes. See `OnDemandEditSymptomRechecker`.
+    var machineCheckTheSymptom: ((
+        _ complaint: String,
+        _ before: OnDemandEditRuntimeEvidence?,
+        _ after: OnDemandEditRuntimeEvidence?
+    ) async -> MachineSymptomRecheck?)?
+
     /// Backs the committed branch up to the reader's OWN fork — fork-only, never
     /// a push-merge to a third party's canonical repo (that would be a distinct
     /// social act on someone else's project, forbidden for on-demand regardless
@@ -408,6 +438,11 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// The runtime-evidence text gathered BEFORE the run, kept so the
     /// post-relaunch re-gather can say whether a crash report is NEW.
     private var runtimeEvidenceTextBeforeTheRun: String?
+    /// The whole before-evidence, kept so the automated re-check can compare
+    /// the app's window to how it looked when the reader complained. The
+    /// screenshot used to be captured, used once in the opening turn, and
+    /// dropped.
+    private var runtimeEvidenceBeforeTheRun: OnDemandEditRuntimeEvidence?
 
     /// The freshly packaged artifact's path, cached across a possible force-quit
     /// consent so the heavy build never runs twice for one relaunch.
@@ -541,6 +576,37 @@ final class OnDemandEditCoordinator: ObservableObject {
             priorAttemptsDidNotCureTheComplaint:
                 OnDemandEditRunLog.priorAttemptsDidNotCureTheComplaint(forAppSlug: appSlug)
         )
+    }
+
+    /// The production automated symptom re-check: resolve the reader's OWN
+    /// provider (never the funded proxy, exactly like the edit itself) and ask
+    /// it whether the complaint survived.
+    ///
+    /// The relaunched window rides as a real image block. The window from
+    /// BEFORE the change is not attached — `MaintainChatTurn` carries one image
+    /// — so the prompt is told there is nothing to compare against and leans
+    /// harder on CANNOT-TELL, which is the honest default here anyway.
+    static let defaultMachineCheckTheSymptom: (
+        String, OnDemandEditRuntimeEvidence?, OnDemandEditRuntimeEvidence?
+    ) async -> MachineSymptomRecheck? = { complaint, before, after in
+        guard let provider = MaintainModelProviderResolver.firstAvailable() else { return nil }
+        let material = OnDemandEditSymptomRechecker.reviewMaterial(
+            complaint: complaint,
+            logTextBefore: before?.runtimeLogText,
+            logTextAfter: after?.runtimeLogText,
+            hasScreenshotBefore: false,
+            hasScreenshotAfter: after?.appWindowScreenshotPNG != nil
+        )
+        guard let reply = try? await provider.respond(
+            systemPrompt: OnDemandEditSymptomRechecker.systemPrompt,
+            conversation: [MaintainChatTurn(
+                role: "user",
+                text: material,
+                attachedImagePNGData: after?.appWindowScreenshotPNG
+            )],
+            maximumOutputTokens: 300
+        ) else { return nil }
+        return OnDemandEditSymptomRechecker.parse(reply: reply)
     }
 
     // MARK: - Step 1: pick an app
@@ -977,6 +1043,7 @@ final class OnDemandEditCoordinator: ObservableObject {
         let runtimeEvidence = await gatherRuntimeEvidenceForApp?(slug)
             ?? OnDemandEditRuntimeEvidence(runtimeLogText: nil, appWindowScreenshotPNG: nil)
         runtimeEvidenceTextBeforeTheRun = runtimeEvidence.runtimeLogText
+        runtimeEvidenceBeforeTheRun = runtimeEvidence
         filesTouchedThisRun = []
         lastAgentNarrationThisRun = ""
 
@@ -1240,6 +1307,20 @@ final class OnDemandEditCoordinator: ObservableObject {
             editRunner.note(line)
             runLog?.record("file edits applied: \(paths.joined(separator: "; "))")
             showStatus(line)
+        case .runningAdversarialReview:
+            statusLine = "Handing the change to an independent reviewer that has not seen the work…"
+            editRunner.note("Asking a fresh reviewer to try to find something wrong with the change.")
+            runLog?.record("adversarial review: running")
+
+        case .adversarialReviewRaisedIssues(let issues):
+            adversarialReviewIssues = issues
+            editRunner.note("The reviewer raised: \(issues.joined(separator: "; "))")
+            runLog?.record("adversarial review: raised \(issues.count) issue(s) — \(issues.joined(separator: "; "))")
+
+        case .verificationLadderEarned(let rung, let evidenceLog):
+            earnedVerification = (rung: rung, evidenceLog: evidenceLog)
+            runLog?.record("verification ladder: \(rung.humanReadableLabel)")
+
         case .structuredFileEditRejected(let reason):
             editRunner.note("An edit didn't apply: \(reason)")
             runLog?.record("file edit rejected: \(reason)")
@@ -1430,6 +1511,36 @@ final class OnDemandEditCoordinator: ObservableObject {
                 ? "Iris couldn't observe the relaunched app (no window or logs yet)."
                 : summaryParts.joined(separator: "; ") + "."
             self.editRunner.note("Looked again: \(self.symptomRecheckSummary ?? "")")
+
+            // Then actually ASK whether the complaint survived, instead of
+            // waiting for a tap that usually never comes. The reader's own
+            // answer still overrides this the moment they give one; until then
+            // the record says what Iris observed rather than "nobody checked".
+            guard let machineCheck = self.machineCheckTheSymptom,
+                  let complaint = self.scrubbedRequest,
+                  self.phase == .awaitingSymptomConfirmation else { return }
+            let recheck = await machineCheck(
+                complaint, self.runtimeEvidenceBeforeTheRun, evidenceAfter
+            )
+            guard let recheck,
+                  self.phase == .awaitingSymptomConfirmation,
+                  self.readerHasAnsweredTheSymptomQuestion == false else { return }
+            self.machineSymptomRecheck = recheck
+            let sentence = OnDemandEditSymptomRechecker.readerFacingSummary(for: recheck)
+            self.symptomRecheckSummary = (self.symptomRecheckSummary ?? "") + " " + sentence + "."
+            self.editRunner.note(sentence)
+            self.runLog?.record("machine symptom re-check: \(recheck.verdict.rawValue) — \(recheck.reasoning)")
+            switch recheck.verdict {
+            case .looksFixed:
+                self.persistSymptomVerdict(.machineCheckedFixed)
+            case .looksStillBroken:
+                self.persistSymptomVerdict(.machineCheckedStillBroken)
+            case .cannotTell:
+                // Nothing to record: "could not tell" IS unverified, and
+                // writing it down as a verdict would dress a shrug up as a
+                // finding.
+                break
+            }
         }
     }
 
@@ -1441,6 +1552,9 @@ final class OnDemandEditCoordinator: ObservableObject {
         guard phase == .awaitingSymptomConfirmation, let slug = activeAppSlug else { return }
         let appName = activeAppName ?? slug
         let branchName = committedBranchName ?? "the branch"
+        // Latched before anything else so an automated re-check still in flight
+        // cannot land on top of the reader's own answer.
+        readerHasAnsweredTheSymptomQuestion = true
         editRunner.note("Your verdict: \(verdict.displayLabel).")
         persistSymptomVerdict(verdict)
         switch verdict {
@@ -1454,6 +1568,11 @@ final class OnDemandEditCoordinator: ObservableObject {
         case .cannotTell:
             statusLine = "Left as unverified — the change is on branch \(branchName) and \(appName) is running it. You can undo any time from here."
             editRunner.finishApplied()
+        case .machineCheckedFixed, .machineCheckedStillBroken:
+            // Not a reader verdict, so it never ends the phase — the buttons
+            // stay up. `beginSymptomRecheck` records these through
+            // `persistSymptomVerdict` directly and never comes through here.
+            return
         }
         phase = .done
     }
@@ -2150,6 +2269,7 @@ final class OnDemandEditCoordinator: ObservableObject {
         manifestConsentContinuation = nil
         pendingManifestChangeSummary = nil
         runtimeEvidenceTextBeforeTheRun = nil
+        runtimeEvidenceBeforeTheRun = nil
         symptomRecheckSummary = nil
         offersRetryWithMemory = false
         deliveredChangeCanBeUndone = false
@@ -2176,12 +2296,27 @@ enum OnDemandEditSymptomVerdict: String, Sendable {
     case fixed
     case stillBroken
     case cannotTell
+    /// Iris's own automated re-check, not the reader's answer. Recorded when
+    /// nobody has tapped anything, so a walk-away stops meaning "unverified".
+    case machineCheckedFixed
+    case machineCheckedStillBroken
+
+    /// True for the two verdicts a PERSON gives. A reader's answer always
+    /// outranks a machine re-check and overwrites it; the reverse never happens.
+    var cameFromAPerson: Bool {
+        switch self {
+        case .fixed, .stillBroken, .cannotTell: return true
+        case .machineCheckedFixed, .machineCheckedStillBroken: return false
+        }
+    }
 
     var displayLabel: String {
         switch self {
         case .fixed: return "fixed"
         case .stillBroken: return "still broken"
         case .cannotTell: return "can't tell yet"
+        case .machineCheckedFixed: return "Iris thinks it's fixed"
+        case .machineCheckedStillBroken: return "Iris thinks it's still broken"
         }
     }
 
@@ -2191,6 +2326,8 @@ enum OnDemandEditSymptomVerdict: String, Sendable {
         case .fixed: return OnDemandEditMemoryRecord.symptomVerdictConfirmed
         case .stillBroken: return OnDemandEditMemoryRecord.symptomVerdictStillBroken
         case .cannotTell: return OnDemandEditMemoryRecord.symptomVerdictUnverified
+        case .machineCheckedFixed: return OnDemandEditMemoryRecord.symptomVerdictMachineFixed
+        case .machineCheckedStillBroken: return OnDemandEditMemoryRecord.symptomVerdictMachineStillBroken
         }
     }
 
@@ -2200,6 +2337,8 @@ enum OnDemandEditSymptomVerdict: String, Sendable {
         case .fixed: return "confirmed"
         case .stillBroken: return "still-broken"
         case .cannotTell: return "unverified"
+        case .machineCheckedFixed: return "machine-checked-fixed"
+        case .machineCheckedStillBroken: return "machine-checked-still-broken"
         }
     }
 }

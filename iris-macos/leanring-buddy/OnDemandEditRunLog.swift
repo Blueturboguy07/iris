@@ -152,6 +152,12 @@ struct OnDemandEditMemoryRecord: Codable, Sendable {
     static let symptomVerdictConfirmed = "confirmed"
     static let symptomVerdictStillBroken = "still-broken"
     static let symptomVerdictUnverified = "unverified"
+    /// Iris looked at the relaunched app itself and formed a view. Deliberately
+    /// separate from `confirmed`/`still-broken`, which mean a PERSON answered:
+    /// a machine re-check is weaker evidence, it never stops the escalation
+    /// gate, and the next run must be able to tell the two apart at a glance.
+    static let symptomVerdictMachineFixed = "machine-checked-fixed"
+    static let symptomVerdictMachineStillBroken = "machine-checked-still-broken"
 
     /// The two `kind` labels, matching the words the coordinator already uses
     /// for the run log header so the memory and the transcript agree.
@@ -507,8 +513,14 @@ extension OnDemandEditRunLog {
         let records = recentMemoryRecords(forAppSlug: slug, limit: 6, directoryPath: directoryPath)
         guard !records.isEmpty else { return false }
         if records.contains(where: { $0.symptomVerdict == OnDemandEditMemoryRecord.symptomVerdictConfirmed }) { return false }
+        // One is the threshold, not two. Against the real WhimprFlow trace a
+        // threshold of two fired for the first time on run FIVE — runs 2, 3 and
+        // 4 each saw at most one prior applied run, so the gate they needed was
+        // shut. One applied-and-unconfirmed run is already the signal: a change
+        // went in, nobody could say it worked, and the complaint came back. The
+        // cost of being wrong is a single probe step.
         let appliedRuns = records.filter { $0.outcome.hasPrefix("applied on branch") }
-        return appliedRuns.count >= 2
+        return appliedRuns.count >= 1
     }
 
     /// One remembered run as one compact line.

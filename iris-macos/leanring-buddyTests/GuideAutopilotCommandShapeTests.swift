@@ -57,4 +57,37 @@ struct GuideAutopilotCommandShapeTests {
                     "a command that returns must not be backgrounded: \(command)")
         }
     }
+
+    // MARK: - Moved here from GuideAutopilotShellSessionTests
+    //
+    // These three lived in a SECOND struct of this same name at the bottom
+    // of that file. Two suites cannot share a name: the whole test target
+    // failed to build with "invalid redeclaration", and every macro-
+    // generated @Test entry point in both files failed to resolve — so no
+    // test in the project could run at all.
+
+
+    @Test func devServersAreRecognisedAndBuildCommandsAreNot() {
+        #expect(GuideAutopilotCommandShape.holdsTheShellOpen("npm run dev"))
+        #expect(GuideAutopilotCommandShape.holdsTheShellOpen("corepack pnpm dev"))
+        #expect(GuideAutopilotCommandShape.holdsTheShellOpen("docker compose up"))
+        #expect(!GuideAutopilotCommandShape.holdsTheShellOpen("docker compose up -d"))
+        #expect(!GuideAutopilotCommandShape.holdsTheShellOpen("npm ci"))
+        #expect(!GuideAutopilotCommandShape.holdsTheShellOpen(
+            "ui/node_modules/.bin/tauri build --bundles app"))
+    }
+
+    @Test func unterminatedConstructsAreRefusedBeforeTheyWedgeTheShell() {
+        #expect(GuideAutopilotCommandShape.looksSyntacticallyIncomplete("echo 'unterminated"))
+        #expect(GuideAutopilotCommandShape.looksSyntacticallyIncomplete("cat <<EOF\nhello"))
+        #expect(!GuideAutopilotCommandShape.looksSyntacticallyIncomplete(
+            "git commit -m 'a complete message'"))
+    }
+
+    @Test func hostsAreExtractedForFixValidation() {
+        let hosts = GuideAutopilotCommandShape.hostsTheCommandWouldReach(
+            "git clone https://github.com/Blueturboguy07/cue.git && curl https://registry.npmjs.org/x"
+        )
+        #expect(hosts == ["github.com", "registry.npmjs.org"])
+    }
 }

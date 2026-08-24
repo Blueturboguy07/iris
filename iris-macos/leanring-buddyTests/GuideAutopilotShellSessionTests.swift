@@ -133,7 +133,8 @@ struct GuideAutopilotShellSessionTests {
         // needs afterwards is a session they can Try Again on.
         try await Self.withStartedSession { session in
             let startedAt = Date()
-            async let running = session.run(try Self.approved("sleep 30"))
+            let sleepCommand = try Self.approved("sleep 30")
+            async let running = session.run(sleepCommand)
             try await Task.sleep(nanoseconds: 500_000_000)
 
             // This is the escape-hatch sequence the runner performs.
@@ -216,33 +217,5 @@ struct GuideAutopilotOutputBufferTests {
         buffer.append(Array(emoji[0..<2]))   // splits the ✓
         buffer.append(Array(emoji[2...]))
         #expect(buffer.displayLines == ["✓ done"])
-    }
-}
-
-@MainActor
-struct GuideAutopilotCommandShapeTests {
-
-    @Test func devServersAreRecognisedAndBuildCommandsAreNot() {
-        #expect(GuideAutopilotCommandShape.holdsTheShellOpen("npm run dev"))
-        #expect(GuideAutopilotCommandShape.holdsTheShellOpen("corepack pnpm dev"))
-        #expect(GuideAutopilotCommandShape.holdsTheShellOpen("docker compose up"))
-        #expect(!GuideAutopilotCommandShape.holdsTheShellOpen("docker compose up -d"))
-        #expect(!GuideAutopilotCommandShape.holdsTheShellOpen("npm ci"))
-        #expect(!GuideAutopilotCommandShape.holdsTheShellOpen(
-            "ui/node_modules/.bin/tauri build --bundles app"))
-    }
-
-    @Test func unterminatedConstructsAreRefusedBeforeTheyWedgeTheShell() {
-        #expect(GuideAutopilotCommandShape.looksSyntacticallyIncomplete("echo 'unterminated"))
-        #expect(GuideAutopilotCommandShape.looksSyntacticallyIncomplete("cat <<EOF\nhello"))
-        #expect(!GuideAutopilotCommandShape.looksSyntacticallyIncomplete(
-            "git commit -m 'a complete message'"))
-    }
-
-    @Test func hostsAreExtractedForFixValidation() {
-        let hosts = GuideAutopilotCommandShape.hostsTheCommandWouldReach(
-            "git clone https://github.com/Blueturboguy07/cue.git && curl https://registry.npmjs.org/x"
-        )
-        #expect(hosts == ["github.com", "registry.npmjs.org"])
     }
 }

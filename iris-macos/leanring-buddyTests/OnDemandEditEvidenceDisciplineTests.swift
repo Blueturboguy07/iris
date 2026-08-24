@@ -146,49 +146,72 @@ import Testing
 
     // MARK: - "We have tried this before and it did not work"
 
-    @Test("two applied runs with nothing confirmed escalates")
-    func repeatedApplyWithoutCureEscalates() throws {
+    @Test("one applied run with nothing confirmed already escalates")
+    func oneAppliedRunWithoutCureEscalates() throws {
+        // The threshold is one, not two. Against the real WhimprFlow trace a
+        // threshold of two first fired on run FIVE, because runs 2, 3 and 4
+        // each saw at most one prior applied run.
         let directory = try freshMemoryDirectory()
         defer { try? FileManager.default.removeItem(atPath: directory) }
 
-        for index in 0..<2 {
-            OnDemandEditRunLog.appendMemoryRecord(
-                OnDemandEditMemoryRecord(
-                    appSlug: "whimprflow",
-                    date: Date(),
-                    kind: "bug fix",
-                    scrubbedRequest: "perms already granted",
-                    filesTouched: ["ui/src/hub/SettingsPane.tsx"],
-                    agentFinalNarration: "attempt \(index)",
-                    outcome: "applied on branch iris/edit-\(index)",
-                    symptomVerdict: OnDemandEditMemoryRecord.symptomVerdictUnverified
-                ),
-                directoryPath: directory
-            )
-        }
+        OnDemandEditRunLog.appendMemoryRecord(
+            OnDemandEditMemoryRecord(
+                date: Date(),
+                appSlug: "whimprflow",
+                kind: "bug fix",
+                scrubbedRequest: "perms already granted",
+                filesTouched: ["ui/src/hub/Onboarding.tsx"],
+                agentFinalNarration: "auto-advance once both are granted",
+                outcome: "applied on branch iris/edit-9eaec",
+                symptomVerdict: OnDemandEditMemoryRecord.symptomVerdictUnverified
+            ),
+            directoryPath: directory
+        )
         #expect(OnDemandEditRunLog.priorAttemptsDidNotCureTheComplaint(
             forAppSlug: "whimprflow", directoryPath: directory
         ))
     }
 
-    @Test("a single prior attempt does not escalate")
-    func oneAttemptDoesNotEscalate() throws {
+    @Test("a run that only failed does not escalate — nothing was applied")
+    func failedRunsDoNotEscalate() throws {
         let directory = try freshMemoryDirectory()
         defer { try? FileManager.default.removeItem(atPath: directory) }
         OnDemandEditRunLog.appendMemoryRecord(
             OnDemandEditMemoryRecord(
-                appSlug: "whimprflow",
                 date: Date(),
+                appSlug: "whimprflow",
                 kind: "bug fix",
                 scrubbedRequest: "perms already granted",
                 filesTouched: [],
-                agentFinalNarration: "first try",
-                outcome: "applied on branch iris/edit-0",
+                agentFinalNarration: "",
+                outcome: "failed: ran out of steps without a fix",
                 symptomVerdict: nil
             ),
             directoryPath: directory
         )
         #expect(!OnDemandEditRunLog.priorAttemptsDidNotCureTheComplaint(
+            forAppSlug: "whimprflow", directoryPath: directory
+        ))
+    }
+
+    @Test("a machine re-check does NOT stop the escalation — only a person does")
+    func machineVerdictDoesNotStopEscalation() throws {
+        let directory = try freshMemoryDirectory()
+        defer { try? FileManager.default.removeItem(atPath: directory) }
+        OnDemandEditRunLog.appendMemoryRecord(
+            OnDemandEditMemoryRecord(
+                date: Date(),
+                appSlug: "whimprflow",
+                kind: "bug fix",
+                scrubbedRequest: "perms already granted",
+                filesTouched: ["src-tauri/src/paste.rs"],
+                agentFinalNarration: "switched the trust call",
+                outcome: "applied on branch iris/edit-b825",
+                symptomVerdict: OnDemandEditMemoryRecord.symptomVerdictMachineFixed
+            ),
+            directoryPath: directory
+        )
+        #expect(OnDemandEditRunLog.priorAttemptsDidNotCureTheComplaint(
             forAppSlug: "whimprflow", directoryPath: directory
         ))
     }
@@ -204,8 +227,8 @@ import Testing
         ] {
             OnDemandEditRunLog.appendMemoryRecord(
                 OnDemandEditMemoryRecord(
-                    appSlug: "whimprflow",
                     date: Date(),
+                    appSlug: "whimprflow",
                     kind: "bug fix",
                     scrubbedRequest: "perms already granted",
                     filesTouched: [],
@@ -227,8 +250,8 @@ import Testing
     func memoryLabelsDiagnosesAsClaims() {
         let entry = OnDemandEditRunLog.memoryPromptEntry(
             for: OnDemandEditMemoryRecord(
-                appSlug: "whimprflow",
                 date: Date(),
+                appSlug: "whimprflow",
                 kind: "bug fix",
                 scrubbedRequest: "granted but still asking",
                 filesTouched: ["src-tauri/src/paste.rs"],
@@ -241,6 +264,54 @@ import Testing
         )
         #expect(entry.contains("claimed (UNCONFIRMED)"))
         #expect(!entry.contains("Iris's own diagnosis"))
+    }
+
+    // MARK: - The automated symptom re-check
+
+    @Test("the re-check parses the three verdicts")
+    func recheckParsesVerdicts() {
+        #expect(OnDemandEditSymptomRechecker.parse(
+            reply: "VERDICT: FIXED\nWHY: the permission row is green in the relaunched window"
+        ).verdict == .looksFixed)
+        #expect(OnDemandEditSymptomRechecker.parse(
+            reply: "VERDICT: STILL-BROKEN\nWHY: the same warning is on screen"
+        ).verdict == .looksStillBroken)
+        #expect(OnDemandEditSymptomRechecker.parse(
+            reply: "VERDICT: CANNOT-TELL\nWHY: the window shows a different screen"
+        ).verdict == .cannotTell)
+    }
+
+    @Test("an unreadable reply fails closed to cannot-tell, never to fixed")
+    func recheckFailsClosed() {
+        // A wrong "fixed" is written into memory and read by the next run as a
+        // cure that worked, so anything unparseable must land here.
+        let recheck = OnDemandEditSymptomRechecker.parse(reply: "Looks good to me!")
+        #expect(recheck.verdict == .cannotTell)
+        #expect(!recheck.reasoning.isEmpty)
+    }
+
+    @Test("a negated verdict is not read as fixed")
+    func recheckDoesNotMisreadNegation() {
+        #expect(OnDemandEditSymptomRechecker.parse(
+            reply: "VERDICT: NOT FIXED\nWHY: still there"
+        ).verdict == .looksStillBroken)
+    }
+
+    @Test("a machine verdict never claims the reader confirmed anything")
+    func machineVerdictReadsAsIrisOwnView() {
+        let summary = OnDemandEditSymptomRechecker.readerFacingSummary(
+            for: MachineSymptomRecheck(verdict: .looksFixed, reasoning: "the dot is green")
+        )
+        #expect(summary.contains("Iris"))
+        #expect(summary.lowercased().contains("disagree"))
+    }
+
+    @Test("only a person's verdict counts as a person's verdict")
+    func machineVerdictsAreNotHumanOnes() {
+        #expect(OnDemandEditSymptomVerdict.fixed.cameFromAPerson)
+        #expect(OnDemandEditSymptomVerdict.stillBroken.cameFromAPerson)
+        #expect(!OnDemandEditSymptomVerdict.machineCheckedFixed.cameFromAPerson)
+        #expect(!OnDemandEditSymptomVerdict.machineCheckedStillBroken.cameFromAPerson)
     }
 
     // MARK: - Helpers

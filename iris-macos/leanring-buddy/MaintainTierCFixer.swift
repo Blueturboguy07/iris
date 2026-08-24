@@ -161,6 +161,20 @@ enum MaintainTierCProgressEvent: Sendable, Equatable {
     /// A structured edit could not be applied (bad path, ambiguous search,
     /// build-file); the model was told and will retry.
     case structuredFileEditRejected(reason: String)
+    /// The evidence ladder the verification run actually earned, with the
+    /// observed rows behind it. Emitted so the reader-facing card can SHOW the
+    /// harness's own honest computation instead of re-deriving one: the card
+    /// used to rebuild this from the result enum with `compileClean = true`
+    /// hardcoded, which reported "L1 — builds / Build: the app built" for a
+    /// stack whose recipe has no build command and where nothing was ever
+    /// compiled.
+    case verificationLadderEarned(rung: VerificationRung, evidenceLog: [String])
+    /// The independent adversarial review (L6) is running in fresh context.
+    case runningAdversarialReview
+    /// The independent reviewer named problems. The change still stands — it
+    /// built and passed its suite — but it does not earn L6, and the reader
+    /// sees what was said.
+    case adversarialReviewRaisedIssues(issues: [String])
 }
 
 /// The two optional seams a caller may hand `attemptOnDemandEdit`: live
@@ -183,6 +197,20 @@ final class MaintainTierCFixer {
     // forever. The real governors are the no-progress detector and the
     // action-dedup below, which only ever stop a loop that is stuck.
     static let runawayStepCeiling = 500
+
+    /// One independent review is one call on the reader's own key, and the
+    /// reply protocol is a verdict line plus short ISSUE lines.
+    static let maximumOutputTokensPerAdversarialReview = 1200
+
+    /// Shim onto `FeatureEditAdversarialReviewer` so the loop reads in one
+    /// vocabulary.
+    nonisolated static func reviewPrompt(
+        request: String, kind: OnDemandEditKind, unifiedDiff: String, evidenceLog: [String]
+    ) -> (system: String, user: String) {
+        FeatureEditAdversarialReviewer.reviewPrompt(
+            request: request, kind: kind, unifiedDiff: unifiedDiff, evidenceLog: evidenceLog
+        )
+    }
 
     // 1200 could not hold one medium heredoc file-write, which forced real
     // edits to split across many small append steps.
@@ -548,7 +576,11 @@ final class MaintainTierCFixer {
         verificationCommandsOverride: VerificationCommands? = nil,
         // True when this app's remembered runs show the reader's complaint was
         // NOT cured. See `mustLookBeyondTheSourceBeforeEditing`.
-        priorAttemptsDidNotCureTheComplaint: Bool = false
+        priorAttemptsDidNotCureTheComplaint: Bool = false,
+        // The independent review (L6) is one extra call on the provider. Tests
+        // that assert on the engine's own conversation with the model turn it
+        // off so they are not reading the reviewer's turns by mistake.
+        runsAnIndependentReview: Bool = true
     ) async -> MaintainOnDemandEditResult {
         let changeKindTrailer = kind == .feature ? "on-demand-feature" : "on-demand-bug-fix"
         let outcome = await runEditLoopVerifyAndCommit(
@@ -594,7 +626,8 @@ final class MaintainTierCFixer {
             appWindowScreenshotPNG: appWindowScreenshotPNG,
             additionalPromptSections: additionalPromptSections,
             manifestChangeApproval: manifestChangeApproval,
-            priorAttemptsDidNotCureTheComplaint: priorAttemptsDidNotCureTheComplaint
+            priorAttemptsDidNotCureTheComplaint: priorAttemptsDidNotCureTheComplaint,
+            runsAnIndependentReview: runsAnIndependentReview
         )
         switch outcome {
         case .committed(let branchName, let suitePassed, let symptomVerifiedByRepro):
@@ -659,7 +692,8 @@ final class MaintainTierCFixer {
         appWindowScreenshotPNG: Data? = nil,
         additionalPromptSections: [String] = [],
         manifestChangeApproval: MaintainTierCManifestChangeApproval? = nil,
-        priorAttemptsDidNotCureTheComplaint: Bool = false
+        priorAttemptsDidNotCureTheComplaint: Bool = false,
+        runsAnIndependentReview: Bool = true
     ) async -> EditLoopOutcome {
         guard MaintainSandbox.isAvailable else {
             return .notEligible(reason: "the sandbox is unavailable on this machine")
@@ -931,11 +965,32 @@ final class MaintainTierCFixer {
             // protocol) is recorded, acknowledged, and the model continues
             // editing SOURCE as if it were present — the reader is asked and
             // Iris applies it after DONE. Never steered as "no command".
-            if let declaration = MaintainManifestApplier.parse(fromModelReply: reply) {
+            // `parseDetailed`, not `parse`: a nearly-right block is told what
+            // is wrong with it instead of vanishing. The lossy parser returned
+            // nil for a malformed manifest, which fell through to the bottom of
+            // the dispatch and steered "reply with exactly one ```bash fenced
+            // command, or DONE" — advice that has nothing to do with the actual
+            // mistake, and that a model has no way to act on. The applier's own
+            // documentation already said this loop used the detailed one.
+            switch MaintainManifestApplier.parseDetailed(fromModelReply: reply) {
+            case .success(let declaration):
                 declaredManifestChange = declaration
                 conversation.append(MaintainChatTurn(
                     role: "user",
                     text: "Noted: Iris will ask the user to allow \(MaintainManifestApplier.humanReadableSummary(declaration)) once you reply DONE, and will apply it itself. Continue implementing as if it were already present. Next command, or DONE."
+                ))
+                continue
+            case .failure(.noManifestBlockInReply):
+                // No manifest block at all — this reply is something else, so
+                // fall through to the rest of the dispatch.
+                break
+            case .failure(let rejection):
+                progressHandler?(.structuredFileEditRejected(
+                    reason: "the manifest declaration was rejected: \(rejection.modelFacingMessage)"
+                ))
+                conversation.append(MaintainChatTurn(
+                    role: "user",
+                    text: "That manifest block was NOT accepted: \(rejection.modelFacingMessage) Fix it and resend, or continue in source without it."
                 ))
                 continue
             }
@@ -1328,6 +1383,61 @@ final class MaintainTierCFixer {
                 runner: runner, commands: commands, reproCommand: nil
             )
         }
+        // The independent review (L6). `FeatureEditAdversarialReviewer` has
+        // existed complete — system prompt, checklist, strict reply protocol,
+        // parser, tests — with ZERO production callers, so the top of the
+        // ladder was unreachable by construction and no change could ever be
+        // reviewed by anything but the model that wrote it. It runs here, in
+        // fresh context, on a change that has already passed verification.
+        //
+        // It reports; it does not block. A reviewer objection is surfaced to
+        // the reader and withholds the L6 credit, but a change that built and
+        // passed its suite is not thrown away on one model's opinion.
+        if runsAnIndependentReview, case .onDemand(let request, let kind) = task,
+           verification.earnsCleanApply {
+            let unifiedDiff = (try? await runner.run("git diff HEAD", deadline: 120))?
+                .outputTail ?? ""
+            if !unifiedDiff.isEmpty, cancellationCheck?() != true {
+                progressHandler?(.runningAdversarialReview)
+                let review = Self.reviewPrompt(
+                    request: request, kind: kind,
+                    unifiedDiff: String(unifiedDiff.prefix(20_000)),
+                    evidenceLog: verification.evidenceLog
+                )
+                let verdict: AdversarialVerdict
+                if let reply = try? await provider.respond(
+                    systemPrompt: review.system,
+                    conversation: [MaintainChatTurn(role: "user", text: review.user)],
+                    maximumOutputTokens: Self.maximumOutputTokensPerAdversarialReview
+                ) {
+                    verdict = FeatureEditAdversarialReviewer.parse(reply: reply)
+                } else {
+                    // A call that never landed is not a clean review. Fail
+                    // closed: no credit, and say why rather than leave it blank.
+                    verdict = AdversarialVerdict(
+                        isDisqualifying: true,
+                        issues: ["the independent review could not be run"]
+                    )
+                }
+                if verdict.isDisqualifying {
+                    progressHandler?(.adversarialReviewRaisedIssues(issues: verdict.issues))
+                } else {
+                    var evidence = verification.verificationEvidence ?? VerificationEvidence()
+                    evidence.adversarialReviewClean = true
+                    evidence.adversarialReviewCleanEvidence =
+                        "an independent reviewer, given only the diff and the evidence log, named no disqualifying problem"
+                    verification.verificationEvidence = evidence
+                    verification.verificationRung =
+                        FeatureEditVerificationLadder.highestEarnedRung(from: evidence)
+                    verification.evidenceLog = evidence.evidenceLogLines()
+                }
+            }
+        }
+        if let earnedRung = verification.verificationRung {
+            progressHandler?(.verificationLadderEarned(
+                rung: earnedRung, evidenceLog: verification.evidenceLog
+            ))
+        }
         guard verification.earnsCleanApply else {
             let failedStage = verification.blockedStage ?? "unknown"
             // The repair cycle: show the model what the compiler said and let
@@ -1355,6 +1465,18 @@ final class MaintainTierCFixer {
                 )
                 declaredDone = false
                 consecutiveNoProgressStepCount = 0
+                // A repair round is a fresh reading of a tree that has changed
+                // since the last one, so the round's history has to be reset
+                // with it. Leaving `commandsAlreadyRun` populated meant the
+                // dedup steer ("you already ran that exact command earlier and
+                // its result has not changed") refused to let the model re-read
+                // the very file the compiler had just complained about — the
+                // result HAD changed, that was the whole point of the round.
+                // Leaving `hasNudgedTowardConvergence` set spent the round's one
+                // convergence nudge before it began, so five read-only steps
+                // ended the run outright instead of steering it once.
+                commandsAlreadyRun.removeAll()
+                hasNudgedTowardConvergence = false
                 fileStatesFromPreviousStep = Self.workingTreeFileStates(repoRootPath: clonePath)
                 continue repairRounds
             }
@@ -1726,8 +1848,9 @@ final class MaintainTierCFixer {
     dependencies. Explore and edit only.
 
     Each turn, reply with EXACTLY ONE command in a ```bash fenced block, and \
-    nothing else. Read files, grep, and edit in place (sed, or write a file \
-    with a heredoc). Make the SMALLEST change that fixes the reported \
+    nothing else. Read files, grep, and edit in place — heredocs do NOT work \
+    in this sandbox, so write files some other way. Make the SMALLEST change \
+    that fixes the reported \
     problem — do not refactor, do not touch unrelated files, do not weaken or \
     delete tests. When you believe the bug is fixed, reply with DONE on its \
     own line and nothing else. A verification build and the full test suite \
@@ -1744,8 +1867,9 @@ final class MaintainTierCFixer {
     a build that downloads dependencies. Explore and edit only.
 
     Each turn, reply with EXACTLY ONE command in a ```bash fenced block, and \
-    nothing else. Read files, grep, and edit in place (sed, or write a file \
-    with a heredoc). Make the SMALLEST change that implements the requested \
+    nothing else. Read files, grep, and edit in place — heredocs do NOT work \
+    in this sandbox, so write files some other way. Make the SMALLEST change \
+    that implements the requested \
     feature — follow the app's existing patterns, do not refactor unrelated \
     code, do not touch files the feature does not need, and do not weaken or \
     delete tests. When you believe the feature is implemented, reply with \

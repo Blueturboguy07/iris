@@ -587,37 +587,28 @@ struct OnDemandEditCard: View {
         }
     }
 
-    /// The earned §9 verification rung and its evidence-log lines, DERIVED from
-    /// the engine's own result — never a self-rated confidence number. This first
-    /// slice's result carries only the compile/build fact and the existing-suite
-    /// outcome, so the ladder can honestly earn at most L2 (builds + existing
-    /// tests green); the ladder's own "stop at the first missing signal" rule
-    /// guarantees no rung is ever reported above the evidence actually collected.
-    /// Nil unless the last result is an applied-and-rebuilt change, so this only
-    /// surfaces where there is a real committed change to describe.
+    /// The earned §9 verification rung and its evidence-log rows, taken
+    /// VERBATIM from `VerificationHarness` via the coordinator.
+    ///
+    /// This used to rebuild the ladder here from the result enum, opening with
+    /// `collectedEvidence.compileClean = true` and the evidence row "the app
+    /// built". The harness deliberately requires `commands.buildCommand != nil
+    /// && outcome.buildSucceeded` before it will call a build clean, because a
+    /// nil build command sets `buildSucceeded = true` to mean "stage absent",
+    /// not "stage green". Dropping that guard made this card assert L1 and
+    /// print "Build: the app built" for a change nothing had ever compiled —
+    /// a reader-facing claim of evidence that did not exist. It also ignored
+    /// `symptomVerifiedByRepro`, so a genuinely three-leg-verified fix was
+    /// still shown as L1/L2.
+    ///
+    /// Nothing is derived here now. If the harness did not earn it, it is not
+    /// shown.
     private var earnedVerificationForLastResult: (rung: VerificationRung, evidenceLogLines: [String])? {
-        guard case .appliedAndRebuilt(_, _, _, let suitePassed, _)? = coordinator.lastResult else {
+        guard case .appliedAndRebuilt? = coordinator.lastResult,
+              let earned = coordinator.earnedVerification else {
             return nil
         }
-        // "Applied and rebuilt" means the change compiled/built clean — L1 is
-        // earned. The existing-suite result (green, red, or absent) decides
-        // whether L2 is earned on top; nothing higher is derivable here.
-        var collectedEvidence = VerificationEvidence()
-        collectedEvidence.compileClean = true
-        collectedEvidence.compileCleanEvidence = "the app built"
-        switch suitePassed {
-        case .some(true):
-            collectedEvidence.existingSuiteGreen = true
-            collectedEvidence.existingSuiteGreenEvidence = "existing tests stayed green"
-        case .some(false):
-            // Reachable only defensively — the engine blocks a red suite before
-            // committing — but stated honestly rather than as "no evidence".
-            collectedEvidence.existingSuiteGreenEvidence = "existing suite did not pass"
-        case .none:
-            collectedEvidence.existingSuiteGreenEvidence = "no test suite to run"
-        }
-        let earnedRung = FeatureEditVerificationLadder.highestEarnedRung(from: collectedEvidence)
-        return (earnedRung, collectedEvidence.evidenceLogLines())
+        return (earned.rung, earned.evidenceLog)
     }
 
     /// The rung label over its evidence log, in a quiet raised block beside the

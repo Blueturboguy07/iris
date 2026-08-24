@@ -282,6 +282,7 @@ final class CompanionManager: ObservableObject {
         // report, gathered the moment a consented run starts. The bundle id
         // comes from the same inventory row every other closure here uses;
         // an app with no bundle id gathers nothing, honestly.
+        coordinator.machineCheckTheSymptom = OnDemandEditCoordinator.defaultMachineCheckTheSymptom
         coordinator.gatherRuntimeEvidenceForApp = { [weak self] appSlug in
             guard let self else {
                 return OnDemandEditRuntimeEvidence(runtimeLogText: nil, appWindowScreenshotPNG: nil)

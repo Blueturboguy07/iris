@@ -534,7 +534,12 @@ final class OnDemandEditCoordinator: ObservableObject {
             runtimeLogContext: runtimeEvidence.runtimeLogText,
             appWindowScreenshotPNG: runtimeEvidence.appWindowScreenshotPNG,
             additionalPromptSections: additionalPromptSections,
-            manifestChangeApproval: manifestChangeApproval
+            manifestChangeApproval: manifestChangeApproval,
+            // Read here rather than threaded through the performer's signature:
+            // the app slug is all it takes, and keeping the judgement next to
+            // the log that backs it means one place can be wrong, not two.
+            priorAttemptsDidNotCureTheComplaint:
+                OnDemandEditRunLog.priorAttemptsDidNotCureTheComplaint(forAppSlug: appSlug)
         )
     }
 
@@ -1404,6 +1409,19 @@ final class OnDemandEditCoordinator: ObservableObject {
             }
             if let signing = self.freshBuildSigningSummary {
                 summaryParts.append("this build is \(signing)")
+            }
+            // Which copy is actually running the fix. AppRelaunchService is
+            // Option A by design — it builds a fresh artifact from the clone
+            // and launches THAT, and deliberately never writes over an
+            // installed bundle. The consequence was going unsaid: the reader
+            // was told "relaunched with the change", closed it, reopened the
+            // app they normally open, and got the old code back. Reported to
+            // Iris, correctly, as "you said it worked and it is still broken".
+            if let artifactPath = self.packagedArtifactPath,
+               !artifactPath.hasPrefix("/Applications/") {
+                summaryParts.append(
+                    "the running copy is the one Iris just built at \(artifactPath) — your installed \(appName) is untouched and still has the old code, so open it from there to see the fix"
+                )
             }
             if !self.packagingMetadataFailures.isEmpty {
                 summaryParts.append("WARNING: \(self.packagingMetadataFailures.joined(separator: "; "))")

@@ -10,7 +10,7 @@
 
 import Foundation
 import Testing
-@testable import leanring_buddy
+@testable import Iris
 
 @Suite struct BreakSignatureServiceTests {
 

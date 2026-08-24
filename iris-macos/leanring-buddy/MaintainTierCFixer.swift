@@ -545,7 +545,10 @@ final class MaintainTierCFixer {
         // recipe as the only source of the un-jailed build command, so the default
         // behavior is unchanged.
         modelAuthoredBuildCommand: String? = nil,
-        verificationCommandsOverride: VerificationCommands? = nil
+        verificationCommandsOverride: VerificationCommands? = nil,
+        // True when this app's remembered runs show the reader's complaint was
+        // NOT cured. See `mustLookBeyondTheSourceBeforeEditing`.
+        priorAttemptsDidNotCureTheComplaint: Bool = false
     ) async -> MaintainOnDemandEditResult {
         let changeKindTrailer = kind == .feature ? "on-demand-feature" : "on-demand-bug-fix"
         let outcome = await runEditLoopVerifyAndCommit(
@@ -590,7 +593,8 @@ final class MaintainTierCFixer {
             runtimeLogContext: runtimeLogContext,
             appWindowScreenshotPNG: appWindowScreenshotPNG,
             additionalPromptSections: additionalPromptSections,
-            manifestChangeApproval: manifestChangeApproval
+            manifestChangeApproval: manifestChangeApproval,
+            priorAttemptsDidNotCureTheComplaint: priorAttemptsDidNotCureTheComplaint
         )
         switch outcome {
         case .committed(let branchName, let suitePassed, let symptomVerifiedByRepro):
@@ -654,7 +658,8 @@ final class MaintainTierCFixer {
         runtimeLogContext: String? = nil,
         appWindowScreenshotPNG: Data? = nil,
         additionalPromptSections: [String] = [],
-        manifestChangeApproval: MaintainTierCManifestChangeApproval? = nil
+        manifestChangeApproval: MaintainTierCManifestChangeApproval? = nil,
+        priorAttemptsDidNotCureTheComplaint: Bool = false
     ) async -> EditLoopOutcome {
         guard MaintainSandbox.isAvailable else {
             return .notEligible(reason: "the sandbox is unavailable on this machine")
@@ -736,7 +741,8 @@ final class MaintainTierCFixer {
                     repoMapSummary: repoMapSummary,
                     runtimeShapePreflightAddendum: runtimeShapePreflightAddendum,
                     runtimeLogContext: runtimeLogContext,
-                    hasAttachedWindowScreenshot: appWindowScreenshotPNG != nil
+                    hasAttachedWindowScreenshot: appWindowScreenshotPNG != nil,
+                    buildAndInstallDocExcerpt: Self.buildAndInstallDocExcerpt(repoRootPath: clonePath)
                 ),
                 // The screenshot rides the opening turn as a real image block —
                 // and ONLY the first model call: it is stripped after the first
@@ -754,6 +760,11 @@ final class MaintainTierCFixer {
         var commandsAlreadyRun: Set<String> = []
         var fileStatesFromPreviousStep = Self.workingTreeFileStates(repoRootPath: clonePath)
         var theModelHasEditedTheTreeAtLeastOnce = false
+        /// Set the first time this run inspects something that is not the
+        /// source: the built/installed bundle, its signature, its plist, the
+        /// environment it runs in. Gates the first edit when earlier runs on
+        /// this app already failed from inside the source alone.
+        var hasLookedBeyondTheSourceThisRun = false
         var consecutiveNoProgressStepCount = 0
         var hasNudgedTowardConvergence = false
         var buildScriptRestoresRemaining = Self.maximumBuildScriptRestoresPerRun
@@ -861,6 +872,24 @@ final class MaintainTierCFixer {
             // never the jailed shell (which is read-only for editing now).
             // Several may ride one reply; they need no output between them.
             let fileEditRequests = MaintainFileEditApplier.parse(fromModelReply: reply)
+            if !fileEditRequests.isEmpty,
+               priorAttemptsDidNotCureTheComplaint,
+               !hasLookedBeyondTheSourceThisRun {
+                // The escalation gate. Earlier runs already read this source,
+                // formed a theory, edited, and left the complaint standing —
+                // so the source is the one place the cause is known NOT to
+                // have been found. Editing it again before looking anywhere
+                // else repeats a move with a losing record.
+                progressHandler?(.structuredFileEditRejected(
+                    reason: "earlier fixes to this app's source didn't cure it — checking the built app first"
+                ))
+                irisTrace("maintain: on-demand escalation gate held the first edit until a probe ran")
+                conversation.append(MaintainChatTurn(
+                    role: "user",
+                    text: Self.lookBeyondTheSourceSteer
+                ))
+                continue
+            }
             if !fileEditRequests.isEmpty {
                 var appliedPaths: [String] = []
                 var rejection: String? = nil
@@ -1007,7 +1036,7 @@ final class MaintainTierCFixer {
             let commandStartedAt = Date()
             let result = try? await runner.run(jailed.invocation, deadline: 120)
             let commandDuration = Date().timeIntervalSince(commandStartedAt)
-            let output = String((result?.outputTail ?? "(no output)").suffix(4000))
+            let output = Self.outputForModel(result?.outputTail ?? "(no output)")
             progressHandler?(.jailedCommandFinished(
                 exitCode: result?.exitCode ?? -1,
                 duration: commandDuration,
@@ -1038,8 +1067,13 @@ final class MaintainTierCFixer {
                     theModelHasEditedTheTreeAtLeastOnce = true
                     consecutiveNoProgressStepCount = 0
                     progressHandler?(.editedFiles(paths: changedPaths, stepNumber: step))
-                } else if theModelHasEditedTheTreeAtLeastOnce
-                            && !MaintainDiagnosticProbe.looksLikeADiagnosticProbe(command) {
+                }
+                if MaintainDiagnosticProbe.looksLikeADiagnosticProbe(command) {
+                    hasLookedBeyondTheSourceThisRun = true
+                }
+                if changedPaths?.isEmpty != false,
+                   theModelHasEditedTheTreeAtLeastOnce,
+                   !MaintainDiagnosticProbe.looksLikeADiagnosticProbe(command) {
                     // A read-only system probe (codesign, plutil, spctl, …) is
                     // investigation, not spinning — it never counts as a stall.
                     consecutiveNoProgressStepCount += 1
@@ -1251,7 +1285,14 @@ final class MaintainTierCFixer {
         // "applied"). Only a bug fix ever has one.
         var screenedReproCommand: String? = nil
         if let candidateRepro = modelAuthoredReproCommand {
-            if case .runsWithoutAsking = GuideAutopilotRiskAssessment.assess(
+            let pathsThisChangeTouched = await Self.changedFilePaths(runner: runner)
+            if let tautology = Self.reproMerelyReReadsTheChange(
+                candidateRepro, changedPaths: pathsThisChangeTouched
+            ) {
+                progressHandler?(.modelAuthoredReproDiscarded(reason: tautology))
+                irisTrace("maintain: on-demand repro discarded as a tautology — \(tautology)")
+                modelAuthoredReproCommand = nil
+            } else if case .runsWithoutAsking = GuideAutopilotRiskAssessment.assess(
                 candidateRepro, autonomyGranted: false
             ) {
                 screenedReproCommand = candidateRepro
@@ -1350,6 +1391,200 @@ final class MaintainTierCFixer {
         )
         } // repairRounds — every exit above is a `return`; only a failed
           // verification with rounds remaining loops back to the edit loop.
+    }
+
+    /// The build/install/run sections of whatever documentation the repository
+    /// ships, quoted for the opening message.
+    ///
+    /// The loop used to derive its build command purely from the file layout —
+    /// see a Cargo.toml, run `cargo build --release` — and never read a word the
+    /// project wrote about itself. WhimprFlow's README carries this, in bold,
+    /// two lines above the command it recommends:
+    ///
+    ///     build ONLY via `tauri build`; a bare `cargo build` + manual codesign
+    ///     will NOT bundle the UI and can drop TCC grants
+    ///
+    /// Five runs ran the bare `cargo build` anyway, each producing an ad-hoc
+    /// signed binary that reset the very Accessibility grant the user was
+    /// complaining about. The sentence that would have stopped every one of
+    /// them was sitting in a file none of them opened.
+    ///
+    /// Cheap and heuristic on purpose: first matching heading in the first
+    /// matching file, capped, no parsing beyond finding where the section ends.
+    nonisolated static func buildAndInstallDocExcerpt(repoRootPath: String) -> String? {
+        let candidateFiles = [
+            "README.md", "README", "readme.md",
+            "docs/BUILD.md", "BUILD.md", "docs/INSTALL.md", "INSTALL.md",
+            "CONTRIBUTING.md", "docs/CONTRIBUTING.md",
+        ]
+        // Headings worth quoting. A "Build (macOS)" or "## Installing" section
+        // is where the warnings live.
+        let wantedHeadingWords = ["build", "install", "develop", "running", "run ", "setup", "getting started"]
+        var excerpt = ""
+        let limit = 2200
+
+        for relativePath in candidateFiles {
+            let path = (repoRootPath as NSString).appendingPathComponent(relativePath)
+            guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+            let lines = text.components(separatedBy: .newlines)
+            var index = 0
+            while index < lines.count {
+                let line = lines[index]
+                guard line.hasPrefix("#") else { index += 1; continue }
+                let heading = line.lowercased()
+                guard wantedHeadingWords.contains(where: { heading.contains($0) }) else {
+                    index += 1
+                    continue
+                }
+                let headingDepth = line.prefix(while: { $0 == "#" }).count
+                var section = [line]
+                var scan = index + 1
+                while scan < lines.count {
+                    let next = lines[scan]
+                    // Stop at the next heading of the same or shallower depth.
+                    if next.hasPrefix("#") {
+                        let depth = next.prefix(while: { $0 == "#" }).count
+                        if depth <= headingDepth { break }
+                    }
+                    section.append(next)
+                    scan += 1
+                }
+                let rendered = "--- \(relativePath)\n" + section.joined(separator: "\n")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if excerpt.count + rendered.count + 2 > limit { return excerpt.isEmpty ? nil : excerpt }
+                excerpt += (excerpt.isEmpty ? "" : "\n\n") + rendered
+                index = scan
+            }
+            if !excerpt.isEmpty { break }
+        }
+        return excerpt.isEmpty ? nil : excerpt
+    }
+
+    /// Held in front of the first edit of a run on an app whose earlier fixes
+    /// did not cure the complaint.
+    ///
+    /// Five consecutive WhimprFlow runs read the same Swift and Rust, each
+    /// found a different plausible cause in it, each edited, each reported
+    /// success, and the reader's complaint never moved. It could not have
+    /// moved: the cause was not in the source at all. The installed app was
+    /// ad-hoc signed, so macOS keyed its Accessibility grant to a hash of the
+    /// binary and dropped the grant on every rebuild — visible in one second
+    /// to anything that ran `codesign -d -r-` on the bundle, and invisible
+    /// forever to anything that only read source.
+    ///
+    /// A run that reads only source can only ever find a cause in source. When
+    /// the record already says that search failed, the next run has to widen
+    /// it before it narrows again.
+    static let lookBeyondTheSourceSteer = """
+        Hold that edit for one step.
+
+        Iris's notes on this app say earlier runs already changed this source and the reader's complaint survived. That is evidence about WHERE the cause is: the source has been searched and the answer was not there. Editing it again first repeats a move with a losing record.
+
+        So before your first edit, run ONE read-only command that inspects something other than this repository's source — whichever is plausible for this complaint:
+
+        - the built or installed app rather than the code that makes it: `codesign -dvvv --verbose=4 <bundle>`, `codesign -d -r- <bundle>` (its designated requirement — what macOS actually matches a permission grant against), `plutil -p <bundle>/Contents/Info.plist`, `spctl -a -vvv <bundle>`, `xattr -p com.apple.quarantine <bundle>`
+        - whether the installed copy was even built from this source: compare its binary's timestamp and signing identifier with what this tree produces
+        - the app's stored state and config: the plist, the database, the files it reads at startup
+        - what the repo's own README, BUILD or CONTRIBUTING docs say about building and installing it — those documents routinely name the trap you are standing in
+
+        Then continue. If what you find changes nothing, say so in your next sentence and make the edit you were going to make — this costs one step and is not a veto.
+        """
+
+    /// How much of a command's output the model is shown, and which part.
+    ///
+    /// This used to be `.suffix(4000)` — the LAST four thousand characters and
+    /// nothing else. For `grep` that is fine. For `cat SomeFile.swift`, which
+    /// is most of what this loop runs, it hands back the END of the file and
+    /// silently drops the beginning: the imports, the type declarations, the
+    /// top of the very function being investigated. The model cannot tell that
+    /// anything is missing, so it reasons confidently about a file whose first
+    /// half it has never seen, and burns steps re-grepping for pieces it
+    /// already "read". A WhimprFlow run spent eleven of its first twelve steps
+    /// that way.
+    ///
+    /// Both ends are what a person reading a file actually needs, so both ends
+    /// are what is kept — with the cut marked, because a model that knows it is
+    /// missing the middle can ask for the middle.
+    nonisolated static func outputForModel(_ raw: String) -> String {
+        let limit = 4000
+        guard raw.count > limit else { return raw }
+        let headCharacters = 1500
+        let tailCharacters = limit - headCharacters
+        let head = String(raw.prefix(headCharacters))
+        let tail = String(raw.suffix(tailCharacters))
+        let omitted = raw.count - headCharacters - tailCharacters
+        return head
+            + "\n\n[\(omitted) characters of the middle omitted — re-read a specific range with `sed -n 'A,Bp' <file>` if you need it]\n\n"
+            + tail
+    }
+
+    /// Whether a model-authored repro check does nothing but re-read the patch
+    /// it is supposed to be testing — in which case it is discarded.
+    ///
+    /// The three legs prove a repro *distinguishes* the tree before the patch
+    /// from the tree after it. That is a weaker property than it looks, because
+    /// "the file I edited now contains the line I added" distinguishes them
+    /// perfectly while proving nothing at all about the user's complaint. A run
+    /// against WhimprFlow earned "repro-verified" on exactly this:
+    ///
+    ///     grep -q "useEffect" ui/src/hub/SettingsPane.tsx && grep -q "no relaunch needed" ui/src/hub/SettingsPane.tsx
+    ///
+    /// It fails before the patch, passes after it, and fails on revert — three
+    /// green legs for a change that never came near the reported bug, and the
+    /// user was told the fix was verified. Five runs in a row did this.
+    ///
+    /// Every check of that shape names a file the patch just wrote and then
+    /// only looks at it, so that pair is what is refused. A repro that
+    /// compiles, runs, or tests something is left alone even when an edited
+    /// path appears in it — running the code IS exercising behaviour. And a
+    /// grep of *generated* output stays legal, because build products are not
+    /// in the change's touched-path set.
+    nonisolated static func reproMerelyReReadsTheChange(
+        _ command: String, changedPaths: [String]
+    ) -> String? {
+        let namedPath = changedPaths.first { path in
+            guard !path.isEmpty else { return false }
+            if command.contains(path) { return true }
+            // A bare file name counts too — `grep -q x SettingsPane.tsx` after
+            // cd-ing is the same tautology. Short names are skipped; they
+            // collide with ordinary words.
+            let basename = (path as NSString).lastPathComponent
+            return basename.count >= 5 && command.contains(basename)
+        }
+        guard let namedPath else { return nil }
+
+        // Does the command RUN the program rather than read its source? That
+        // is a real check whatever files it mentions.
+        //
+        // Matched against the first word of each pipeline segment, never as a
+        // substring of the whole command. Substring matching looked fine and
+        // was wrong in the one case that matters most: the token "tsx " occurs
+        // inside "SettingsPane.tsx &&", so the exact tautology this function
+        // exists to reject was read as "runs a TypeScript file" and let
+        // through.
+        let programsThatRunCode: Set<String> = [
+            "cargo", "npm", "npx", "pnpm", "yarn", "bun", "bunx", "node",
+            "deno", "python", "python3", "pytest", "go", "swift", "xcodebuild",
+            "make", "gradle", "mvn", "jest", "vitest", "mocha", "rspec",
+            "phpunit", "dotnet", "ruby", "tsc", "ts-node", "tsx", "bash", "sh",
+            "zsh", "docker", "java", "gcc", "clang", "cmake", "ninja", "dart",
+            "flutter", "php", "perl", "rscript", "swiftc", "rustc",
+        ]
+        let segments = command.components(separatedBy: CharacterSet(charactersIn: ";|&\n()`"))
+        for segment in segments {
+            let words = segment.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+            // Skip leading VAR=value assignments the way a shell does.
+            guard let firstWord = words.first(where: { !$0.contains("=") || $0.hasPrefix("-") }) else {
+                continue
+            }
+            // `./script.sh` and `/usr/local/bin/thing` execute something.
+            if firstWord.hasPrefix("./") || firstWord.hasPrefix("../") { return nil }
+            let programName = (firstWord as NSString).lastPathComponent.lowercased()
+            if programsThatRunCode.contains(programName) { return nil }
+        }
+
+        return "it only re-reads \(namedPath), a file this change just wrote — "
+            + "true of any edit, and no evidence about the reported problem"
     }
 
     /// The change's touched paths — tracked changes against HEAD plus untracked
@@ -1724,7 +1959,8 @@ final class MaintainTierCFixer {
         repoMapSummary: String,
         runtimeShapePreflightAddendum: String?,
         runtimeLogContext: String? = nil,
-        hasAttachedWindowScreenshot: Bool = false
+        hasAttachedWindowScreenshot: Bool = false,
+        buildAndInstallDocExcerpt: String? = nil
     ) -> String {
         var sections: [String] = [baseOpeningMessage(appSlug: appSlug, task: task)]
 
@@ -1755,6 +1991,20 @@ final class MaintainTierCFixer {
             rely on it):
 
             \(repoMapSummary)
+            """)
+        }
+
+        if let buildAndInstallDocExcerpt, !buildAndInstallDocExcerpt.isEmpty {
+            sections.append("""
+            What this repository says about building and installing itself, \
+            quoted from its own documentation. Projects write these sections \
+            after being bitten, so they often name the exact trap you are \
+            standing in — WhimprFlow's README said in bold that a bare \
+            `cargo build` "can drop TCC grants", and five runs broke the app \
+            again by doing precisely that. Prefer the entrypoint the repo \
+            provides over one you infer from its file layout:
+
+            \(buildAndInstallDocExcerpt)
             """)
         }
 

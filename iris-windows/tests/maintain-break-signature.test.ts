@@ -15,12 +15,12 @@ import {
   WINDOWS_SIGNATURE_ALGO_VERSION,
   type BreakAppStack,
 } from "../src/services/maintain/break-signature";
-// The one file in this suite allowed to import outside `iris-windows/` — see
-// the porting spec §0/§3 and `tsconfig.json`'s `rootDir: ".."`, changed
-// specifically to permit this line. It proves `normalizeMessage` above stays
-// byte-identical to the web repo's real `normalizeBreakMessage`, not to a
-// copy of it that could quietly drift.
-import { normalizeBreakMessage } from "../../lib/break-signature";
+// This used to reach across the repository boundary into publik's
+// `lib/break-signature` to prove `normalizeMessage` had not drifted from the
+// real thing. Splitting the clients out of publik broke that import and the
+// whole Windows typecheck with it. There is nothing left to prove: both are
+// now the same function, exported from `@iris/core`.
+import { normalizeBreakMessage } from "@iris/core";
 import {
   buildAppCrashWerText,
   CUE_APPCRASH_WER_FIXTURE,

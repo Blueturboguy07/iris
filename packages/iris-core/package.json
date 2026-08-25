@@ -1,0 +1,22 @@
+{
+  "name": "@iris/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The logic both Iris clients run. Pure: no I/O, no platform APIs, no Node built-ins \u2014 so it loads in Electron and in JavaScriptCore alike.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5",
+    "vitest": "^4.1.10"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "//type": "No \"type\": \"module\". The build emits CommonJS because that is what Electron's main process requires; declaring the package ESM makes Node treat dist/*.js as ESM and it fails on `exports is not defined`. Sources are ESM-authored and vitest transpiles them."
+}

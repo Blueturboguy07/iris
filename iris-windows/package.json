@@ -1,7 +1,7 @@
 {
   "name": "iris-windows",
   "version": "0.1.0",
-  "description": "Iris — publik's desktop companion for Windows. A text-first fork of tekram/clicky-windows.",
+  "description": "Iris \u2014 publik's desktop companion for Windows. A text-first fork of tekram/clicky-windows.",
   "main": "dist/main/index.js",
   "scripts": {
     "dev": "npm run compile && electron-forge start",
@@ -45,5 +45,7 @@
     "typescript-eslint": "^8.18.0",
     "vitest": "^2.1.8"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@iris/core": "file:../packages/iris-core"
+  }
 }

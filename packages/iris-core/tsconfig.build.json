@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "lib": ["ES2022"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "declaration": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "skipLibCheck": true,
+    "types": []
+  },
+  "//": "Emits CommonJS for Electron to require. The macOS side takes a single bundled file instead — see scripts/bundle-core-for-jsc.mjs — because JavaScriptCore has no module loader.",
+  "include": ["src/**/*.ts"]
+}

@@ -7,6 +7,8 @@
     "types": ["node"],
     "outDir": "dist",
     "rootDir": "..",
+    "baseUrl": ".",
+    "paths": { "@iris/core": ["../packages/iris-core/src/index.ts"] },
     "strict": true,
     "noUncheckedIndexedAccess": false,
     "esModuleInterop": true,
@@ -16,7 +18,7 @@
     "sourceMap": true
   },
   "//": "The checking config: covers the app AND the suite, so `npm run typecheck` sees both. Emitting is done by tsconfig.build.json.",
-  "//rootDir": "\"..\" (the publik repo root), not \".\", because tests/maintain-break-signature.test.ts imports ../../lib/break-signature.ts directly to prove byte-identical normalization against the web repo's shared normalizer — see that test file and the maintain-mode porting spec §0/§3. This is check-only: tsconfig.build.json sets its own narrower rootDir:\"src\" and excludes tests/, so widening this file's rootDir has no effect on what ships.",
+  "//rootDir": "\"..\" (the iris repo root), not \".\", because src/ and tests/ both import @iris/core, which lives in ../packages/iris-core. This is check-only: tsconfig.build.json sets its own narrower rootDir and excludes tests/, so widening this file's rootDir has no effect on what ships.",
   "include": ["src/**/*", "tests/**/*", "forge.config.ts", "vitest.config.ts"],
   "exclude": ["node_modules", "dist", "out"]
 }

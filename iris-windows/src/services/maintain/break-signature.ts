@@ -74,6 +74,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { normalizeBreakMessage } from "@iris/core";
 
 /** Which family of failure a signature identifies. Wire vocabulary shared
  *  with the server's `signatures.signature_kind` check constraint — keep
@@ -478,21 +479,17 @@ const MAX_NORMALIZED_MESSAGE_LENGTH = 300;
  * Path replacement is also the mandatory redaction: every Windows path embeds
  * the account name (`C:\Users\<name>\...`).
  */
-export function normalizeMessage(message: string): string {
-  return message
-    .toLowerCase()
-    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, "<uuid>")
-    .replace(/0x[0-9a-f]+/g, "<addr>")
-    .replace(/\b[0-9a-f]{7,}\b/g, "<hex>")
-    // Windows paths before POSIX ones: the POSIX pattern would otherwise eat
-    // the tail of "C:\Users\x\y" and leave a stray drive letter behind.
-    .replace(/[a-z]:\\[^\s"']*/g, "<path>")
-    .replace(/(?:\/[^\s"'/]+){2,}\/?/g, "<path>")
-    .replace(/\d+/g, "<n>")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, MAX_NORMALIZED_MESSAGE_LENGTH);
-}
+/**
+ * Re-exported from `@iris/core` rather than implemented here.
+ *
+ * This was a byte-for-byte hand port of publik's `normalizeBreakMessage`, and
+ * the suite asserted parity by importing publik's copy across the repository
+ * boundary — a check that broke the moment the clients were split out. One
+ * implementation in the core is what that check was trying to buy; now it is
+ * true by construction instead of by assertion, and macOS gets the same answer
+ * through JavaScriptCore.
+ */
+export const normalizeMessage = normalizeBreakMessage;
 
 /** sha256 of the composite, truncated to 32 lowercase hex characters — the
  *  same shape `app_breaks.break_signature` already uses. Unchanged port of

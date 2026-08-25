@@ -14,7 +14,8 @@
     "typecheck": "npm run build:core && tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "gui-e2e": "node tests/gui-e2e/run.mjs",
-    "build:core": "npm --prefix ../packages/iris-core run build"
+    "build:core": "npm --prefix ../packages/iris-core run build && npm run vendor:core",
+    "vendor:core": "node scripts/vendor-core.mjs"
   },
   "repository": {
     "type": "git",

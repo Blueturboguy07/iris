@@ -156,10 +156,16 @@ jobs:
           pgrep -x Iris >/dev/null
           osascript -e 'tell application "Iris" to quit' || pkill -x Iris || true
 
+      - name: Record whether the app was signed
+        run: |
+          echo "${{ steps.signing.outputs.signed }}" > iris-macos/dist/macos-signed.txt
+
       - uses: actions/upload-artifact@v4
         with:
           name: iris-macos
-          path: iris-macos/dist/Iris-assistant.dmg
+          path: |
+            iris-macos/dist/Iris-assistant.dmg
+            iris-macos/dist/macos-signed.txt
           if-no-files-found: error
 
   # Windows ships the Electron app. It used to ship iris-desktop (Tauri) — a
@@ -198,8 +204,8 @@ jobs:
         run: npm run make
 
       # Azure Artifact Signing, the same account and secrets the Tauri build
-      # used. Missing secrets downgrade to unsigned, as everywhere else here —
-      # but `publish` refuses to attach an unsigned Windows installer to a tag.
+      # used. Missing secrets downgrade to unsigned, as everywhere else here;
+      # `publish` then states it on the release rather than blocking it.
       #
       # KNOWN GAP: this signs the Squirrel setup executable only. Tauri applied
       # its sign command during bundling, so the Tauri build signed the
@@ -273,34 +279,49 @@ jobs:
         with:
           name: iris-windows
           path: release-assets/windows
-      # The Windows installer was signed by Azure Artifact Signing until the
-      # Tauri client stopped being the thing we ship. An unsigned installer
-      # means a SmartScreen wall on every download, which reads to a user as
-      # "this is malware" — so a tagged release refuses to carry one rather
-      # than quietly hand it out. A workflow_dispatch run may still publish
-      # unsigned, which is what makes it useful for testing the pipeline.
-      - name: Refuse to release an unsigned Windows installer
-        if: startsWith(github.ref, 'refs/tags/')
+      # Iris is meant to be a signed application on both platforms. It is not
+      # signed yet, and that must not stop a release — but it must not be
+      # invisible either, because an unsigned build is the one where the user
+      # meets Gatekeeper or SmartScreen instead of the app and concludes it is
+      # malware. So an unsigned platform is stated on the release itself, and
+      # the note disappears on its own once the secrets exist.
+      - name: Work out what got signed
+        id: signing
         run: |
-          state="$(cat release-assets/windows/windows-signed.txt 2>/dev/null || echo missing)"
-          if [ "$state" != "true" ]; then
-            echo "The Windows installer is not signed (state: $state)." >&2
-            echo "Set AZURE_SIGNING_ENDPOINT / _ACCOUNT / _PROFILE and the three" >&2
-            echo "AZURE_CLIENT_* secrets, or publish with workflow_dispatch if you" >&2
-            echo "genuinely mean to hand out an unsigned build." >&2
-            exit 1
+          macos="$(cat release-assets/macos/macos-signed.txt 2>/dev/null || echo unknown)"
+          windows="$(cat release-assets/windows/windows-signed.txt 2>/dev/null || echo unknown)"
+          echo "macos=$macos" >> "$GITHUB_OUTPUT"
+          echo "windows=$windows" >> "$GITHUB_OUTPUT"
+
+          notes="Publik's desktop assistant for macOS and Windows."
+          warn=""
+          if [ "$macos" != "true" ]; then
+            warn="$warn\n- **macOS build is not signed or notarized.** Gatekeeper will refuse it on first open; right-click → Open, or \`xattr -dr com.apple.quarantine\`."
           fi
+          if [ "$windows" != "true" ]; then
+            warn="$warn\n- **Windows installer is not signed.** SmartScreen will warn on download; More info → Run anyway."
+          fi
+          if [ -n "$warn" ]; then
+            notes="$notes\n\n### Signing\n$warn\n\nIris is meant to be signed on both platforms. These notes go away once the signing secrets are configured."
+            echo "::warning::Publishing an unsigned build (macOS signed: $macos, Windows signed: $windows)"
+          fi
+          {
+            echo "notes<<IRIS_NOTES_EOF"
+            printf "%b\n" "$notes"
+            echo "IRIS_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Publish desktop installers
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           IRIS_TAG: ${{ github.ref_name }}
+          RELEASE_NOTES: ${{ steps.signing.outputs.notes }}
         run: |
           gh release view "$IRIS_TAG" >/dev/null 2>&1 || \
             gh release create "$IRIS_TAG" \
               --title "Iris ${IRIS_TAG#iris-v}" \
-              --notes "Publik's desktop assistant for macOS and Windows."
+              --notes "$RELEASE_NOTES"
           gh release upload "$IRIS_TAG" \
             release-assets/macos/*.dmg \
             $(find release-assets/windows -name '*.exe') \

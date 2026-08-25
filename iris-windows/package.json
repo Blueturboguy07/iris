@@ -5,15 +5,16 @@
   "main": "dist/main/index.js",
   "scripts": {
     "dev": "npm run compile && electron-forge start",
-    "compile": "tsc -p tsconfig.build.json",
+    "compile": "npm run build:core && tsc -p tsconfig.build.json",
     "build": "npm run compile && electron-forge make",
     "package": "npm run compile && electron-forge package",
     "make": "npm run compile && electron-forge make",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "npm run build:core && tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "gui-e2e": "node tests/gui-e2e/run.mjs"
+    "gui-e2e": "node tests/gui-e2e/run.mjs",
+    "build:core": "npm --prefix ../packages/iris-core run build"
   },
   "repository": {
     "type": "git",

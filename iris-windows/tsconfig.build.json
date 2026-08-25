@@ -3,8 +3,10 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    "paths": {}
   },
+  "//paths": "Cleared, deliberately. tsconfig.json maps @iris/core to the core's SOURCE so the editor and `npm run typecheck` follow it straight into the real file. The emit cannot do that: rootDir is src/, and a mapping to ../packages/iris-core/src makes tsc try to compile files outside it (\"is not under rootDir\"). With no mapping it resolves through node_modules, where the file: dependency links the built package, so the core is an ordinary external import and is emitted as a require() the packaged app resolves at runtime. The core must therefore be BUILT before this runs — see the build:core step in the workflows.",
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", "out", "tests"]
 }

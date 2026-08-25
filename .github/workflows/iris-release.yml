@@ -109,6 +109,43 @@ jobs:
           fi
           test -d "build/Build/Products/Release/Iris.app"
 
+      # Sparkle ships its helpers ALREADY signed — ad-hoc — and Xcode's
+      # CODE_SIGN_IDENTITY does not reach inside a prebuilt framework to redo
+      # them. So Autoupdate, Updater.app and both XPC services went to Apple
+      # ad-hoc signed while the main binary was Developer ID, and notarization
+      # came back `Invalid` with nothing in the build log to explain it.
+      #
+      # Inside-out order is not optional: signing a container invalidates the
+      # signature of anything signed inside it afterwards.
+      - name: Re-sign Sparkle's nested helpers
+        if: steps.signing.outputs.signed == 'true'
+        working-directory: iris-macos
+        run: |
+          set -euo pipefail
+          SPARKLE="build/Build/Products/Release/Iris.app/Contents/Frameworks/Sparkle.framework"
+          [ -d "$SPARKLE" ] || { echo "No Sparkle.framework — nothing to re-sign."; exit 0; }
+          for target in \
+            "$SPARKLE/Versions/B/XPCServices/Downloader.xpc" \
+            "$SPARKLE/Versions/B/XPCServices/Installer.xpc" \
+            "$SPARKLE/Versions/B/Updater.app" \
+            "$SPARKLE/Versions/B/Autoupdate" \
+            "$SPARKLE/Versions/B/Sparkle" \
+            "$SPARKLE" \
+            "build/Build/Products/Release/Iris.app"
+          do
+            codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
+              --options runtime --timestamp "$target"
+          done
+          # Every Mach-O must now carry a Developer ID and the hardened runtime,
+          # or the submission is rejected again.
+          while IFS= read -r binary; do
+            codesign -dv --verbose=2 "$binary" 2>&1 | grep -q "^Authority=Developer ID Application" \
+              || { echo "::error::$binary is not Developer ID signed"; exit 1; }
+            codesign -dv --verbose=2 "$binary" 2>&1 | grep -q "runtime" \
+              || { echo "::error::$binary lacks the hardened runtime"; exit 1; }
+          done < <(find "build/Build/Products/Release/Iris.app" -type f \
+                     -exec sh -c 'file "$1" | grep -q "Mach-O" && echo "$1"' _ {} \;)
+
       - name: Package dmg
         working-directory: iris-macos
         run: |

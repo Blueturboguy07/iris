@@ -48,6 +48,18 @@ export const ALLOWED_EXTERNAL_HOSTS: ReadonlySet<string> = new Set([
   // host.
   "files.browseros.com",
   "go.dev",
+  // Added to the Tauri client on 2026-08-10 for the Hickeyfield, Nutcracker
+  // and Dripwriter Origin guides and never propagated here. publik's guide
+  // test validated links against the Tauri list, so four published steps
+  // passed CI and opened nothing on this client. Propagated 2026-08-25;
+  // publik's IRIS_ALLOWED_HOSTS is the source of truth.
+  "fal.ai",
+  "www.fal.ai",
+  "nasm.us",
+  "www.nasm.us",
+  "chromewebstore.google.com",
+  "docs.google.com",
+  "blueturboguy07.github.io",
 ]);
 
 /** Loopback, for a locally-run publik during development. */

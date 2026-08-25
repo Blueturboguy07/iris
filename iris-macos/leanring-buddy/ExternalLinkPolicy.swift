@@ -47,6 +47,19 @@ enum ExternalLinkPolicy {
         // that branch — opened nothing at all in the desktop app.
         "files.browseros.com",
         "go.dev",
+        // Added to the Tauri client on 2026-08-10 for the Hickeyfield,
+        // Nutcracker and Dripwriter Origin guides and never propagated here.
+        // publik's guide test validated links against the Tauri list, so four
+        // published steps passed CI and opened nothing on this client.
+        // Propagated 2026-08-25; publik's IRIS_ALLOWED_HOSTS is the source of
+        // truth and tests/ at this repo's root holds this list to it.
+        "fal.ai",
+        "www.fal.ai",
+        "nasm.us",
+        "www.nasm.us",
+        "chromewebstore.google.com",
+        "docs.google.com",
+        "blueturboguy07.github.io",
     ]
 
     /// The two hosts a developer running the publik site locally needs, which

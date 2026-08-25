@@ -1,13 +1,13 @@
 {
   "name": "iris",
   "private": true,
-  "description": "Iris — the publik desktop assistant. Three clients; this root holds only the cross-client checks.",
+  "description": "Iris \u2014 the publik desktop assistant. Three clients; this root holds only the cross-client checks.",
   "scripts": {
     "test": "vitest run",
-    "iris:dev": "cd iris-desktop && pnpm tauri dev",
-    "iris:build:macos": "scripts/build-iris-macos.sh",
-    "iris:build:windows": "cd iris-desktop && pnpm tauri build",
-    "iris:deploy:local": "scripts/deploy-iris-local.sh"
+    "iris:deploy:macos": "scripts/deploy-iris-local.sh",
+    "iris:build:windows": "cd iris-windows && npm run make",
+    "tauri:dev": "cd iris-desktop && pnpm tauri dev",
+    "tauri:build:macos": "scripts/build-iris-macos.sh"
   },
   "devDependencies": {
     "typescript": "^5",

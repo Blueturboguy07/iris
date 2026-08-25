@@ -26,8 +26,8 @@ double-click time. Finally it launches the binary and confirms it stays up —
 passing assessment and actually starting are different failures.
 
 Verified locally on 2026-07-27 against
-`Developer ID Application: Mann Bellani (R5R3ZS54LV)`, Apple ID
-`the Apple ID used for signing`:
+`Developer ID Application: Mann Bellani (R5R3ZS54LV)`, using the Apple ID that
+holds that certificate:
 
 ```
 Signature

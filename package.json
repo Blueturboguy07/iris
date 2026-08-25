@@ -1,0 +1,17 @@
+{
+  "name": "iris",
+  "private": true,
+  "description": "Iris — the publik desktop assistant. Three clients; this root holds only the cross-client checks.",
+  "scripts": {
+    "test": "vitest run",
+    "iris:dev": "cd iris-desktop && pnpm tauri dev",
+    "iris:build:macos": "scripts/build-iris-macos.sh",
+    "iris:build:windows": "cd iris-desktop && pnpm tauri build",
+    "iris:deploy:local": "scripts/deploy-iris-local.sh"
+  },
+  "devDependencies": {
+    "typescript": "^5",
+    "vitest": "^4.1.10"
+  },
+  "packageManager": "pnpm@10.0.0"
+}

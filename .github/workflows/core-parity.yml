@@ -1,0 +1,75 @@
+name: core-parity
+
+# The gate that protects the mature app.
+#
+# macOS is 47k lines in daily use; the shared core is new. If a module moves
+# and the core is subtly different, macOS regresses in a way that unit tests
+# written FOR the core cannot catch, because they were written from the same
+# misunderstanding. So the shipping macOS implementation is the reference and
+# the core has to match it, case for case, before macOS is allowed to stop
+# using its own copy.
+#
+# Runs on macOS because it compiles the reference with swiftc. It does NOT
+# build the app — it is fast, and it is meant to fail loudly the moment a core
+# module and its Swift counterpart disagree about anything.
+
+on:
+  push:
+    paths:
+      - "packages/iris-core/**"
+      - "iris-macos/leanring-buddy/**"
+      - ".github/workflows/core-parity.yml"
+  pull_request:
+    paths:
+      - "packages/iris-core/**"
+      - "iris-macos/leanring-buddy/**"
+  workflow_dispatch:
+
+jobs:
+  parity:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Build the core
+        working-directory: packages/iris-core
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+
+      - name: Core conformance suite
+        working-directory: packages/iris-core
+        run: npm test
+
+      # Each module here has a verbatim copy of the shipping Swift under
+      # parity/<module>.swift. When the real Swift changes, that copy must
+      # change with it — and if someone updates one and not the other, this
+      # step is where it surfaces.
+      - name: Differential gate against the shipping macOS implementation
+        working-directory: packages/iris-core
+        run: node parity/run.mjs break-signature
+
+      # The Swift the gate compiles is only meaningful if it still matches the
+      # app. This catches the copy silently drifting from the original.
+      - name: The reference still matches the app it was taken from
+        run: |
+          set -euo pipefail
+          # Compare BODIES, not declarations: the app's is a static method on a
+          # type and the reference is a free function, which is the only
+          # difference that is allowed to exist between them.
+          body() {
+            awk "/func normalizeMessage/,/^$2}\$/" "$1" \
+              | grep -vE '^\s*//' | tr -d '[:space:]' | sed 's/^.*->String{//'
+          }
+          app="$(body iris-macos/leanring-buddy/BreakSignatureService.swift '    ')"
+          ref="$(body packages/iris-core/parity/break-signature.swift '')"
+          if [ "$app" != "$ref" ]; then
+            echo "::error::parity/break-signature.swift has drifted from BreakSignatureService.swift."
+            echo "The gate would be comparing the core against a stale reference."
+            diff <(printf '%s\n' "$app") <(printf '%s\n' "$ref") || true
+            exit 1
+          fi
+          echo "reference matches the shipping implementation"

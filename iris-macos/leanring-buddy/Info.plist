@@ -4,10 +4,20 @@
 <dict>
 	<key>LSUIElement</key>
 	<true/>
-	<key>SUFeedURL</key>
-	<string>https://raw.githubusercontent.com/julianjear/makesomething-mac-app/main/appcast.xml</string>
-	<key>SUPublicEDKey</key>
-	<string>/l3d2rw5ZZFRU3AadP/w2Zf8FHfhA6bKv16BQOV5OSk=</string>
+	<!-- No SUFeedURL and no SUPublicEDKey, deliberately.
+
+	     These were inherited verbatim from the upstream template this app was
+	     forked from and pointed at github.com/julianjear/makesomething-mac-app
+	     with that project's EdDSA public key. Sparkle starts on launch, so every
+	     Iris install was asking an unrelated third party for updates and would
+	     have trusted anything they signed — an install path into the machine of
+	     every user, from a repository nobody here controls.
+
+	     Iris has no update feed of its own yet. Restoring automatic updates
+	     needs an Iris-owned appcast and an EdDSA keypair generated here, whose
+	     PUBLIC half goes in SUPublicEDKey and whose private half never leaves
+	     the signing machine. Until both exist these stay absent, and
+	     `startSparkleUpdater` refuses to start without them. -->
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>Iris needs screen recording access to see your screen and help you.</string>
 	<!-- Claims the iris:// scheme so the OAuth redirect and the website's guide

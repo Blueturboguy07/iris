@@ -115,7 +115,7 @@ final class ScreenCaptureKitWatchLoopFrameSource: WatchLoopFrameSource {
         }
         let displayUnderTheCursor = shareableContent.displays.first { display in
             let displayFrame = appKitScreenByDisplayIdentifier[display.displayID]?.frame ?? display.frame
-            return displayFrame.contains(mouseLocation)
+            return ScreenContainment.screenFrame(displayFrame, containsPointer: mouseLocation)
         } ?? shareableContent.displays[0]
 
         let ownBundleIdentifier = Bundle.main.bundleIdentifier

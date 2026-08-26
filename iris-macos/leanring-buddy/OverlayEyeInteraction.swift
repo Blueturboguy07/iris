@@ -210,7 +210,11 @@ struct OverlayEyeExchange: Equatable {
     /// once there is an answer to follow up on — while Iris is still working
     /// the field is not the thing to interrupt.
     mutating func registerTheReaderWentBackToTheField() {
-        guard phase == .showingTheAnswer else { return }
+        // `.waitingForIrisToAnswer` is allowed through as well. A request that
+        // was cancelled never publishes an answer, so a bar stuck in that phase
+        // could never reach `.showingTheAnswer` and this guard made tapping the
+        // field a no-op forever.
+        guard phase == .showingTheAnswer || phase == .waitingForIrisToAnswer else { return }
         phase = .composingAFollowUp
     }
 

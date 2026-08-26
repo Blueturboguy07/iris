@@ -61,8 +61,8 @@ enum CompanionScreenCaptureUtility {
         let sortedDisplays = content.displays.sorted { displayA, displayB in
             let frameA = nsScreenByDisplayID[displayA.displayID]?.frame ?? displayA.frame
             let frameB = nsScreenByDisplayID[displayB.displayID]?.frame ?? displayB.frame
-            let aContainsCursor = frameA.contains(mouseLocation)
-            let bContainsCursor = frameB.contains(mouseLocation)
+            let aContainsCursor = ScreenContainment.screenFrame(frameA, containsPointer: mouseLocation)
+            let bContainsCursor = ScreenContainment.screenFrame(frameB, containsPointer: mouseLocation)
             if aContainsCursor != bContainsCursor { return aContainsCursor }
             return false
         }
@@ -76,7 +76,7 @@ enum CompanionScreenCaptureUtility {
             let displayFrame = nsScreenByDisplayID[display.displayID]?.frame
                 ?? CGRect(x: display.frame.origin.x, y: display.frame.origin.y,
                           width: CGFloat(display.width), height: CGFloat(display.height))
-            let isCursorScreen = displayFrame.contains(mouseLocation)
+            let isCursorScreen = ScreenContainment.screenFrame(displayFrame, containsPointer: mouseLocation)
 
             let filter = SCContentFilter(display: display, excludingWindows: ownAppWindows)
 

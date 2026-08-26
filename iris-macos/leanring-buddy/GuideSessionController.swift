@@ -259,6 +259,13 @@ final class GuideSessionController: ObservableObject {
     /// this is never called again (see `startAutopilot`).
     var confirmAutonomousControl: (() -> Bool)?
 
+    /// Why autopilot did not start, when the reader asked it to and it did not.
+    ///
+    /// "Let Iris run it" used to fail by returning quietly: the consent was
+    /// declined or its alert never reached the front, and the button simply did
+    /// nothing forever after. A tap has to be answered.
+    @Published private(set) var autopilotBlockedExplanation: String?
+
     /// The persisted "Let Iris take control" grant `startAutopilot` reads and
     /// sets. Settable (not just `.shared`) so a test can inject one over an
     /// isolated `UserDefaults` suite and never touch the reader's real
@@ -563,13 +570,25 @@ final class GuideSessionController: ObservableObject {
         guideBeingFollowed = fetchedGuide
         selectedBranch = resolvedHandoff.branch
 
-        // A link that names both a branch and a step is carrying the reader's
-        // own place across from the website, so it wins over whatever this
-        // machine last wrote down. Without one, saved progress is the only thing
-        // that knows where they got to.
-        let theLinkNamedThisExactBranchAndStep =
-            branchKeyFromDeepLink == resolvedHandoff.branch.branchKey
-            && stepIndexFromDeepLink != nil
+        // A link that names a branch and a step BEYOND THE START is carrying the
+        // reader's own place across from the website, so it wins over whatever
+        // this machine last wrote down.
+        //
+        // `step=0` is not that. publik's "Open in Iris" button always emits a
+        // step, and the step it emits comes from the BROWSER's localStorage —
+        // a different store from this one. A reader who did seven steps inside
+        // Iris still has 0 in their browser, so clicking that button a second
+        // time used to send `step=0`, satisfy this condition, jump the guide
+        // back to the beginning AND overwrite the saved 7 with 0 on the very
+        // next line. Their progress was not ignored, it was destroyed, on the
+        // ordinary path of clicking the button twice.
+        //
+        // A link cannot distinguish "resume me at the start" from "I have no
+        // resume point", so the start is treated as the second — saved progress
+        // wins, and a reader who genuinely wants step one can use Back.
+        let linkNamesThisBranch = branchKeyFromDeepLink == resolvedHandoff.branch.branchKey
+        let linkCarriesARealResumePoint = (stepIndexFromDeepLink ?? 0) > 0
+        let theLinkNamedThisExactBranchAndStep = linkNamesThisBranch && linkCarriesARealResumePoint
         if theLinkNamedThisExactBranchAndStep {
             currentStepIndex = resolvedHandoff.stepIndex
             readerHasFinishedTheGuide = false
@@ -591,6 +610,19 @@ final class GuideSessionController: ObservableObject {
 
     func closeTheGuide() {
         cancelAnyWorkFromThePreviousStep()
+        // A pointer request already in flight has to die with the guide.
+        //
+        // It did not, and the result was the strangest thing in the bug report:
+        // "randomly, it will move to a spot on my computer and say the first
+        // step, out of nowhere". A model call launched while the guide was open
+        // finished seconds after it closed, passed its own `!Task.isCancelled`
+        // check because nothing had cancelled it, and drove the eye — which
+        // force-shows a hidden overlay — announcing the step title it captured
+        // when it started. For a guide the reader never advanced, that is step
+        // one, arriving long after they walked away from it.
+        pointingTask?.cancel()
+        pointingTask = nil
+        stopPointingTheEye?()
         if autopilotIsRunning { stopAutopilot() }
         watchLoop.stopWatching()
         loadState = .noGuideIsOpen
@@ -967,9 +999,23 @@ final class GuideSessionController: ObservableObject {
         // approving each command. If they decline, autopilot simply does not
         // start — the guide stays open for them to follow by hand.
         if !autonomyGrant.isGranted {
-            guard confirmAutonomousControl?() == true else { return }
+            guard let confirmAutonomousControl else {
+                // No consent seam wired at all. Previously this returned in
+                // silence, which is indistinguishable from a broken button.
+                autopilotBlockedExplanation = "Iris can't ask for permission to run this install right now. Restart Iris and try again."
+                return
+            }
+            guard confirmAutonomousControl() else {
+                // Declined, or the alert never reached the front. Either way the
+                // reader tapped a button and something has to answer them: a bare
+                // `return` here is exactly the "Let Iris run it does nothing"
+                // report — the tap lands, nothing moves, and no reason is given.
+                autopilotBlockedExplanation = "Iris needs permission to run installs itself. Turn on Auto-install in Iris's settings, or follow the steps by hand below."
+                return
+            }
             autonomyGrant.grant()
         }
+        autopilotBlockedExplanation = nil
         let context = GuideAutopilotGuideContext(
             slug: guide.appSlug,
             version: guide.version,

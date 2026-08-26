@@ -859,6 +859,15 @@ struct OverlayEyeInputBarView: View {
                     exchange.whatIrisSaidBackIsAFailureMessage ? DS.Colors.red : DS.Colors.ink
                 )
                 .lineSpacing(2.5)
+                // Selectable, like every other text surface in this app.
+                //
+                // This one was not, and it is the mechanism behind a whole class
+                // of reported failure: a reader asked Iris for a shell command,
+                // could not select the answer to copy it, and retyped it by hand.
+                // `curl -fsSL` reached their shell as `curltl-fsSL` and `.zshrc`
+                // as `.zhrc`. Iris was blamed for giving wrong commands; it gave
+                // the right ones and made them impossible to take.
+                .textSelection(.enabled)
                 // Wrap rather than truncate: an answer the reader cannot finish
                 // reading is not an answer.
                 .fixedSize(horizontal: false, vertical: true)

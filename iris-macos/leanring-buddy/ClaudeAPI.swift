@@ -154,13 +154,25 @@ class ClaudeAPI {
         maximumOutputTokens: Int,
         shouldStream: Bool,
         tools: [[String: Any]]? = nil,
-        toolChoice: [String: Any]? = nil
+        toolChoice: [String: Any]? = nil,
+        /// Set to 0 for anything whose answer should not change between two
+        /// identical questions.
+        ///
+        /// Pointing needs this and never had it. The default is 1.0, so asking
+        /// "where is the Install Node LTS control" about an unchanged screen was
+        /// sampled fresh every time: one reader's six attempts at a single
+        /// target produced five different coordinates. The maintain engine has
+        /// always set 0; this path was simply missed.
+        temperature: Double? = nil
     ) -> [String: Any] {
         var requestBody: [String: Any] = [
             "max_tokens": maximumOutputTokens,
             "system": Self.systemFieldValue(for: transport, systemPrompt: systemPrompt),
             "messages": messages,
         ]
+        if let temperature {
+            requestBody["temperature"] = temperature
+        }
         if shouldStream {
             requestBody["stream"] = true
         }
@@ -248,7 +260,9 @@ class ClaudeAPI {
         conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
         userPrompt: String,
         onTextChunk: @MainActor @Sendable (String) -> Void
-    ) async throws -> (text: String, duration: TimeInterval) {
+    ,
+        /// 0 for a question whose answer should not move between identical asks.
+        temperature: Double? = nil) async throws -> (text: String, duration: TimeInterval) {
         let startTime = Date()
 
         let transport = try await resolveTransport().get()
@@ -264,7 +278,8 @@ class ClaudeAPI {
             systemPrompt: systemPrompt,
             messages: messages,
             maximumOutputTokens: 1024,
-            shouldStream: true
+            shouldStream: true,
+            temperature: temperature
         )
 
         let bodyData = try JSONSerialization.data(withJSONObject: body)

@@ -591,6 +591,13 @@ final class CompanionManager: ObservableObject {
         // AppKit-free) — activate first so the alert comes to front for an
         // app that lives in the menu bar with no dock icon.
         guideSessionController.confirmAutonomousControl = {
+            // This alert has to win against Iris's own windows. The overlay and
+            // the takeover panel are floating panels that sit above ordinary
+            // windows, and this app has no dock icon, so an NSAlert can end up
+            // behind them — the reader taps "Let Iris run it", the consent they
+            // never see is never answered, and the button reads as broken. The
+            // same class of bug already hid macOS's own TCC prompts behind the
+            // takeover scrim once.
             NSApp.activate(ignoringOtherApps: true)
             let alert = NSAlert()
             alert.messageText = "Let Iris take control of your Mac?"
@@ -602,6 +609,11 @@ final class CompanionManager: ObservableObject {
             """
             alert.addButton(withTitle: "Let Iris take control")
             alert.addButton(withTitle: "Not now")
+            // Lift it above the floating panels, and make it the key window so
+            // Return and Escape reach it.
+            alert.window.level = .modalPanel
+            alert.window.collectionBehavior.insert(.moveToActiveSpace)
+            alert.window.makeKeyAndOrderFront(nil)
             return alert.runModal() == .alertFirstButtonReturn
         }
 
@@ -1193,18 +1205,21 @@ final class CompanionManager: ObservableObject {
     // MARK: - Companion Prompt
 
     private static let companionResponseSystemPrompt = """
-    you're iris, a friendly always-on companion that lives in the user's menu bar. the user just typed a message to you from the menu bar panel and you can see their screen(s). your reply is shown as text in that small panel, so keep it tight and readable. this is an ongoing conversation — you remember everything they've said before.
+    you're iris, a friendly always-on companion that lives in the user's menu bar. the user just typed a message to you from the menu bar panel and you can see their screen(s). your reply is shown as text in that small panel, so keep it tight and readable. you can see the last few things they said in this conversation. you do NOT remember earlier conversations, and you cannot look anything up from before — if you need something from earlier, ask.
 
     rules:
     - default to one or two sentences. be direct and dense. BUT if the user asks you to explain more, go deeper, or elaborate, then go all out — give a thorough, detailed explanation with no length limit.
     - all lowercase, casual, warm. no emojis.
-    - short sentences. no lists, bullet points, markdown, or formatting — just natural prose.
+    - short sentences, natural prose. no bullet points or markdown headings.
+    - ONE exception, and it matters: a shell command, a file path, a url or a filename goes on its OWN LINE, exactly as it must be typed, with nothing around it — no quotes, no backticks, no "run:" prefix, no trailing period. the reader copies that line straight into their terminal, so anything you wrap around it ends up in their shell. never split one command across lines.
     - if the user's question relates to what's on their screen, reference specific things you see.
     - if the screenshot doesn't seem relevant to their question, just answer the question directly.
     - you can help with anything — coding, writing, general knowledge, brainstorming.
+    - be honest about what you cannot do. you cannot run commands, open apps, edit files, or put things on the clipboard from this conversation. if the reader asks you to DO something like that, say plainly that you can't do it from chat and tell them the one thing that can: for installs, the guide's "let iris run it"; for changing an installed app, "fix a bug in…" on the eye bar. do not pretend to have done it, and do not just refuse without pointing somewhere.
     - never say "simply" or "just".
+    - if a bracketed note tells you what is installed on this machine, TRUST IT over your instincts. do not suggest a tool that note says is missing, and do not suggest installing a package manager to get something that is already available another way. if the note does not cover what you need, say what you would check rather than guessing a command.
     - if the message includes a bracketed note that the reader is following an install guide, ground your answer in the step and the terminal output it gives you. never invent a command, hostname, url, or file path that is not in that note or visibly on screen — if you cannot tell what went wrong, ask the reader to paste the error rather than guessing.
-    - don't quote code verbatim at length. describe what the code does or what needs to change conversationally.
+    - don't paste long code listings; describe what the code does instead. this does NOT apply to commands, paths, urls or filenames — those are always exact and never paraphrased.
     - focus on giving a thorough, useful explanation. don't end with simple yes/no questions like "want me to explain more?" — those are dead ends that force the user to just say yes.
     - instead, when it fits naturally, end by planting a seed — mention something bigger or more ambitious they could try, a related concept that goes deeper, or a next-level technique that builds on what you just explained. it's okay to not end with anything extra if the answer is complete on its own.
     - if you receive multiple screen images, the one labeled "primary focus" is where the cursor is — prioritize that one but reference others if relevant.
@@ -1259,8 +1274,10 @@ final class CompanionManager: ObservableObject {
                 images: labeledImages,
                 systemPrompt: Self.guideTargetLocatorSystemPrompt,
                 userPrompt: userPrompt,
-                onTextChunk: { _ in }
-            )
+                onTextChunk: { _ in },
+                    // A pointing answer must not move between two identical asks.
+                    temperature: 0
+                )
 
             let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
             irisTrace("pointing/model: raw reply=\(parseResult.coordinate.map { "[POINT:\(Int($0.x)),\(Int($0.y))]" } ?? "none")")
@@ -1694,7 +1711,9 @@ final class CompanionManager: ObservableObject {
                     images: labeledImages,
                     systemPrompt: Self.onboardingDemoSystemPrompt,
                     userPrompt: "look around my screen and find something interesting to point at",
-                    onTextChunk: { _ in }
+                    onTextChunk: { _ in },
+                    // A pointing answer must not move between two identical asks.
+                    temperature: 0
                 )
 
                 let parseResult = Self.parsePointingCoordinates(from: fullResponseText)

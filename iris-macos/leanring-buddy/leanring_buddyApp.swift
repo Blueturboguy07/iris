@@ -147,7 +147,43 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Starts the updater only when this build is configured to update itself
+    /// from somewhere we control.
+    ///
+    /// The feed URL and the public key it trusts were inherited verbatim from
+    /// the template this app was forked from, and pointed at an unrelated
+    /// third party's repository with that project's EdDSA key. Sparkle starts
+    /// on launch, so every install asked a stranger for updates and would have
+    /// installed anything they signed. Removing the two Info.plist keys closes
+    /// that, but a plist is easy to reintroduce by accident — a merge, a
+    /// template, a copied file — so the refusal lives here too, where it is
+    /// code and has to be argued with rather than merely overwritten.
+    ///
+    /// Both keys must be present for updates to run at all: a feed with no key
+    /// is an unauthenticated download, which is worse than no updates.
     private func startSparkleUpdater() {
+        let bundle = Bundle.main
+        let feedURL = (bundle.object(forInfoDictionaryKey: "SUFeedURL") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let publicKey = (bundle.object(forInfoDictionaryKey: "SUPublicEDKey") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let feedURL, !feedURL.isEmpty, let publicKey, !publicKey.isEmpty else {
+            irisTrace("sparkle: no feed and/or no public key configured — updater not started")
+            return
+        }
+
+        // Whatever the feed is, it has to be ours. A signed update from someone
+        // else's host is still someone else's code running on this machine.
+        let host = URL(string: feedURL)?.host?.lowercased() ?? ""
+        let trustedUpdateHosts = ["github.com", "raw.githubusercontent.com", "publikhq.com", "www.publikhq.com"]
+        let ownedByUs = feedURL.lowercased().contains("blueturboguy07/iris")
+            || host == "publikhq.com" || host == "www.publikhq.com"
+        guard trustedUpdateHosts.contains(host), ownedByUs else {
+            irisTrace("sparkle: refusing update feed that is not ours — \(host)")
+            return
+        }
+
         let updaterController = SPUStandardUpdaterController(
             startingUpdater: false,
             updaterDelegate: nil,
@@ -158,7 +194,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         do {
             try updaterController.updater.start()
         } catch {
-            print("⚠️ Iris: Sparkle updater failed to start: \(error)")
+            irisTrace("sparkle: updater failed to start — \(error)")
         }
     }
 }

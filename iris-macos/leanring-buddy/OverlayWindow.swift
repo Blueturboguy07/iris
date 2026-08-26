@@ -194,7 +194,7 @@ struct BlueCursorView: View {
         _cursorPosition = State(
             initialValue: OverlayEyeInteractionGeometry.restingEyeCenterInSwiftUICoordinates
         )
-        _isCursorOnThisScreen = State(initialValue: screenFrame.contains(mouseLocation))
+        _isCursorOnThisScreen = State(initialValue: ScreenContainment.screenFrame(screenFrame, containsPointer: mouseLocation))
         _gazeTracker = State(initialValue: IrisEyeGazeTracker(
             pointerLocation: mouseLocation,
             observedAt: ProcessInfo.processInfo.systemUptime
@@ -484,7 +484,7 @@ struct BlueCursorView: View {
         .onAppear {
             // Set initial cursor position immediately before starting animation
             let mouseLocation = NSEvent.mouseLocation
-            isCursorOnThisScreen = screenFrame.contains(mouseLocation)
+            isCursorOnThisScreen = ScreenContainment.screenFrame(screenFrame, containsPointer: mouseLocation)
 
             let swiftUIPosition = convertScreenPointToSwiftUICoordinates(mouseLocation)
             self.cursorPosition = self.restingPositionInSwiftUICoordinates
@@ -650,7 +650,7 @@ struct BlueCursorView: View {
             // pointer even on a machine where permissions are only partly
             // granted. That is why the pointer is polled rather than tapped.
             let mouseLocation = NSEvent.mouseLocation
-            self.isCursorOnThisScreen = self.screenFrame.contains(mouseLocation)
+            self.isCursorOnThisScreen = ScreenContainment.screenFrame(self.screenFrame, containsPointer: mouseLocation)
 
             // THE CLICK-THROUGH GATE, re-decided sixty times a second.
             //

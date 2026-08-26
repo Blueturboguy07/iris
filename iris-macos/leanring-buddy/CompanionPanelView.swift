@@ -88,14 +88,28 @@ struct CompanionPanelView: View {
             //
             // This panel is settings. That is what `iris-macos/CLAUDE.md` has
             // always said it is.
-            Group {
-                settingsAndAccountContent
-                    .transition(DS.Motion.contentTransition)
+            // Scrolls, with the header and footer pinned either side of it.
+            //
+            // This body was laid out straight into the panel with no scroll
+            // view, so once the account, keys, permissions, apps and install
+            // sections together grew taller than the dropdown, everything past
+            // the bottom edge was simply unreachable — no scrollbar, no
+            // indication anything was there. A reader reported it as the
+            // settings being cut off, which is exactly what it was. The Quit
+            // button lives in the footer, so that at least stayed reachable.
+            ScrollView(.vertical) {
+                Group {
+                    settingsAndAccountContent
+                        .transition(DS.Motion.contentTransition)
+                }
+                .animation(DS.Motion.contentIn, value: guideSessionController.loadState.isShowingSomethingAboutAGuide)
+                .padding(.bottom, 12)
             }
-            .animation(DS.Motion.contentIn, value: guideSessionController.loadState.isShowingSomethingAboutAGuide)
-
-            Spacer()
-                .frame(height: 12)
+            .scrollIndicators(.automatic)
+            // A ScrollView needs a bound or it grows to fit its content and
+            // scrolls nothing. This caps the panel below the shortest laptop
+            // display's usable height.
+            .frame(maxHeight: 520)
 
             Divider()
                 .background(DS.Colors.line)
@@ -478,40 +492,75 @@ struct CompanionPanelView: View {
     /// Mirrors `modelPickerRow`'s shape. Turning it on here is the same grant
     /// the install alert sets; turning it off makes the next install ask again.
     private var autopilotAutonomyRow: some View {
-        HStack(alignment: .top) {
+        // Two named buttons, not one button labelled with its own state.
+        //
+        // It used to be a single control reading "On" or "Off", which is the
+        // classic ambiguity: does "On" mean it IS on, or that tapping turns it
+        // on? At 9pt with only a faint background difference between the two
+        // states there was nothing to disambiguate it, and a reader reported
+        // exactly that. Each mode is now its own button, named for what it
+        // does rather than for the state it is in, and the selected one is
+        // filled — so what is true and what tapping would do are different
+        // things on screen.
+        VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Auto-install")
+                Text("Installs")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(DS.Colors.muted)
-                Text("Let Iris run installs itself, without approving each step")
+                Text(autopilotAutonomyGranted
+                     ? "Iris runs installs itself. It never runs anything that could erase your disk."
+                     : "Iris asks before each step it wants to run.")
                     .font(.system(size: 9))
                     .foregroundColor(DS.Colors.muted.opacity(0.7))
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            Spacer()
-
-            Button(action: {
-                let grant = AutopilotAutonomyGrant.shared
-                if autopilotAutonomyGranted {
-                    grant.revoke()
-                } else {
-                    grant.grant()
-                }
-                autopilotAutonomyGranted.toggle()
-            }) {
-                Text(autopilotAutonomyGranted ? "On" : "Off")
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundColor(autopilotAutonomyGranted ? DS.Colors.ink : DS.Colors.muted)
-                    .padding(.horizontal, 12)
-                    .frame(minHeight: 22)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(autopilotAutonomyGranted ? Color.white.opacity(0.12) : Color.white.opacity(0.055))
-                    )
+            HStack(spacing: 6) {
+                autonomyModeButton(
+                    title: "Ask me each step",
+                    isSelected: !autopilotAutonomyGranted,
+                    action: {
+                        AutopilotAutonomyGrant.shared.revoke()
+                        autopilotAutonomyGranted = false
+                    }
+                )
+                autonomyModeButton(
+                    title: "Run installs for me",
+                    isSelected: autopilotAutonomyGranted,
+                    action: {
+                        AutopilotAutonomyGrant.shared.grant()
+                        autopilotAutonomyGranted = true
+                    }
+                )
             }
-            .buttonStyle(.plain)
         }
         .padding(.vertical, 4)
+    }
+
+    private func autonomyModeButton(
+        title: String,
+        isSelected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 10, weight: isSelected ? .semibold : .regular))
+                .foregroundColor(isSelected ? DS.Colors.ink : DS.Colors.muted)
+                .padding(.horizontal, 10)
+                .frame(minHeight: 24)
+                .frame(maxWidth: .infinity)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(isSelected ? Color.white.opacity(0.14) : Color.white.opacity(0.04))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(isSelected ? Color.white.opacity(0.22) : Color.clear, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+        .help(title)
     }
 
     private var modelPickerRow: some View {

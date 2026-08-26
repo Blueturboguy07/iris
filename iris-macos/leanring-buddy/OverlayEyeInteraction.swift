@@ -292,7 +292,7 @@ struct OverlayEyeInteractionGeometry {
     /// thousand-word answer that grew the window to match would be a wall
     /// across their screen that they did not ask for, so past this height the
     /// answer scrolls inside the bar instead of the bar growing to fit it.
-    static let tallestTheInputBarMayGrow: CGFloat = 420
+    static let tallestTheInputBarMayGrow: CGFloat = 580
 
     /// The shortest the bar's window may be. A floor rather than a fixed size,
     /// so a measurement that arrives before the content has laid out cannot
@@ -303,7 +303,18 @@ struct OverlayEyeInteractionGeometry {
     /// ceiling by enough that the field above it and the question echo always
     /// have room, so the field can never be pushed off the bottom of the bar
     /// by a long answer.
-    static let tallestTheAnswerAreaMayGrow: CGFloat = 236
+    static let tallestTheAnswerAreaMayGrow: CGFloat = 380
+
+    /// How tall the answer area is once there IS an answer, regardless of how
+    /// short the measurement came back.
+    ///
+    /// The height is derived from measuring the answer text, and the measured
+    /// text sits inside a scroll view whose frame is that same height — so the
+    /// two chase each other, and a real answer could render as a two-line
+    /// sliver that had to be scrolled to read at all. A reader sent a
+    /// screenshot of exactly that. An answer worth showing gets room to be an
+    /// answer; the ceiling above still stops it becoming a wall.
+    static let shortestTheAnswerAreaMayBeOnceThereIsAnAnswer: CGFloat = 132
 
     /// Where the eye's centre currently is, in this screen's SwiftUI overlay
     /// coordinates. Held rather than assumed so a caller can ask about the eye

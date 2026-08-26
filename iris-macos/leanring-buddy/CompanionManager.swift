@@ -8,6 +8,8 @@
 //
 
 import AVFoundation
+import AppKit
+import ApplicationServices
 import Combine
 import Foundation
 import ScreenCaptureKit
@@ -1702,10 +1704,40 @@ final class CompanionManager: ObservableObject {
                     return promptWithGuideContext + "\n\n" + machineFacts
                 }()
 
+                // Which app the reader is actually in.
+                //
+                // Chat was handed a flat screenshot of the whole display, every
+                // window composited together, and told nothing about which one
+                // was in front. Asked "what's on my screen", the model saw a
+                // browser, a terminal and an editor overlapping and answered
+                // about whichever it noticed — which is why a reader got "you've
+                // got a lot going on here" instead of an answer about the thing
+                // they were looking at, and why one window's content got read as
+                // a continuation of another's.
+                //
+                // The watch loop learned this months ago and passes exactly this
+                // pair. Chat never did.
+                let promptWithFrontmostApp: String = {
+                    guard let frontmostApplication = NSWorkspace.shared.frontmostApplication,
+                          let applicationName = frontmostApplication.localizedName,
+                          frontmostApplication.bundleIdentifier != Bundle.main.bundleIdentifier
+                    else {
+                        return promptWithMachineFacts
+                    }
+                    var note = "[The app the reader is working in right now is \(applicationName)."
+                    if let windowTitle = Self.titleOfTheFrontmostWindow(), !windowTitle.isEmpty {
+                        note += " Its front window is titled \"\(windowTitle)\"."
+                    }
+                    note += " The screenshot shows every window on the display at once, so when the"
+                    note += " question is about \"my screen\" or \"this\", answer about \(applicationName)"
+                    note += " unless they clearly mean something else.]"
+                    return promptWithMachineFacts + "\n\n" + note
+                }()
+
                 let (fullResponseText, _) = try await requestTheChatAnswer(
                     labeledImages: labeledImages,
                     conversationHistoryForTheAPI: historyForAPI,
-                    userPrompt: promptWithMachineFacts
+                    userPrompt: promptWithFrontmostApp
                 )
 
                 guard !Task.isCancelled else { return }
@@ -1922,6 +1954,27 @@ final class CompanionManager: ObservableObject {
 
     /// Parses a [POINT:x,y:label:screenN] or [POINT:none] tag from the end of Claude's response.
     /// Returns the display text (tag removed) and the optional coordinate + label + screen number.
+    /// The title of the frontmost window, read through accessibility.
+    ///
+    /// Best-effort by design: without the Accessibility grant, or for an app
+    /// that exposes no title, this is nil and the caller simply names the app
+    /// without it. A missing title must never cost the reader the app name,
+    /// which is the more useful half.
+    static func titleOfTheFrontmostWindow() -> String? {
+        guard AXIsProcessTrusted() else { return nil }
+        guard let frontmostApplication = NSWorkspace.shared.frontmostApplication else { return nil }
+        let applicationElement = AXUIElementCreateApplication(frontmostApplication.processIdentifier)
+        var focusedWindow: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            applicationElement, kAXFocusedWindowAttribute as CFString, &focusedWindow
+        ) == .success, let window = focusedWindow else { return nil }
+        var title: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            window as! AXUIElement, kAXTitleAttribute as CFString, &title
+        ) == .success else { return nil }
+        return title as? String
+    }
+
     static func parsePointingCoordinates(from fullResponseText: String) -> PointingParseResult {
         // Match [POINT:none] or [POINT:123,456:label] or [POINT:123,456:label:screen2].
         //

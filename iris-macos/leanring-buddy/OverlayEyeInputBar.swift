@@ -976,9 +976,17 @@ struct OverlayEyeInputBarView: View {
     /// is what stops this floating bar from becoming a wall across the screen
     /// the reader is trying to work on.
     private var heightTheAnswerAreaShouldBe: CGFloat {
-        let shortestAnswerAreaWorthDrawing: CGFloat = 17
+        // The floor is the point here. This height feeds the frame of the
+        // scroll view that CONTAINS the text being measured, so on the first
+        // layout pass the measurement is taken against a nearly-zero frame and
+        // can settle small — leaving a real answer rendered as a two-line
+        // sliver the reader has to scroll to read. Once there is an answer at
+        // all it gets a proper minimum, and the ceiling still caps a long one.
+        let floor = exchange.whatIrisSaidBack?.isEmpty == false
+            ? OverlayEyeInteractionGeometry.shortestTheAnswerAreaMayBeOnceThereIsAnAnswer
+            : 17
         return min(
-            max(measuredAnswerTextHeight, shortestAnswerAreaWorthDrawing),
+            max(measuredAnswerTextHeight, floor),
             OverlayEyeInteractionGeometry.tallestTheAnswerAreaMayGrow
         )
     }

@@ -11,6 +11,18 @@
 
 import Foundation
 
+/// What a tool Iris executed itself hands back to the model, in the shape a
+/// `tool_result` block wants.
+///
+/// `isError` is about whether the TOOL ran, not about whether what it ran
+/// succeeded. A command that exits 1 ran perfectly well and its exit code is
+/// the answer; a command the risk gate refused never ran at all, and that is
+/// the difference this flag carries.
+struct ClaudeClientToolResult: Sendable {
+    let contentText: String
+    let isError: Bool
+}
+
 /// Claude API helper with streaming for progressive text display.
 class ClaudeAPI {
     private static let tlsWarmupLock = NSLock()
@@ -351,6 +363,127 @@ class ClaudeAPI {
     }
 
     // MARK: - Tool-carrying requests
+
+    /// A chat turn that may DO things: the same screenshot-carrying request
+    /// `analyzeImageStreaming` sends, plus a tool list, plus the loop that runs
+    /// whatever the model asks for and hands the REAL result back so it can
+    /// react to what actually happened rather than to what it hoped would.
+    ///
+    /// Two kinds of tool ride here and only one of them loops. Server tools
+    /// (`web_search`) are executed on Anthropic's side inside the same turn and
+    /// arrive already answered; a long one surfaces as a `pause_turn` stop
+    /// reason, resumed by resending the assistant's own blocks exactly the way
+    /// `respondWithTools` does. Client tools (the clipboard, a command) come
+    /// back as `tool_use` blocks that Iris must answer with a `tool_result`
+    /// before the model can finish its sentence — that round trip is the whole
+    /// point, because it is what lets the model tell the reader that a command
+    /// exited 1 instead of assuming it worked.
+    ///
+    /// Every path out of here is bounded. `maximumClientToolRounds` caps how
+    /// many times tools may actually execute, and `maximumModelCalls` is an
+    /// absolute ceiling so a model that will not stop asking still ends the
+    /// turn. A round that is over budget executes NOTHING and says so — but it
+    /// still answers every `tool_use`, because an unanswered one is a
+    /// malformed conversation the API rejects.
+    func analyzeImageStreamingRunningClientTools(
+        images: [(data: Data, label: String)],
+        systemPrompt: String,
+        conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
+        userPrompt: String,
+        tools: [[String: Any]],
+        maximumClientToolRounds: Int,
+        // @escaping because each round wraps this in a closure of its own to
+        // prefix the text earlier rounds already produced, and the optional
+        // parameter it is handed to is escaping by construction.
+        onTextChunk: @escaping @MainActor @Sendable (String) -> Void,
+        executeClientTool: @MainActor (_ toolName: String, _ toolInputJSONText: String) async -> ClaudeClientToolResult
+    ) async throws -> (text: String, duration: TimeInterval) {
+        let startTime = Date()
+
+        var messages = buildMessages(
+            images: images,
+            conversationHistory: conversationHistory,
+            userPrompt: userPrompt
+        )
+
+        // The model can speak on either side of a tool call ("let me check…"
+        // then "…it's already installed"), and the reader is owed both halves,
+        // so text accumulates across rounds rather than only the last round
+        // surviving.
+        var textAcrossAllRounds = ""
+        var clientToolRoundsUsed = 0
+        var pauseTurnResumesUsed = 0
+        let maximumPauseTurnResumes = 3
+        // Deliberately larger than the sum of the two budgets: after the last
+        // round of tools the model still needs one call to put the outcome into
+        // words. It cannot loop forever regardless — this counter only ever
+        // rises.
+        let maximumModelCalls = maximumClientToolRounds + maximumPauseTurnResumes + 2
+        var modelCallsUsed = 0
+
+        while modelCallsUsed < maximumModelCalls {
+            modelCallsUsed += 1
+
+            let textFromEarlierRounds = textAcrossAllRounds
+            let message = try await streamOneMessage(
+                systemPrompt: systemPrompt,
+                messages: messages,
+                maximumOutputTokens: 1024,
+                tools: tools,
+                toolChoice: nil,
+                onTextChunk: { textSoFarThisRound in
+                    // Progressive display must show the whole answer so far,
+                    // not just this round's share of it.
+                    onTextChunk(textFromEarlierRounds + textSoFarThisRound)
+                }
+            )
+
+            if !message.text.isEmpty {
+                textAcrossAllRounds += textAcrossAllRounds.isEmpty ? message.text : "\n\n" + message.text
+            }
+
+            if message.stopReason == "pause_turn", pauseTurnResumesUsed < maximumPauseTurnResumes {
+                pauseTurnResumesUsed += 1
+                messages.append(["role": "assistant", "content": message.assistantContentBlocks])
+                continue
+            }
+
+            guard !message.toolUses.isEmpty else { break }
+
+            messages.append(["role": "assistant", "content": message.assistantContentBlocks])
+
+            // The budget is spent per ROUND, not per tool, so a round that is
+            // over budget runs none of its tools rather than running the first
+            // and refusing the second — half-done is the worst of both.
+            let thisRoundMayExecute = clientToolRoundsUsed < maximumClientToolRounds
+            var toolResultBlocks: [[String: Any]] = []
+            for toolUse in message.toolUses {
+                let result: ClaudeClientToolResult
+                if thisRoundMayExecute {
+                    result = await executeClientTool(toolUse.name, toolUse.inputJSONText)
+                } else {
+                    result = ClaudeClientToolResult(
+                        contentText: """
+                        Iris has done as much as it will do for one message, so this was NOT \
+                        run and nothing changed. Answer the reader in words now.
+                        """,
+                        isError: true
+                    )
+                }
+                toolResultBlocks.append([
+                    "type": "tool_result",
+                    "tool_use_id": toolUse.identifier,
+                    "content": result.contentText,
+                    "is_error": result.isError,
+                ])
+            }
+            messages.append(["role": "user", "content": toolResultBlocks])
+            clientToolRoundsUsed += 1
+        }
+
+        let duration = Date().timeIntervalSince(startTime)
+        return (text: textAcrossAllRounds, duration: duration)
+    }
 
     /// One Messages call whose answer arrives as structured tool_use blocks
     /// (and, with server tools like web_search, as server-executed rounds).

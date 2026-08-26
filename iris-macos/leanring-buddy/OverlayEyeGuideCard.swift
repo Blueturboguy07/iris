@@ -40,13 +40,39 @@ nonisolated struct OverlayEyeGuideStepPresentation: Equatable, Sendable {
     let readerCanGoBack: Bool
     let isTheLastStep: Bool
 
+    /// What `GuideSessionController.primaryActionForTheCurrentStep` says the
+    /// primary button really does right now — "Open download", "I ran it",
+    /// "Check again", "Checking…".
+    ///
+    /// WHY THE CONTROLLER'S OWN WORD, RATHER THAN THE GUESS BELOW. The label
+    /// this card worked out for itself is a second opinion about a decision the
+    /// controller has already made once, and the two disagree exactly where it
+    /// costs the most: inside the setup detour that repairs a missing
+    /// prerequisite. There the button this card draws as "Continue" is really
+    /// the step's download link, and after that the tool re-check that is the
+    /// only honest way out of the detour — so a reader pressing "Continue" on
+    /// "Install Node LTS" watches the step stay exactly where it was and
+    /// reports, correctly, that Continue does not work (founder report). A
+    /// label taken from the resolved action cannot drift from what pressing it
+    /// will do, however the guide gets to that state.
+    ///
+    /// A `var` with a default rather than a `let` so the memberwise
+    /// initializer keeps a default for it, and a surface that has not been
+    /// taught to resolve the action yet still compiles and behaves as before.
+    var labelForThePrimaryAction: String? = nil
+
     /// The primary button's words.
     ///
-    /// A command step's primary action is Copy, because that is the thing the
-    /// reader actually needs next; everything else moves the guide forward.
-    /// Getting this wrong makes the reader hunt for the button that does the
-    /// obvious thing.
+    /// The controller's own label wins whenever there is one. The fallback is
+    /// the original local guess — a command step's primary action is Copy,
+    /// because that is the thing the reader actually needs next; everything
+    /// else moves the guide forward — and it is a guess: it cannot see a
+    /// download link, an "I ran it" latch, or the detour's re-check, so it is
+    /// only ever right for a plain step of the guide itself.
     var primaryActionLabel: String {
+        if let labelForThePrimaryAction, !labelForThePrimaryAction.isEmpty {
+            return labelForThePrimaryAction
+        }
         if command != nil { return "Copy" }
         return isTheLastStep ? "Done" : "Continue"
     }

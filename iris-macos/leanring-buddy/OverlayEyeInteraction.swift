@@ -320,10 +320,24 @@ struct OverlayEyeInteractionGeometry {
         self.eyeDiameter = eyeDiameter
     }
 
+    /// The side of the one square of the overlay that may accept a mouse click:
+    /// the eye itself plus its ring of forgiveness.
+    ///
+    /// Named rather than left inline because the *drawn* eye's hit shape has to
+    /// be grown to exactly this. It was not: the window's gate opened over this
+    /// square while the eye hit-tested as a circle inscribed in its own 64pt
+    /// frame, so in the ring between the two the overlay had already stopped
+    /// being click-through and neither the eye nor the app underneath received
+    /// the click. One number, read by both sides, is what stops that coming
+    /// back.
+    var sideLengthOfTheClickTargetSquare: CGFloat {
+        eyeDiameter + 2 * Self.clickTargetPaddingAroundTheEye
+    }
+
     /// The one rectangle of the overlay that may accept a mouse click, in this
     /// screen's SwiftUI overlay coordinates.
     var interactiveRectInSwiftUICoordinates: CGRect {
-        let sideLength = eyeDiameter + 2 * Self.clickTargetPaddingAroundTheEye
+        let sideLength = sideLengthOfTheClickTargetSquare
         return CGRect(
             x: eyeCenterInSwiftUICoordinates.x - sideLength / 2,
             y: eyeCenterInSwiftUICoordinates.y - sideLength / 2,

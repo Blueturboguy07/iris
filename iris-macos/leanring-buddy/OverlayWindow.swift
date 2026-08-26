@@ -84,6 +84,12 @@ class OverlayWindow: NSPanel {
 /// pointer is inside the eye's rect and shut everywhere else, which means the
 /// window is click-through for every pixel of the screen except a 76pt square
 /// around the eye.
+///
+/// The one exception is a drag of the eye. Because this gate is the only reason
+/// the overlay receives mouse events at all, shutting it while the reader is
+/// dragging would end the drag the moment the pointer outran the eye — so the
+/// poll holds it open for the length of a drag, and a watchdog on the mouse
+/// button shuts it again the instant the drag is over.
 @MainActor
 final class OverlayWindowMouseEventGate {
 
@@ -152,7 +158,28 @@ struct BlueCursorView: View {
     /// Where the eye rests and which of its pixels may be clicked. Everything
     /// about the eye as a *control* lives in `OverlayEyeInteraction.swift`,
     /// which is testable without a screen.
-    private static let interactionGeometry = OverlayEyeInteractionGeometry()
+    ///
+    /// Rebuilt from the eye's current home rather than held as one `static`
+    /// value, because the reader can drag the eye somewhere else and the
+    /// click-through gate, the eye's own hit shape and the input bar all have
+    /// to follow it there. While it was static and built on the default corner
+    /// nothing could read the remembered resting place at all.
+    private var interactionGeometryForTheEyeWhereItSitsNow: OverlayEyeInteractionGeometry {
+        OverlayEyeInteractionGeometry(
+            eyeCenterInSwiftUICoordinates: eyeRestingPlaceInSwiftUICoordinates
+        )
+    }
+
+    /// The side of the square the eye is drawn to hit-test as — exactly the
+    /// square the window's click-through gate opens over, read from the same
+    /// place the gate reads it.
+    private var sideOfTheEyesClickTargetSquare: CGFloat {
+        interactionGeometryForTheEyeWhereItSitsNow.sideLengthOfTheClickTargetSquare
+    }
+
+    /// How long after the eye has been dragged a click on it is read as the
+    /// mouse-up that ended the drag rather than as a click of its own.
+    private static let howLongAClickIsIgnoredAfterTheEyeIsDragged: TimeInterval = 0.3
 
     /// The eye drawn on the overlay: 64pt across. It was 32pt, which read as an
     /// eye but was easy to overlook and far too small to ask anybody to hit —
@@ -172,6 +199,24 @@ struct BlueCursorView: View {
     /// drawn as an eye or as the settings gear.
     @State private var eyeActivation = OverlayEyeActivation()
 
+    /// Where the eye's home is on this screen right now, in SwiftUI overlay
+    /// coordinates. Seeded from `OverlayEyeRestingPlace` and moved by a drag,
+    /// which together are what make "drag the eye somewhere and it stays
+    /// there" true for the rest of this session and after a relaunch.
+    @State private var eyeRestingPlaceInSwiftUICoordinates: CGPoint
+
+    /// Where the eye's home was at the instant the drag in progress began, or
+    /// nil when no drag is in progress — which is also how the pointer poll
+    /// knows to hold the click-through gate open.
+    ///
+    /// The drag is applied as a translation from this point rather than by
+    /// snapping the eye's centre onto the pointer, so the eye keeps the grip
+    /// the reader took hold of it by instead of jumping the moment it moves.
+    @State private var eyeHomeWhenTheCurrentDragBegan: CGPoint?
+
+    /// When the eye was last actually dragged, on the uptime clock.
+    @State private var whenTheEyeWasLastDragged: TimeInterval?
+
     init(
         screenFrame: CGRect,
         isFirstAppearance: Bool,
@@ -190,10 +235,14 @@ struct BlueCursorView: View {
         let mouseLocation = NSEvent.mouseLocation
         let localX = mouseLocation.x - screenFrame.origin.x
         let localY = screenFrame.height - (mouseLocation.y - screenFrame.origin.y)
-        // Starts at rest in the top-left rather than beside the pointer.
-        _cursorPosition = State(
-            initialValue: OverlayEyeInteractionGeometry.restingEyeCenterInSwiftUICoordinates
-        )
+        // Starts at rest where the reader last left the eye — the top-left
+        // corner until they drag it somewhere else — rather than beside the
+        // pointer. Read here rather than in `onAppear` so the eye never draws
+        // one frame in the old corner and then jumps.
+        let rememberedRestingPlace = OverlayEyeRestingPlace.shared
+            .restingPlace(onScreenOfSize: screenFrame.size)
+        _eyeRestingPlaceInSwiftUICoordinates = State(initialValue: rememberedRestingPlace)
+        _cursorPosition = State(initialValue: rememberedRestingPlace)
         _isCursorOnThisScreen = State(initialValue: ScreenContainment.screenFrame(screenFrame, containsPointer: mouseLocation))
         _gazeTracker = State(initialValue: IrisEyeGazeTracker(
             pointerLocation: mouseLocation,
@@ -230,8 +279,8 @@ struct BlueCursorView: View {
 
     /// The cursor position at the moment navigation started, used to detect
     /// if the user moves the cursor enough to cancel the navigation.
-    /// Where the eye lives when it is not flying somewhere: pinned to the top
-    /// left of this screen, below the menu bar.
+    /// Where the eye lives when it is not flying somewhere: wherever the
+    /// reader put it, which is the top left of this screen until they drag it.
     ///
     /// It used to trail the pointer by a fixed offset, which meant a thing
     /// moving in the corner of your vision whenever you moved the mouse — the
@@ -239,9 +288,10 @@ struct BlueCursorView: View {
     /// also need to chase. Staying put makes it findable: the same place every
     /// time, rather than wherever the cursor happened to leave it.
     private var restingPositionInSwiftUICoordinates: CGPoint {
-        // Half the eye's own size plus a margin, so the shape clears the menu
-        // bar rather than tucking under it.
-        OverlayEyeInteractionGeometry.restingEyeCenterInSwiftUICoordinates
+        // Clamped on the way in and out by `OverlayEyeRestingPlace`, so a
+        // remembered spot can never put the eye under the menu bar or off the
+        // edge of a display that has since been unplugged.
+        eyeRestingPlaceInSwiftUICoordinates
     }
 
     @State private var cursorPositionWhenNavigationStarted: CGPoint = .zero
@@ -415,25 +465,44 @@ struct BlueCursorView: View {
             Button {
                 handleAClickOnTheEye()
             } label: {
-                // The eye and the gear are the same size and wear the same
-                // shell, so this swap changes what the object offers without
-                // moving or resizing it.
-                switch eyeActivation.affordanceToDraw {
-                case .eye:
-                    OverlayIrisEyeView(
-                        geometry: Self.overlayEyeGeometry,
-                        mood: eyeMood,
-                        glanceOffset: irisGlanceOffset
-                    )
-                case .settingsGear:
-                    OverlaySettingsGearView(geometry: Self.overlayEyeGeometry)
+                ZStack {
+                    // The eye and the gear are the same size and wear the same
+                    // shell, so this swap changes what the object offers without
+                    // moving or resizing it.
+                    switch eyeActivation.affordanceToDraw {
+                    case .eye:
+                        OverlayIrisEyeView(
+                            geometry: Self.overlayEyeGeometry,
+                            mood: eyeMood,
+                            glanceOffset: irisGlanceOffset
+                        )
+                    case .settingsGear:
+                        OverlaySettingsGearView(geometry: Self.overlayEyeGeometry)
+                    }
                 }
+                // THE HIT SHAPE HAS TO AGREE WITH THE WINDOW'S GATE. The gate
+                // stops the overlay being click-through over a square around
+                // the eye; the eye used to hit-test as a circle inscribed in
+                // its own smaller frame. In the ring between the two the
+                // overlay had already stopped passing clicks through and the
+                // eye was not there to take them, so a click landed on nothing
+                // at all with nothing drawn to explain why. Both sides now read
+                // the one number.
+                .frame(
+                    width: sideOfTheEyesClickTargetSquare,
+                    height: sideOfTheEyesClickTargetSquare
+                )
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            // The eye is round, so its click region is too — the corners of its
-            // bounding box are desktop, not eye.
-            .contentShape(Circle())
             .pointerCursor(isEnabled: theEyeIsClickableRightNow)
+            // Dragging the eye moves its home, and the reader keeps it there.
+            // `simultaneousGesture` rather than `highPriorityGesture` because a
+            // click on the eye is the way into the whole product and must never
+            // be swallowed by a gesture that is only *sometimes* meant; the
+            // button's action still fires at the end of a drag, and
+            // `handleAClickOnTheEye` is what ignores it.
+            .simultaneousGesture(theGestureThatMovesTheEyesHome)
             // A view at zero opacity still hit-tests in SwiftUI, so an eye that
             // is invisible on this screen — or mid-flight to an element — has
             // to be told not to take clicks. The window's own click-through
@@ -453,12 +522,7 @@ struct BlueCursorView: View {
             .scaleEffect(buddyFlightScale)
             .opacity(buddyIsVisibleOnThisScreen ? cursorOpacity : 0)
             .position(cursorPosition)
-            .animation(
-                buddyNavigationMode == .followingCursor
-                    ? .spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0)
-                    : nil,
-                value: cursorPosition
-            )
+            .animation(animationForTheEyesPosition, value: cursorPosition)
             .animation(.easeIn(duration: 0.25), value: companionManager.assistantState)
 
         }
@@ -600,8 +664,118 @@ struct BlueCursorView: View {
             && cursorOpacity > 0
     }
 
+    /// Whether the reader currently has hold of the eye. The pointer poll reads
+    /// this to keep the overlay's click-through gate open for the whole drag.
+    private var theEyeIsBeingDraggedRightNow: Bool {
+        eyeHomeWhenTheCurrentDragBegan != nil
+    }
+
+    /// Whether the primary mouse button is physically down at this instant.
+    /// Read the same permission-free way the pointer itself is read, and used
+    /// only to prove that a drag is over.
+    private static var theMouseButtonThatDragsIsDown: Bool {
+        NSEvent.pressedMouseButtons & 0x1 != 0
+    }
+
+    /// How a change to the eye's position is animated.
+    ///
+    /// A spring while the eye is moving under its own rules; nothing at all
+    /// while the reader is dragging it, because an eye that springs a fifth of
+    /// a second behind the pointer holding it does not feel picked up — and
+    /// nothing during a `[POINT:…]` flight, where the bezier timer sets the
+    /// position frame by frame and an implicit animation would fight it.
+    private var animationForTheEyesPosition: Animation? {
+        guard !theEyeIsBeingDraggedRightNow else { return nil }
+        guard buddyNavigationMode == .followingCursor else { return nil }
+        return .spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0)
+    }
+
+    /// The drag that moves the eye's home — the whole reason the eye can live
+    /// anywhere other than the top-left corner.
+    ///
+    /// `minimumDistance` is a few points of slop so an ordinary click, which
+    /// always travels a pixel or two while the button is down, opens the input
+    /// bar instead of counting as a move of the eye.
+    private var theGestureThatMovesTheEyesHome: some Gesture {
+        DragGesture(minimumDistance: 4)
+            .onChanged { dragValue in
+                // The same conditions that let the eye be clicked let it be
+                // dragged: it is at rest, on this screen, and visible.
+                guard self.theEyeIsClickableRightNow else { return }
+                // Not while the input bar is open. The bar is its own window,
+                // placed against the eye at the moment it opened, and it has no
+                // way to follow the eye mid-drag — so a draggable gear would
+                // just tear the two apart.
+                guard !self.eyeActivation.theInputBarIsOpen else { return }
+
+                let homeAtTheStartOfThisDrag =
+                    self.eyeHomeWhenTheCurrentDragBegan ?? self.eyeRestingPlaceInSwiftUICoordinates
+                self.eyeHomeWhenTheCurrentDragBegan = homeAtTheStartOfThisDrag
+
+                self.moveTheEyesHome(to: CGPoint(
+                    x: homeAtTheStartOfThisDrag.x + dragValue.translation.width,
+                    y: homeAtTheStartOfThisDrag.y + dragValue.translation.height
+                ))
+                // Stamped here rather than in `onEnded` because the button's own
+                // action fires on the mouse-up that ends the drag, and this has
+                // to already be true by then for that click to be ignored.
+                self.whenTheEyeWasLastDragged = ProcessInfo.processInfo.systemUptime
+            }
+            .onEnded { dragValue in
+                // No recorded start means this drag never got past the guards
+                // above — it was a click, or the bar was open. Nothing moved,
+                // so nothing is remembered.
+                guard let homeAtTheStartOfThisDrag = self.eyeHomeWhenTheCurrentDragBegan else {
+                    return
+                }
+
+                self.moveTheEyesHome(to: CGPoint(
+                    x: homeAtTheStartOfThisDrag.x + dragValue.translation.width,
+                    y: homeAtTheStartOfThisDrag.y + dragValue.translation.height
+                ))
+                self.whenTheEyeWasLastDragged = ProcessInfo.processInfo.systemUptime
+                // Clearing this last: it is what holds the click-through gate
+                // open, and the drag is not over until the eye has landed.
+                self.eyeHomeWhenTheCurrentDragBegan = nil
+
+                // Written once, when the reader lets go, rather than sixty
+                // times a second on the way across the screen.
+                OverlayEyeRestingPlace.shared.remember(
+                    self.eyeRestingPlaceInSwiftUICoordinates,
+                    onScreenOfSize: self.screenFrame.size
+                )
+            }
+    }
+
+    /// Puts the eye's home at a point the reader dragged it to.
+    ///
+    /// Clamped by the same rule that will clamp it when it is read back at the
+    /// next launch, so what the reader sees during the drag is exactly what is
+    /// remembered — the eye stops at the edge under their pointer rather than
+    /// following it off the screen and reappearing somewhere else later.
+    private func moveTheEyesHome(to placeTheReaderDraggedItTo: CGPoint) {
+        let clampedPlace = OverlayEyeRestingPlace.clamped(
+            placeTheReaderDraggedItTo,
+            toScreenOfSize: screenFrame.size
+        )
+        eyeRestingPlaceInSwiftUICoordinates = clampedPlace
+        // The pointer poll would pull the eye onto its new home on the next
+        // tick anyway; moving it now is what makes it track the drag rather
+        // than trail a frame behind it.
+        cursorPosition = clampedPlace
+    }
+
     /// One click target, two meanings, decided by `OverlayEyeActivation`.
     private func handleAClickOnTheEye() {
+        // A click that arrives on the heels of a drag IS the mouse-up that
+        // ended that drag: the pointer never left the eye, because the eye was
+        // travelling with it. Acting on it would mean the reader could not move
+        // the eye without also being handed a bar they did not ask for.
+        if let whenTheEyeWasLastDragged,
+           ProcessInfo.processInfo.systemUptime - whenTheEyeWasLastDragged
+               < Self.howLongAClickIsIgnoredAfterTheEyeIsDragged {
+            return
+        }
         switch eyeActivation.registerAClickOnTheEye() {
         case .shouldOpenTheInputBar:
             presentTheInputBar()
@@ -629,7 +803,7 @@ struct BlueCursorView: View {
     private func presentTheInputBar() {
         guard let inputBarPanelManager else { return }
         inputBarPanelManager.showInputBar(
-            forEyeAtInteractionGeometry: Self.interactionGeometry,
+            forEyeAtInteractionGeometry: interactionGeometryForTheEyeWhereItSitsNow,
             onScreenWithFrame: screenFrame,
             companionManager: companionManager,
             onTheBarClosing: {
@@ -652,6 +826,24 @@ struct BlueCursorView: View {
             let mouseLocation = NSEvent.mouseLocation
             self.isCursorOnThisScreen = ScreenContainment.screenFrame(self.screenFrame, containsPointer: mouseLocation)
 
+            // A DRAG CANNOT OUTLIVE THE MOUSE BUTTON THAT STARTED IT. SwiftUI
+            // does not promise `onEnded` for a gesture that is interrupted
+            // rather than finished, and a drag latch left set would hold the
+            // gate below open over the WHOLE screen with nothing drawn to
+            // explain why the reader's own apps had stopped taking clicks. The
+            // button being up is the one fact that settles it, so it is checked
+            // sixty times a second rather than trusted to the gesture.
+            if self.theEyeIsBeingDraggedRightNow && !Self.theMouseButtonThatDragsIsDown {
+                self.eyeHomeWhenTheCurrentDragBegan = nil
+                // Remembered here too: a drag that ended without an `onEnded`
+                // still moved the eye, and the reader would not accept it
+                // sliding back to where it was at the next launch.
+                OverlayEyeRestingPlace.shared.remember(
+                    self.eyeRestingPlaceInSwiftUICoordinates,
+                    onScreenOfSize: self.screenFrame.size
+                )
+            }
+
             // THE CLICK-THROUGH GATE, re-decided sixty times a second.
             //
             // The overlay covers the whole screen and sits above everything, so
@@ -661,13 +853,19 @@ struct BlueCursorView: View {
             // `setWhetherTheOverlayAcceptsMouseEvents` no-ops unless the answer
             // has changed, so this poll costs nothing while the pointer is off
             // in the user's own app — which is nearly always.
-            let thePointerIsOverTheEye = Self.interactionGeometry
+            let thePointerIsOverTheEye = self.interactionGeometryForTheEyeWhereItSitsNow
                 .theOverlayShouldAcceptMouseEvents(
                     forPointerAtAppKitScreenLocation: mouseLocation,
                     onScreenWithFrame: self.screenFrame
                 )
+            // A DRAG HOLDS THE GATE OPEN FOR AS LONG AS IT LASTS. This gate is
+            // the only reason the overlay receives mouse events at all, so
+            // shutting it mid-drag would end the drag on the spot — and the
+            // pointer does leave the eye's square during a drag, the moment the
+            // clamp stops the eye at a screen edge and the pointer keeps going.
             self.overlayWindowMouseEventGate?.setWhetherTheOverlayAcceptsMouseEvents(
-                thePointerIsOverTheEye && self.theEyeIsClickableRightNow
+                (thePointerIsOverTheEye || self.theEyeIsBeingDraggedRightNow)
+                    && self.theEyeIsClickableRightNow
             )
 
             // The gaze is recomputed on every tick no matter what the rest of

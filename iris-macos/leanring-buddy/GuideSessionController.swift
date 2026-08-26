@@ -153,6 +153,134 @@ struct GuideSetupRecoveryState: Equatable, Sendable {
     }
 }
 
+/// The guide the reader had open the last time they used Iris, remembered
+/// across quits so the panel can offer to put them back into it.
+///
+/// The reader's *place* has always been on disk — `iris:progress:cue:v7:macos:desktop`
+/// knew perfectly well they were on step seven — but nothing remembered WHICH
+/// guide those keys belonged to. So a relaunch drew an empty "Follow an install
+/// guide" field with no sign that Iris remembered anything, and the reader
+/// reasonably reported it as "it doesn't save what step I was on". This is the
+/// missing half: the identity of the position, stored beside the position.
+nonisolated struct GuideTheReaderWasFollowing: Equatable, Sendable {
+    let slug: String
+
+    /// The guide's display name ("publikclip"), stored rather than re-fetched
+    /// so the resume offer can be drawn before any network call.
+    let appName: String
+
+    /// The version the remembered step index was counted in. A step number only
+    /// means something inside its own version, which is why it is kept with it.
+    let version: Int
+
+    let branchKey: String
+
+    /// Zero-based, the same index `GuideProgress` stores.
+    let stepIndex: Int
+
+    let numberOfStepsInTheBranch: Int
+
+    let readerHadFinishedTheGuide: Bool
+
+    /// "step 7 of 12" — the one phrasing shared by the resume offer and the
+    /// chat context, so the panel and the assistant never describe the same
+    /// position two different ways.
+    ///
+    /// One-based, because a reader counts steps from one.
+    static func progressPhrase(
+        stepIndex: Int,
+        numberOfStepsInTheBranch: Int,
+        readerHasFinishedTheGuide: Bool
+    ) -> String {
+        if readerHasFinishedTheGuide {
+            return "the end of the guide"
+        }
+        guard numberOfStepsInTheBranch > 0 else {
+            return "step \(stepIndex + 1)"
+        }
+        return "step \(stepIndex + 1) of \(numberOfStepsInTheBranch)"
+    }
+
+    var humanReadableProgressPhrase: String {
+        Self.progressPhrase(
+            stepIndex: stepIndex,
+            numberOfStepsInTheBranch: numberOfStepsInTheBranch,
+            readerHasFinishedTheGuide: readerHadFinishedTheGuide
+        )
+    }
+
+    /// Whether the reader is far enough in that resuming means anything. Step
+    /// one of a guide nobody started is not a place worth being offered back.
+    var readerIsPartwayThrough: Bool {
+        stepIndex > 0 || readerHadFinishedTheGuide
+    }
+}
+
+/// Where `GuideTheReaderWasFollowing` lives between launches: one
+/// `UserDefaults` key alongside the `iris:progress:…` keys `GuideService`
+/// already writes, in the same style.
+///
+/// A small struct over `UserDefaults` rather than a couple of loose read/write
+/// calls, for the same reason `AutopilotAutonomyGrant` is one: a test can point
+/// it at an isolated suite and never touch the reader's real preferences.
+nonisolated struct LastFollowedGuideMemory: @unchecked Sendable {
+    /// The app-wide memory, over `UserDefaults.standard`.
+    static let shared = LastFollowedGuideMemory()
+
+    /// `iris:guide:lastFollowed`, deliberately outside `GuideService`'s
+    /// `iris:progress:` prefix: "forget every guide's progress" sweeps that
+    /// prefix, and this key is cleared explicitly rather than by accident.
+    static let storageKey = "iris:guide:lastFollowed"
+
+    private let userDefaults: UserDefaults
+
+    init(userDefaults: UserDefaults = .standard) {
+        self.userDefaults = userDefaults
+    }
+
+    func rememberedGuide() -> GuideTheReaderWasFollowing? {
+        guard
+            let storedGuide = userDefaults.dictionary(forKey: Self.storageKey),
+            let slug = storedGuide["slug"] as? String, !slug.isEmpty,
+            let branchKey = storedGuide["branchKey"] as? String, !branchKey.isEmpty
+        else {
+            return nil
+        }
+        return GuideTheReaderWasFollowing(
+            slug: slug,
+            // A hand-edited preference (or a build before the name was stored)
+            // may have no display name. The slug is what the reader typed to
+            // get here, so it reads fine — and it beats forgetting the guide.
+            appName: (storedGuide["appName"] as? String) ?? slug,
+            version: (storedGuide["version"] as? Int) ?? 1,
+            branchKey: branchKey,
+            stepIndex: max(0, (storedGuide["step"] as? Int) ?? 0),
+            numberOfStepsInTheBranch: max(0, (storedGuide["steps"] as? Int) ?? 0),
+            readerHadFinishedTheGuide: (storedGuide["completed"] as? Bool) ?? false
+        )
+    }
+
+    func remember(_ guideTheReaderWasFollowing: GuideTheReaderWasFollowing) {
+        userDefaults.set(
+            [
+                "slug": guideTheReaderWasFollowing.slug,
+                "appName": guideTheReaderWasFollowing.appName,
+                "version": guideTheReaderWasFollowing.version,
+                "branchKey": guideTheReaderWasFollowing.branchKey,
+                "step": guideTheReaderWasFollowing.stepIndex,
+                "steps": guideTheReaderWasFollowing.numberOfStepsInTheBranch,
+                "completed": guideTheReaderWasFollowing.readerHadFinishedTheGuide,
+                "updatedAt": Date().timeIntervalSince1970,
+            ] as [String: Any],
+            forKey: Self.storageKey
+        )
+    }
+
+    func forgetTheRememberedGuide() {
+        userDefaults.removeObject(forKey: Self.storageKey)
+    }
+}
+
 /// How the controller asks whether a tool is installed. It is a closure rather
 /// than a direct call to `ToolVersionService` so a test can answer "node is
 /// missing" without a machine that actually lacks Node, and so no test ever
@@ -169,6 +297,27 @@ final class GuideSessionController: ObservableObject {
     @Published private(set) var currentStepIndex: Int = 0
     @Published private(set) var readerHasFinishedTheGuide: Bool = false
     @Published private(set) var toolCheckRows: [GuideToolCheckRow] = []
+
+    /// The guide this Mac remembers the reader following, so the panel can
+    /// offer "Resume publikclip — step 7 of 12" instead of an empty slug field
+    /// after a quit and reopen.
+    ///
+    /// Publishing it is ALL this controller does with it at launch. A relaunch
+    /// that reopened a guide by itself would take the panel away from whatever
+    /// the reader actually pressed the hotkey for, so reopening stays a gesture
+    /// the reader makes: `resumeTheGuideTheReaderWasFollowing()`.
+    @Published private(set) var lastGuideTheReaderWasFollowing: GuideTheReaderWasFollowing?
+
+    /// Where that memory is kept. Settable (not just `.shared`) for the same
+    /// reason `autonomyGrant` is: a test injects one over an isolated
+    /// `UserDefaults` suite and never touches the reader's real preference.
+    /// Assigning it re-reads, because what was published at init came from
+    /// whichever store was in place then.
+    var lastFollowedGuideMemory = LastFollowedGuideMemory.shared {
+        didSet {
+            lastGuideTheReaderWasFollowing = lastFollowedGuideMemory.rememberedGuide()
+        }
+    }
 
     /// Set the moment the reader copies the step's command, which is what turns
     /// the button from "Copy" into "I ran it" — the same `actionReady` latch the
@@ -302,8 +451,13 @@ final class GuideSessionController: ObservableObject {
     /// has finished activating, so the decision landed on
     /// `targetAppIsNotInFront` and no retry ever came. The eye stayed home at
     /// exactly the steps that most need showing. Watching activations makes
-    /// the refusal self-healing: the moment the right app comes forward, the
-    /// eye flies — and it re-points when the reader wanders off and back.
+    /// the refusal self-healing: once the right app comes forward, the eye
+    /// flies — and it re-points when the reader wanders off and back.
+    ///
+    /// "Once", not "the moment": the refresh is debounced (see
+    /// `refreshPointingOnceAppActivationsHaveSettled`) because a single cmd-tab
+    /// is several activations and each one used to re-run the whole ladder and
+    /// re-announce the step.
     private var appActivationObserver: NSObjectProtocol?
 
     /// Called from init. Split out so init stays readable.
@@ -314,9 +468,52 @@ final class GuideSessionController: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, self.loadState == .guideIsOpen else { return }
-                self.refreshPointingForTheOpenStep()
+                guard let self, self.theReaderCanSeeTheGuideStepRightNow else { return }
+                self.refreshPointingOnceAppActivationsHaveSettled()
             }
+        }
+    }
+
+    /// Whether there is a guide step in front of the reader at all.
+    ///
+    /// An activation while the card is closed used to re-run the whole ladder
+    /// for a step nobody is looking at — including, on an inferred step, a paid
+    /// model call. Nothing to see means nothing to point at.
+    private var theReaderCanSeeTheGuideStepRightNow: Bool {
+        guard loadState == .guideIsOpen else { return false }
+        // Absent the injection this is true whenever a guide is open, which is
+        // the behavior that shipped: `CompanionManager` owns the panel and the
+        // eye card and is the only thing that knows whether either is on
+        // screen, so it is the one that can answer better than "a guide exists".
+        return isTheGuideCardOnScreen?() ?? true
+    }
+
+    /// Injected by `CompanionManager`: is the guide card actually on screen?
+    /// See `theReaderCanSeeTheGuideStepRightNow` for what nil means.
+    var isTheGuideCardOnScreen: (() -> Bool)?
+
+    /// How long the activation storm has to be quiet before pointing re-runs.
+    ///
+    /// Activations arrive in bursts and each one cost a full ladder: a cmd-tab
+    /// out and back is two, an `open`ed app that bounces focus is more, and
+    /// every one of them re-announced the step title over the eye. Only the app
+    /// the reader ends up in matters, so the refresh waits for the switching to
+    /// stop. Short enough that the self-healing "the right app just came
+    /// forward" case still feels immediate.
+    private static let quietPeriodBeforeRefreshingPointingAfterAnActivation: Duration = .milliseconds(400)
+
+    private var debouncedPointingRefreshTask: Task<Void, Never>?
+
+    /// Coalesces a burst of app activations into one pointing refresh.
+    private func refreshPointingOnceAppActivationsHaveSettled() {
+        debouncedPointingRefreshTask?.cancel()
+        debouncedPointingRefreshTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.quietPeriodBeforeRefreshingPointingAfterAnActivation)
+            guard !Task.isCancelled, let self else { return }
+            // Re-checked after the wait, not just before it: the reader may
+            // have closed the card during the quiet period.
+            guard self.theReaderCanSeeTheGuideStepRightNow else { return }
+            self.refreshPointingForTheOpenStep()
         }
     }
 
@@ -338,6 +535,7 @@ final class GuideSessionController: ObservableObject {
             let step = stepTheReaderIsLookingAt
         else {
             pointingDecisionForTheOpenStep = .doNotPoint(.stepHasNothingToPointAt)
+            explanationForIrisHavingStoppedPointingAtThisStep = nil
             stopPointingTheEye?()
             return
         }
@@ -356,20 +554,37 @@ final class GuideSessionController: ObservableObject {
         )
 
         guard let targetLocator else {
+            // Nothing can look for anything in this configuration, so there is
+            // no budget to spend and nothing about a budget to explain.
             pointingDecisionForTheOpenStep = decision
+            explanationForIrisHavingStoppedPointingAtThisStep = nil
             return
         }
 
-        // Pointing now refreshes on every app activation, so the paid model
-        // rung has to be budgeted per step or a single parked step can spend
-        // a screenshot-sized model call on every window switch. The free
-        // rungs (window frame, accessibility tree) re-run every time.
+        // Pointing refreshes on app activation as well as on step changes, so
+        // the paid model rung has to be budgeted per step or a single parked
+        // step can spend a screenshot-sized model call on every window switch.
+        // The free rungs (window frame, accessibility tree) re-run every time.
         let stepIdentityForBudget = "\(currentStepIndex):\(step.id)"
         if stepIdentityForBudget != stepIdentityTheModelBudgetBelongsTo {
             stepIdentityTheModelBudgetBelongsTo = stepIdentityForBudget
             modelPointingAsksSpentOnThisStep = 0
+            // A fresh step has not given up on anything yet.
+            explanationForIrisHavingStoppedPointingAtThisStep = nil
         }
+
+        // The ask is RESERVED here, before the await below, rather than counted
+        // after it. Counting afterwards was a read-then-write across a
+        // suspension point: every activation that arrived while a resolve was
+        // still in flight read the same pre-increment number, decided it had
+        // budget too, and asked — which is how a cap of two let six model calls
+        // through on one step. Everything in this method runs to completion on
+        // the main actor, so a spend reserved before the task starts is a spend
+        // every later refresh can see.
         let mayAskTheModel = modelPointingAsksSpentOnThisStep < Self.maximumModelPointingAsksPerStep
+        if mayAskTheModel {
+            modelPointingAsksSpentOnThisStep += 1
+        }
 
         pointingTask = Task { [weak self] in
             let outcome = await GuideStepPointingCoordinator.resolve(
@@ -380,12 +595,23 @@ final class GuideSessionController: ObservableObject {
                 using: targetLocator
             )
             guard let self else { return }
-            // Count the spend even if this task lost a race to a newer
-            // refresh — the call happened either way.
-            if outcome.theModelWasAsked {
-                self.modelPointingAsksSpentOnThisStep += 1
+            // Hand the reservation back when the ladder never reached the model
+            // — an authored target the accessibility tree found, or a decision
+            // that was not `pointAt` at all. Only into the budget this refresh
+            // reserved from: a step the reader has since moved to has its own
+            // allowance and must not be credited out of an older step's.
+            if mayAskTheModel,
+               !outcome.theModelWasAsked,
+               self.stepIdentityTheModelBudgetBelongsTo == stepIdentityForBudget {
+                self.modelPointingAsksSpentOnThisStep = max(0, self.modelPointingAsksSpentOnThisStep - 1)
             }
             guard !Task.isCancelled else { return }
+            self.explanationForIrisHavingStoppedPointingAtThisStep =
+                Self.explanationForGivingUpOnPointing(
+                    decision: decision,
+                    outcome: outcome,
+                    theBudgetAllowedAnAsk: mayAskTheModel
+                )
             self.pointingDecisionForTheOpenStep = outcome.decision
             if let location = outcome.screenLocation, let displayFrame = outcome.displayFrame {
                 self.sendTheEyeTo?(location, displayFrame, step.title)
@@ -395,13 +621,54 @@ final class GuideSessionController: ObservableObject {
         }
     }
 
-    /// The paid pointing rung's allowance for one step. Two, not one, because
-    /// the first ask often races the screen it needs (the right app is still
-    /// coming forward); a second try once it has landed is usually the one
-    /// that hits. Free rungs are unlimited.
-    private static let maximumModelPointingAsksPerStep = 2
+    /// The sentence for the one way pointing used to fail silently.
+    ///
+    /// Every other refusal already carries its own line (see
+    /// `GuidePointRefusal.userFacingMessage`). The spent budget carried none:
+    /// the step's inferred target needed the model rung, the rung was skipped,
+    /// the eye simply stopped, and the reader was left with "it works the first
+    /// time or two, but sometimes does not". Nil whenever pointing worked or
+    /// failed for a reason that explains itself.
+    private static func explanationForGivingUpOnPointing(
+        decision: GuidePointingDecision,
+        outcome: GuideStepPointingOutcome,
+        theBudgetAllowedAnAsk: Bool
+    ) -> String? {
+        guard outcome.screenLocation == nil, !theBudgetAllowedAnAsk else {
+            return nil
+        }
+        // An inferred target is the only kind allowed to reach the model, so it
+        // is the only kind a spent budget can silence.
+        guard case .pointAt(let target) = decision, target.provenance == .inferred else {
+            return nil
+        }
+        return """
+        I've stopped looking for this one — I tried \(maximumModelPointingAsksPerStep) times \
+        and couldn't find it on screen. Ask me in chat and I'll talk you through it.
+        """
+    }
+
+    /// The paid pointing rung's allowance for one step. Free rungs (the window
+    /// frame, the accessibility tree) are unlimited; only the model is capped.
+    ///
+    /// Four, raised from two. Two was set when the counter leaked — six calls
+    /// got through a cap of two — so it was never really a budget of two. Now
+    /// that the spend is reserved before the await and honoured exactly, two
+    /// turned out to be too few for the ordinary shape of a step: the first ask
+    /// often races the screen it needs (the app is still coming forward), and a
+    /// step where the reader legitimately moves between two apps — System
+    /// Settings and a browser, say — deserves a fresh look each time they come
+    /// back. Four covers that and still bounds the spend at a small number the
+    /// reader can never turn into a runaway bill by leaving a step open.
+    private static let maximumModelPointingAsksPerStep = 4
     private var modelPointingAsksSpentOnThisStep = 0
     private var stepIdentityTheModelBudgetBelongsTo: String?
+
+    /// Why the eye has stopped pointing at this step, in a sentence for the
+    /// reader, or nil while it is pointing or refusing for a reason that speaks
+    /// for itself. Published so the panel and the eye card can say it out loud
+    /// instead of letting the eye go quiet with no explanation.
+    @Published private(set) var explanationForIrisHavingStoppedPointingAtThisStep: String?
 
     /// Whether the inferred path is allowed to run. Screen Recording only; the
     /// accessibility tree needs no capture, which is why an authored descriptor
@@ -478,6 +745,12 @@ final class GuideSessionController: ObservableObject {
             self.advanceToTheNextStep()
         }
 
+        // Read the remembered guide at init so the panel's very first draw
+        // already knows there is something to resume. This publishes the
+        // memory and nothing else — no guide is opened, no network call is
+        // made, and startup is not hijacked.
+        self.lastGuideTheReaderWasFollowing = lastFollowedGuideMemory.rememberedGuide()
+
         startRefreshingPointingOnAppActivation()
     }
 
@@ -504,6 +777,33 @@ final class GuideSessionController: ObservableObject {
             slug: slug,
             requestedVersion: nil,
             branchKeyFromDeepLink: nil,
+            stepIndexFromDeepLink: nil
+        )
+    }
+
+    /// The resume route: the reader pressed the offer the panel draws from
+    /// `lastGuideTheReaderWasFollowing`. Nothing calls this on launch.
+    ///
+    /// The remembered version is deliberately NOT pinned. A version publik has
+    /// since retired answers "this version of the guide is no longer
+    /// available", which is a worse reply to "put me back" than simply opening
+    /// the guide as it stands today — and when the guide really has moved on,
+    /// `restoreSavedProgress` finds nothing saved under the new version and
+    /// starts at step one, which is the honest answer (step 7 of v6 is not
+    /// step 7 of v7).
+    ///
+    /// The branch IS carried across, because a reader's place is per-branch:
+    /// resuming the Android build into the iPhone branch would be somebody
+    /// else's ninth step.
+    func resumeTheGuideTheReaderWasFollowing() async {
+        guard let lastGuideTheReaderWasFollowing else { return }
+        await openGuide(
+            slug: lastGuideTheReaderWasFollowing.slug,
+            requestedVersion: nil,
+            branchKeyFromDeepLink: lastGuideTheReaderWasFollowing.branchKey,
+            // Nil, not the remembered step. The progress saved for this branch
+            // is the authority, and going through it is what applies the
+            // machine reality check a link-carried step index skips.
             stepIndexFromDeepLink: nil
         )
     }
@@ -622,6 +922,12 @@ final class GuideSessionController: ObservableObject {
         // one, arriving long after they walked away from it.
         pointingTask?.cancel()
         pointingTask = nil
+        // A debounced refresh waiting out its quiet period has to die with the
+        // guide too, for the same reason: it would re-point at a step nobody is
+        // looking at any more.
+        debouncedPointingRefreshTask?.cancel()
+        debouncedPointingRefreshTask = nil
+        explanationForIrisHavingStoppedPointingAtThisStep = nil
         stopPointingTheEye?()
         if autopilotIsRunning { stopAutopilot() }
         watchLoop.stopWatching()
@@ -1136,15 +1442,64 @@ final class GuideSessionController: ObservableObject {
     /// terminal output — not inferred from a screenshot. This is the direct
     /// fix for the fabricated-diagnosis failure (`ping api.publik.local`): the
     /// model is handed the exact command and its output instead of guessing.
+    ///
+    /// It answers with something whenever this Mac knows the reader is midway
+    /// through an install, not only while the card is open. An install does not
+    /// stop existing because the panel is closed or the app was relaunched, and
+    /// a model told nothing answers a question about step seven with "navigate
+    /// to the workflow".
     func chatContextForTheAssistant() -> String? {
-        guard loadState == .guideIsOpen, !readerIsInSetupRecovery,
-              let guide = guideBeingFollowed, let step = currentStep else {
-            return nil
+        // A step on screen is the richest thing to hand over: the exact step,
+        // its command, and the real terminal output underneath it.
+        if loadState == .guideIsOpen, !readerIsInSetupRecovery,
+           let guide = guideBeingFollowed, let step = currentStep {
+            return contextForTheGuideTheReaderIsLookingAt(guide: guide, step: step)
         }
-        var context = """
-        [The reader is following the \(guide.appName) install guide, on the step \
-        titled "\(step.title)".
-        """
+
+        // Everything below is why this no longer returns nil the moment the
+        // panel is not showing a step. After a relaunch the chat was told
+        // nothing at all, so a question about an install seven steps in came
+        // back as "navigate to the workflow" — advice for somebody who has not
+        // started. The reader's place is on disk either way, so the assistant
+        // is told about it either way.
+        guard let lastGuideTheReaderWasFollowing else { return nil }
+        return contextForTheGuideTheReaderWasFollowing(lastGuideTheReaderWasFollowing)
+    }
+
+    /// The context for the step the reader is looking at right now.
+    private func contextForTheGuideTheReaderIsLookingAt(
+        guide: IrisGuide,
+        step: IrisGuideStep
+    ) -> String {
+        // These numbers come from the same place the panel's "7 / 12" does —
+        // the progress restored from storage when the guide opened — which is
+        // what makes this sentence and the remembered one below agree.
+        let progressPhrase = GuideTheReaderWasFollowing.progressPhrase(
+            stepIndex: currentStepIndex,
+            numberOfStepsInTheBranch: numberOfStepsInTheSelectedBranch,
+            readerHasFinishedTheGuide: readerHasFinishedTheGuide
+        )
+        // Saying what is already behind them is what stops the model answering
+        // as though the install had not begun.
+        let whatIsAlreadyBehindThem = currentStepIndex > 0
+            ? " They are partway through: every step before this one is already done."
+            : ""
+        // A finished guide is a completion card, not a step the reader is "on",
+        // and telling the model otherwise would have it coaching somebody
+        // through work they have already done.
+        var context: String
+        if readerHasFinishedTheGuide {
+            context = """
+            [The reader has finished the \(guide.appName) install guide — all \
+            \(numberOfStepsInTheSelectedBranch) steps are done. The last step was \
+            titled "\(step.title)".
+            """
+        } else {
+            context = """
+            [The reader is following the \(guide.appName) install guide. They are on \
+            \(progressPhrase), titled "\(step.title)".\(whatIsAlreadyBehindThem)
+            """
+        }
         if let command = step.command, !command.isEmpty {
             context += "\nThe step's command is:\n\(command)"
         }
@@ -1161,6 +1516,39 @@ final class GuideSessionController: ObservableObject {
         output above.]
         """
         return context
+    }
+
+    /// The context when the panel is not showing a guide step but this Mac
+    /// remembers the reader partway through an install: after a relaunch, after
+    /// they closed the card, or while the prerequisite detour has the card.
+    private func contextForTheGuideTheReaderWasFollowing(
+        _ guideTheReaderWasFollowing: GuideTheReaderWasFollowing
+    ) -> String {
+        let whereTheReaderStands: String
+        if readerIsInSetupRecovery {
+            whereTheReaderStands = """
+            They are at \(guideTheReaderWasFollowing.humanReadableProgressPhrase), and Iris is \
+            walking them through installing a missing prerequisite before they can carry on.
+            """
+        } else if guideTheReaderWasFollowing.readerHadFinishedTheGuide {
+            whereTheReaderStands = """
+            They reached the end of it. The guide is not open in Iris's panel right now.
+            """
+        } else {
+            whereTheReaderStands = """
+            They are partway through it, at \(guideTheReaderWasFollowing.humanReadableProgressPhrase) \
+            — the steps before that one are already done — and the guide is not open in Iris's \
+            panel right now.
+            """
+        }
+        return """
+        [The reader was last following the \(guideTheReaderWasFollowing.appName) install guide. \
+        \(whereTheReaderStands)
+
+        Answer about that install rather than assuming they have not started it, and offer to \
+        reopen the guide if they want to carry on. Do not invent commands, hostnames, URLs, or \
+        file paths that are not in this guide.]
+        """
     }
 
     /// Whether the current step is one Iris executes itself (as opposed to a
@@ -2006,6 +2394,11 @@ final class GuideSessionController: ObservableObject {
 
         currentStepIndex = resumeIndex
         readerHasFinishedTheGuide = savedProgress.isCompleted && !realityCheckFailed
+
+        // Opening or switching a branch is itself a position worth remembering:
+        // a reader who opens a guide and quits without pressing anything still
+        // expects Iris to know which guide they were in.
+        rememberThisAsTheGuideTheReaderIsFollowing()
     }
 
     /// The reality check behind a resume: every `git clone` step BEFORE the
@@ -2073,11 +2466,41 @@ final class GuideSessionController: ObservableObject {
                 isCompleted: readerHasFinishedTheGuide
             )
         )
+        // Every write of "how far in" also writes "into what". The two halves
+        // of the reader's place go to disk together or the resume offer drifts
+        // behind the progress it is describing.
+        rememberThisAsTheGuideTheReaderIsFollowing()
+    }
+
+    /// Writes down which guide and branch the reader is on, beside the
+    /// `iris:progress:…` keys that record how far into it they are.
+    ///
+    /// A no-op when nothing changed, so the ordinary case — a refresh that
+    /// lands on the same position — does not republish and redraw the panel.
+    private func rememberThisAsTheGuideTheReaderIsFollowing() {
+        guard let guide = guideBeingFollowed, let branch = selectedBranch else { return }
+        let guideTheReaderIsFollowing = GuideTheReaderWasFollowing(
+            slug: guide.appSlug,
+            appName: guide.appName,
+            version: guide.version,
+            branchKey: branch.branchKey,
+            stepIndex: currentStepIndex,
+            numberOfStepsInTheBranch: branch.steps.count,
+            readerHadFinishedTheGuide: readerHasFinishedTheGuide
+        )
+        guard guideTheReaderIsFollowing != lastGuideTheReaderWasFollowing else { return }
+        lastGuideTheReaderWasFollowing = guideTheReaderIsFollowing
+        lastFollowedGuideMemory.remember(guideTheReaderIsFollowing)
     }
 
     /// Forgets every guide's saved place, the same reset the Tauri panel offers.
     func clearAllStoredGuideProgress() async {
         await guideService.clearAllStoredProgress()
+        // The pointer to the guide goes with the progress it points into. A
+        // reset that left "Resume publikclip — step 7 of 12" on the panel would
+        // be offering the reader a place that no longer exists.
+        lastFollowedGuideMemory.forgetTheRememberedGuide()
+        lastGuideTheReaderWasFollowing = nil
         if selectedBranch != nil {
             currentStepIndex = 0
             readerHasFinishedTheGuide = false

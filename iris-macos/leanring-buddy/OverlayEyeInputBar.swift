@@ -137,10 +137,24 @@ final class OverlayEyeInputBarPanelManager {
             companionManager?.guideSessionController.isActivelyGuiding == true
         }
 
-        // A brand new view every time, which is what makes "dismissing clears
-        // the exchange" true without anything having to remember to clear it:
-        // the exchange lives in this view's state and the view does not outlive
-        // the bar.
+        // A brand new view every time — but no longer a brand new CONVERSATION.
+        //
+        // The exchange still lives in this view's state, and the view still does
+        // not outlive the bar. What changed is where the view starts from: the
+        // reader's chat is now kept on disk (`ChatTranscriptStore`), so a bar
+        // that opens after a dismissal — or after Iris was quit and started
+        // again — opens showing the last thing that was said instead of the
+        // suggestion chips. Reopening continues the conversation rather than
+        // pretending nothing was ever asked, which is the reported bug: "when I
+        // click off Iris it just gets rid of my chat and opens a brand new one".
+        //
+        // It is still ONE exchange. This is a bar hanging off a 64pt eye, not a
+        // second chat window: the most recent exchange comes back and nothing
+        // else does.
+        let exchangeToReopenWith = Self.exchangeShowingTheLastThingThatWasSaid(
+            fromTranscriptStore: companionManager.chatTranscriptStore
+        )
+
         let inputBarView = OverlayEyeInputBarView(
             companionManager: companionManager,
             guideSessionController: companionManager.guideSessionController,
@@ -155,7 +169,8 @@ final class OverlayEyeInputBarPanelManager {
             },
             onTheBarsMeasuredHeightChanged: { [weak self] measuredHeight in
                 self?.resizeTheBarToFit(measuredContentHeight: measuredHeight)
-            }
+            },
+            showingTheExchange: exchangeToReopenWith
         )
         .frame(width: OverlayEyeInteractionGeometry.inputBarWidth)
 
@@ -205,6 +220,43 @@ final class OverlayEyeInputBarPanelManager {
         inputBarPanel = panel
         panel.makeKeyAndOrderFront(nil)
         installClickOutsideMonitor()
+    }
+
+    /// The exchange a freshly-opened bar should already be showing: the last
+    /// thing the reader and Iris said to each other, or the empty opening state
+    /// when they have never spoken.
+    ///
+    /// WHY IT LANDS IN `.composingAFollowUp` RATHER THAN `.showingTheAnswer`.
+    /// Those two phases show the same thing — the question and the answer — but
+    /// they disagree about the keyboard, and the bar has just been made key with
+    /// the field about to take focus. `.composingAFollowUp` is the phase that
+    /// means "the answer is still up and the reader is writing the next
+    /// question", which is exactly what reopening the bar is, so
+    /// `theBarShouldHoldTheKeyboard` agrees with what the window is actually
+    /// doing. Landing in `.showingTheAnswer` would claim the bar had given the
+    /// keyboard back while it was holding it.
+    ///
+    /// The restored answer is never a failure sentence: `CompanionManager` only
+    /// records an exchange on the success path, so nothing that failed is ever
+    /// in the transcript to come back.
+    static func exchangeShowingTheLastThingThatWasSaid(
+        fromTranscriptStore chatTranscriptStore: ChatTranscriptStore
+    ) -> OverlayEyeExchange {
+        var exchange = OverlayEyeExchange()
+        guard let lastSavedExchange = chatTranscriptStore.mostRecentExchange else {
+            return exchange
+        }
+
+        // Replayed through the same three transitions a live exchange goes
+        // through, rather than assembled field by field, so a restored bar can
+        // never be in a state a real conversation could not have reached.
+        exchange.registerTheReaderAsked(lastSavedExchange.question)
+        exchange.registerIrisAnswered(
+            lastSavedExchange.answer,
+            theAnswerIsAFailureMessage: false
+        )
+        exchange.registerTheReaderWentBackToTheField()
+        return exchange
     }
 
     /// Takes the bar down and hands keyboard focus back to whatever had it.
@@ -419,9 +471,12 @@ struct OverlayEyeInputBarView: View {
 
     @FocusState private var theTextFieldHasKeyboardFocus: Bool
 
-    /// The `exchange` seed exists so the bar's four states can be rendered and
-    /// looked at without a live model round-trip. Nothing in the app passes it:
-    /// a real bar always opens empty and fills up as the reader uses it.
+    /// The `exchange` seed is how a reopened bar comes back showing the last
+    /// thing that was said: `OverlayEyeInputBarPanelManager` reads it out of
+    /// `ChatTranscriptStore` and passes it in, so dismissing the bar no longer
+    /// throws the conversation away. It defaults to empty, which is both what a
+    /// first-ever bar opens on and what lets the four states be rendered and
+    /// looked at without a live model round-trip.
     init(
         companionManager: CompanionManager,
         guideSessionController: GuideSessionController,
@@ -629,8 +684,22 @@ struct OverlayEyeInputBarView: View {
             progressFraction: totalSteps > 0 ? min(1, Double(stepNumber) / Double(totalSteps)) : 0,
             completionHint: step.verifierLabel,
             pointingNote: OverlayEyeGuidePointingNote.note(for: guideSessionController.pointingDecisionForTheOpenStep),
-            readerCanGoBack: guideSessionController.currentStepIndex > 0,
-            isTheLastStep: readerIsOnARealStep && stepNumber == totalSteps
+            // The controller's answer, not the guide's step index.
+            //
+            // During the setup-recovery detour the guide index is deliberately
+            // frozen, so asking it whether the reader can go back is asking the
+            // wrong question twice over: a reader starting at guide step 0 got
+            // NO Back button even though there was a setup step behind them,
+            // and a reader resuming at a later guide step got a Back button
+            // that hit the detour's own guard and silently did nothing.
+            readerCanGoBack: guideSessionController.canReturnToThePreviousStep,
+            isTheLastStep: readerIsOnARealStep && stepNumber == totalSteps,
+            // The controller already works out the right word for this button —
+            // "Open nodejs.org", "Check again", "I ran it", "Finish" — and this
+            // card was guessing instead, which is how the Node LTS step ended up
+            // with a button reading "Continue" that opened a browser on the
+            // first press and re-ran a tool check on the next. Ask, don't guess.
+            labelForThePrimaryAction: guideSessionController.primaryActionForTheCurrentStep?.buttonLabel
         )
     }
 
@@ -709,10 +778,26 @@ struct OverlayEyeInputBarView: View {
                 // is not key and the text field cannot take a click and start
                 // editing on its own. This plate turns that click into "ask for
                 // the keyboard back, then put the caret in the field". It only
-                // exists in that state, so it never sits between the reader and
-                // a field they can already type in.
+                // exists in the states where the bar is not holding the
+                // keyboard, so it never sits between the reader and a field they
+                // can already type in.
+                //
+                // WHY IT COVERS `.waitingForIrisToAnswer` TOO, NOT JUST THE
+                // ANSWER. The bar releases the keyboard for BOTH of those phases
+                // (`OverlayEyeExchange.theBarShouldHoldTheKeyboard`), and a
+                // question does not always come back with an answer: a CANCELLED
+                // request publishes nothing, so `assistantResponseGenerationCount`
+                // never bumps and the bar stays in `.waitingForIrisToAnswer` for
+                // good. With the plate gated on `.showingTheAnswer` alone there
+                // was then no way back into the field — the window could not
+                // become key, so Escape (which needs key status) could not fire
+                // either, and the × was the only way out. This is the reported
+                // "randomly wouldn't let me type in it". The matching half is
+                // `registerTheReaderWentBackToTheField`, which accepts the same
+                // two phases.
                 .overlay {
-                    if exchange.phase == .showingTheAnswer {
+                    if exchange.phase == .showingTheAnswer
+                        || exchange.phase == .waitingForIrisToAnswer {
                         Color.clear
                             .contentShape(Rectangle())
                             .onTapGesture {

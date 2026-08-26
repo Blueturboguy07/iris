@@ -18,14 +18,21 @@ import {
  */
 
 describe("the allowlist itself", () => {
-  it("has exactly the 22 hosts main.rs allows", () => {
-    expect(ALLOWED_EXTERNAL_HOSTS.size).toBe(22);
+  it("has exactly the 29 hosts every client allows", () => {
+    expect(ALLOWED_EXTERNAL_HOSTS.size).toBe(29);
   });
 
   it("contains every host `allowed_external_host` names", () => {
-    // Transcribed from main.rs. If this ever drifts, a published guide sends a
-    // reader somewhere the desktop app refuses to open.
-    const hostsFromMainRs = [
+    // A hand transcription — the fourth copy of this list — and it went stale
+    // exactly as you would expect: seven hosts were added to the Tauri client
+    // on 2026-08-10 for the Hickeyfield, Nutcracker and Dripwriter guides and
+    // reached none of the other copies, so four published guide steps opened
+    // nothing on any shipping client.
+    //
+    // The cross-client comparison lives in the repo root's
+    // tests/client-parity.test.ts, which reads all three lists and fails when
+    // they disagree. What is left here is a local sanity check.
+    const hostsEveryClientAllows = [
       "publikhq.com",
       "www.publikhq.com",
       "github.com",
@@ -48,9 +55,16 @@ describe("the allowlist itself", () => {
       "www.cmake.org",
       "files.browseros.com",
       "go.dev",
+      "fal.ai",
+      "www.fal.ai",
+      "nasm.us",
+      "www.nasm.us",
+      "chromewebstore.google.com",
+      "docs.google.com",
+      "blueturboguy07.github.io",
     ];
-    expect(hostsFromMainRs).toHaveLength(22);
-    for (const host of hostsFromMainRs) {
+    expect(hostsEveryClientAllows).toHaveLength(29);
+    for (const host of hostsEveryClientAllows) {
       expect(isAllowedExternalHost(host), `${host} should be allowlisted`).toBe(true);
     }
   });

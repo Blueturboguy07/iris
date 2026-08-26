@@ -6,7 +6,7 @@
     "lib": ["ES2022"],
     "types": ["node"],
     "outDir": "dist",
-    "rootDir": "..",
+    "rootDir": ".",
     "strict": true,
     "noUncheckedIndexedAccess": false,
     "esModuleInterop": true,
@@ -16,7 +16,7 @@
     "sourceMap": true
   },
   "//": "The checking config: covers the app AND the suite, so `npm run typecheck` sees both. Emitting is done by tsconfig.build.json.",
-  "//rootDir": "\"..\" (the publik repo root), not \".\", because tests/maintain-break-signature.test.ts imports ../../lib/break-signature.ts directly to prove byte-identical normalization against the web repo's shared normalizer — see that test file and the maintain-mode porting spec §0/§3. This is check-only: tsconfig.build.json sets its own narrower rootDir:\"src\" and excludes tests/, so widening this file's rootDir has no effect on what ships.",
+  "//rootDir": "\".\", not \"..\". It was widened only so tests/maintain-break-signature.test.ts could import publik's normalizer across the repository boundary; that import is gone (it broke when the clients were split out, and the check is golden vectors now), so nothing in this project may reach outside it again.",
   "include": ["src/**/*", "tests/**/*", "forge.config.ts", "vitest.config.ts"],
   "exclude": ["node_modules", "dist", "out"]
 }

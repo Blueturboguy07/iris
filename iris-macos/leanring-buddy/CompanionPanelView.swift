@@ -515,6 +515,18 @@ struct CompanionPanelView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            // Only offered once there is something to undo — a "reset" for a
+            // panel nobody has moved is a control that does nothing.
+            if MenuBarPanelPlacement.shared.readerHasPlacedItThemselves {
+                Button("Put this panel back under the menu bar") {
+                    MenuBarPanelPlacement.shared.forget()
+                    NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 9))
+                .foregroundColor(DS.Colors.muted.opacity(0.8))
+            }
+
             HStack(spacing: 6) {
                 autonomyModeButton(
                     title: "Ask me each step",

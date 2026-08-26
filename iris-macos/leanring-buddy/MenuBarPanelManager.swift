@@ -225,7 +225,11 @@ final class MenuBarPanelManager: NSObject {
 
         let menuBarPanel = KeyablePanel(
             contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight),
-            styleMask: [.borderless, .nonactivatingPanel],
+            // `.resizable` joins the borderless panel so the reader can drag its
+            // edges. A borderless window keeps no title bar to grab, so moving
+            // is handled by `isMovableByWindowBackground` below — together they
+            // answer "I can't move shit around".
+            styleMask: [.borderless, .nonactivatingPanel, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -238,18 +242,65 @@ final class MenuBarPanelManager: NSObject {
         menuBarPanel.hidesOnDeactivate = false
         menuBarPanel.isExcludedFromWindowsMenu = true
         menuBarPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        menuBarPanel.isMovableByWindowBackground = false
+        // Draggable by its own background, since there is no title bar.
+        menuBarPanel.isMovableByWindowBackground = true
+        menuBarPanel.minSize = CGSize(
+            width: MenuBarPanelPlacement.narrowestWidth,
+            height: MenuBarPanelPlacement.shortestHeight
+        )
+        menuBarPanel.maxSize = CGSize(
+            width: MenuBarPanelPlacement.widestWidth,
+            height: MenuBarPanelPlacement.tallestHeight
+        )
         menuBarPanel.titleVisibility = .hidden
         menuBarPanel.titlebarAppearsTransparent = true
 
         menuBarPanel.contentView = hostingView
         panel = menuBarPanel
+
+        // Remember wherever the reader leaves it. Both notifications fire after
+        // the gesture ends, so this stores a settled frame rather than every
+        // intermediate one during a drag.
+        panelPlacementObservers = [
+            NotificationCenter.default.addObserver(
+                forName: NSWindow.didMoveNotification, object: menuBarPanel, queue: .main
+            ) { [weak menuBarPanel] _ in
+                guard let menuBarPanel else { return }
+                MenuBarPanelPlacement.shared.remember(origin: menuBarPanel.frame.origin)
+            },
+            NotificationCenter.default.addObserver(
+                forName: NSWindow.didEndLiveResizeNotification, object: menuBarPanel, queue: .main
+            ) { [weak menuBarPanel] _ in
+                guard let menuBarPanel else { return }
+                MenuBarPanelPlacement.shared.remember(size: menuBarPanel.frame.size)
+                MenuBarPanelPlacement.shared.remember(origin: menuBarPanel.frame.origin)
+            },
+        ]
     }
+
+    /// Kept so the observers can be torn down with the panel.
+    private var panelPlacementObservers: [NSObjectProtocol] = []
 
     private func positionPanelBelowStatusItem() {
         guard let panel else { return }
-        guard let buttonWindow = statusItem?.button?.window else { return }
 
+        // Once the reader has moved or resized it, it stays where they put it.
+        // Re-snapping it under the menu bar icon on every open would make the
+        // drag look like it had not worked.
+        let placement = MenuBarPanelPlacement.shared
+        if let storedOrigin = placement.storedOrigin {
+            var size = panel.frame.size
+            if let storedSize = placement.storedSize {
+                size = storedSize
+            }
+            let visibleFrames = NSScreen.screens.map(\.visibleFrame)
+            let origin = MenuBarPanelPlacement.clampedOrigin(
+                storedOrigin, panelSize: size, visibleFrames: visibleFrames
+            )
+            panel.setFrame(NSRect(origin: origin, size: size), display: true)
+            return
+        }
+        guard let buttonWindow = statusItem?.button?.window else { return }
         let statusItemFrame = buttonWindow.frame
         let gapBelowMenuBar: CGFloat = 4
 

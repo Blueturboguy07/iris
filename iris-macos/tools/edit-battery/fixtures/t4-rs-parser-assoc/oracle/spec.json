@@ -1,0 +1,21 @@
+{
+  "editable": [
+    "src/parser.rs",
+    "src/eval.rs",
+    "src/tokenizer.rs",
+    "src/lib.rs"
+  ],
+  "drop": [
+    {
+      "from": "drop/tests/oracle.rs",
+      "to": "tests/oracle.rs"
+    }
+  ],
+  "command": "cargo test --offline --test oracle -- --test-threads=1",
+  "f2p": [
+    "f2p_*"
+  ],
+  "p2p": [
+    "p2p_*"
+  ]
+}

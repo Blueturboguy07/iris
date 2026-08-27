@@ -3,15 +3,21 @@
 //  leanring-buddy
 //
 //  Tier C runs on the user's OWN model access — never the funded proxy
-//  (ratified D4/D5). Three providers speak one interface so the fix loop
-//  doesn't care which the user brought:
+//  (ratified D4/D5). Providers speak one interface so the fix loop doesn't
+//  care which the user brought:
 //
-//    anthropic   the user's sk-ant key, through the BYO-only ClaudeAPI.
+//    anthropic   the user's sk-ant key OR their Claude Code login, through
+//                the BYO-only ClaudeAPI.
 //    openai      the user's sk key, straight to api.openai.com — net-new
 //                for Iris, its first non-Anthropic model call, kept behind
 //                this seam so nothing else in the app learns a second SDK.
-//    (agent CLIs and local models are M6.1 / v1.1; the interface is shaped
-//     to take them without a caller change.)
+//    codex       the user's ChatGPT account, driven through the Codex CLI
+//                they signed in to (2026-08-26). It lives in its own file,
+//                `CodexMaintainProvider.swift`, because it is a subprocess
+//                rather than an HTTP call — the "agent CLI" shape this
+//                interface was always meant to be able to take, and the
+//                proof that it can without a caller change.
+//    (local models are v1.1.)
 //
 //  The whole interface is one turn: history in, one assistant text turn out.
 //  The ReAct loop that drives it lives in MaintainTierCFixer.
@@ -177,15 +183,42 @@ final class OpenAIMaintainProvider: MaintainModelProviding {
 // MARK: - Resolution
 
 enum MaintainModelProviderResolver {
-    /// The provider to use for Tier C, preferring Anthropic when both keys
-    /// are present (its BYO isolation is already proven and tested). Nil when
-    /// the user brought no key at all — the honest funded-tier ceiling.
+    /// The provider to use for Tier C, in descending order of how much Iris can
+    /// promise about it. Nil when the user brought no model access at all — the
+    /// honest funded-tier ceiling.
+    ///
+    /// The order is not a quality ranking, it is a confidence ranking:
+    ///
+    ///   1. Anthropic — a pasted key or a Claude Code login, through the BYO
+    ///      transport whose isolation property is proven and tested.
+    ///   2. OpenAI key — a pasted key, one plain HTTPS call Iris fully controls.
+    ///   3. Codex login — the reader's ChatGPT account, driven through their
+    ///      Codex CLI. Last because it is the only provider whose behaviour Iris
+    ///      does not own end to end: a separate program, its own model default,
+    ///      its own agent instincts (see `CodexMaintainProvider`). It is here so
+    ///      that a reader with a ChatGPT subscription and no API key at all can
+    ///      still run Tier C, which was previously impossible for them.
     @MainActor
     static func firstAvailable() -> MaintainModelProviding? {
         let anthropic = AnthropicMaintainProvider()
         if anthropic.isAvailable { return anthropic }
         let openai = OpenAIMaintainProvider()
         if openai.isAvailable { return openai }
+        let codex = CodexMaintainProvider()
+        if codex.isAvailable { return codex }
         return nil
+    }
+
+    /// Every provider the reader could currently use, most-preferred first.
+    /// The panel uses this to say what Tier C would run on without committing
+    /// to a run, and the parity harness uses it to enumerate what to compare.
+    @MainActor
+    static func allAvailable() -> [MaintainModelProviding] {
+        let candidates: [MaintainModelProviding] = [
+            AnthropicMaintainProvider(),
+            OpenAIMaintainProvider(),
+            CodexMaintainProvider(),
+        ]
+        return candidates.filter { $0.isAvailable }
     }
 }

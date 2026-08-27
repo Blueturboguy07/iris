@@ -288,25 +288,37 @@ final class MaintainTierCFixer {
         return nonEmptyLines.suffix(4).map { String($0.prefix(220)) }
     }
 
-    /// The agent's own prose from one reply — everything OUTSIDE the fenced
-    /// command block, minus the bare DONE line — flattened to one scrubbed,
-    /// capped paragraph for the live surface. Nil when the reply carried no
-    /// prose (old-style replies, or a model ignoring the narration ask), so
-    /// the caller emits nothing rather than an empty row.
+    /// The agent's own prose from one reply — everything OUTSIDE every fenced
+    /// block, minus the bare DONE line — flattened to one scrubbed, capped
+    /// paragraph for the live surface. Nil when the reply carried no prose
+    /// (old-style replies, or a model ignoring the narration ask), so the
+    /// caller emits nothing rather than an empty row.
+    ///
+    /// It used to strip only the FIRST fenced block, with its own ad-hoc range
+    /// search. That was written when a reply could hold exactly one block — a
+    /// bash command — and it stopped being true the day the file-edit channel
+    /// invited "several write/edit blocks in ONE reply". What the reader then
+    /// saw in the line this code calls their window into the agent was the
+    /// narration followed by a raw diff, cut off mid-hunk at the 400-character
+    /// cap:
+    ///
+    ///     says: Teaching the parser to preserve doubled quotes… ```edit
+    ///     tests/test_csvlite.py <<<<<<< SEARCH def test_quoted_empty_field
+    ///
+    /// So the block spans come from `fencedBlocksWithSpans` — the same scanner
+    /// the command, repro and manifest parsers use — and EVERY one of them is
+    /// removed, unterminated blocks included.
     nonisolated static func narrationText(fromModelReply reply: String) -> String? {
-        var proseOnly = reply
-        // Strip the first fenced block, matching extractBashCommand's fence
-        // detection so the two never disagree about where the command was.
-        if let fenceStart = proseOnly.range(of: "```bash") ?? proseOnly.range(of: "```sh")
-            ?? proseOnly.range(of: "```") {
-            let afterFence = proseOnly[fenceStart.upperBound...]
-            if let fenceEnd = afterFence.range(of: "```") {
-                proseOnly = String(proseOnly[..<fenceStart.lowerBound])
-                    + String(proseOnly[fenceEnd.upperBound...])
-            } else {
-                proseOnly = String(proseOnly[..<fenceStart.lowerBound])
+        var proseOnly = ""
+        var cursor = reply.startIndex
+        for block in fencedBlocksWithSpans(in: reply) {
+            if block.span.lowerBound > cursor {
+                proseOnly += reply[cursor..<block.span.lowerBound]
             }
+            cursor = max(cursor, block.span.upperBound)
         }
+        if cursor < reply.endIndex { proseOnly += reply[cursor...] }
+
         let flattened = GuideAutopilotOutputBuffer.scrubbed(proseOnly)
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -766,6 +778,19 @@ final class MaintainTierCFixer {
             FeatureEditRuntimeChecklist.preflightPromptAddendum(forRuntimeShape: recipe.runtimeShape)
         }
 
+        // Resolved BEFORE the first model call, not after the loop, so the
+        // opening turn can name the exact build and test commands this change
+        // will be judged by. It is read again authoritatively at the verify
+        // step (a manifest change approved mid-run can alter it); both readings
+        // come from `resolvedVerificationCommands`, so they cannot drift apart
+        // in their rules — only in what the tree said when each one looked.
+        let verificationCommandsThisRunWillBeJudgedBy = Self.resolvedVerificationCommands(
+            override: verificationCommandsOverride,
+            appStack: appStack,
+            repoRootPath: clonePath,
+            derivedRecipe: derivedFeatureEngineRecipe
+        )
+
         var conversation: [MaintainChatTurn] = [
             MaintainChatTurn(
                 role: "user",
@@ -776,7 +801,11 @@ final class MaintainTierCFixer {
                     runtimeShapePreflightAddendum: runtimeShapePreflightAddendum,
                     runtimeLogContext: runtimeLogContext,
                     hasAttachedWindowScreenshot: appWindowScreenshotPNG != nil,
-                    buildAndInstallDocExcerpt: Self.buildAndInstallDocExcerpt(repoRootPath: clonePath)
+                    buildAndInstallDocExcerpt: Self.buildAndInstallDocExcerpt(repoRootPath: clonePath),
+                    sandboxContractSection: Self.sandboxContractSection(
+                        buildCommand: verificationCommandsThisRunWillBeJudgedBy.buildCommand,
+                        testCommand: verificationCommandsThisRunWillBeJudgedBy.testCommand
+                    )
                 ),
                 // The screenshot rides the opening turn as a real image block —
                 // and ONLY the first model call: it is stripped after the first
@@ -902,10 +931,24 @@ final class MaintainTierCFixer {
                 progressHandler?(.agentNarration(text: narration, stepNumber: step))
             }
 
+            // A bug fix's headless repro check, wherever in the run it appears.
+            // Capture used to live inside the DONE branch, which is one of five
+            // dispatch outcomes — a reply that sent a ```repro block alongside
+            // structured edits `continue`d past it and the check was thrown
+            // away without a word. The repro is the ONLY thing that turns
+            // "applied" into "verified", so it is taken from any reply that
+            // offers one; a later one replaces an earlier one, which is the
+            // model refining its own check.
+            if taskIsAnOnDemandBugFix,
+               let offeredRepro = Self.extractFencedBlock(tagged: "repro", from: reply) {
+                modelAuthoredReproCommand = offeredRepro
+            }
+
             // Structured file edits (```write / ```edit) — applied by IRIS,
             // never the jailed shell (which is read-only for editing now).
             // Several may ride one reply; they need no output between them.
-            let fileEditRequests = MaintainFileEditApplier.parse(fromModelReply: reply)
+            let fileEditParse = MaintainFileEditApplier.parseDetailed(fromModelReply: reply)
+            let fileEditRequests = fileEditParse.requests
             if !fileEditRequests.isEmpty,
                priorAttemptsDidNotCureTheComplaint,
                !hasLookedBeyondTheSourceThisRun {
@@ -952,11 +995,54 @@ final class MaintainTierCFixer {
                         fileStatesFromPreviousStep = latest
                     }
                 }
+                // Blocks that never became requests at all (an unclosed fence,
+                // a missing path, an ```edit with no markers) are named here
+                // beside the ones that failed to APPLY. Both are the same thing
+                // to the model — an edit it believes it made that did not
+                // happen — and neither may be silent.
+                let parseRejectionNotes = fileEditParse.rejections
+                    .map { "One edit block was NOT usable: \($0.modelFacingMessage). " }
+                    .joined()
                 conversation.append(MaintainChatTurn(
                     role: "user",
                     text: (appliedPaths.isEmpty ? "" : "Applied: \(MaintainFileEditApplier.appliedSummary(appliedPaths)). ")
                         + (rejection.map { "One edit was NOT applied: \($0). Fix it and resend. " } ?? "")
-                        + "Continue, or DONE when the fix is complete."
+                        + parseRejectionNotes
+                        + Self.nextMoveLine(task: task, theModelHasEditedTheTree: theModelHasEditedTheTreeAtLeastOnce)
+                ))
+                continue
+            }
+
+            // A reply that tried to edit files and produced NO usable block:
+            // every one of its blocks was refused. Say which and why. Without
+            // this the reply falls all the way through the dispatch to the
+            // bottom, which steers "reply with exactly one ```bash fenced
+            // command" — a correction to a mistake the model did not make, and
+            // the exact mis-steer the manifest channel already documents as a
+            // fixed bug.
+            //
+            // ORDERING, and why it is a guard rather than an early branch: this
+            // check used to fire before BLOCKED, DONE, the manifest parse and
+            // `extractBashCommand`, and it `continue`s — so a reply carrying a
+            // broken edit block AND a legal move had the legal move thrown
+            // away. That is not a rare shape: the likeliest producer of an
+            // unterminated block is the output cap cutting a reply mid-write,
+            // and such a reply can easily also carry a genuine `BLOCKED:`. The
+            // steer is only correct when the reply contains NOTHING ELSE the
+            // loop could act on, so it now asks exactly that.
+            if !fileEditParse.rejections.isEmpty,
+               !Self.replyCarriesALegalMoveBesidesFileEdits(reply) {
+                let rejectionSummary = fileEditParse.rejections
+                    .map { $0.modelFacingMessage }
+                    .joined(separator: "; ")
+                progressHandler?(.structuredFileEditRejected(
+                    reason: "an edit block could not be read: \(rejectionSummary)"
+                ))
+                irisTrace("maintain: on-demand file-edit block(s) rejected at parse at step \(step)")
+                conversation.append(MaintainChatTurn(
+                    role: "user",
+                    text: "No file was changed — \(rejectionSummary). Resend the corrected block. "
+                        + Self.nextMoveLine(task: task, theModelHasEditedTheTree: theModelHasEditedTheTreeAtLeastOnce)
                 ))
                 continue
             }
@@ -977,7 +1063,8 @@ final class MaintainTierCFixer {
                 declaredManifestChange = declaration
                 conversation.append(MaintainChatTurn(
                     role: "user",
-                    text: "Noted: Iris will ask the user to allow \(MaintainManifestApplier.humanReadableSummary(declaration)) once you reply DONE, and will apply it itself. Continue implementing as if it were already present. Next command, or DONE."
+                    text: "Noted: Iris will ask the user to allow \(MaintainManifestApplier.humanReadableSummary(declaration)) once you reply DONE, and will apply it itself. Continue implementing as if it were already present. "
+                        + Self.nextMoveLine(task: task, theModelHasEditedTheTree: theModelHasEditedTheTreeAtLeastOnce)
                 ))
                 continue
             case .failure(.noManifestBlockInReply):
@@ -1019,11 +1106,9 @@ final class MaintainTierCFixer {
             // mixed with a command is protocol drift: the command is real work
             // still in flight, so it runs and DONE is ignored (told below).
             if replyDeclaresDone && commandBlockCount == 0 {
-                // A bug fix may hand over its headless repro with the DONE.
-                if taskIsAnOnDemandBugFix,
-                   let repro = Self.extractFencedBlock(tagged: "repro", from: reply) {
-                    modelAuthoredReproCommand = repro
-                }
+                // (A ```repro block riding this reply was already captured
+                // above, before the dispatch, so it survives whichever branch
+                // this reply takes.)
                 // DONE before anything changed (and no manifest declared) is
                 // not finished — steer once toward an edit or an honest
                 // BLOCKED, the two things that can be true.
@@ -1032,7 +1117,7 @@ final class MaintainTierCFixer {
                     hasSteeredDoneWithoutChanges = true
                     conversation.append(MaintainChatTurn(
                         role: "user",
-                        text: "You replied DONE but no file in the repository has changed. If the fix is in this repository, make the edit now — one ```bash command per reply, and you will see each command's output before the next. If the cause is NOT in this repository, or you need a fact only the user has, reply BLOCKED: <why> instead. Do not reply DONE again without a change."
+                        text: Self.doneWithoutAnyChangeSteer(task: task)
                     ))
                     irisTrace("maintain: tier-c DONE-without-changes steered at step \(step)")
                     continue
@@ -1043,7 +1128,9 @@ final class MaintainTierCFixer {
             guard let command = Self.extractBashCommand(from: reply) else {
                 conversation.append(MaintainChatTurn(
                     role: "user",
-                    text: "Reply with exactly one ```bash fenced command, or DONE on its own line."
+                    text: Self.noActionableReplySteer(
+                        task: task, theModelHasEditedTheTree: theModelHasEditedTheTreeAtLeastOnce
+                    )
                 ))
                 continue
             }
@@ -1068,7 +1155,9 @@ final class MaintainTierCFixer {
                 irisTrace("maintain: tier-c skipped a repeated identical command at step \(step)")
                 conversation.append(MaintainChatTurn(
                     role: "user",
-                    text: "You already ran that exact command earlier and its result has not changed. Run a DIFFERENT command that makes progress, or reply DONE."
+                    text: Self.repeatedCommandSteer(
+                        task: task, theModelHasEditedTheTree: theModelHasEditedTheTreeAtLeastOnce
+                    )
                 ))
                 continue
             }
@@ -1091,7 +1180,10 @@ final class MaintainTierCFixer {
             let commandStartedAt = Date()
             let result = try? await runner.run(jailed.invocation, deadline: 120)
             let commandDuration = Date().timeIntervalSince(commandStartedAt)
-            let output = Self.outputForModel(result?.outputTail ?? "(no output)")
+            let output = Self.outputForModel(
+                result?.outputTail ?? "(no output)",
+                bytesDroppedBeforeThisOutput: result?.bytesDroppedBeforeTail ?? 0
+            )
             progressHandler?(.jailedCommandFinished(
                 exitCode: result?.exitCode ?? -1,
                 duration: commandDuration,
@@ -1102,7 +1194,9 @@ final class MaintainTierCFixer {
                 role: "user",
                 text: "Command exit \(result?.exitCode ?? -1). Output:\n\(output)\n\n"
                     + (replyProtocolNotes.isEmpty ? "" : replyProtocolNotes.joined(separator: " ") + "\n\n")
-                    + "Next command, or DONE."
+                    + Self.nextMoveLine(
+                        task: task, theModelHasEditedTheTree: theModelHasEditedTheTreeAtLeastOnce
+                    )
             ))
 
             // No-progress detector (plan §6), now file-aware. A snapshot diff
@@ -1293,18 +1387,17 @@ final class MaintainTierCFixer {
         //   3. the code-authored VerificationCommands.defaults — the crash path's
         //      unchanged source, and the on-demand fallback when the recipe found
         //      nothing (never DOWNGRADE a working default to an empty recipe).
-        var commands: VerificationCommands
-        if let verificationCommandsOverride {
-            commands = verificationCommandsOverride
-        } else {
-            commands = VerificationCommands.defaults(for: appStack, repoRootPath: clonePath)
-            if let derivedFeatureEngineRecipe {
-                let recipeCommands = Self.verificationCommands(fromDerivedRecipe: derivedFeatureEngineRecipe)
-                if recipeCommands.buildCommand != nil || recipeCommands.testCommand != nil {
-                    commands = recipeCommands
-                }
-            }
-        }
+        // Resolved a second time here, authoritatively, after any approved
+        // manifest change has landed. The pre-loop resolution above told the
+        // model what it will be judged by; this one is what actually runs. They
+        // agree unless the run itself changed what the repo declares, in which
+        // case the later reading is the correct one.
+        var commands = Self.resolvedVerificationCommands(
+            override: verificationCommandsOverride,
+            appStack: appStack,
+            repoRootPath: clonePath,
+            derivedRecipe: derivedFeatureEngineRecipe
+        )
 
         // Decision 1b (opt-in): a model-authored build command may run un-jailed
         // ONLY after passing the SAME catastrophe/risk classifier the autopilot
@@ -1346,6 +1439,12 @@ final class MaintainTierCFixer {
             ) {
                 progressHandler?(.modelAuthoredReproDiscarded(reason: tautology))
                 irisTrace("maintain: on-demand repro discarded as a tautology — \(tautology)")
+                modelAuthoredReproCommand = nil
+            } else if let selfGraded = Self.reproIsGradedByTestsThisChangeWrote(
+                candidateRepro, changedPaths: pathsThisChangeTouched
+            ) {
+                progressHandler?(.modelAuthoredReproDiscarded(reason: selfGraded))
+                irisTrace("maintain: on-demand repro discarded as self-graded — \(selfGraded)")
                 modelAuthoredReproCommand = nil
             } else if case .runsWithoutAsking = GuideAutopilotRiskAssessment.assess(
                 candidateRepro, autonomyGranted: false
@@ -1497,7 +1596,7 @@ final class MaintainTierCFixer {
         progressHandler?(.committingTheChange)
         let symptomVerifiedByRepro = taskIsAnOnDemandBugFix && verification.earnsVerifiedFix
         let vocabulary = commitVocabulary(verification.suitePassed, symptomVerifiedByRepro, appliedManifestChangeSummary)
-        let branchName = await MaintainFixCommit.commitOnBranch(
+        let committedBranchName = await MaintainFixCommit.commitOnBranch(
             plan: MaintainFixCommitPlan(
                 branchPrefix: branchPrefix,
                 changeId: changeId,
@@ -1506,7 +1605,29 @@ final class MaintainTierCFixer {
             ),
             runner: runner
         )
+        // The branch name is what the reader is shown, what the patch queue is
+        // keyed by, and what the fork backup pushes. If HEAD did not move there
+        // is no such commit, and reporting one would be the loop's single most
+        // consequential lie — so the run fails honestly with the tree put back.
+        guard let branchName = committedBranchName else {
+            _ = try? await runner.run("git checkout -- . && git clean -fd --quiet", deadline: 120)
+            irisTrace("maintain: tier-c verification passed but the commit did not land — reverted")
+            return .couldNotFix(
+                reason: "the change passed verification but could not be committed, so nothing was kept"
+            )
+        }
         irisTrace("maintain: tier-c committed a change on \(branchName)")
+        // The one honest reader of "did anything actually run". `earnsCleanApply`
+        // deliberately does not gate on this (see its doc comment — that is an
+        // open product decision), so the least this loop can do is record, at
+        // the moment of commit, that it kept a change nothing had exercised.
+        if !verification.atLeastOneVerificationStageActuallyRan {
+            irisTrace(
+                "maintain: tier-c committed on \(branchName) with NO verification stage having run "
+                + "— this stack resolved neither a build nor a test command, so the change is "
+                + "applied on no evidence at all"
+            )
+        }
         return .committed(
             branchName: branchName, suitePassed: verification.suitePassed,
             symptomVerifiedByRepro: symptomVerifiedByRepro
@@ -1541,7 +1662,14 @@ final class MaintainTierCFixer {
         ]
         // Headings worth quoting. A "Build (macOS)" or "## Installing" section
         // is where the warnings live.
-        let wantedHeadingWords = ["build", "install", "develop", "running", "run ", "setup", "getting started"]
+        // "test"/"check"/"verify" are here because the model is JUDGED by the
+        // repo's test command and used to be shown only its build section: a
+        // README with `## Build\n npm run build` and `## Test\n npm test`
+        // quoted the first and stopped, while the run verified with the second.
+        let wantedHeadingWords = [
+            "build", "install", "develop", "running", "run ", "setup", "getting started",
+            "test", "check", "verify",
+        ]
         var excerpt = ""
         let limit = 2200
 
@@ -1627,16 +1755,94 @@ final class MaintainTierCFixer {
     /// Both ends are what a person reading a file actually needs, so both ends
     /// are what is kept — with the cut marked, because a model that knows it is
     /// missing the middle can ask for the middle.
-    nonisolated static func outputForModel(_ raw: String) -> String {
+    ///
+    /// The marker used to report a CHARACTER count and hand back the recovery
+    /// command `sed -n 'A,Bp' <file>`, which needs LINE numbers and a filename.
+    /// Nothing in the message could be pasted; a model had to guess a line
+    /// range from a character count and hope. So the cut is made on line
+    /// boundaries and named in lines, the ranges the model HAS seen are stated
+    /// (so it knows what it is missing rather than only that something is), and
+    /// the one-file assumption behind `<file>` is called out — a command that
+    /// `cat`s five files produces one output whose line numbers belong to no
+    /// single file, and five of this loop's observed elisions were of exactly
+    /// that shape.
+    ///
+    /// `bytesDroppedBeforeThisOutput` is what `MaintainShellRunner` already
+    /// clipped off the front before this function ever ran. It is reported
+    /// rather than absorbed: two truncators where the second describes the
+    /// first's work as its own is how the head of a 40KB file came to be
+    /// labelled the head of the output.
+    nonisolated static func outputForModel(
+        _ raw: String, bytesDroppedBeforeThisOutput: Int = 0
+    ) -> String {
+        let runnerDropNote = bytesDroppedBeforeThisOutput > 0
+            ? "[this command produced more output than Iris keeps, so its first "
+                + "\(bytesDroppedBeforeThisOutput) bytes were dropped before this point — "
+                + "what follows is the END of its output, not the start. Re-run it narrowed "
+                + "(a grep, or `sed -n` over a range) if you need the beginning.]\n\n"
+            : ""
+
         let limit = 4000
-        guard raw.count > limit else { return raw }
-        let headCharacters = 1500
-        let tailCharacters = limit - headCharacters
-        let head = String(raw.prefix(headCharacters))
-        let tail = String(raw.suffix(tailCharacters))
-        let omitted = raw.count - headCharacters - tailCharacters
-        return head
-            + "\n\n[\(omitted) characters of the middle omitted — re-read a specific range with `sed -n 'A,Bp' <file>` if you need it]\n\n"
+        guard raw.count > limit else { return runnerDropNote + raw }
+
+        let headCharacterBudget = 1500
+        let tailCharacterBudget = limit - headCharacterBudget
+        let lines = raw.components(separatedBy: "\n")
+
+        /// How many whole lines fit in a character budget, counted from one
+        /// end. Whole lines only: half a line of code is worse than none,
+        /// because it reads as complete.
+        func wholeLineCount(fittingIn budget: Int, fromTheEnd: Bool) -> Int {
+            var usedCharacters = 0
+            var count = 0
+            for line in (fromTheEnd ? Array(lines.reversed()) : lines) {
+                usedCharacters += line.count + 1
+                if usedCharacters > budget { break }
+                count += 1
+            }
+            return count
+        }
+
+        let headLineCount = wholeLineCount(fittingIn: headCharacterBudget, fromTheEnd: false)
+        let tailLineCount = wholeLineCount(fittingIn: tailCharacterBudget, fromTheEnd: true)
+
+        // Output with no usable line structure — one enormous line of minified
+        // JS, a base64 blob — cannot be addressed in lines at all. Say that,
+        // and cut on characters, rather than quoting line numbers that mean
+        // nothing to the reader of a single line.
+        guard headLineCount + tailLineCount < lines.count, headLineCount > 0 else {
+            let omittedCharacterCount = raw.count - headCharacterBudget - tailCharacterBudget
+            // TWO different facts land here and they must not share a sentence.
+            // `headLineCount == 0` says only that the FIRST line overflows the
+            // head budget — which is also true of a 600-line file that opens
+            // with one long minified line. Calling that "too few line breaks"
+            // is false, and this is the one function whose entire job is to not
+            // lie to the model about its own evidence.
+            let whyLineNumbersAreUnavailable = lines.count > 2
+                ? "its first line alone is longer than this excerpt, so no clean line range can be cut"
+                : "it has too few line breaks to name a line range"
+            return runnerDropNote
+                + String(raw.prefix(headCharacterBudget))
+                + "\n\n[\(omittedCharacterCount) characters were omitted here. This output could not "
+                + "be addressed by line: \(whyLineNumbersAreUnavailable). Re-read it in narrower pieces "
+                + "(grep for what you need, or `sed -n` over a byte-bounded range).]\n\n"
+                + String(raw.suffix(tailCharacterBudget))
+        }
+
+        // 1-based, inclusive, exactly as `sed -n 'A,Bp'` counts.
+        let firstOmittedLine = headLineCount + 1
+        let lastOmittedLine = lines.count - tailLineCount
+        let head = lines[0..<headLineCount].joined(separator: "\n")
+        let tail = lines[(lines.count - tailLineCount)...].joined(separator: "\n")
+
+        return runnerDropNote
+            + head
+            + "\n\n[lines \(firstOmittedLine)–\(lastOmittedLine) of this output were omitted "
+            + "(\(lastOmittedLine - firstOmittedLine + 1) of its \(lines.count) lines). You have "
+            + "seen lines 1–\(headLineCount) and \(lastOmittedLine + 1)–\(lines.count). To read "
+            + "the gap, re-run with `sed -n '\(firstOmittedLine),\(lastOmittedLine)p' <file>` — "
+            + "but note these are positions in THIS OUTPUT: if the command read more than one "
+            + "file, they map to no single file, so re-read the files one at a time.]\n\n"
             + tail
     }
 
@@ -1707,6 +1913,107 @@ final class MaintainTierCFixer {
 
         return "it only re-reads \(namedPath), a file this change just wrote — "
             + "true of any edit, and no evidence about the reported problem"
+    }
+
+    /// Whether a reply contains a move the loop can act on OTHER than a
+    /// structured file edit: a BLOCKED declaration, a bare DONE, a runnable
+    /// command, or a manifest block.
+    ///
+    /// This exists to keep a BROKEN edit block from silently eating a GOOD move
+    /// that arrived with it. The rejection steer that reports an unreadable
+    /// ```write/```edit block used to run before BLOCKED, DONE, the manifest
+    /// parse and `extractBashCommand`, and it `continue`s the loop — so a reply
+    /// carrying both was reduced to its mistake and its legal move was thrown
+    /// away. That shape is not rare: the likeliest cause of an unterminated
+    /// block is the 4,000-token output cap cutting a reply mid-write, and such
+    /// a reply can easily also carry a genuine `BLOCKED:` the reader needs to
+    /// see. The steer is only right when there is nothing else to do.
+    ///
+    /// Free of loop state, so the rule is unit-tested without running the loop.
+    /// (Main-actor bound only because the readers it composes are.)
+    static func replyCarriesALegalMoveBesidesFileEdits(_ reply: String) -> Bool {
+        if blockedDeclaration(in: reply) != nil { return true }
+        if reply.range(of: #"(?m)^\s*DONE\s*$"#, options: .regularExpression) != nil { return true }
+        if extractBashCommand(from: reply) != nil { return true }
+        if case .failure(.noManifestBlockInReply) =
+            MaintainManifestApplier.parseDetailed(fromModelReply: reply) {
+            return false
+        }
+        return true
+    }
+
+    /// Rejects a repro whose verdict is decided by tests THIS CHANGE WROTE.
+    ///
+    /// `reproMerelyReReadsTheChange` above catches the crude tautology — a
+    /// repro that greps the file it just edited. This catches the sophisticated
+    /// one, which survived that screen because it genuinely runs code:
+    ///
+    ///     the model rewrites `src/parser.rs`, inline `#[cfg(test)]` module and
+    ///     all, then offers `cargo test --quiet --lib` as its repro.
+    ///
+    /// `--lib` runs the library target's tests, which live in `src/` — the very
+    /// tests it just authored. It passes, the loop calls the change VERIFIED,
+    /// and the repo's real suite (`cargo test --test oracle`) was never
+    /// consulted. Observed live on 2026-08-26: the engine reported "applied,
+    /// built, suite green" for a tree that did not COMPILE against the held-out
+    /// tests. A model grading itself is the exact failure this whole
+    /// verification path exists to prevent.
+    ///
+    /// It is deliberately NOT "reject narrow repros". A good repro SHOULD be
+    /// narrow and aimed at the reported symptom — `pytest tests/test_csv.py::
+    /// test_quotes` is exactly right when the model did not write that test.
+    /// The defect is not narrowness, it is who authored the scope's contents.
+    /// So this fires only when the scope the repro selects resolves to files
+    /// this change touched, and stays quiet otherwise. When it fires the repro
+    /// is dropped and the change earns "applied" rather than "verified" —
+    /// the same, already-safe consequence as any other discarded repro.
+    ///
+    /// Pure and total, so the whole rule is unit-tested without a repo.
+    nonisolated static func reproIsGradedByTestsThisChangeWrote(
+        _ command: String, changedPaths: [String]
+    ) -> String? {
+        let changedTestPaths = changedPaths.filter { path in
+            let lowered = path.lowercased()
+            return lowered.contains("test") || lowered.contains("spec")
+        }
+
+        // 1. The repro names a test file this change itself created or edited.
+        //    Covers every ecosystem at once, because naming the file is how a
+        //    test runner is pointed at one.
+        for path in changedTestPaths where !path.isEmpty {
+            if command.contains(path) {
+                return "it is graded by \(path), a test file this change wrote"
+            }
+            let basename = (path as NSString).lastPathComponent
+            if basename.count >= 5 && command.contains(basename) {
+                return "it is graded by \(basename), a test file this change wrote"
+            }
+        }
+
+        // 2. Rust's inline tests. `cargo test --lib` / `--bins` / `--bin NAME` /
+        //    `--doc` all select targets whose tests live INSIDE `src/`, so a
+        //    change that touched `src/*.rs` authored the tests being run.
+        let words = command.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+        if words.contains("cargo") {
+            let inlineTargetFlags = ["--lib", "--bins", "--bin", "--doc"]
+            if words.contains(where: { inlineTargetFlags.contains($0) }),
+               let changedSource = changedPaths.first(where: {
+                   $0.hasSuffix(".rs") && ($0.hasPrefix("src/") || $0.contains("/src/"))
+               }) {
+                return "it runs only the inline tests in the crate's own source "
+                    + "(\(changedSource) is part of this change), not the repository's test suite"
+            }
+            // 3. `cargo test --test NAME` where `tests/NAME.rs` is in the change.
+            if let testFlagIndex = words.firstIndex(of: "--test"),
+               testFlagIndex + 1 < words.count {
+                let targetName = words[testFlagIndex + 1]
+                if changedPaths.contains(where: { $0.hasSuffix("tests/\(targetName).rs") }) {
+                    return "it is graded by the tests/\(targetName).rs target, which this change wrote"
+                }
+            }
+        }
+
+        return nil
     }
 
     /// The change's touched paths — tracked changes against HEAD plus untracked
@@ -1857,24 +2164,58 @@ final class MaintainTierCFixer {
     run automatically after you say DONE; you do not run them yourself.
     """
 
+    /// The on-demand BUG-FIX system prompt.
+    ///
+    /// It exists as a near-copy of `bugFixSystemPrompt` above rather than a
+    /// tweak to it because that one is the CRASH path's prompt, kept
+    /// byte-for-byte since before the on-demand generalization, and whether the
+    /// crash path adopts the file-edit protocol is an open product decision.
+    ///
+    /// The one substantive difference is the sentence this prompt does NOT
+    /// carry. The shared original said "Read files, grep, and edit in place —
+    /// heredocs do NOT work in this sandbox, so write files some other way",
+    /// whose only unrejected reading is `sed -i` or `printf >` — the exact
+    /// shell surgery `onDemandFileEditPromptAddendum` was added to stop, and
+    /// which its own comment calls "the fix for the 56-step sed-surgery dogfood
+    /// failure". A live model then had to resolve two sections of its own
+    /// prompt against each other and happened to prefer the later one. A model
+    /// that prefers the earlier one lands squarely in the documented failure.
+    /// So here the shell is read-only from the first sentence, and the file
+    /// channel is the addendum's alone to describe.
+    private static let onDemandBugFixSystemPrompt = """
+    You are fixing a bug in a local checkout of an open-source app. You work \
+    in a sandbox: writes are confined to this repository, and there is NO \
+    network — so you cannot fetch anything or run a build that downloads \
+    dependencies. Explore and edit only.
+
+    The jailed shell is for READING — `cat`, `grep`, `ls`, `find`, `sed -n` to \
+    view. It is NOT how you change files; the edit blocks described below are, \
+    and Iris applies them for you. Make the SMALLEST change that fixes the \
+    reported problem — do not refactor, do not touch unrelated files, do not \
+    weaken or delete tests. When you believe the bug is fixed, reply with DONE \
+    on its own line. A verification build and the full test suite run \
+    automatically after you say DONE; you do not run them yourself.
+    """
+
     /// The system prompt for an on-demand feature request. Same jail and DONE
     /// mechanics; the standard is "implement the smallest version of the
-    /// requested feature", not "fix the reported problem".
+    /// requested feature", not "fix the reported problem". Carries the same
+    /// read-only-shell wording as `onDemandBugFixSystemPrompt`, and for the
+    /// same reason.
     private static let featureSystemPrompt = """
     You are adding a small, user-requested feature to a local checkout of an \
     open-source app. You work in a sandbox: writes are confined to this \
     repository, and there is NO network — so you cannot fetch anything or run \
     a build that downloads dependencies. Explore and edit only.
 
-    Each turn, reply with EXACTLY ONE command in a ```bash fenced block, and \
-    nothing else. Read files, grep, and edit in place — heredocs do NOT work \
-    in this sandbox, so write files some other way. Make the SMALLEST change \
-    that implements the requested \
-    feature — follow the app's existing patterns, do not refactor unrelated \
-    code, do not touch files the feature does not need, and do not weaken or \
-    delete tests. When you believe the feature is implemented, reply with \
-    DONE on its own line and nothing else. A verification build and the full \
-    test suite run automatically after you say DONE; you do not run them \
+    The jailed shell is for READING — `cat`, `grep`, `ls`, `find`, `sed -n` to \
+    view. It is NOT how you change files; the edit blocks described below are, \
+    and Iris applies them for you. Make the SMALLEST change that implements \
+    the requested feature — follow the app's existing patterns, do not \
+    refactor unrelated code, do not touch files the feature does not need, and \
+    do not weaken or delete tests. When you believe the feature is \
+    implemented, reply with DONE on its own line. A verification build and the \
+    full test suite run automatically after you say DONE; you do not run them \
     yourself.
     """
 
@@ -1938,6 +2279,12 @@ final class MaintainTierCFixer {
     the replacement lines
     >>>>>>> REPLACE
     ```
+
+    If the file you are writing CONTAINS a line that is three backticks on its \
+    own (a Markdown file with code samples in it, for instance), open and close \
+    that block with FOUR backticks instead of three — a three-backtick block \
+    ends at the first bare three-backtick line inside it, and the rest of your \
+    file would be silently cut off.
 
     You may put several write/edit blocks in ONE reply (they need no output \
     between them) — but never mix them with a ```bash command in the same \
@@ -2008,6 +2355,189 @@ final class MaintainTierCFixer {
     or safeguards the complaint did not ask for.
     """
 
+    /// The verification vocabulary this run will be judged by. Precedence:
+    ///   1. an explicit test override (the adversarial harness's seam) — wins,
+    ///      so the existing engine tests keep exercising exactly what they pass.
+    ///   2. the derived Feature-Engine recipe's build/test — on-demand, when it
+    ///      resolved something the coarse per-stack default would have missed.
+    ///      This is what retires the "unknown stack" refusal for real repos.
+    ///   3. the code-authored VerificationCommands.defaults — the crash path's
+    ///      unchanged source, and the on-demand fallback when the recipe found
+    ///      nothing (never DOWNGRADE a working default to an empty recipe).
+    ///
+    /// Factored out of the verify step because it is now needed TWICE: once
+    /// before the first model call, so the opening turn can state what will
+    /// judge the change, and once at the verify step itself. Two copies of a
+    /// three-tier precedence rule is exactly how the two come to disagree.
+    static func resolvedVerificationCommands(
+        override: VerificationCommands?,
+        appStack: BreakAppStack,
+        repoRootPath: String,
+        derivedRecipe: RepoRecipe?
+    ) -> VerificationCommands {
+        if let override { return override }
+        let stackDefaults = VerificationCommands.defaults(for: appStack, repoRootPath: repoRootPath)
+        guard let derivedRecipe else { return stackDefaults }
+        let recipeCommands = verificationCommands(fromDerivedRecipe: derivedRecipe)
+        if recipeCommands.buildCommand != nil || recipeCommands.testCommand != nil {
+            return recipeCommands
+        }
+        return stackDefaults
+    }
+
+    /// What this jail actually is, stated from the loop's OWN resolved state.
+    ///
+    /// Everything else in the opening turn is a heuristic about the REPO — a
+    /// symbol map, a README grep, a runtime-shape guess. None of it describes
+    /// the RUN, and the loop knew every fact below before its first model call
+    /// while telling the model none of them. Four costs, each observed:
+    ///
+    ///   - `.git` is moved aside for the whole run (see the strip below) and
+    ///     nothing said so. A run spent a step on
+    ///     `git log --all -- keys/pubkeys.json` and got `fatal: not a git
+    ///     repository (or any of the parent directories)` — an error whose
+    ///     wording actively misleads, since it reads as "your cwd is wrong".
+    ///     Reproduced on both runs of that task. Meanwhile the loop's own
+    ///     plumbing reaches the backup fine, so history is available to
+    ///     everyone except the model.
+    ///   - The model is judged by a test command it was never shown. The doc
+    ///     excerpt quoted a README's `## Build` and stopped; the run then
+    ///     verified with `npm test` from `## Test`.
+    ///   - `onDemandBuildScriptConstraintAddendum` forbids EDITING build files.
+    ///     A run read it as a constraint on reading and turned its file list
+    ///     into grep exclusions verbatim — so package.json, which held the very
+    ///     test command the excerpt had withheld, stayed invisible for six of
+    ///     seven steps.
+    ///   - A step went to `rg`, which is not installed.
+    ///
+    /// Every one of those is the same shape: a constraint enforced by code and
+    /// never mirrored into the prompt, because each was added where it was
+    /// implemented. One section, owned by the loop and populated from the
+    /// loop's own state, is the only arrangement in which adding a constraint
+    /// without declaring it looks wrong.
+    ///
+    /// Sent on BOTH paths. Nothing here is protocol — it is a description of
+    /// the sandbox the crash path runs in just as much as the on-demand one,
+    /// and the `.git` strip that motivated it is shared code.
+    nonisolated static func sandboxContractSection(
+        buildCommand: String?, testCommand: String?
+    ) -> String {
+        """
+        YOUR ENVIRONMENT, stated exactly — these are facts about this run, not \
+        guesses from its documentation:
+        - Git history is NOT available. Iris moved `.git` aside for the \
+        duration of this run, so every git command fails with "not a git \
+        repository" no matter which directory you are in. The files on disk are \
+        the whole of the evidence.
+        - There is no network, and `rg` is not installed. Read and search with \
+        `grep`, `sed -n`, `cat`, `find`, `ls`, `head`, `tail`.
+        - You may freely READ and grep build files — package.json, Cargo.toml, \
+        Makefile, CMakeLists.txt and the rest. They often hold the scripts and \
+        entry points that explain how the app runs. The hard constraint on them \
+        is only on EDITING.
+        - After you say DONE, Iris runs exactly this and nothing else: \
+        build `\(buildCommand ?? "(none — this repo has no build step Iris could resolve)")`, \
+        test `\(testCommand ?? "(none — this repo has no test suite Iris could resolve)")`. \
+        That is what will judge your change.
+        """
+    }
+
+    // MARK: - Runtime steers, derived from the reply contract
+
+    // Every sentence the loop writes back to the model to say "here is what
+    // you may do next" is built HERE, from `onDemandReplyFormatRecap`'s
+    // move list, rather than hand-written at the six places a turn is
+    // appended.
+    //
+    // Hand-writing them is what happened first, and they drifted apart exactly
+    // as separately-maintained restatements of one contract always do. Measured
+    // over a six-task edit battery: not one of the 28 runtime turns mentioned
+    // ```write or ```edit — the only per-step reminders on offer were "Next
+    // command, or DONE." and "Continue, or DONE when the fix is complete." —
+    // while five of the five steps that actually changed a file were steps
+    // where the model's correct move was named by neither. Worse, the
+    // DONE-without-changes steer, whose whole job is to extract an edit from a
+    // stalled model, told it to "make the edit now — one ```bash command per
+    // reply", which is the `sed`-surgery failure the file-edit channel exists
+    // to prevent, prescribed by the one turn most likely to be read.
+    //
+    // THE CRASH PATH KEEPS ITS EXACT WORDING. `systemPrompt(for:)` hands
+    // `.crashFix` the bare `bugFixSystemPrompt` — no file-edit addendum, no
+    // reply-format recap — so a steer naming ```write/```edit would point it at
+    // a protocol it was never taught. Whether the crash path should adopt that
+    // protocol is an open product decision, and it is deliberately not made
+    // here; every function below carries the same `.crashFix` branch returning
+    // the sentence that path has always been sent.
+
+    /// What the model may legally do next, in one sentence. The `DONE` move
+    /// appears only once at least one file has actually changed, because DONE
+    /// before that is not a legal move — the loop rejects it — and a steer that
+    /// offers an illegal move invites the reply it is trying to prevent. A bug
+    /// fix's DONE carries the repro ask WITH IT, at the moment of the decision:
+    /// the repro is offered once, five sections deep in an ~8,800-character
+    /// system prompt, and across four identical opportunities with the same
+    /// model the offer was taken once. The difference between telling a reader
+    /// "Verified" and "Applied" should not be model volunteerism.
+    nonisolated static func nextMoveLine(
+        task: MaintainEditTask, theModelHasEditedTheTree: Bool
+    ) -> String {
+        if case .crashFix = task { return "Next command, or DONE." }
+        var moves = [
+            "```write/```edit block(s) to change files",
+            "ONE ```bash read/search command",
+        ]
+        if theModelHasEditedTheTree {
+            if case .onDemand(_, .bugFix) = task {
+                moves.append(
+                    "DONE — and if a headless check of the reported symptom is possible, "
+                    + "put it in ONE ```repro block before the DONE line; that is what earns "
+                    + "\"verified\" instead of \"applied\""
+                )
+            } else {
+                moves.append("DONE")
+            }
+        }
+        moves.append("BLOCKED: <why>")
+        return "Next: " + moves.joined(separator: ", or ") + "."
+    }
+
+    /// The steer for a DONE that arrived with nothing changed. The one steer
+    /// whose entire job is getting an edit out of a stalled model, so it names
+    /// the edit channel and nothing else.
+    nonisolated static func doneWithoutAnyChangeSteer(task: MaintainEditTask) -> String {
+        if case .crashFix = task {
+            return "You replied DONE but no file in the repository has changed. If the fix is in this repository, make the edit now — one ```bash command per reply, and you will see each command's output before the next. If the cause is NOT in this repository, or you need a fact only the user has, reply BLOCKED: <why> instead. Do not reply DONE again without a change."
+        }
+        return "You replied DONE but no file in the repository has changed. If the fix is in "
+            + "this repository, make the edit now — send the ```write or ```edit block(s) that "
+            + "change it, and Iris will apply them. If the cause is NOT in this repository, or "
+            + "you need a fact only the user has, reply BLOCKED: <why> instead. Do not reply "
+            + "DONE again without a change."
+    }
+
+    /// The steer for a reply that carried no move the loop can act on.
+    nonisolated static func noActionableReplySteer(
+        task: MaintainEditTask, theModelHasEditedTheTree: Bool
+    ) -> String {
+        if case .crashFix = task {
+            return "Reply with exactly one ```bash fenced command, or DONE on its own line."
+        }
+        return "That reply carried nothing Iris can act on. "
+            + nextMoveLine(task: task, theModelHasEditedTheTree: theModelHasEditedTheTree)
+    }
+
+    /// The steer for a command the model has already run verbatim this run.
+    nonisolated static func repeatedCommandSteer(
+        task: MaintainEditTask, theModelHasEditedTheTree: Bool
+    ) -> String {
+        if case .crashFix = task {
+            return "You already ran that exact command earlier and its result has not changed. Run a DIFFERENT command that makes progress, or reply DONE."
+        }
+        return "You already ran that exact command earlier and its result has not changed, so "
+            + "it was not run again. Do something different. "
+            + nextMoveLine(task: task, theModelHasEditedTheTree: theModelHasEditedTheTree)
+    }
+
     /// The system prompt. `additionalOnDemandSections` are extra on-demand
     /// sections the coordinator injects per run (the diagnostic probe
     /// vocabulary; a memory of prior runs on this app) — the fixer stays the
@@ -2020,7 +2550,7 @@ final class MaintainTierCFixer {
         case .crashFix:
             return bugFixSystemPrompt
         case .onDemand(_, .bugFix):
-            return ([bugFixSystemPrompt, onDemandNarrationPromptAddendum,
+            return ([onDemandBugFixSystemPrompt, onDemandNarrationPromptAddendum,
                      onDemandBuildScriptConstraintAddendum,
                      onDemandFileEditPromptAddendum,
                      MaintainManifestApplier.modelFacingProtocolPromptAddendum,
@@ -2084,9 +2614,18 @@ final class MaintainTierCFixer {
         runtimeShapePreflightAddendum: String?,
         runtimeLogContext: String? = nil,
         hasAttachedWindowScreenshot: Bool = false,
-        buildAndInstallDocExcerpt: String? = nil
+        buildAndInstallDocExcerpt: String? = nil,
+        sandboxContractSection: String? = nil
     ) -> String {
         var sections: [String] = [baseOpeningMessage(appSlug: appSlug, task: task)]
+
+        // Right after the task, ahead of every heuristic: what the run IS,
+        // before anything guessed about the repo. A model that reaches the
+        // repo map without knowing git is gone will still spend a step finding
+        // that out.
+        if let sandboxContractSection, !sandboxContractSection.isEmpty {
+            sections.append(sandboxContractSection)
+        }
 
         // Runtime evidence from the RUNNING app, gathered the moment the run
         // started — the observations the agent used to have to deduce cold.
@@ -2179,26 +2718,129 @@ final class MaintainTierCFixer {
         }
     }
 
+    /// One fenced block found in a reply: its tag, its body, and — the part
+    /// that makes this the ONE scanner rather than merely the first of several
+    /// — the full span it occupies in the reply, opening fence through closing
+    /// fence. A consumer that needs to REMOVE blocks (the narration extractor)
+    /// can then do it from this scan instead of writing a second, subtly
+    /// different one of its own.
+    nonisolated struct FencedBlockInReply: Sendable {
+        let tag: String
+        let body: String
+        /// Opening backtick run through closing backtick run, inclusive.
+        let span: Range<String.Index>
+        /// False for a block whose fence was never closed — the model's reply
+        /// was cut off mid-block. Its body is everything to the end of the
+        /// reply. The command/repro/manifest parsers ignore these (an
+        /// unterminated block is not a complete instruction); the narration
+        /// extractor still strips them, because half a write block is exactly
+        /// as unfit to show a reader as a whole one.
+        let isTerminated: Bool
+    }
+
     /// Every ``` fenced block in a reply, as (tag, body) pairs in order — the
     /// tag is the word right after the opening fence ("bash", "repro",
-    /// "manifest", or "" for an untagged fence). One scanner so the command
-    /// parser, the repro parser, and the manifest parser can never disagree
-    /// about where a block starts and ends.
+    /// "manifest", "write"/"edit", or "" for an untagged fence). One scanner so
+    /// the command parser, the repro parser, and the manifest parser can never
+    /// disagree about where a block starts and ends.
+    ///
+    /// Unterminated blocks are omitted here: every caller of this overload is
+    /// asking "what complete instruction did the model give me", and an
+    /// unclosed fence is not one. `fencedBlocksWithSpans` keeps them.
     nonisolated static func fencedBlocks(in reply: String) -> [(tag: String, body: String)] {
-        var blocks: [(tag: String, body: String)] = []
-        var searchStart = reply.startIndex
-        while let openingFence = reply.range(of: "```", range: searchStart..<reply.endIndex) {
-            let afterOpening = reply[openingFence.upperBound...]
-            // The tag runs to the first newline (or whitespace); an untagged
-            // fence has an empty tag.
-            let tagEnd = afterOpening.firstIndex(where: { $0.isNewline || $0 == " " }) ?? afterOpening.endIndex
-            let tag = String(afterOpening[..<tagEnd]).trimmingCharacters(in: .whitespaces)
-            let bodyStart = tagEnd < afterOpening.endIndex ? afterOpening.index(after: tagEnd) : tagEnd
-            guard let closingFence = reply.range(of: "```", range: bodyStart..<reply.endIndex) else { break }
-            let body = String(reply[bodyStart..<closingFence.lowerBound])
+        fencedBlocksWithSpans(in: reply)
+            .filter { $0.isTerminated }
+            .map { (tag: $0.tag, body: $0.body) }
+    }
+
+    /// The scan itself. Fences are matched by BACKTICK-RUN LENGTH: an opening
+    /// run of N backticks is closed only by a run of at least N. Three-backtick
+    /// blocks behave exactly as they always did, and the longer form becomes a
+    /// real delimiter — which matters for the file-edit channel, where the
+    /// content being written can itself legally contain a bare ``` and would
+    /// otherwise terminate its own block.
+    ///
+    /// The boundary rules themselves are NOT defined here. They live in
+    /// `MaintainFileEditApplier.fencedBlockBoundaryRules`, because this scanner
+    /// and that applier both need the answer and used to each carry their own:
+    /// this one closed a block on a long-enough backtick run ANYWHERE on a line,
+    /// the applier required a line that was backticks only. So the two disagreed
+    /// about where a malformed block ended, and the reader saw half a write
+    /// block inside the narration line that is supposed to be Iris's own words.
+    /// This scan was moved onto the applier's stricter rule rather than the
+    /// reverse: a fence that opens mid-sentence is far likelier to be prose
+    /// about code than a block, and the applier is the one that writes files.
+    ///
+    /// Line-based for that reason, but it still reports `String.Index` spans,
+    /// so `narrationText` can excise exactly the block and nothing else.
+    nonisolated static func fencedBlocksWithSpans(in reply: String) -> [FencedBlockInReply] {
+        // One pass to get each line with the index it starts at, so a line-based
+        // scan can still speak in the spans the narration extractor needs.
+        var lineTexts: [String] = []
+        var lineStarts: [String.Index] = []
+        var cursor = reply.startIndex
+        while true {
+            lineStarts.append(cursor)
+            if let newline = reply[cursor...].firstIndex(of: "\n") {
+                lineTexts.append(String(reply[cursor..<newline]))
+                cursor = reply.index(after: newline)
+            } else {
+                lineTexts.append(String(reply[cursor...]))
+                break
+            }
+        }
+
+        typealias Rules = MaintainFileEditApplier.fencedBlockBoundaryRules
+        var blocks: [FencedBlockInReply] = []
+        var index = 0
+        while index < lineTexts.count {
+            let openingRun = Rules.openingRunLength(of: lineTexts[index])
+            guard openingRun > 0 else { index += 1; continue }
+
+            // The tag is the first whitespace-delimited word after the run —
+            // "bash", "repro", "manifest", "write"/"edit", or "" for a bare
+            // fence. The path on a ```write line is deliberately NOT part of it.
+            let trimmedOpening = lineTexts[index].trimmingCharacters(in: .whitespaces)
+            let tag = String(trimmedOpening.dropFirst(openingRun))
+                .trimmingCharacters(in: .whitespaces)
+                .components(separatedBy: " ").first ?? ""
+
+            var closingLine: Int?
+            var scan = index + 1
+            while scan < lineTexts.count {
+                if Rules.isClosingFence(lineTexts[scan], minimum: openingRun) {
+                    closingLine = scan
+                    break
+                }
+                scan += 1
+            }
+
+            let bodyEnd = closingLine ?? lineTexts.count
+            let body = lineTexts[(index + 1)..<bodyEnd]
+                .joined(separator: "\n")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            blocks.append((tag: tag.lowercased(), body: body))
-            searchStart = closingFence.upperBound
+
+            if let closingLine {
+                // Through the end of the closing fence's line, so excising the
+                // span cannot leave a stray newline behind in the narration.
+                let spanEnd = closingLine + 1 < lineStarts.count
+                    ? lineStarts[closingLine + 1] : reply.endIndex
+                blocks.append(FencedBlockInReply(
+                    tag: tag.lowercased(),
+                    body: body,
+                    span: lineStarts[index]..<spanEnd,
+                    isTerminated: true
+                ))
+                index = closingLine + 1
+            } else {
+                blocks.append(FencedBlockInReply(
+                    tag: tag.lowercased(),
+                    body: body,
+                    span: lineStarts[index]..<reply.endIndex,
+                    isTerminated: false
+                ))
+                break
+            }
         }
         return blocks
     }

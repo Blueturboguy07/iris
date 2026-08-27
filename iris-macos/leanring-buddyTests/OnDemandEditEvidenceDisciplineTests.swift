@@ -94,6 +94,53 @@ import Testing
         #expect(shown.count < raw.count)
     }
 
+    /// The elision marker has to be something the model can ACT on. It used to
+    /// report "N characters of the middle omitted — re-read a specific range
+    /// with `sed -n 'A,Bp' <file>`", which asks for line coordinates and hands
+    /// over a character count: nothing in the message could be pasted, and a
+    /// model had to guess a line range from a byte total. Now the cut is made
+    /// on line boundaries and named in lines, and the ranges the model HAS seen
+    /// are stated so it knows what it is missing rather than only that
+    /// something is.
+    @Test("an elision names the omitted LINES, not a character count")
+    func elisionIsLineAddressed() {
+        let raw = (1...400)
+            .map { "line \($0) ————————————————————" }
+            .joined(separator: "\n")
+        let shown = MaintainTierCFixer.outputForModel(raw)
+
+        #expect(shown.contains("lines "))
+        #expect(shown.contains("You have seen lines 1–"))
+        #expect(shown.contains("sed -n "))
+        #expect(!shown.contains("characters of the middle omitted"))
+        // The recovery range must be real: the first omitted line is the one
+        // right after the last line actually shown.
+        #expect(shown.hasPrefix("line 1 "))
+        #expect(shown.hasSuffix("line 400 ————————————————————"))
+        // And it must say the line numbers belong to the OUTPUT, because a
+        // command that cats several files produces one output whose numbering
+        // maps onto no single file.
+        #expect(shown.contains("more than one"))
+    }
+
+    /// The runner clips output before the loop ever sees it. When it does, the
+    /// loop must say so rather than presenting the surviving tail's first
+    /// characters as the start of the output — which is exactly what the
+    /// "head + [middle omitted] + tail" marker did while sitting on top of a
+    /// second, silent truncator.
+    @Test("output the runner already clipped is reported as clipped")
+    func aRunnerDropIsDeclaredNotAbsorbed() {
+        let shown = MaintainTierCFixer.outputForModel(
+            "the surviving tail", bytesDroppedBeforeThisOutput: 40_000
+        )
+        #expect(shown.contains("40000"))
+        #expect(shown.contains("the END of its output"))
+        #expect(shown.hasSuffix("the surviving tail"))
+        // Nothing dropped means nothing said — a short output is still passed
+        // through byte for byte.
+        #expect(MaintainTierCFixer.outputForModel("hello", bytesDroppedBeforeThisOutput: 0) == "hello")
+    }
+
     // MARK: - The repo's own build instructions reach the model
 
     @Test("the README section that names the trap is quoted")
@@ -129,6 +176,43 @@ import Testing
         #expect(excerpt.contains("can drop TCC grants"))
         // The section ends at the next same-depth heading.
         #expect(!excerpt.contains("MIT."))
+    }
+
+    /// The model is JUDGED by the repo's test command, so the repo's own words
+    /// about testing have to reach it. `wantedHeadingWords` used to list
+    /// build/install/develop/running/setup/getting-started and no form of the
+    /// word "test", so a README with a `## Build` and a `## Test` section
+    /// quoted the first, stopped, and left the model to guess at the command
+    /// its change would actually be verified with.
+    @Test("a README Test section is quoted alongside its Build section")
+    func quotesTheTestSectionToo() throws {
+        let root = NSTemporaryDirectory() + "iris-doc-excerpt-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(
+            atPath: root, withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        try """
+        # csvlite
+
+        ## Build
+
+            npm run build
+
+        ## Test
+
+            npm test
+
+        ## License
+
+        MIT.
+        """.write(toFile: root + "/README.md", atomically: true, encoding: .utf8)
+
+        let excerpt = try #require(
+            MaintainTierCFixer.buildAndInstallDocExcerpt(repoRootPath: root)
+        )
+        #expect(excerpt.contains("npm run build"))
+        #expect(excerpt.contains("npm test"))
     }
 
     @Test("a repo with no build documentation yields nothing rather than noise")

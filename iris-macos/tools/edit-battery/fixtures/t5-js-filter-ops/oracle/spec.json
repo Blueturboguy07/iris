@@ -1,0 +1,7 @@
+{
+  "editable": ["src/operators.js", "src/filter.js", "test/regression.test.js", "docs/FILTERS.md", "README.md"],
+  "drop": [{ "from": "drop/oracle.test.js", "to": "oracle.test.js" }],
+  "command": "node --test oracle.test.js",
+  "f2p": ["F2P *"],
+  "p2p": ["P2P *"]
+}

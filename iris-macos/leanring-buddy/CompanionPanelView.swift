@@ -61,6 +61,15 @@ struct CompanionPanelView: View {
     /// The one-line result of the last "Import from Claude Code" attempt.
     @State private var claudeCodeImportMessage: String?
 
+    /// The interactive `codex login` session — the OpenAI-side sibling of the
+    /// Claude one above. Same pty machinery, different success oracle (the CLI's
+    /// credential file rather than a token scraped from the output).
+    @StateObject private var codexSignInSession = CodexCLISignInSession()
+    /// Whether the inline `codex login` terminal is showing.
+    @State private var isShowingCodexSignIn = false
+    /// What the reader types into the inline Codex terminal.
+    @State private var codexSignInInput: String = ""
+
     init(companionManager: CompanionManager) {
         self.companionManager = companionManager
         _accountService = ObservedObject(wrappedValue: companionManager.accountService)
@@ -883,7 +892,12 @@ struct CompanionPanelView: View {
             if isShowingClaudeCodeSetup {
                 claudeCodeSetupInlineView
             }
+            codexLoginRows
+            if isShowingCodexSignIn {
+                codexSignInInlineView
+            }
         }
+        .onAppear { accountService.refreshCodexLoginState() }
     }
 
     // MARK: Claude Code CLI login
@@ -1029,6 +1043,158 @@ struct CompanionPanelView: View {
             }
             NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
         }
+    }
+
+    // MARK: Codex CLI login
+
+    @ViewBuilder
+    private var codexLoginRows: some View {
+        if accountService.hasConnectedCodexLogin {
+            HStack(spacing: 8) {
+                Image(systemName: "terminal.fill")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(DS.Colors.textTertiary)
+
+                Text(accountService.codexLoginState == .signedInWithAPIKey
+                     ? "Connected via Codex (API key)"
+                     : "Connected via Codex")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+
+                Spacer()
+
+                Button(action: { accountService.disconnectCodexLogin() }) {
+                    Text("Disconnect")
+                }
+                .irisTextButton(fontSize: 10, isDanger: true)
+            }
+        } else if accountService.codexLoginState == .codexNotInstalled {
+            Text("Codex isn't installed where Iris can find it. Install it with `npm i -g @openai/codex` to use your ChatGPT account for app editing.")
+                .font(.system(size: 10))
+                .foregroundColor(DS.Colors.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                Button(action: { startCodexSignIn() }) {
+                    Text("Sign in with Codex")
+                }
+                .irisTinyButton()
+
+                Text("Uses your ChatGPT account through the Codex CLI, which keeps the credential itself — Iris never stores it. Powers app editing, not chat. A ChatGPT subscription used by a third-party app is a gray area and can be rate-limited; a pasted key is the unambiguous option.")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// The inline `codex login` terminal. Inline for the same reason the Claude
+    /// one is: the menu-bar panel is a non-activating NSPanel where a SwiftUI
+    /// sheet does not reliably present.
+    private var codexSignInInlineView: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            switch codexSignInSession.phase {
+            case .codexNotFound:
+                Text("Iris couldn't find the `codex` command. Install it with `npm i -g @openai/codex` and try again.")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.destructiveText)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .running:
+                Text("Complete the sign-in Codex opened in your browser. Iris is watching for it to land.")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .connected:
+                Text("Connected! Iris will use your Codex login for app editing.")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.success)
+            case .finishedWithoutLogin:
+                Text("That finished without signing in. Try again, or paste an API key above.")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.destructiveText)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .failed(let reason):
+                Text(reason)
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.destructiveText)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .idle:
+                EmptyView()
+            }
+
+            if !codexSignInSession.visibleTranscript.isEmpty {
+                ScrollView {
+                    Text(codexSignInSession.visibleTranscript)
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(height: 130)
+                .padding(8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(DS.Colors.surfaceRaised)
+                )
+            }
+
+            if codexSignInSession.isRunning {
+                HStack(spacing: 8) {
+                    TextField("Type here if the CLI asks for input…", text: $codexSignInInput)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11))
+                        .foregroundColor(DS.Colors.ink)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(DS.Colors.surfaceRaised)
+                        )
+                        .onSubmit { sendCodexSignInInput() }
+
+                    Button(action: { sendCodexSignInInput() }) {
+                        Text("Send")
+                    }
+                    .irisTinyButton()
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button(action: { endCodexSignIn() }) {
+                    Text(codexSignInSession.isRunning ? "Cancel" : "Done")
+                }
+                .irisTextButton(fontSize: 10)
+            }
+        }
+        .onChange(of: codexSignInSession.phase) { _, _ in
+            accountService.refreshCodexLoginState()
+            NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+        }
+    }
+
+    private func startCodexSignIn() {
+        isShowingCodexSignIn = true
+        codexSignInSession.start()
+        NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+    }
+
+    private func sendCodexSignInInput() {
+        let trimmed = codexSignInInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            codexSignInSession.sendReturn()
+            return
+        }
+        codexSignInSession.sendLine(trimmed)
+        codexSignInInput = ""
+    }
+
+    private func endCodexSignIn() {
+        codexSignInSession.cancel()
+        isShowingCodexSignIn = false
+        codexSignInInput = ""
+        accountService.refreshCodexLoginState()
+        NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
     }
 
     private func startClaudeCodeSetup() {

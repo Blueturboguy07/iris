@@ -128,7 +128,19 @@ import Testing
         #expect(!symbolNames.contains("func"))
     }
 
-    @Test func typeScriptDeclarationsCaptureInterfaceTypeClassEnumButNotFunctionKeyword() {
+    /// TypeScript captures interface/type/class/enum AND the two forms a real
+    /// TS or JS file actually declares functions with.
+    ///
+    /// This test used to assert the opposite — that `function notCaptured()`
+    /// and `const arrow = () => {}` were deliberately NOT captured, on the
+    /// grounds that the plan's keyword list said `func`, not `function`. That
+    /// reasoning held right up until it met a JavaScript file: a repo that
+    /// declares everything with plain `function` yielded zero symbols per file,
+    /// every file was dropped as empty, `summarize` returned "", and the whole
+    /// repo-map section vanished from the opening turn with nothing to say it
+    /// had been attempted. It is the map's most important omission, not its
+    /// intended behaviour, and this test was pinning it in place.
+    @Test func typeScriptCapturesInterfaceTypeClassEnumAndBothFunctionForms() {
         let typeScriptSource = """
         export interface CompanionProps {
           title: string
@@ -139,8 +151,11 @@ import Testing
         }
         type InternalAlias = number
         enum Mood { Idle }
-        function notCaptured() {}
-        const arrow = () => {}
+        function plainFunction() {}
+        export async function exportedAsyncFunction() {}
+        const arrowBinding = () => {}
+        export const typedArrow: Formatter = (value: string) => value
+        const notAFunction = (first + second) * 2
         """
 
         let symbolNames = FeatureEditRepoMap.declarationNames(
@@ -148,20 +163,23 @@ import Testing
             forLanguage: .typescript
         )
 
-        // `function`/arrow-const declarations are intentionally not captured —
-        // the plan's keyword list is `func`, not `function`, and `func` will not
-        // match inside `function` (word boundary). A method line with no keyword
-        // is not captured either.
         #expect(symbolNames == [
             "CompanionProps",
             "CompanionId",
             "CompanionManager",
             "InternalAlias",
             "Mood",
+            "plainFunction",
+            "exportedAsyncFunction",
+            "arrowBinding",
+            "typedArrow",
         ])
-        #expect(!symbolNames.contains("notCaptured"))
-        #expect(!symbolNames.contains("arrow"))
+        // A method line with no declaration keyword is still not captured (the
+        // map is top-level declarations only), and a `const` bound to an
+        // ordinary VALUE is not a declaration the map should list — the
+        // arrow-binding pattern insists on a real function on the right.
         #expect(!symbolNames.contains("method"))
+        #expect(!symbolNames.contains("notAFunction"))
     }
 
     // MARK: - Declaration extraction: Rust
@@ -299,6 +317,67 @@ import Testing
         )
 
         #expect(symbolNames == ["Repeated", "first"])
+    }
+
+    // MARK: - Declaration extraction: every language must actually yield something
+
+    /// The map's most consequential failure mode is not a wrong symbol — it is
+    /// NO symbols, because that is indistinguishable from a repo with nothing
+    /// in it. A language whose keyword list matches nothing drops every file as
+    /// empty, `summarize` returns "", and the whole "Repo map" section is
+    /// omitted from the opening turn with no indication it was ever attempted.
+    /// Measured over a six-task edit battery: the section was present for every
+    /// Python and Rust task and absent from all six JavaScript ones — and
+    /// Iris's own targets (the Windows client, publikclip, kneecap, notetion)
+    /// are Electron/TS, which is exactly where it was blind.
+    ///
+    /// So this sweeps EVERY case of `RepoMapLanguage` against a representative
+    /// file. Adding a language without a working pattern for it fails here.
+    @Test func everySupportedLanguageYieldsSymbolsForARepresentativeFile() {
+        let representativeSourceByLanguage: [RepoMapLanguage: String] = [
+            .swift: "final class Widget {\n    func render() {}\n}",
+            .typescript: "export function formatMoney(cents: number): string { return \"\" }",
+            .javascript: "function splitEvenly(total, ways) { return total / ways }",
+            .rust: "pub fn parse_row(line: &str) -> Vec<String> { vec![] }",
+            .python: "def paginate(items, size):\n    return items",
+            .go: "func Serve(port int) error { return nil }",
+        ]
+        for language in RepoMapLanguage.allCases {
+            let representativeSource = representativeSourceByLanguage[language]
+            #expect(representativeSource != nil, "no representative source for \(language.rawValue)")
+            guard let representativeSource else { continue }
+            let symbolNames = FeatureEditRepoMap.declarationNames(
+                inSourceText: representativeSource,
+                forLanguage: language
+            )
+            #expect(
+                !symbolNames.isEmpty,
+                "\(language.rawValue) extracted no symbols from a file that plainly declares one"
+            )
+        }
+    }
+
+    /// The JavaScript case end to end, through the walk and the summary rather
+    /// than the regex alone — because "" from `summarize` is what actually
+    /// reached the loop, and it reached it silently.
+    @Test func javaScriptFunctionsAndArrowBindingsReachTheSummary() throws {
+        let repoRootPath = try Self.makeFixtureRepo(files: [
+            "src/money.js": """
+            function splitEvenly(total, ways) {
+              return Math.floor(total / ways)
+            }
+
+            export const formatCents = (cents) => `$${(cents / 100).toFixed(2)}`
+
+            module.exports = { splitEvenly }
+            """,
+        ])
+        defer { try? FileManager.default.removeItem(atPath: repoRootPath) }
+
+        let summary = FeatureEditRepoMap.summarize(repoRootPath: repoRootPath)
+        #expect(summary.contains("src/money.js"))
+        #expect(summary.contains("splitEvenly"))
+        #expect(summary.contains("formatCents"))
     }
 
     // MARK: - The walk: ignore directories are never mined

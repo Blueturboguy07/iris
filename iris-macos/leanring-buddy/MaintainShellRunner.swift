@@ -27,6 +27,17 @@ struct MaintainCommandResult: Sendable {
     /// not a gigabyte of webpack progress bars.
     let outputTail: String
     let timedOut: Bool
+    /// How many bytes this runner dropped off the FRONT of the output to
+    /// produce `outputTail`. Zero means `outputTail` is the whole thing.
+    ///
+    /// It exists because a truncation nobody reports is a truncation nobody can
+    /// mention. The Tier C loop truncates a second time before showing output
+    /// to the model and marks its own cut — but it was marking a cut in a
+    /// string this runner had ALREADY silently clipped, so the "head" it
+    /// labelled as the start of the output was the start of the last 16KB of
+    /// it. Reporting the number here is what lets the only layer that talks to
+    /// the model tell the truth about both cuts.
+    let bytesDroppedBeforeTail: Int
 
     var succeeded: Bool { exitCode == 0 && !timedOut }
 }
@@ -43,7 +54,18 @@ nonisolated final class MaintainShellRunner: Sendable {
     /// Everything this runner ever touches lives under here.
     let repoRootPath: String
 
-    private static let outputTailLimit = 16_384
+    /// How much of a command's combined output survives to `outputTail`.
+    ///
+    /// Deliberately far above what any consumer keeps (the Tier C loop shows a
+    /// model 4,000 characters; verification reads the last 2,000 of a failure)
+    /// so that in the ordinary case this layer truncates NOTHING and there is
+    /// exactly one truncator in the pipeline. At 16KB it routinely became a
+    /// second, silent one: `cat` of a real 40KB source file — the on-demand
+    /// loop's most common command — was clipped here before the loop ever saw
+    /// it, so the loop's own "head + [middle omitted] + tail" marker described
+    /// a gap that was not where it said it was. When even this is exceeded the
+    /// overflow is counted into `bytesDroppedBeforeTail` rather than vanishing.
+    private static let outputTailLimit = 65_536
 
     init(repoRootPath: String) throws {
         var isDirectory: ObjCBool = false
@@ -111,10 +133,12 @@ nonisolated final class MaintainShellRunner: Sendable {
                 pipe.fileHandleForReading.readabilityHandler = nil
                 let remaining = try? pipe.fileHandleForReading.readToEnd()
                 if let remaining, !remaining.isEmpty { collector.append(remaining) }
+                let (tail, droppedByteCount) = collector.tail(limit: Self.outputTailLimit)
                 continuation.resume(returning: MaintainCommandResult(
                     exitCode: finished.terminationStatus,
-                    outputTail: collector.tail(limit: Self.outputTailLimit),
-                    timedOut: collector.didTimeOut
+                    outputTail: tail,
+                    timedOut: collector.didTimeOut,
+                    bytesDroppedBeforeTail: droppedByteCount
                 ))
             }
 
@@ -125,7 +149,8 @@ nonisolated final class MaintainShellRunner: Sendable {
                 continuation.resume(returning: MaintainCommandResult(
                     exitCode: 127,
                     outputTail: "failed to spawn: \(error.localizedDescription)",
-                    timedOut: false
+                    timedOut: false,
+                    bytesDroppedBeforeTail: 0
                 ))
             }
         }
@@ -137,13 +162,20 @@ nonisolated final class MaintainShellRunner: Sendable {
         private let lock = NSLock()
         private var buffer = Data()
         private var timedOut = false
+        /// Bytes discarded off the FRONT of the stream, across every trim.
+        private var droppedByteCount = 0
 
         func append(_ data: Data) {
             lock.lock()
             defer { lock.unlock() }
             buffer.append(data)
             if buffer.count > 1_048_576 {
-                buffer = buffer.suffix(262_144)
+                // A runaway command's output is bounded here, but the bytes
+                // dropped are COUNTED — a consumer that shows this output to a
+                // model has to be able to say that a beginning existed.
+                let keptSuffix = buffer.suffix(262_144)
+                droppedByteCount += buffer.count - keptSuffix.count
+                buffer = Data(keptSuffix)
             }
         }
 
@@ -159,11 +191,17 @@ nonisolated final class MaintainShellRunner: Sendable {
             return timedOut
         }
 
-        func tail(limit: Int) -> String {
+        /// The last `limit` bytes as text, plus how many bytes were dropped off
+        /// the front to get there — this call's own clip added to anything the
+        /// overflow trim in `append` already discarded.
+        func tail(limit: Int) -> (text: String, bytesDropped: Int) {
             lock.lock()
             defer { lock.unlock() }
             let slice = buffer.suffix(limit)
-            return String(decoding: slice, as: UTF8.self)
+            return (
+                String(decoding: slice, as: UTF8.self),
+                droppedByteCount + (buffer.count - slice.count)
+            )
         }
     }
 }

@@ -184,6 +184,17 @@ final class AccountService: ObservableObject {
     /// show the CLI-login as connected and offer disconnect.
     @Published private(set) var hasConnectedClaudeCodeLogin: Bool = false
 
+    /// Whether the reader has a usable Codex CLI login. Unlike every other flag
+    /// here, this is NOT backed by a Keychain item: Iris does not hold the Codex
+    /// credential at all (see `CodexCLILogin.swift`). It is read from the CLI's
+    /// own `auth.json`, so it can also go false without Iris doing anything —
+    /// the reader running `codex logout` in a terminal, for instance — which is
+    /// why the panel re-reads it on appear rather than trusting a cached value.
+    @Published private(set) var codexLoginState: CodexCLILogin.ConnectionState = .codexNotInstalled
+
+    /// Whether Codex is currently usable as a Tier C provider.
+    var hasConnectedCodexLogin: Bool { codexLoginState.isUsable }
+
     /// True while the BYO key field is being checked against Anthropic.
     @Published private(set) var isValidatingAnthropicAPIKey = false
 
@@ -214,6 +225,7 @@ final class AccountService: ObservableObject {
         self.urlSession = urlSession
         self.hasStoredAnthropicAPIKey = KeychainStore.hasSecret(ofKind: .anthropicAPIKey)
         self.hasConnectedClaudeCodeLogin = KeychainStore.hasSecret(ofKind: .anthropicOAuthToken)
+        self.codexLoginState = CodexCLILogin.currentState()
     }
 
     // MARK: - Restoring a previous session
@@ -670,6 +682,14 @@ final class AccountService: ObservableObject {
         if hasConnectedClaudeCodeLogin {
             return "your Claude Code login"
         }
+        // Codex is last for the same reason it is last in the Tier C resolver,
+        // and it is named as an app-editing credential rather than a chat one:
+        // chat speaks the Anthropic Messages wire format on both of its routes
+        // (`docs/iris-assistant-protocol.md` section 1), which a Codex login
+        // cannot serve. It powers app editing, which is where Tier C runs.
+        if hasConnectedCodexLogin {
+            return "your Codex login (app editing)"
+        }
         return nil
     }
 
@@ -696,6 +716,22 @@ final class AccountService: ObservableObject {
     func disconnectClaudeCodeLogin() {
         ClaudeCodeLogin.disconnect()
         refreshClaudeCodeLoginState()
+    }
+
+    // MARK: - Codex CLI login
+
+    /// Re-reads the Codex CLI's login state from disk. Cheap (one file read),
+    /// and called on panel appear because the state can change outside Iris.
+    func refreshCodexLoginState() {
+        codexLoginState = CodexCLILogin.currentState()
+    }
+
+    /// Asks the Codex CLI to forget its own login (`codex logout`), then
+    /// re-reads. Iris never deletes the credential file itself — it is the
+    /// CLI's, and the CLI is the only thing that should decide its shape.
+    func disconnectCodexLogin() {
+        CodexCLILogin.disconnect()
+        refreshCodexLoginState()
     }
 
     // MARK: - The user's own Anthropic key

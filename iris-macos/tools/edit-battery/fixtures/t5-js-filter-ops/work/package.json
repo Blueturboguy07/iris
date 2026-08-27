@@ -1,0 +1,11 @@
+{
+  "name": "filter-dsl",
+  "version": "0.9.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "The saved-view filter DSL for the reporting UI.",
+  "scripts": {
+    "build": "node --check src/filter.js && node --check src/operators.js",
+    "test": "node --test test/regression.test.js"
+  }
+}

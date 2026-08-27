@@ -1,0 +1,11 @@
+{
+  "name": "money-split",
+  "version": "1.4.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "Integer-cent money helpers for the billing service.",
+  "scripts": {
+    "build": "node --check src/money.js",
+    "test": "node --test test/regression.test.js"
+  }
+}

@@ -84,7 +84,11 @@ final class IncomingFixReviewer {
         }
         let commands = VerificationCommands.defaults(for: appStack, repoRootPath: worktreePath)
         let outcome = await VerificationHarness.verifyAppliedPatch(
-            runner: worktreeRunner, commands: commands, reproCommand: nil
+            runner: worktreeRunner, commands: commands, reproCommand: nil,
+            // The PR's change is COMMITTED in this detached worktree, so there
+            // is no uncommitted diff and there never will be. Saying so is what
+            // keeps the diff-scope gate from refusing every incoming PR.
+            expectsAnUncommittedDiff: false
         )
         irisTrace("github: re-verified PR #\(pr.number) here — clean=\(outcome.earnsCleanApply) blocked=\(outcome.blockedStage ?? "none")")
         return IncomingFixReview(

@@ -1,0 +1,7 @@
+{
+  "editable": ["src/money.js"],
+  "drop": [{ "from": "drop/oracle.test.js", "to": "oracle.test.js" }],
+  "command": "node --test oracle.test.js",
+  "f2p": ["F2P conservation", "F2P fairness", "F2P order", "F2P every worked example", "F2P integrality"],
+  "p2p": ["P2P exact divisions", "P2P argument validation", "P2P sumCents", "P2P formatCents"]
+}

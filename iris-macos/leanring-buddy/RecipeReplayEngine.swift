@@ -218,7 +218,7 @@ final class RecipeReplayEngine {
         // shared with the Tier C loop via MaintainFixCommit; only the trailer
         // VOCABULARY (a replayed/adapted recipe's honest claim) is ours.
         let provenanceWord = wasAdapted ? "adapted from" : "replayed"
-        let branchName = await MaintainFixCommit.commitOnBranch(
+        let committedBranchName = await MaintainFixCommit.commitOnBranch(
             plan: MaintainFixCommitPlan(
                 branchPrefix: "iris/fix-",
                 changeId: signatureId,
@@ -233,6 +233,16 @@ final class RecipeReplayEngine {
             ),
             runner: runner
         )
+        // A commit that did not happen must not be recorded as one. The queue,
+        // the fork push, and the reader's card all key on this branch name, and
+        // a name for a branch that carries nothing is worse than a failure —
+        // it is a failure reported as a success.
+        guard let branchName = committedBranchName else {
+            _ = try? await runner.run("git checkout -- . && git clean -fd --quiet", deadline: 120)
+            await file(outcome: false, kind: "verified", recipe: recipe)
+            irisTrace("maintain: recipe \(recipe.id) verified but the commit did not land — reverted")
+            return .patchRevertedAfterFailedVerification(blockedStage: "commit")
+        }
 
         patchQueue.record(QueuedPatch(
             recipeId: recipe.id,

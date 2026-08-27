@@ -1,0 +1,11 @@
+{
+  "name": "licensekit",
+  "version": "3.2.1",
+  "private": true,
+  "type": "commonjs",
+  "description": "Offline licence verification for the desktop app.",
+  "scripts": {
+    "build": "node --check src/license.js",
+    "test": "node --test test/regression.test.js"
+  }
+}

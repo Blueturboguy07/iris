@@ -1,0 +1,7 @@
+{
+  "editable": ["app/csvlite.py"],
+  "drop": [{ "from": "drop/oracle_test.py", "to": "oracle_test.py" }],
+  "command": "python3 -m unittest oracle_test -v",
+  "f2p": ["DoubledQuoteEscape", "RoundTrip"],
+  "p2p": ["Regression"]
+}

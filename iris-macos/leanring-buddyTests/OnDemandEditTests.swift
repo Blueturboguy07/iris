@@ -399,6 +399,44 @@ import Testing
         #expect(MaintainTierCFixer.narrationText(fromModelReply: "DONE") == nil)
     }
 
+    /// Narration must strip EVERY fenced block, not just the first.
+    ///
+    /// The old extractor removed one block with its own ad-hoc range search,
+    /// written when a reply could hold exactly one — a bash command. The
+    /// file-edit channel then explicitly invited "several write/edit blocks in
+    /// ONE reply", and what the reader saw in the line the code calls their
+    /// window into the agent became the narration followed by a raw diff, cut
+    /// off mid-hunk at the 400-character cap.
+    @Test func narrationStripsEveryFencedBlockNotJustTheFirst() {
+        let reply = """
+        Teaching the parser to preserve doubled quotes.
+        ```edit src/parser.py
+        <<<<<<< SEARCH
+        old
+        =======
+        new
+        >>>>>>> REPLACE
+        ```
+        ```edit tests/test_parser.py
+        <<<<<<< SEARCH
+        before
+        =======
+        after
+        >>>>>>> REPLACE
+        ```
+        """
+        #expect(MaintainTierCFixer.narrationText(fromModelReply: reply)
+            == "Teaching the parser to preserve doubled quotes.")
+    }
+
+    /// A reply cut off mid-block still yields clean prose: half a write block
+    /// is exactly as unfit to show a reader as a whole one.
+    @Test func narrationStripsAnUnterminatedBlockToo() {
+        let reply = "Rewriting the settings pane.\n```write ui/Settings.tsx\nexport function Settings() {"
+        #expect(MaintainTierCFixer.narrationText(fromModelReply: reply)
+            == "Rewriting the settings pane.")
+    }
+
     /// The per-file snapshot diff names writes, creations, and deletions, and
     /// an identical snapshot names nothing — the pair of facts the no-progress
     /// detector and the "Changed: …" transparency line both stand on.

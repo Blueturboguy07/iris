@@ -592,10 +592,10 @@ struct OnDemandEditCard: View {
     ///
     /// This used to rebuild the ladder here from the result enum, opening with
     /// `collectedEvidence.compileClean = true` and the evidence row "the app
-    /// built". The harness deliberately requires `commands.buildCommand != nil
-    /// && outcome.buildSucceeded` before it will call a build clean, because a
-    /// nil build command sets `buildSucceeded = true` to mean "stage absent",
-    /// not "stage green". Dropping that guard made this card assert L1 and
+    /// built". The harness deliberately requires `outcome.build == .passed`
+    /// before it will call a build clean, because a stack with no build command
+    /// leaves that stage `.notRun` — absent, not green. Dropping that guard
+    /// made this card assert L1 and
     /// print "Build: the app built" for a change nothing had ever compiled —
     /// a reader-facing claim of evidence that did not exist. It also ignored
     /// `symptomVerifiedByRepro`, so a genuinely three-leg-verified fix was

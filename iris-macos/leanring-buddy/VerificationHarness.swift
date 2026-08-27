@@ -45,14 +45,65 @@
 
 import Foundation
 
+/// What became of one verification stage. Three states, because a stage has
+/// three fates and any two-valued encoding has to conflate two of them:
+///
+///     .notRun   the stack has no such command, so nothing was attempted
+///     .passed   the command ran and exited 0
+///     .failed   the command ran and did not
+///
+/// The build stage used to be a `Bool` that was set to `true` for BOTH
+/// "passed" and "did not exist" — the comment at the assignment said, in as
+/// many words, "the stage is absent, not green" — and every downstream reader
+/// of that `true` was then reading a value that had two meanings and no way to
+/// tell them apart. Measured over an edit battery: four of five committed runs
+/// collected no evidence at all, because their stacks resolved neither a build
+/// nor a test command, and "no build" plus "no suite" added up to a clean
+/// apply. Making the absent case its own value is what stops the seventh
+/// instance of that being written next month — the compiler now asks about it
+/// at every site.
+enum VerificationStageResult: Sendable, Equatable {
+    case notRun
+    case passed
+    case failed
+}
+
 /// What one verification run proved. Serialized into the recipe pointer's
 /// `verification` jsonb and into the commit trailer block.
 struct VerificationOutcome: Sendable {
     var reproFailedBeforePatch: Bool?
     var reproPassedAfterPatch: Bool?
     var reproFailedOnRevert: Bool?
-    var buildSucceeded: Bool = false
-    var suitePassed: Bool?
+
+    /// Whether the build command ran, and how it went. `.notRun` when the
+    /// stack has no build command — which is a real and common case
+    /// (`.swiftMacOS` and `.other` both resolve to no vocabulary at all), and
+    /// is emphatically not the same thing as a green build.
+    var build: VerificationStageResult = .notRun
+
+    /// Whether the app's own full test suite ran, and how it went. `.notRun`
+    /// when the stack has no test command — honestly skipped, never a silent
+    /// green.
+    var suite: VerificationStageResult = .notRun
+
+    /// COMPATIBILITY ACCESSOR. "The build stage did not fail" — which is what
+    /// this field has always meant, absent and green alike. Every reader that
+    /// wants to know whether something actually COMPILED must ask
+    /// `build == .passed` instead; that ambiguity is precisely the defect
+    /// `VerificationStageResult` exists to remove, and this stays only so the
+    /// serialized shape and the existing readers keep their meaning.
+    var buildSucceeded: Bool { build != .failed }
+
+    /// COMPATIBILITY ACCESSOR, and an exact one: nil when the suite did not
+    /// run, true/false when it did. Unlike `buildSucceeded` this was never
+    /// ambiguous, because it was already three-valued.
+    var suitePassed: Bool? {
+        switch suite {
+        case .notRun: return nil
+        case .passed: return true
+        case .failed: return false
+        }
+    }
     /// The failing stage's output tail when the gate blocked, for the
     /// diagnosis record — never shown raw to the user.
     var blockedStage: String?
@@ -94,14 +145,32 @@ struct VerificationOutcome: Sendable {
         reproFailedBeforePatch == true
             && reproPassedAfterPatch == true
             && reproFailedOnRevert == true
-            && buildSucceeded
-            && suitePassed != false
+            && build != .failed
+            && suite != .failed
     }
 
     /// The replay standard: applied cleanly, builds, suite green — honest
     /// but weaker, and counted separately by the pool.
+    ///
+    /// DELIBERATELY UNCHANGED, and this is worth stating plainly: with both
+    /// stages `.notRun` this is still true, so a change on a stack that
+    /// resolves neither a build nor a test command still auto-commits on no
+    /// evidence whatsoever. Requiring at least one stage to have actually run
+    /// is the obviously correct gate and it is NOT applied here, because it
+    /// would refuse to auto-commit for every `.swiftMacOS` and `.other` repo —
+    /// a behaviour change a reader would feel immediately, and a product
+    /// decision that has not been made. `atLeastOneVerificationStageActuallyRan`
+    /// is the honest predicate that decision would turn on; until then the loop
+    /// records when it commits without evidence rather than refusing to.
     var earnsCleanApply: Bool {
-        buildSucceeded && suitePassed != false && blockedStage == nil
+        build != .failed && suite != .failed && blockedStage == nil
+    }
+
+    /// Whether ANY verification stage actually executed. False means this run
+    /// proved nothing: no build, no suite, no repro — an edit was made and
+    /// nothing ran it.
+    var atLeastOneVerificationStageActuallyRan: Bool {
+        build != .notRun || suite != .notRun || reproPassedAfterPatch != nil
     }
 }
 
@@ -175,7 +244,19 @@ enum VerificationHarness {
         // Optional and defaulted so every existing caller is untouched. When a
         // caller knows how this app runs, the ladder step also records the rung
         // required to auto-commit (ratified decision 5a) — data only.
-        runtimeShape: RecipeRuntimeShape? = nil
+        runtimeShape: RecipeRuntimeShape? = nil,
+        // Whether the change under verification is expected to be sitting in the
+        // working tree UNCOMMITTED. True for every path that just applied a
+        // patch — a Tier C run, a recipe replay — where an empty diff means
+        // there is nothing to vouch for and the run must not sail through.
+        //
+        // FALSE for `IncomingFixReviewer`, which verifies somebody else's fix
+        // inside `git worktree add --detach FETCH_HEAD`: there the change is
+        // COMMITTED, so `git diff HEAD` is empty by construction and always
+        // will be. Treating that as "nothing to verify" refused every incoming
+        // PR before a single build ran. The scope limits still apply — an empty
+        // diff simply stops being an error for a caller that never expected one.
+        expectsAnUncommittedDiff: Bool = true
     ) async -> VerificationOutcome {
         var outcome = VerificationOutcome()
 
@@ -184,7 +265,9 @@ enum VerificationHarness {
         // see: it deletes the failing test to go green, or it sprawls across
         // the codebase. The suite is necessary, not sufficient; this is the
         // other half. A block here is as hard as a failed leg.
-        let scope = await enforceDiffScope(runner: runner)
+        let scope = await enforceDiffScope(
+            runner: runner, expectsAnUncommittedDiff: expectsAnUncommittedDiff
+        )
         guard scope.ok else {
             return blocked(&outcome, stage: "diff-scope", tail: scope.reason ?? "diff-scope violation")
         }
@@ -232,21 +315,20 @@ enum VerificationHarness {
         // Build — always, when the stack has one.
         if let buildCommand = commands.buildCommand {
             let buildResult = try? await runner.run(buildCommand, inSubdirectory: commands.commandSubdirectory)
-            outcome.buildSucceeded = buildResult?.succeeded ?? false
-            guard outcome.buildSucceeded else {
+            outcome.build = (buildResult?.succeeded ?? false) ? .passed : .failed
+            guard outcome.build == .passed else {
                 return blocked(&outcome, stage: "build", tail: buildResult?.outputTail ?? "")
             }
-        } else {
-            // No build vocabulary for this stack: the stage is absent, not
-            // green. earnsCleanApply still requires blockedStage == nil.
-            outcome.buildSucceeded = true
         }
+        // No build vocabulary for this stack: `outcome.build` stays `.notRun`,
+        // which is now a value in its own right rather than a `true` that has
+        // to be explained in a comment.
 
         // Full suite — PASS_TO_PASS, the touched files are never enough.
         if let testCommand = commands.testCommand {
             let suiteResult = try? await runner.run(testCommand, inSubdirectory: commands.commandSubdirectory)
-            outcome.suitePassed = suiteResult?.succeeded ?? false
-            guard outcome.suitePassed == true else {
+            outcome.suite = (suiteResult?.succeeded ?? false) ? .passed : .failed
+            guard outcome.suite == .passed else {
                 return blocked(&outcome, stage: "suite", tail: suiteResult?.outputTail ?? "")
             }
         }
@@ -278,7 +360,7 @@ enum VerificationHarness {
         // carries a rung implying it was honest. Never a self-rated number —
         // FeatureEditVerificationLadder climbs strictly and stops at the first
         // missing signal, so no rung is ever claimed above its evidence.
-        let collectedEvidence = evidenceFromCollectedSignals(outcome: outcome, commands: commands)
+        let collectedEvidence = evidenceFromCollectedSignals(outcome: outcome)
         outcome.verificationEvidence = collectedEvidence
         outcome.verificationRung = FeatureEditVerificationLadder.highestEarnedRung(from: collectedEvidence)
         outcome.evidenceLog = collectedEvidence.evidenceLogLines()
@@ -297,12 +379,13 @@ enum VerificationHarness {
     /// ladder's per-signal evidence. Deliberately conservative and honest:
     ///
     ///   - L1 `compileClean` is earned ONLY when a real build command existed
-    ///     AND succeeded. The "no build vocabulary for this stack" case sets
-    ///     `buildSucceeded = true` to mean "stage absent, not failed" — that is
-    ///     not a compile, so it must not be reported as one.
+    ///     AND succeeded — which is now just `build == .passed`, because the
+    ///     stage result says so itself. It used to require cross-checking
+    ///     `commands.buildCommand != nil` against a `buildSucceeded` that meant
+    ///     "absent OR green", i.e. two sources that could disagree.
     ///   - L2 `existingSuiteGreen` is earned only when the full suite actually
-    ///     ran and was green (`suitePassed == true`); a skipped suite (nil) is
-    ///     no evidence, never a silent green.
+    ///     ran and was green (`suite == .passed`); a skipped suite is no
+    ///     evidence, never a silent green.
     ///   - L3 `newTestPasses` is earned only when the three-leg repro proved a
     ///     targeted test that failed before the patch, passed after, and failed
     ///     again on revert — a test shown to actually see the change. A replay
@@ -313,18 +396,16 @@ enum VerificationHarness {
     /// harness collects, so they remain unearned — the run reports the honest
     /// floor rather than a fabricated ceiling.
     private static func evidenceFromCollectedSignals(
-        outcome: VerificationOutcome,
-        commands: VerificationCommands
+        outcome: VerificationOutcome
     ) -> VerificationEvidence {
         var evidence = VerificationEvidence()
 
-        let aRealBuildRanAndPassed = commands.buildCommand != nil && outcome.buildSucceeded
-        if aRealBuildRanAndPassed {
+        if outcome.build == .passed {
             evidence.compileClean = true
             evidence.compileCleanEvidence = "build command exited 0"
         }
 
-        if outcome.suitePassed == true {
+        if outcome.suite == .passed {
             evidence.existingSuiteGreen = true
             evidence.existingSuiteGreenEvidence = "existing suite exited 0"
         }
@@ -401,7 +482,8 @@ enum VerificationHarness {
     /// many files or weakens tests. Uses `git diff --numstat HEAD`, so it
     /// sees exactly what the patch changed against the last commit.
     private static func enforceDiffScope(
-        runner: MaintainShellRunner
+        runner: MaintainShellRunner,
+        expectsAnUncommittedDiff: Bool
     ) async -> (ok: Bool, reason: String?) {
         guard let result = try? await runner.run("git diff --numstat HEAD", deadline: 60),
               result.succeeded else {
@@ -423,7 +505,22 @@ enum VerificationHarness {
             .filter { !$0.isEmpty } ?? []
 
         let totalFiles = lines.count + untracked.count
-        guard totalFiles > 0 else { return (true, nil) } // nothing changed
+        // An EMPTY diff is not a clean scope — it is nothing to verify. The
+        // gate used to answer "ok" here, so a run whose tree turned out to hold
+        // no change at all sailed through the scope check and on into a build
+        // and suite that were, correctly, green about the unmodified code. A
+        // gate that reports on a diff must not report "clean" about a diff that
+        // is not there.
+        //
+        // But only for a caller that EXPECTED an uncommitted diff. Reviewing a
+        // committed change in a detached worktree legitimately has none, and
+        // failing that closed refused every incoming PR outright — a whole
+        // feature broken by a check meant to protect a different one.
+        if expectsAnUncommittedDiff {
+            guard totalFiles > 0 else {
+                return (false, "the working tree has no changes to verify")
+            }
+        }
 
         if totalFiles > maximumFilesTouched {
             return (false, "touches \(totalFiles) files (\(lines.count) changed, \(untracked.count) new), over the \(maximumFilesTouched)-file limit for one fix")

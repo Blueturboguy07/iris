@@ -66,23 +66,60 @@ nonisolated enum RepoMapLanguage: String, Sendable, CaseIterable {
     }
 
     /// The declaration keywords whose following identifier the map captures, per
-    /// plan §6. Swift/TS/JS deliberately share one set (`func|class|struct|enum|
-    /// interface|type`): a Swift file simply never contains `interface`/`type`,
-    /// and a TS file never contains `func`/`struct`, so the shared set is exact
-    /// for each without a per-language split. (JS functions written with the
-    /// `function` keyword are intentionally NOT captured — the plan's keyword
-    /// list is `func`, not `function` — so a JS file contributes its class /
-    /// interface / type / enum declarations only.)
+    /// plan §6.
+    ///
+    /// TypeScript/JavaScript used to SHARE Swift's set (`func|class|struct|enum|
+    /// interface|type`) on the reasoning that a Swift file never contains
+    /// `interface`/`type` and a TS file never contains `func`/`struct`, so one
+    /// set was exact for all three. The half of that argument about JS was
+    /// wrong in the way that mattered: `func` has a word boundary after it, so
+    /// it can never match `function foo()`, and a JS/TS file that declares
+    /// everything with plain `function` (or with an arrow bound to a `const`)
+    /// contributed ZERO symbols — every file dropped, `summarize` returning "",
+    /// and the whole "Repo map" section silently missing from the opening turn.
+    /// Measured across an edit battery: the section was absent from every one of
+    /// the six JavaScript tasks and present for every Python/Rust one. Iris's
+    /// own targets — the Windows client, publikclip, kneecap, notetion — are
+    /// Electron/TS, which is exactly where the map was blind.
+    ///
+    /// So TS/JS now carry `function` of their own, and the arrow-bound form
+    /// (`export const fmt = () => {}`), which no keyword list can express, is
+    /// picked up by `additionalDeclarationPatterns` below.
     var declarationKeywords: [String] {
         switch self {
-        case .swift, .typescript, .javascript:
+        case .swift:
             return ["func", "class", "struct", "enum", "interface", "type"]
+        case .typescript, .javascript:
+            return ["function", "class", "enum", "interface", "type"]
         case .rust:
             return ["fn", "struct", "enum", "trait", "impl"]
         case .python:
             return ["def", "class"]
         case .go:
             return ["func", "type"]
+        }
+    }
+
+    /// Extra whole-line declaration patterns this language needs that a
+    /// keyword-then-identifier shape cannot express. Each must capture the
+    /// declared name in group 1, exactly like the keyword regex, so the two
+    /// kinds are interchangeable to the scanner.
+    ///
+    /// Only TS/JS have one today: a function bound to a `const`/`let`/`var`,
+    /// which is how most modern JavaScript declares a top-level function and
+    /// which contributes nothing to a keyword alternation. The pattern insists
+    /// on an actual function on the right-hand side — `function`, a
+    /// parenthesized parameter list followed by `=>`, or a single bare
+    /// parameter followed by `=>` — so an ordinary value binding
+    /// (`const total = (a + b) * 2`) is not listed as a declaration.
+    var additionalDeclarationPatterns: [String] {
+        switch self {
+        case .typescript, .javascript:
+            return [
+                #"^[ \t]*(?:export[ \t]+)?(?:default[ \t]+)?(?:const|let|var)[ \t]+([A-Za-z_$][A-Za-z0-9_$]*)[ \t]*(?::[^=\n]*)?=[ \t]*(?:async[ \t]+)?(?:function\b|\([^)\n]*\)[ \t]*=>|[A-Za-z_$][A-Za-z0-9_$]*[ \t]*=>)"#,
+            ]
+        case .swift, .rust, .python, .go:
+            return []
         }
     }
 
@@ -141,6 +178,12 @@ nonisolated enum FeatureEditRepoMap {
     /// thumb and errs slightly toward UNDER-filling the budget, which is the
     /// safe direction for a context-window guard.
     private static let approximateCharactersPerToken = 4
+
+    /// How many recognized source files a walk must have READ before "no symbols
+    /// anywhere" is treated as evidence about the map rather than about the
+    /// repo. A handful of files can honestly declare nothing (a repo of config
+    /// and scripts); a dozen cannot.
+    private static let minimumRecognizedFilesBeforeAnEmptyMapIsSuspicious = 8
 
     /// Cap the symbols shown for any single file line so one enormous file can't
     /// consume the whole budget; the overflow is shown as a trailing "…" so the
@@ -266,27 +309,37 @@ nonisolated enum FeatureEditRepoMap {
             fileScanLimit: fileScanLimit
         )
 
-        // Compile one regex per language once, rather than recompiling the same
-        // pattern for every file of that language across a large clone.
-        var compiledRegexByLanguage: [RepoMapLanguage: NSRegularExpression] = [:]
+        // Compile each language's regexes once, rather than recompiling the same
+        // patterns for every file of that language across a large clone.
+        var compiledRegexesByLanguage: [RepoMapLanguage: [NSRegularExpression]] = [:]
         for language in RepoMapLanguage.allCases {
-            if let declarationRegex = makeDeclarationRegex(forLanguage: language) {
-                compiledRegexByLanguage[language] = declarationRegex
+            let declarationRegexes = makeDeclarationRegexes(forLanguage: language)
+            if !declarationRegexes.isEmpty {
+                compiledRegexesByLanguage[language] = declarationRegexes
             }
         }
+
+        // Counted only so the all-empty case can be LOUD. A keyword allowlist
+        // that recognizes nothing produces exactly the same value as a repo
+        // with no code in it — "" — and that silence is how JavaScript stayed
+        // unmapped for as long as it did. A run that reads a meaningful number
+        // of recognized source files and extracts not one symbol from them is
+        // reporting on the allowlist, not on the repo, and says so in the trace.
+        var recognizedSourceFileCount = 0
 
         var fileSummaries: [RepoMapFileSymbolSummary] = []
         for discoveredFile in discoveredFiles {
             let fileName = (discoveredFile.absolutePath as NSString).lastPathComponent
             guard
                 let language = RepoMapLanguage.language(forFileName: fileName),
-                let declarationRegex = compiledRegexByLanguage[language],
+                let declarationRegexes = compiledRegexesByLanguage[language],
                 let sourceText = readSourceText(atAbsolutePath: discoveredFile.absolutePath)
             else { continue }
+            recognizedSourceFileCount += 1
 
             let symbolNames = declarationNames(
                 inSourceText: sourceText,
-                usingRegex: declarationRegex
+                usingRegexes: declarationRegexes
             )
             // Drop files with no declarations: an empty row localizes nothing and
             // only spends budget.
@@ -296,6 +349,16 @@ nonisolated enum FeatureEditRepoMap {
                 repoRelativePath: discoveredFile.repoRelativePath,
                 symbolNames: symbolNames
             ))
+        }
+
+        if fileSummaries.isEmpty,
+           recognizedSourceFileCount >= minimumRecognizedFilesBeforeAnEmptyMapIsSuspicious {
+            irisTrace(
+                "repo map: read \(recognizedSourceFileCount) recognized source file(s) and "
+                + "extracted NO declarations — the map will be omitted from the opening turn. "
+                + "This is far more likely to be a gap in the per-language declaration patterns "
+                + "than a repo that declares nothing."
+            )
         }
 
         // Richest-first so the token budget spends itself on the most central
@@ -319,10 +382,9 @@ nonisolated enum FeatureEditRepoMap {
         inSourceText sourceText: String,
         forLanguage language: RepoMapLanguage
     ) -> [String] {
-        guard let declarationRegex = makeDeclarationRegex(forLanguage: language) else {
-            return []
-        }
-        return declarationNames(inSourceText: sourceText, usingRegex: declarationRegex)
+        let declarationRegexes = makeDeclarationRegexes(forLanguage: language)
+        guard !declarationRegexes.isEmpty else { return [] }
+        return declarationNames(inSourceText: sourceText, usingRegexes: declarationRegexes)
     }
 
     // MARK: - The learned-notes file (plan §6, Devin-playbook substitute)
@@ -546,36 +608,52 @@ nonisolated enum FeatureEditRepoMap {
         "trait", "impl", "def", "var", "let", "function",
     ]
 
-    /// Build the per-line declaration regex for a language. The pattern, anchored
-    /// at line start:
+    /// Build the per-line declaration regexes for a language: the keyword
+    /// pattern first, then any of the language's `additionalDeclarationPatterns`.
+    /// All of them capture the declared name in group 1, so the scanner can try
+    /// them in order and take the first that matches a line.
+    ///
+    /// The keyword pattern, anchored at line start:
     ///   optional whitespace → optional attributes → optional modifiers →
     ///   one of the language's declaration keywords (as a whole word) →
     ///   optional generic clause right after the keyword (handles Rust
     ///   `impl<T> Foo`) → required whitespace → the captured identifier.
-    /// A fresh instance is returned each call (no shared mutable global state);
+    ///
+    /// Keywords are alternated LONGEST-FIRST. Alternation is ordered, so with
+    /// `func` ahead of `function` the engine tries `func`, fails its `\b`
+    /// against the `t`, and only then backtracks — correct, but one keyword
+    /// silently shadowing a longer one is the kind of thing that later stops
+    /// being correct. Sorting removes the dependence on backtracking entirely.
+    ///
+    /// Fresh instances are returned each call (no shared mutable global state);
     /// callers that scan many files precompile once via `buildFileSymbolSummaries`.
-    private static func makeDeclarationRegex(
+    private static func makeDeclarationRegexes(
         forLanguage language: RepoMapLanguage
-    ) -> NSRegularExpression? {
-        let keywordAlternation = language.declarationKeywords.joined(separator: "|")
-        let pattern =
+    ) -> [NSRegularExpression] {
+        let keywordsLongestFirst = language.declarationKeywords
+            .sorted { ($0.count, $0) > ($1.count, $1) }
+        let keywordAlternation = keywordsLongestFirst.joined(separator: "|")
+        let keywordPattern =
             "^[ \\t]*"
             + leadingAttributePrefixPattern
             + declarationModifierPrefixPattern
             + "(?:" + keywordAlternation + ")\\b"
             + "(?:<[^>\\n]*>)?"
             + "\\s+([A-Za-z_][A-Za-z0-9_]*)"
-        return try? NSRegularExpression(pattern: pattern, options: [])
+        return ([keywordPattern] + language.additionalDeclarationPatterns)
+            .compactMap { try? NSRegularExpression(pattern: $0, options: []) }
     }
 
-    /// Apply a precompiled declaration regex line-by-line, returning the captured
-    /// names deduped in first-seen order. Line-at-a-time (rather than one
-    /// multiline match) keeps each `^` anchored to a real line start and keeps
-    /// the work proportional to the file — and a `//`-commented declaration is
-    /// naturally excluded because the keyword no longer sits at the line's head.
+    /// Apply a language's precompiled declaration regexes line-by-line,
+    /// returning the captured names deduped in first-seen order. Line-at-a-time
+    /// (rather than one multiline match) keeps each `^` anchored to a real line
+    /// start and keeps the work proportional to the file — and a
+    /// `//`-commented declaration is naturally excluded because the keyword no
+    /// longer sits at the line's head. The regexes are tried in order and the
+    /// first that matches a line wins; a line declares at most one thing.
     private static func declarationNames(
         inSourceText sourceText: String,
-        usingRegex declarationRegex: NSRegularExpression
+        usingRegexes declarationRegexes: [NSRegularExpression]
     ) -> [String] {
         var orderedNames: [String] = []
         var alreadySeenNames: Set<String> = []
@@ -586,13 +664,15 @@ nonisolated enum FeatureEditRepoMap {
             if line.isEmpty { continue }
 
             let lineRange = NSRange(line.startIndex..<line.endIndex, in: line)
-            guard
-                let match = declarationRegex.firstMatch(in: line, options: [], range: lineRange),
-                match.numberOfRanges >= 2,
-                let captureRange = Range(match.range(at: 1), in: line)
-            else { continue }
-
-            let capturedName = String(line[captureRange])
+            let firstMatchedName: String? = declarationRegexes.lazy.compactMap { declarationRegex in
+                guard
+                    let match = declarationRegex.firstMatch(in: line, options: [], range: lineRange),
+                    match.numberOfRanges >= 2,
+                    let captureRange = Range(match.range(at: 1), in: line)
+                else { return nil }
+                return String(line[captureRange])
+            }.first
+            guard let capturedName = firstMatchedName else { continue }
             // Guard against the keyword-in-front-of-keyword mis-parse.
             if reservedDeclarationNames.contains(capturedName) { continue }
 

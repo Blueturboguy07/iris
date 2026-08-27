@@ -6,3 +6,19 @@ build/
 releases/
 .claude/
 coding-plans/
+
+# Xcode derived data for the agent-run build/test loop. 646 MB the last time
+# someone measured it, and it shows as untracked, so it is one `git add -A`
+# away from the history of a public repo.
+.build-check/
+
+# The edit battery's fixtures are committed as FILES; their git repos are built
+# on first use by `battery.py`'s ensure_fixture_repo. A .git nested inside this
+# repo cannot be tracked — git records a gitlink to a submodule that does not
+# exist and the fixture's own files vanish from the commit.
+tools/edit-battery/fixtures/*/work/.git/
+
+# Leftover minting material for t6's oracle tokens — a real Ed25519 private key
+# that NOTHING in the battery reads (the tokens are committed already signed).
+# iris is a public repo; this never goes near it.
+tools/edit-battery/fixtures/*/oracle/secret/*.pem

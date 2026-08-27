@@ -1,0 +1,6 @@
+[package]
+name = "calckit"
+version = "0.5.2"
+edition = "2021"
+
+[dependencies]

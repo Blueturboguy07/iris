@@ -78,10 +78,69 @@ nonisolated enum MaintainFileEditApplier {
 
     // MARK: - Parsing
 
-    /// Every file-edit block in a reply, in order. A ```write block's tag line
-    /// is `write <repo-relative-path>`; a ```edit block's is `edit <path>` and
-    /// its body holds a search/replace pair delimited by the conflict-marker
-    /// format models produce reliably:
+    /// Why one file-edit block could not be turned into a request. These exist
+    /// because the alternative — the block silently vanishing — is a lie the
+    /// model has no way to detect: a reply whose only content was a malformed
+    /// ```edit parsed to an EMPTY request list, which is byte-identical to "the
+    /// reply contained no edit at all", so the loop fell through its whole
+    /// dispatch and steered "Reply with exactly one ```bash fenced command" —
+    /// advice about a mistake the model did not make, and that it cannot act
+    /// on. The manifest parser was given exactly this treatment for exactly
+    /// this reason; this is the same fix on the channel that carries the
+    /// actual changes.
+    enum ParseRejection: Error, Equatable {
+        case blockFenceWasNeverClosed(verb: String, path: String)
+        case blockNamesNoFilePath(verb: String)
+        case editBlockHasNoSearchReplaceMarkers(path: String)
+        case blockMayHaveEndedEarlyAtAFenceInItsContent(verb: String, path: String)
+
+        /// Said to the MODEL, so it names the mistake and the repair.
+        var modelFacingMessage: String {
+            switch self {
+            case .blockFenceWasNeverClosed(let verb, let path):
+                return "your ```\(verb) block for \(path.isEmpty ? "(no path)" : path) was never closed "
+                    + "with a matching fence line, so it could not be applied"
+            case .blockNamesNoFilePath(let verb):
+                return "a ```\(verb) block must name the repo-relative file path on its opening line "
+                    + "(```\(verb) path/to/File.swift)"
+            case .editBlockHasNoSearchReplaceMarkers(let path):
+                return "the ```edit block for \(path) needs the three markers on their own lines, in order "
+                    + "— <<<<<<< SEARCH, then =======, then >>>>>>> REPLACE — with non-empty search text"
+            case .blockMayHaveEndedEarlyAtAFenceInItsContent(let verb, let path):
+                return "your three-backtick ```\(verb) block for \(path) is ambiguous: the fences after it "
+                    + "do not pair up, which is what happens when the content itself contains a ``` line and "
+                    + "the block ended there instead of where you meant. Resend it opened with FOUR backticks "
+                    + "(````\(verb) \(path)) so a ``` inside the content cannot close it"
+            }
+        }
+    }
+
+    /// The result of scanning one reply for file-edit blocks: what will be
+    /// applied, and what was refused and why. Both halves matter — a reply can
+    /// legitimately carry one good block and one broken one, and the good one
+    /// must still land while the broken one is named.
+    struct ParseOutcome: Equatable {
+        let requests: [MaintainFileEditRequest]
+        let rejections: [ParseRejection]
+
+        /// True when the reply mentioned file editing at all, well or badly.
+        /// The loop uses this to tell "this reply was about editing and got it
+        /// wrong" apart from "this reply was about something else entirely".
+        var replyAttemptedAFileEdit: Bool { !requests.isEmpty || !rejections.isEmpty }
+    }
+
+    /// Every file-edit block in a reply, in order, discarding the reasons any
+    /// were refused. Kept because most callers only want the requests; the loop
+    /// itself uses `parseDetailed`.
+    static func parse(fromModelReply reply: String) -> [MaintainFileEditRequest] {
+        parseDetailed(fromModelReply: reply).requests
+    }
+
+    /// Every file-edit block in a reply, in order, WITH the reason each refused
+    /// block was refused. A ```write block's tag line is
+    /// `write <repo-relative-path>`; a ```edit block's is `edit <path>` and its
+    /// body holds a search/replace pair delimited by the conflict-marker format
+    /// models produce reliably:
     ///
     ///     ```edit src/foo.rs
     ///     <<<<<<< SEARCH
@@ -91,41 +150,176 @@ nonisolated enum MaintainFileEditApplier {
     ///     >>>>>>> REPLACE
     ///     ```
     ///
-    /// A malformed block is skipped (not a hard error) — the model is told and
-    /// retries — so one bad block never discards a reply's good ones.
-    static func parse(fromModelReply reply: String) -> [MaintainFileEditRequest] {
+    /// A malformed block never discards a reply's good ones — it is reported
+    /// alongside them.
+    static func parseDetailed(fromModelReply reply: String) -> ParseOutcome {
         // Scanned directly from raw lines (NOT the shared `fencedBlocks`, whose
         // tag stops at the first space and would fold the path into the body):
         // find a `\`\`\`write <path>` / `\`\`\`edit <path>` opening line, take every
-        // line up to the closing `\`\`\`` as the body, case-preserved.
+        // line up to the closing fence as the body, case-preserved. Fence
+        // matching is by BACKTICK-RUN LENGTH: an opening run of N backticks
+        // closes only on a run of at least N, so a ````write can carry an inner
+        // ``` safely.
+        //
+        // The two limits an earlier version of this comment recorded as open are
+        // now closed, and the comment says how rather than that they are gone:
+        //   1. This DOES now agree with `MaintainTierCFixer.fencedBlocksWithSpans`
+        //      about where a block starts and ends. That scanner used to close on
+        //      a long-enough backtick run ANYWHERE on a line while this one has
+        //      always required a backticks-only line, so the two disagreed and a
+        //      truncated write leaked part of its body into the narration the
+        //      reader sees. The scanner was moved onto this rule, not the other
+        //      way round — `fencedBlockBoundaryRules` states it once for both.
+        //   2. A THREE-backtick ```write whose content holds a bare ``` used to
+        //      end at that inner fence SILENTLY and report success. It is now
+        //      detected — see `fencesAfterAreUnbalanced` below — and refused with
+        //      `blockMayHaveEndedEarlyAtAFenceInItsContent`, which tells the model
+        //      to reopen it with four backticks. The prompt still asks for four
+        //      backticks, but that request is now a convenience rather than the
+        //      only thing standing between the reader and a truncated file.
+        //
+        // What remains genuinely open: a three-backtick write whose content's
+        // stray fences happen to pair up AND which is the last block in the
+        // reply is still indistinguishable from a correctly closed one. Four
+        // backticks are the only complete answer; this catches the rest.
         var requests: [MaintainFileEditRequest] = []
+        var rejections: [ParseRejection] = []
         let lines = reply.components(separatedBy: "\n")
         var index = 0
         while index < lines.count {
             let opening = lines[index].trimmingCharacters(in: .whitespaces)
-            let verb: String? = opening.hasPrefix("```write ") ? "write"
-                : (opening.hasPrefix("```edit ") ? "edit" : nil)
+            let openingBacktickCount = fencedBlockBoundaryRules.openingRunLength(of: lines[index])
+            guard openingBacktickCount > 0 else { index += 1; continue }
+            let afterFence = String(opening.dropFirst(openingBacktickCount))
+            let verb: String? = afterFence == "write" || afterFence.hasPrefix("write ") ? "write"
+                : (afterFence == "edit" || afterFence.hasPrefix("edit ") ? "edit" : nil)
             guard let verb else { index += 1; continue }
-            let filePath = String(opening.dropFirst(("```" + verb + " ").count)).trimmingCharacters(in: .whitespaces)
-            // Body runs to the next line that is exactly a closing fence.
+            let filePath = String(afterFence.dropFirst(verb.count)).trimmingCharacters(in: .whitespaces)
+
+            // Body runs to the next line that is nothing but a backtick run of
+            // at least the opening length.
             var bodyLines: [String] = []
             var cursor = index + 1
             var foundClose = false
             while cursor < lines.count {
-                if lines[cursor].trimmingCharacters(in: .whitespaces) == "```" { foundClose = true; break }
+                if fencedBlockBoundaryRules.isClosingFence(
+                    lines[cursor], minimum: openingBacktickCount
+                ) {
+                    foundClose = true
+                    break
+                }
                 bodyLines.append(lines[cursor]); cursor += 1
             }
-            if !filePath.isEmpty && foundClose {
-                let body = bodyLines.joined(separator: "\n")
-                if verb == "write" {
-                    requests.append(.writeWholeFile(filePath: filePath, content: body))
-                } else if let (search, replace) = parseSearchReplace(fromBody: body) {
-                    requests.append(.replaceInFile(filePath: filePath, search: search, replace: replace))
+
+            guard foundClose else {
+                rejections.append(.blockFenceWasNeverClosed(verb: verb, path: filePath))
+                index += 1
+                continue
+            }
+            guard !filePath.isEmpty else {
+                rejections.append(.blockNamesNoFilePath(verb: verb))
+                index = cursor + 1
+                continue
+            }
+            // A three-backtick block can be closed by a ``` line that was meant
+            // to be CONTENT. The tell is downstream: if the fences after this
+            // block no longer pair up — a bare fence with nothing open, or a
+            // block left hanging at the end of the reply — then this block
+            // almost certainly ended in the wrong place, and applying it would
+            // write a truncated file while reporting success. Four-backtick
+            // blocks cannot have this problem and are never checked.
+            if openingBacktickCount == 3,
+               fencesAfterAreUnbalanced(lines: lines, startingAfter: cursor) {
+                rejections.append(.blockMayHaveEndedEarlyAtAFenceInItsContent(
+                    verb: verb, path: filePath
+                ))
+                index = cursor + 1
+                continue
+            }
+
+            let body = bodyLines.joined(separator: "\n")
+            if verb == "write" {
+                requests.append(.writeWholeFile(filePath: filePath, content: body))
+            } else if let (search, replace) = parseSearchReplace(fromBody: body) {
+                requests.append(.replaceInFile(filePath: filePath, search: search, replace: replace))
+            } else {
+                rejections.append(.editBlockHasNoSearchReplaceMarkers(path: filePath))
+            }
+            index = cursor + 1
+        }
+        return ParseOutcome(requests: requests, rejections: rejections)
+    }
+
+    /// Where a fenced block begins and ends, stated ONCE so the two scanners
+    /// that need the answer cannot drift apart again. `parseDetailed` here and
+    /// `MaintainTierCFixer.fencedBlocksWithSpans` both read block boundaries off
+    /// these rules; they used to each have their own, disagreed about where a
+    /// malformed block ended, and the visible symptom was half a write block
+    /// showing up in the narration line the reader is told is Iris's own words.
+    ///
+    /// The rules are deliberately the stricter of the two originals, because a
+    /// fence that opens mid-sentence is far more likely to be prose about code
+    /// than a real block:
+    ///   * an OPENING fence starts its line (leading whitespace allowed) and is
+    ///     followed on that line by its tag, if it has one;
+    ///   * a CLOSING fence is ALONE on its line, and is at least as long as the
+    ///     opening run — which is what makes ````write a real, distinct
+    ///     delimiter that a ``` in its content cannot close.
+    enum fencedBlockBoundaryRules {
+        /// The backtick-run length at the start of `line`, or 0 if it does not
+        /// begin one of at least three.
+        static func openingRunLength(of line: String) -> Int {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let run = trimmed.prefix(while: { $0 == "`" }).count
+            return run >= 3 ? run : 0
+        }
+
+        /// Whether `line` is nothing but a backtick run of at least `minimum`.
+        static func isClosingFence(_ line: String, minimum: Int) -> Bool {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let run = trimmed.prefix(while: { $0 == "`" }).count
+            return run >= minimum && run == trimmed.count && run >= 3
+        }
+
+        /// Whether `line` is a bare fence — a run alone on its line, opening
+        /// nothing. In a well-formed reply one of these only ever appears as
+        /// the CLOSE of a block that is already open.
+        static func isBareFence(_ line: String) -> Bool {
+            isClosingFence(line, minimum: 3)
+        }
+    }
+
+    /// Whether the fences from `startingAfter` to the end of the reply fail to
+    /// pair up: a bare fence turning up with no block open, or a block left
+    /// open when the reply ends.
+    ///
+    /// This is the signal that a three-backtick block above ended in the wrong
+    /// place. When a ```write closes early on a ``` that was meant to be part of
+    /// its content, everything after inherits the mistake — the model's REAL
+    /// closing fence is then read as opening something, and the books stop
+    /// balancing. When the block ended where the model intended, every fence
+    /// after it is either a tagged opening or the close of one, and they do.
+    static func fencesAfterAreUnbalanced(lines: [String], startingAfter closeIndex: Int) -> Bool {
+        var openRunLength: Int?
+        var index = closeIndex + 1
+        while index < lines.count {
+            let line = lines[index]
+            if let open = openRunLength {
+                if fencedBlockBoundaryRules.isClosingFence(line, minimum: open) { openRunLength = nil }
+            } else {
+                let run = fencedBlockBoundaryRules.openingRunLength(of: line)
+                if run > 0 {
+                    // A bare fence with nothing open closes a block that was
+                    // never opened here — the books are already wrong.
+                    if fencedBlockBoundaryRules.isBareFence(line) { return true }
+                    openRunLength = run
                 }
             }
-            index = foundClose ? cursor + 1 : index + 1
+            index += 1
         }
-        return requests
+        // A block still open at the end of the reply is the other half of the
+        // same failure.
+        return openRunLength != nil
     }
 
     /// Pull the SEARCH and REPLACE halves out of an ```edit body. Tolerant of

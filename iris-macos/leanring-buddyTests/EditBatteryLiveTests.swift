@@ -482,6 +482,7 @@ final class EditBatteryRunLog {
 final class EditBatteryBudgetedProvider: MaintainModelProviding {
 
     let displayName: String
+    let identifier = "battery-budgeted"
     var isAvailable: Bool { upstream.isAvailable }
 
     private let upstream: any MaintainModelProviding

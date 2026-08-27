@@ -69,6 +69,7 @@ import Testing
 @MainActor
 private final class ScriptedProbeProvider: MaintainModelProviding {
     let displayName = "scripted-probe-mock"
+    let identifier = "scripted-probe"
     let isAvailable = true
     private let turns: [String]
     private let errorToThrow: Error?

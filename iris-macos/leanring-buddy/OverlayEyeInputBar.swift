@@ -443,6 +443,17 @@ struct OverlayEyeInputBarView: View {
     /// actually on rather than the step they were on when the bar opened.
     @ObservedObject var guideSessionController: GuideSessionController
 
+    /// Observed directly, not read through the manager, because the bar
+    /// RESTRUCTURES on its phase: while an app is waiting to be described the
+    /// bar is one composer, and every other phase hands the surface to the
+    /// card. A value read off a non-observed object would leave the bar drawing
+    /// the wrong shape until something else happened to redraw it.
+    @ObservedObject var onDemandEditCoordinator: OnDemandEditCoordinator
+
+    /// Observed so the footer's statement of what answers a question follows a
+    /// sign-in or a pasted key without waiting for something else to redraw.
+    @ObservedObject var accountService: AccountService
+
     let onDismissRequested: () -> Void
 
     /// Called on send. See `releaseTheKeyboardSoTheReadersOwnAppGetsItBack` —
@@ -455,6 +466,18 @@ struct OverlayEyeInputBarView: View {
     /// Called whenever the bar's content changes height, so the window it lives
     /// in can grow and shrink with it.
     let onTheBarsMeasuredHeightChanged: (CGFloat) -> Void
+
+    /// Which of the two things the one field does. Only meaningful while an app
+    /// is open for editing; the bar is an ask field and nothing else otherwise.
+    enum ComposerMode: Equatable { case edit, ask }
+
+    /// Editing is the default because opening an app is a deliberate act and
+    /// editing it is the reason to have done it. Asking is one tap away.
+    @State private var composerMode: ComposerMode = .edit
+
+    /// The fix/feature choice, which decides the honesty label and the commit
+    /// trailer, so it is a real choice and not a convenience.
+    @State private var editKind: OnDemandEditKind = .bugFix
 
     @State private var typedMessage: String = ""
 
@@ -488,6 +511,12 @@ struct OverlayEyeInputBarView: View {
     ) {
         self.companionManager = companionManager
         self.guideSessionController = guideSessionController
+        // Derived rather than passed: both live on the manager already, and a
+        // second way to supply them is a second way to supply the wrong ones.
+        _onDemandEditCoordinator = ObservedObject(
+            wrappedValue: companionManager.onDemandEditCoordinator
+        )
+        _accountService = ObservedObject(wrappedValue: companionManager.accountService)
         self.onDismissRequested = onDismissRequested
         self.onTheBarShouldReleaseTheKeyboard = onTheBarShouldReleaseTheKeyboard
         self.onTheBarShouldTakeTheKeyboardBack = onTheBarShouldTakeTheKeyboardBack
@@ -564,10 +593,15 @@ struct OverlayEyeInputBarView: View {
                 // it appears the moment an app is picked (from here or the
                 // settings panel) and clears itself when the flow ends. Driven
                 // by a pending-edit coordinator, NOT the maintain ask.
-                OnDemandEditCard(
-                    coordinator: companionManager.onDemandEditCoordinator,
-                    preselectedKind: companionManager.onDemandEditPreselectedKind
-                )
+                // The describe step is drawn by the bar itself, as one composer
+                // with the ask field (see `appComposer`). Every other phase is a
+                // run in flight and the card owns the whole surface.
+                if onDemandEditCoordinator.phase != .describe {
+                    OnDemandEditCard(
+                        coordinator: onDemandEditCoordinator,
+                        preselectedKind: companionManager.onDemandEditPreselectedKind
+                    )
+                }
 
                 // The guide sits above the field, not inside the settings dropdown.
                 // The reader following instructions is doing the main thing Iris is
@@ -714,8 +748,25 @@ struct OverlayEyeInputBarView: View {
         // panel's model picker so the same choice is reachable without opening
         // settings.
         VStack(alignment: .leading, spacing: 8) {
-            modelSelectorRow
+            if anAppIsOpenForEditing {
+                appComposerHeader
+                // The chat model toggle is deliberately absent here. It governs
+                // ASKING only — chat speaks Anthropic's streaming tool-use
+                // format, which `codex exec` cannot serve — and while an app is
+                // open it read as though it chose the model that would edit the
+                // app. A reader connected to Codex saw "Sonnet | Opus" and drew
+                // the obvious, wrong conclusion. It stays in settings, where it
+                // is not standing next to an editor it has nothing to do with.
+                if effectiveComposerMode == .edit {
+                    editKindRow
+                }
+            } else {
+                modelSelectorRow
+            }
             fieldAndSendRow
+            if anAppIsOpenForEditing {
+                servingProviderFooter
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
@@ -725,6 +776,173 @@ struct OverlayEyeInputBarView: View {
     /// The Sonnet/Opus toggle, trailing-aligned above the field. Bound straight
     /// to `companionManager.selectedModel`, the same state the settings panel
     /// writes, so switching here and switching there are one setting.
+    /// True while an app is picked and waiting to be described — the one state
+    /// where the bar is a two-purpose composer rather than an ask field.
+    private var anAppIsOpenForEditing: Bool {
+        onDemandEditCoordinator.phase == .describe
+    }
+
+    /// The mode actually in force. A reader can be in Ask mode and then sign
+    /// out, and a composer stuck in a mode with nothing behind it would be the
+    /// same class of dead end this whole change exists to remove.
+    private var effectiveComposerMode: ComposerMode {
+        (composerMode == .ask && !accountService.canAnswerQuestions) ? .edit : composerMode
+    }
+
+    private var openAppName: String {
+        onDemandEditCoordinator.activeAppName ?? "this app"
+    }
+
+    /// The app name and the Ask/Edit switch: one surface, one field, and a
+    /// visible statement of which of the two things the field is about to do.
+    ///
+    /// This replaced two stacked glass boxes — an edit card and an ask field —
+    /// which readers could not tell apart, because nothing said that one of
+    /// them ran on the editing provider and the other could not.
+    private var appComposerHeader: some View {
+        HStack(spacing: 8) {
+            Text(openAppName)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(DS.Colors.ink)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 3) {
+                // Ask is shown even when it cannot run. Hiding it would leave a
+                // reader whose only credential is Codex with no way to learn
+                // that Codex does not power chat — they would simply never see
+                // asking exist. Disabled with the reason underneath teaches it.
+                composerModeOption(
+                    .ask, label: "Ask", isEnabled: accountService.canAnswerQuestions
+                )
+                composerModeOption(.edit, label: "Edit", isEnabled: true)
+            }
+            .padding(3)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color.white.opacity(0.055))
+            )
+        }
+    }
+
+    private func composerModeOption(
+        _ mode: ComposerMode, label: String, isEnabled: Bool
+    ) -> some View {
+        // Reflects the mode IN FORCE, not the one last tapped: if Ask has been
+        // overridden for want of a chat credential, Edit is what is highlighted.
+        let isSelected = effectiveComposerMode == mode
+        return Button { if isEnabled { composerMode = mode } } label: {
+            Text(label)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundColor(
+                    isEnabled
+                        ? (isSelected ? DS.Colors.ink : DS.Colors.muted)
+                        : DS.Colors.quiet
+                )
+                .padding(.horizontal, 8)
+                .frame(minHeight: 20)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(isSelected ? Color.white.opacity(0.12) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .help(isEnabled ? label : "Asking needs a publik sign-in or an Anthropic key")
+        .pointerCursor()
+    }
+
+    /// Fix or feature. Kept from the card it replaced because it is not a
+    /// convenience: it decides the honesty label and the commit trailer.
+    private var editKindRow: some View {
+        HStack(spacing: 6) {
+            composerKindPill(.bugFix, label: "Bug fix")
+            composerKindPill(.feature, label: "Feature")
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func composerKindPill(_ kind: OnDemandEditKind, label: String) -> some View {
+        let isSelected = editKind == kind
+        return Button { editKind = kind } label: {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(isSelected ? DS.Colors.accent : DS.Colors.textSecondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
+                        .fill(isSelected ? DS.Colors.accent.opacity(0.14) : DS.Colors.surfaceRaised)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
+                                .strokeBorder(
+                                    isSelected ? DS.Colors.accent.opacity(0.5) : DS.Colors.line,
+                                    lineWidth: 1
+                                )
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+
+    /// Says which model serves the mode the reader is actually in.
+    ///
+    /// The whole confusion this composer exists to end was that Iris never said
+    /// this anywhere: `AccountService.activeTierDescription` was written for a
+    /// "panel status line" and then never rendered, so a reader who had just
+    /// connected Codex had no way to learn that the Sonnet/Opus toggle in front
+    /// of them governed something else entirely. In edit mode this is also the
+    /// control — every connected provider is selectable, because the resolver's
+    /// fallback order was quietly deciding for readers who had a preference.
+    @ViewBuilder
+    private var servingProviderFooter: some View {
+        if effectiveComposerMode == .edit {
+            HStack(spacing: 6) {
+                Text("Edits run on")
+                    .font(.system(size: 9.5))
+                    .foregroundColor(DS.Colors.quiet)
+                editProviderPicker
+                Spacer(minLength: 0)
+            }
+        } else {
+            Text(accountService.chatProviderDescription)
+                .font(.system(size: 9.5))
+                .foregroundColor(DS.Colors.quiet)
+        }
+    }
+
+    @ViewBuilder
+    private var editProviderPicker: some View {
+        let providers = MaintainModelProviderResolver.allAvailable()
+        if providers.isEmpty {
+            Text("no model connected")
+                .font(.system(size: 9.5, weight: .medium))
+                .foregroundColor(DS.Colors.amber)
+        } else if providers.count == 1 {
+            // Nothing to choose between: state it rather than offering a menu
+            // with one item in it.
+            Text(providers[0].displayName)
+                .font(.system(size: 9.5, weight: .medium))
+                .foregroundColor(DS.Colors.textSecondary)
+        } else {
+            Menu {
+                ForEach(providers, id: \.identifier) { provider in
+                    Button(provider.displayName) {
+                        MaintainModelProviderResolver.preferredProviderIdentifier = provider.identifier
+                    }
+                }
+            } label: {
+                Text(MaintainModelProviderResolver.firstAvailable()?.displayName ?? "pick one")
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundColor(DS.Colors.ink)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+        }
+    }
+
     private var modelSelectorRow: some View {
         HStack(spacing: 6) {
             Spacer(minLength: 0)
@@ -825,7 +1043,10 @@ struct OverlayEyeInputBarView: View {
     /// the second time round the interesting thing about the field is that it
     /// is still there and still usable without reopening anything.
     private var fieldPlaceholder: String {
-        exchange.thereIsAnExchangeOnScreen ? "Ask something else…" : "Ask Iris…"
+        if anAppIsOpenForEditing, effectiveComposerMode == .edit {
+            return "What should change in \(openAppName)?"
+        }
+        return exchange.thereIsAnExchangeOnScreen ? "Ask something else…" : "Ask Iris…"
     }
 
     /// The visible way out. Escape covers the reader who is still typing; this
@@ -993,8 +1214,17 @@ struct OverlayEyeInputBarView: View {
 
     // MARK: Driving the exchange
 
+    /// One field, two destinations. Which one is not inferred from anything —
+    /// the reader picked it on the switch above, and the footer says what will
+    /// serve it. Guessing here is what the old two-box layout effectively did.
     private func sendWhatIsTyped() {
         guard thereIsSomethingToSend else { return }
+        if anAppIsOpenForEditing, effectiveComposerMode == .edit {
+            let request = typedMessage
+            typedMessage = ""
+            onDemandEditCoordinator.describeRequest(request, kind: editKind)
+            return
+        }
         send(typedMessage)
     }
 

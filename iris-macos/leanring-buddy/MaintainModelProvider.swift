@@ -46,6 +46,9 @@ enum MaintainModelProviderError: Error {
 @MainActor
 protocol MaintainModelProviding: Sendable {
     var displayName: String { get }
+    /// Stable across launches and independent of `displayName`, which is prose
+    /// and will be reworded. This is what a remembered choice is stored as.
+    var identifier: String { get }
     var isAvailable: Bool { get }
     func respond(
         systemPrompt: String,
@@ -59,6 +62,7 @@ protocol MaintainModelProviding: Sendable {
 @MainActor
 final class AnthropicMaintainProvider: MaintainModelProviding {
     let displayName = "Anthropic (your key)"
+    let identifier = "anthropic"
 
     private lazy var byoOnlyAPI = ClaudeAPI(resolveTransport: {
         // The reader's own credential in either shape — a pasted API key or a
@@ -112,6 +116,7 @@ final class AnthropicMaintainProvider: MaintainModelProviding {
 @MainActor
 final class OpenAIMaintainProvider: MaintainModelProviding {
     let displayName = "OpenAI (your key)"
+    let identifier = "openai"
 
     /// The model the fix loop asks for. A capable coding model; the user's
     /// key, the user's spend.
@@ -189,24 +194,50 @@ enum MaintainModelProviderResolver {
     ///
     /// The order is not a quality ranking, it is a confidence ranking:
     ///
-    ///   1. Anthropic — a pasted key or a Claude Code login, through the BYO
+    ///   1. Codex login — the reader's ChatGPT account, driven through their
+    ///      Codex CLI. First on measured results; see `allAvailable()` for the
+    ///      numbers and for what they do not prove.
+    ///   2. Anthropic — a pasted key or a Claude Code login, through the BYO
     ///      transport whose isolation property is proven and tested.
-    ///   2. OpenAI key — a pasted key, one plain HTTPS call Iris fully controls.
-    ///   3. Codex login — the reader's ChatGPT account, driven through their
-    ///      Codex CLI. Last because it is the only provider whose behaviour Iris
-    ///      does not own end to end: a separate program, its own model default,
-    ///      its own agent instincts (see `CodexMaintainProvider`). It is here so
-    ///      that a reader with a ChatGPT subscription and no API key at all can
-    ///      still run Tier C, which was previously impossible for them.
+    ///   3. OpenAI key — a pasted key, one plain HTTPS call Iris fully controls.
+    /// Where a deliberate choice is remembered. Absent means "no preference,
+    /// use the confidence order below".
+    private static let preferredProviderDefaultsKey = "irisPreferredEditProvider"
+
+    /// The provider the reader chose, if they chose one and it is still usable.
+    @MainActor
+    static var preferredProviderIdentifier: String? {
+        get { UserDefaults.standard.string(forKey: preferredProviderDefaultsKey) }
+        set {
+            if let newValue {
+                UserDefaults.standard.set(newValue, forKey: preferredProviderDefaultsKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: preferredProviderDefaultsKey)
+            }
+        }
+    }
+
+    /// The provider Tier C will actually use.
+    ///
+    /// A REMEMBERED CHOICE WINS. The order below is a confidence ranking, not a
+    /// quality one, and it was silently deciding for readers who had made their
+    /// own decision: with a Claude login connected, a reader who had also
+    /// connected Codex could never reach it, because nothing consulted them and
+    /// nothing said so. That is the wrong default to be confident about — on the
+    /// six-task edit battery, measured 2026-08-27 on real repositories with a
+    /// held-out grader, Codex solved 6/6 and the Anthropic route 2/6.
+    ///
+    /// The stored choice is validated on every read rather than trusted: a
+    /// reader can disconnect the provider they picked, and a preference for
+    /// something no longer connected must fall through instead of failing.
     @MainActor
     static func firstAvailable() -> MaintainModelProviding? {
-        let anthropic = AnthropicMaintainProvider()
-        if anthropic.isAvailable { return anthropic }
-        let openai = OpenAIMaintainProvider()
-        if openai.isAvailable { return openai }
-        let codex = CodexMaintainProvider()
-        if codex.isAvailable { return codex }
-        return nil
+        let available = allAvailable()
+        if let preferredProviderIdentifier,
+           let chosen = available.first(where: { $0.identifier == preferredProviderIdentifier }) {
+            return chosen
+        }
+        return available.first
     }
 
     /// Every provider the reader could currently use, most-preferred first.
@@ -214,10 +245,31 @@ enum MaintainModelProviderResolver {
     /// to a run, and the parity harness uses it to enumerate what to compare.
     @MainActor
     static func allAvailable() -> [MaintainModelProviding] {
+        // CODEX LEADS, changed 2026-08-27, and the reason is measurement rather
+        // than taste. On the six-task edit battery — real repositories, real
+        // defects, each graded by a suite held outside the repo that the agent
+        // never sees — Codex solved 6/6 and the Anthropic route 2/6, with the
+        // engine's own verdict agreeing with the independent grader on all
+        // twelve runs. It was also fewer calls and less wall clock per task.
+        //
+        // The order used to be a CONFIDENCE ranking: Anthropic first because
+        // Iris owns that transport end to end, Codex last because it is a
+        // separate program with its own agent instincts. That reasoning is
+        // still true and it is still why Codex is a subprocess behind a
+        // re-validated read-only sandbox. It is just not a reason to hand a
+        // reader the arm that solved a third as many tasks.
+        //
+        // HONEST LIMITS, because this is a default and defaults are quiet:
+        // n = 6, the tasks are ours and were written knowing how the engine
+        // works, and the two arms differ in model, reasoning budget, output cap
+        // and temperature — so this is a statement about Iris's configuration,
+        // not about two vendors. A reader who disagrees can now say so: the
+        // picker in the composer writes `preferredProviderIdentifier`, and a
+        // stored choice beats this order.
         let candidates: [MaintainModelProviding] = [
+            CodexMaintainProvider(),
             AnthropicMaintainProvider(),
             OpenAIMaintainProvider(),
-            CodexMaintainProvider(),
         ]
         return candidates.filter { $0.isAvailable }
     }

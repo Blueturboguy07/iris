@@ -284,6 +284,7 @@ nonisolated enum CodexExecOutput {
 @MainActor
 final class CodexMaintainProvider: MaintainModelProviding {
     let displayName = "Codex (your ChatGPT login)"
+    let identifier = "codex"
 
     /// Left nil so the CLI's own default applies — which is what the reader
     /// chose when they installed it, and what `codex` upgrades over time. Iris

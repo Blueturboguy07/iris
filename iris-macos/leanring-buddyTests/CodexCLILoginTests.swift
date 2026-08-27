@@ -577,3 +577,73 @@ struct CodexExecOutputTests {
     }
 }
 
+// MARK: - Which provider actually edits the app
+
+/// The resolver used to be a fixed fallback order with no way to reach past it,
+/// so a reader with a Claude login who had ALSO connected Codex could never get
+/// Codex — and nothing on screen said so. That was the confusion behind
+/// "it says connected to codex CLI, but in models I can only choose sonnet or
+/// opus", reported from a second machine on 2026-08-27.
+@Suite @MainActor struct EditProviderPreferenceTests {
+
+    private func withNoStoredPreference(_ body: () -> Void) {
+        let previous = MaintainModelProviderResolver.preferredProviderIdentifier
+        MaintainModelProviderResolver.preferredProviderIdentifier = nil
+        body()
+        MaintainModelProviderResolver.preferredProviderIdentifier = previous
+    }
+
+    @Test("a provider identifier is stable and distinct from its display name")
+    func identifiersAreStableAndDistinct() {
+        let identifiers = [
+            AnthropicMaintainProvider().identifier,
+            OpenAIMaintainProvider().identifier,
+            CodexMaintainProvider().identifier,
+        ]
+        #expect(Set(identifiers).count == 3)
+        // Display names are prose and will be reworded; a remembered choice
+        // must not be stored as one.
+        #expect(identifiers.allSatisfy { !$0.contains(" ") })
+        #expect(AnthropicMaintainProvider().identifier != AnthropicMaintainProvider().displayName)
+    }
+
+    @Test("a remembered choice round-trips")
+    func thePreferenceRoundTrips() {
+        withNoStoredPreference {
+            #expect(MaintainModelProviderResolver.preferredProviderIdentifier == nil)
+            MaintainModelProviderResolver.preferredProviderIdentifier = "codex"
+            #expect(MaintainModelProviderResolver.preferredProviderIdentifier == "codex")
+            MaintainModelProviderResolver.preferredProviderIdentifier = nil
+            #expect(MaintainModelProviderResolver.preferredProviderIdentifier == nil)
+        }
+    }
+
+    /// The safety property: a reader can disconnect the provider they chose, and
+    /// a preference for something no longer connected must fall through to what
+    /// IS connected rather than resolving to nothing.
+    @Test("a preference for a disconnected provider falls through")
+    func aStalePreferenceFallsThrough() {
+        withNoStoredPreference {
+            MaintainModelProviderResolver.preferredProviderIdentifier = "not-a-real-provider"
+            let available = MaintainModelProviderResolver.allAvailable()
+            let resolved = MaintainModelProviderResolver.firstAvailable()
+            // Whatever this machine has connected, the answer is one of them —
+            // never nil because of an unusable stored choice, and never the
+            // stored choice itself.
+            #expect(resolved?.identifier != "not-a-real-provider")
+            #expect(available.isEmpty ? resolved == nil : resolved != nil)
+        }
+    }
+
+    /// With no preference the confidence order still decides, so this changes
+    /// nothing for a reader who has never expressed one.
+    @Test("no preference means the fallback order is unchanged")
+    func noPreferenceKeepsTheOrder() {
+        withNoStoredPreference {
+            let available = MaintainModelProviderResolver.allAvailable()
+            #expect(MaintainModelProviderResolver.firstAvailable()?.identifier
+                == available.first?.identifier)
+        }
+    }
+}
+

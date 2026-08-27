@@ -671,6 +671,37 @@ final class AccountService: ObservableObject {
         )
     }
 
+    /// What will answer a QUESTION, in the reader's words.
+    ///
+    /// Split out from `activeTierDescription` — which described "the next
+    /// request" as though there were one kind, was written for a status line,
+    /// and was then never rendered anywhere. Chat and app-editing genuinely run
+    /// on different providers at the same time: a signed-in reader with a Codex
+    /// login asks publik and edits with Codex. One sentence could not say that,
+    /// so a reader who connected Codex and then saw only "Sonnet | Opus" had
+    /// nothing on screen to correct them. Editing's side is
+    /// `MaintainModelProviderResolver.firstAvailable()`.
+    /// Whether asking a question can go anywhere at all.
+    ///
+    /// A Codex login is deliberately not enough: chat needs the Anthropic
+    /// Messages wire format with tool-use blocks, which `codex exec` cannot
+    /// serve. A reader whose only credential is Codex can edit apps and cannot
+    /// ask questions, and the composer says so rather than offering a field
+    /// that fails on send.
+    var canAnswerQuestions: Bool {
+        signedInAccount != nil || hasStoredAnthropicAPIKey || hasConnectedClaudeCodeLogin
+    }
+
+    var chatProviderDescription: String {
+        if signedInAccount != nil { return "Answers come from publik" }
+        if hasStoredAnthropicAPIKey { return "Answers use your Anthropic key" }
+        if hasConnectedClaudeCodeLogin { return "Answers use your Claude Code login" }
+        // Deliberately not Codex: both chat routes speak the Anthropic Messages
+        // wire format with tool-use blocks, which `codex exec` cannot serve
+        // without a translation layer and the loss of streaming.
+        return "Sign in or add a key to ask questions"
+    }
+
     /// Which tier the next request will take, for the panel's status line.
     var activeTierDescription: String? {
         if signedInAccount != nil {

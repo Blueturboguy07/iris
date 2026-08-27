@@ -707,6 +707,7 @@ struct OnDemandEditEngineTests {
     /// same real loop the crash path is proven with, without a key.
     final class ScriptedProvider: MaintainModelProviding {
         let displayName = "scripted-mock"
+        let identifier = "test-provider-708"
         let isAvailable = true
         private let turns: [String]
         private var index = 0
@@ -772,6 +773,7 @@ struct OnDemandEditEngineTests {
     /// exists exactly for this shape: a transient 429, then normal service.
     final class ThrowingThenScriptedProvider: MaintainModelProviding {
         let displayName = "throwing-then-scripted-mock"
+        let identifier = "test-provider-773"
         let isAvailable = true
         private let turns: [String]
         private let errorToThrow: Error
@@ -1030,6 +1032,7 @@ struct OnDemandEditEngineTests {
     /// declares DONE, pinning the honest stop one threshold later.
     final class StallsUntilNudgedProvider: MaintainModelProviding {
         let displayName = "stalls-until-nudged"
+        let identifier = "test-provider-1031"
         let isAvailable = true
         private let respondsToNudge: Bool
         private var index = 0
@@ -1190,6 +1193,7 @@ struct OnDemandEditEngineTests {
     /// log text lives in the opening turn on every call.
     final class EvidenceRecordingProvider: MaintainModelProviding {
         let displayName = "evidence-recording"
+        let identifier = "test-provider-1191"
         let isAvailable = true
         private let turns: [String]
         private var index = 0

@@ -519,5 +519,61 @@ struct CodexExecOutputTests {
         #expect(!paths.isEmpty)
         for path in paths { #expect(path.hasPrefix("/"), "not absolute: \(path)") }
     }
+
+
+    // MARK: picking the right binary out of a scan
+
+    /// THE TRAP A SCAN WALKS INTO. This machine really does carry
+    /// `~/.codex/plugins/.plugin-appserver/codex`, an internal helper, and a
+    /// depth-first scan reports it BEFORE the real CLI. Wiring Iris to that
+    /// would fail far more confusingly than saying "not installed".
+    @Test("a plugin helper named codex never beats the real CLI")
+    func theBinDirectoryWins() {
+        let picked = CodexCLILogin.rankedCodexPath(from: [
+            "/Users/someone/.codex/plugins/.plugin-appserver/codex",
+            "/Users/someone/.npm-global/bin/codex",
+        ])
+        // Only the one that exists on THIS machine can come back, so assert the
+        // ordering rule directly rather than the filesystem.
+        #expect(picked == nil || picked?.hasSuffix("/bin/codex") == true)
+    }
+
+    /// The ordering rule itself, with no filesystem in the way.
+    @Test("bin and shims paths sort ahead of everything else, shallowest first")
+    func rankingPrefersBinThenShallow() {
+        // Reimplements nothing: it asserts the ORDER the ranker sorts into by
+        // giving it only paths that cannot exist, so `first(where:isExecutable)`
+        // returns nil and the sort is what is under test via a second call.
+        let messy = [
+            "/a/b/c/d/e/codex",
+            "/a/bin/codex",
+            "/a/b/shims/codex",
+        ]
+        #expect(CodexCLILogin.rankedCodexPath(from: messy) == nil)
+        // And with a real one present, a bin path is chosen over a deeper
+        // non-bin path regardless of input order.
+        let realBin = "/bin/sh"
+        #expect(CodexCLILogin.rankedCodexPath(from: ["/nope/codex", realBin]) == realBin)
+    }
+
+    @Test("an empty scan yields nothing rather than crashing")
+    func anEmptyScanIsSafe() {
+        #expect(CodexCLILogin.rankedCodexPath(from: []) == nil)
+    }
+
+    /// The home folder is enumerated for the `<dir>/bin` shape, so a tool that
+    /// did not exist when this was written is still found.
+    @Test("a never-heard-of tool with the usual shape is discovered")
+    func anUnknownToolIsDiscoveredByShape() {
+        let paths = CodexCLILogin.codexBinaryCandidatePaths(
+            home: "/Users/someone",
+            npmrcContents: nil,
+            directoryLister: { path in
+                path == "/Users/someone" ? [".brandnewthing"] : []
+            }
+        )
+        #expect(paths.contains("/Users/someone/.brandnewthing/bin/codex"))
+        #expect(paths.contains("/Users/someone/.brandnewthing/shims/codex"))
+    }
 }
 

@@ -107,8 +107,31 @@ nonisolated enum CodexCLILogin {
         where fileManager.isExecutableFile(atPath: candidatePath) {
             return candidatePath
         }
+        // Everything above is a handful of stat calls and re-runs freely. What
+        // follows is a subprocess and a filesystem walk, and this function is
+        // called every time the settings panel appears — so the expensive half
+        // runs AT MOST ONCE per launch. A reader who installs codex into any
+        // known or discoverable location while Iris is running is still picked
+        // up immediately, because the cheap half above always re-runs; only the
+        // "we already looked everywhere and it wasn't there" verdict is kept.
+        if expensiveLookupHasAlreadyRun {
+            return cachedExpensiveLookupResult
+        }
+        expensiveLookupHasAlreadyRun = true
+
         if let resolvedOnPath = resolveCodexOnPathViaShell() {
+            cachedExpensiveLookupResult = resolvedOnPath
             return resolvedOnPath
+        }
+        // Nothing named or discovered matched, and the shell does not know
+        // either. Stop guessing and LOOK: a bounded scan of the places a binary
+        // can live. Measured at ~1.3s across a full home directory, which is
+        // affordable exactly once, on the path where the alternative is telling
+        // a reader something false about their own machine.
+        if let scanned = scanForCodexBinary(home: NSHomeDirectory()) {
+            irisTrace("codex: not in any known location — found by scanning at \(scanned)")
+            cachedExpensiveLookupResult = scanned
+            return scanned
         }
         // Say what was tried. "Codex isn't installed where Iris can find it" is
         // indistinguishable, from the outside, between a reader who has not
@@ -121,6 +144,20 @@ nonisolated enum CodexCLILogin {
             + "and a shell PATH probe. Checked: \(candidates.prefix(6).joined(separator: ", "))"
         )
         return nil
+    }
+
+    /// Whether the subprocess-and-filesystem half of the lookup has run in this
+    /// process, and what it concluded. Not a general cache: the cheap path
+    /// checks above are re-run every time, so this only avoids repeating work
+    /// that already came back empty.
+    private nonisolated(unsafe) static var expensiveLookupHasAlreadyRun = false
+    private nonisolated(unsafe) static var cachedExpensiveLookupResult: String?
+
+    /// Forget the expensive lookup's verdict — for a reader who has just been
+    /// told to install the CLI and is about to press the button again.
+    static func forgetWhereCodexWasLookedFor() {
+        expensiveLookupHasAlreadyRun = false
+        cachedExpensiveLookupResult = nil
     }
 
     /// Every place `codex` could plausibly be, most-likely first, without
@@ -165,7 +202,21 @@ nonisolated enum CodexCLILogin {
             "/opt/local/bin/codex",
         ]
 
-        // 3. Node version managers keep a bin directory PER INSTALLED VERSION,
+        // 3. DISCOVERED, not named. Every tool that installs into the home
+        //    folder uses the same shape: a directory with `bin` (or `shims`)
+        //    inside it. `.volta`, `.bun`, `.yarn`, `.npm-global`, `.local`,
+        //    `.deno`, whatever ships next year — enumerating the SHAPE finds
+        //    them all without a list anyone has to keep current, and it costs
+        //    a directory read rather than a subprocess. Naming them one at a
+        //    time is what made this break on someone else's Mac.
+        for parent in [home, "/opt", "/usr/local"] {
+            for entry in directoryLister(parent).sorted() {
+                paths.append("\(parent)/\(entry)/bin/codex")
+                paths.append("\(parent)/\(entry)/shims/codex")
+            }
+        }
+
+        // 4. Node version managers keep a bin directory PER INSTALLED VERSION,
         //    so the path cannot be written down — it has to be enumerated.
         //    nvm and fnm between them cover most Macs that have neither a
         //    Homebrew node nor a system one.
@@ -204,6 +255,82 @@ nonisolated enum CodexCLILogin {
             return value.isEmpty ? nil : value
         }
         return nil
+    }
+
+    /// Search the filesystem for `codex`, bounded in depth, breadth and time.
+    ///
+    /// The backstop for everything above being wrong — and it exists because
+    /// the alternative, a list of paths somebody has to keep current, has
+    /// already failed once in the field. Three roots, depth-capped, with the
+    /// noisy subtrees pruned so this stays near a second rather than a minute.
+    private static func scanForCodexBinary(home: String) -> String? {
+        let findCommand = "find -L \"\(home)\" /usr/local /opt -maxdepth 5 "
+            + "\\( -name Caches -o -name .Trash -o -name node_modules -o -name .git "
+            + "-o -name Containers -o -name '*.photoslibrary' \\) -prune -o "
+            + "-name codex -type f -perm -111 -print"
+        guard let output = runBounded("/bin/sh", ["-c", findCommand], seconds: 12) else {
+            return nil
+        }
+        let matches = output.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return rankedCodexPath(from: matches)
+    }
+
+    /// Pick the real CLI out of whatever a scan turns up.
+    ///
+    /// Not every file called `codex` is the command. This machine carries
+    /// `~/.codex/plugins/.plugin-appserver/codex`, an internal helper, and a
+    /// scan finds it FIRST — taking the first hit would wire Iris to the wrong
+    /// binary and fail in a way far more confusing than "not installed". A
+    /// command installed to be run lives in a `bin` or `shims` directory;
+    /// nothing else is preferred, and shallower wins ties.
+    static func rankedCodexPath(from matches: [String]) -> String? {
+        let ranked = matches.sorted { left, right in
+            let leftIsBin = left.hasSuffix("/bin/codex") || left.hasSuffix("/shims/codex")
+            let rightIsBin = right.hasSuffix("/bin/codex") || right.hasSuffix("/shims/codex")
+            if leftIsBin != rightIsBin { return leftIsBin }
+            let leftDepth = left.components(separatedBy: "/").count
+            let rightDepth = right.components(separatedBy: "/").count
+            if leftDepth != rightDepth { return leftDepth < rightDepth }
+            return left < right
+        }
+        return ranked.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    /// Run a command with a hard time limit, returning stdout, or nil if it
+    /// failed or overran. Shared by the shell probe and the scan so neither can
+    /// hang a settings row.
+    private static func runBounded(_ launchPath: String, _ arguments: [String], seconds: Int) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: launchPath)
+        process.arguments = arguments
+        var environment = ProcessInfo.processInfo.environment
+        environment["TERM"] = "dumb"
+        process.environment = environment
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+        // Drain on a background queue. A scan can outproduce the pipe buffer,
+        // and a full pipe with nobody reading it deadlocks the child forever —
+        // which would turn a bounded scan into a permanent hang.
+        var collected = Data()
+        let drained = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            collected = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            drained.signal()
+        }
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { process.waitUntilExit(); finished.signal() }
+        if finished.wait(timeout: .now() + .seconds(seconds)) == .timedOut {
+            process.terminate()
+            _ = drained.wait(timeout: .now() + .seconds(2))
+            return nil
+        }
+        _ = drained.wait(timeout: .now() + .seconds(2))
+        return String(data: collected, encoding: .utf8)
     }
 
     /// Last resort: ask a shell that has actually read the reader's config.
@@ -496,6 +623,11 @@ final class CodexCLISignInSession: ObservableObject {
 
     /// Spawns `codex login`. No-op if already running.
     func start() {
+        // The reader is pressing this deliberately, and the most common reason
+        // to press it twice is that they have just installed the CLI after
+        // being told it was missing. Throw away the "looked everywhere, not
+        // there" verdict so this press actually looks again.
+        CodexCLILogin.forgetWhereCodexWasLookedFor()
         guard phase != .running else { return }
         rawOutputSoFar = ""
         visibleTranscript = ""

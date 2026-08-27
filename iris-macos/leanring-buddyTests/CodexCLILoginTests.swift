@@ -388,3 +388,136 @@ struct CodexExecOutputTests {
         #expect(CodexExecOutput.retryAfterSeconds(inStandardError: "no hint here") == nil)
     }
 }
+
+// MARK: - Finding the CLI on someone else's Mac
+
+/// These exist because the first lookup worked on the machine it was written on
+/// and reported "Codex isn't installed" on a colleague's, which is the worst
+/// possible shape for a bug: invisible to its author.
+@Suite struct CodexBinaryLookupTests {
+
+    // MARK: npmrc prefix
+
+    @Test("a user-level npm prefix is read from .npmrc")
+    func theConfiguredNpmPrefixIsFound() {
+        #expect(CodexCLILogin.npmGlobalPrefix(
+            fromNpmrc: "prefix=/Users/someone/.npm-global\n", home: "/Users/someone"
+        ) == "/Users/someone/.npm-global")
+    }
+
+    @Test("tilde and $HOME in a prefix are expanded")
+    func aHomeRelativePrefixIsExpanded() {
+        #expect(CodexCLILogin.npmGlobalPrefix(
+            fromNpmrc: "prefix=~/.npm-global", home: "/Users/someone"
+        ) == "/Users/someone/.npm-global")
+        #expect(CodexCLILogin.npmGlobalPrefix(
+            fromNpmrc: "prefix=$HOME/npm", home: "/Users/someone"
+        ) == "/Users/someone/npm")
+    }
+
+    @Test("quotes, spacing and a trailing slash are tolerated")
+    func theValueIsCleanedUp() {
+        #expect(CodexCLILogin.npmGlobalPrefix(
+            fromNpmrc: "  prefix = \"/opt/npm/\" ", home: "/Users/someone"
+        ) == "/opt/npm")
+    }
+
+    @Test("a commented-out prefix is not a prefix")
+    func aCommentedPrefixIsIgnored() {
+        #expect(CodexCLILogin.npmGlobalPrefix(
+            fromNpmrc: "# prefix=/wrong\n; prefix=/alsowrong\n", home: "/h"
+        ) == nil)
+        #expect(CodexCLILogin.npmGlobalPrefix(fromNpmrc: nil, home: "/h") == nil)
+    }
+
+    /// `prefix-only-lookalike` keys must not be mistaken for `prefix`.
+    @Test("a key that merely starts with prefix is not the prefix")
+    func aLookalikeKeyIsIgnored() {
+        #expect(CodexCLILogin.npmGlobalPrefix(
+            fromNpmrc: "prefix-something=/wrong", home: "/h"
+        ) == nil)
+    }
+
+    // MARK: candidate ordering
+
+    /// THE CASE THAT BROKE. npm is configured with a user-level prefix, so the
+    /// binary is somewhere no fixed list would guess and no GUI app's PATH
+    /// contains. It must be looked for first, because it is the one location
+    /// that is actually derived from how the reader installed it.
+    @Test("the npm-configured prefix is the first place looked")
+    func theConfiguredPrefixLeadsTheCandidates() {
+        let paths = CodexCLILogin.codexBinaryCandidatePaths(
+            home: "/Users/someone",
+            npmrcContents: "prefix=/Users/someone/.custom-npm\n",
+            directoryLister: { _ in [] }
+        )
+        #expect(paths.first == "/Users/someone/.custom-npm/bin/codex")
+    }
+
+    /// A machine with no npmrc still gets the documented defaults, in a stable
+    /// order, and Homebrew on both architectures.
+    @Test("the fixed locations cover both Homebrew prefixes and the runtimes")
+    func theFixedLocationsAreCovered() {
+        let paths = CodexCLILogin.codexBinaryCandidatePaths(
+            home: "/Users/someone", npmrcContents: nil, directoryLister: { _ in [] }
+        )
+        for expected in [
+            "/opt/homebrew/bin/codex",
+            "/usr/local/bin/codex",
+            "/Users/someone/.volta/bin/codex",
+            "/Users/someone/Library/pnpm/codex",
+            "/Users/someone/.asdf/shims/codex",
+        ] {
+            #expect(paths.contains(expected), "missing \(expected)")
+        }
+    }
+
+    /// A version manager keeps one bin directory per installed version, so the
+    /// path cannot be written down — it has to be enumerated. This is the shape
+    /// most likely on a developer's Mac that is not the author's.
+    @Test("nvm and fnm installed versions are enumerated, newest first")
+    func versionManagerDirectoriesAreEnumerated() {
+        let paths = CodexCLILogin.codexBinaryCandidatePaths(
+            home: "/Users/someone",
+            npmrcContents: nil,
+            directoryLister: { path in
+                path.hasSuffix(".nvm/versions/node") ? ["v20.11.0", "v22.3.0"] : []
+            }
+        )
+        #expect(paths.contains("/Users/someone/.nvm/versions/node/v22.3.0/bin/codex"))
+        #expect(paths.contains("/Users/someone/.nvm/versions/node/v20.11.0/bin/codex"))
+        // Newest first, so a machine with several versions tries the one the
+        // reader most likely installed against.
+        let newer = paths.firstIndex(of: "/Users/someone/.nvm/versions/node/v22.3.0/bin/codex")
+        let older = paths.firstIndex(of: "/Users/someone/.nvm/versions/node/v20.11.0/bin/codex")
+        #expect(newer != nil && older != nil && newer! < older!)
+    }
+
+    @Test("fnm's extra nesting level is covered too")
+    func fnmNestsOneLevelDeeper() {
+        let paths = CodexCLILogin.codexBinaryCandidatePaths(
+            home: "/Users/someone",
+            npmrcContents: nil,
+            directoryLister: { path in
+                path.hasSuffix("fnm/node-versions") ? ["v22.3.0"] : []
+            }
+        )
+        #expect(paths.contains(
+            "/Users/someone/Library/Application Support/fnm/node-versions/v22.3.0/installation/bin/codex"
+        ))
+    }
+
+    /// Nothing in the candidate list may be a bare name: an entry that is not
+    /// an absolute path would be resolved against the app's working directory.
+    @Test("every candidate is an absolute path")
+    func everyCandidateIsAbsolute() {
+        let paths = CodexCLILogin.codexBinaryCandidatePaths(
+            home: "/Users/someone",
+            npmrcContents: "prefix=/p",
+            directoryLister: { _ in ["v1"] }
+        )
+        #expect(!paths.isEmpty)
+        for path in paths { #expect(path.hasPrefix("/"), "not absolute: \(path)") }
+    }
+}
+

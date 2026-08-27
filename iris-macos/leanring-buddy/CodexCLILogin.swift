@@ -82,56 +82,195 @@ nonisolated enum CodexCLILogin {
     // MARK: Locating the CLI
 
     /// The `codex` executable, or nil when the CLI is not installed anywhere
-    /// Iris can find it. Known install locations first (fast, no subprocess),
-    /// then whatever a login shell resolves on the reader's PATH.
+    /// Iris can find it.
     ///
-    /// The npm-global path leads the list on purpose: `npm install -g
-    /// @openai/codex` is the install route the Codex docs give first, and on a
-    /// Mac with a user-level npm prefix it lands somewhere a GUI app's default
-    /// PATH will never see.
+    /// This is harder than it looks, and the first version got it wrong in a way
+    /// that only showed up on someone else's Mac. A GUI app does not inherit the
+    /// PATH a terminal has: launched from Finder or Dock it gets the system
+    /// default — `/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin` and little else.
+    /// Everything a developer adds lives in `~/.zshrc`, which a LOGIN shell
+    /// (`zsh -l -c`) does not even read, because `.zshrc` is for INTERACTIVE
+    /// shells. So the original "ask a login shell" fallback resolved nothing at
+    /// all — measured on the author's own machine, where `codex` is installed
+    /// and working and `zsh -l -c 'command -v codex'` returns empty. It only
+    /// ever appeared to work because one hardcoded path happened to match.
+    ///
+    /// So the order is: paths that can be DERIVED (npm says where it installs
+    /// global binaries, and it is authoritative for the documented install
+    /// route), then the well-known fixed locations, then version managers,
+    /// then — last, and no longer load-bearing — a shell that actually sources
+    /// the interactive config.
     static func locateCodexBinary() -> String? {
-        let home = NSHomeDirectory()
-        let knownCandidatePaths = [
+        let fileManager = FileManager.default
+        let candidates = codexBinaryCandidatePaths()
+        for candidatePath in candidates
+        where fileManager.isExecutableFile(atPath: candidatePath) {
+            return candidatePath
+        }
+        if let resolvedOnPath = resolveCodexOnPathViaShell() {
+            return resolvedOnPath
+        }
+        // Say what was tried. "Codex isn't installed where Iris can find it" is
+        // indistinguishable, from the outside, between a reader who has not
+        // installed it and a reader whose install is somewhere this does not
+        // look — and the second of those is a bug in here, not in their setup.
+        // The first version of this lookup shipped with exactly that ambiguity
+        // and it took someone else's Mac to expose it.
+        irisTrace(
+            "codex: not found — tried \(candidates.count) known locations "
+            + "and a shell PATH probe. Checked: \(candidates.prefix(6).joined(separator: ", "))"
+        )
+        return nil
+    }
+
+    /// Every place `codex` could plausibly be, most-likely first, without
+    /// running anything. Pure and ordered so it can be tested directly — the
+    /// old version's failure was invisible precisely because the whole lookup
+    /// was one opaque function with a subprocess in it.
+    static func codexBinaryCandidatePaths(
+        home: String = NSHomeDirectory(),
+        npmrcContents: String? = nil,
+        directoryLister: (String) -> [String] = { path in
+            (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
+        }
+    ) -> [String] {
+        var paths: [String] = []
+
+        // 1. Wherever npm is configured to put global binaries. `npm install -g
+        //    @openai/codex` is the install route the Codex docs give first, and
+        //    a user-level prefix is common enough that this machine has one:
+        //    `prefix=/Users/…/.npm-global`, which no fixed list would guess.
+        //    Read from the file rather than by running `npm`, because npm is
+        //    itself often unreachable from a GUI app's PATH.
+        let npmrc = npmrcContents
+            ?? (try? String(contentsOfFile: "\(home)/.npmrc", encoding: .utf8))
+        if let configuredPrefix = npmGlobalPrefix(fromNpmrc: npmrc, home: home) {
+            paths.append("\(configuredPrefix)/bin/codex")
+        }
+
+        // 2. Fixed locations: the npm default prefixes, Homebrew on both
+        //    architectures, and the runtimes that install their own bin dir.
+        paths += [
             "\(home)/.npm-global/bin/codex",
             "/opt/homebrew/bin/codex",
             "/usr/local/bin/codex",
             "\(home)/.local/bin/codex",
             "\(home)/.bun/bin/codex",
             "\(home)/.codex/bin/codex",
+            "\(home)/.volta/bin/codex",
+            "\(home)/.yarn/bin/codex",
+            "\(home)/Library/pnpm/codex",
+            "\(home)/.asdf/shims/codex",
+            "\(home)/.local/share/mise/shims/codex",
+            "/opt/local/bin/codex",
         ]
-        let fileManager = FileManager.default
-        for candidatePath in knownCandidatePaths where fileManager.isExecutableFile(atPath: candidatePath) {
-            return candidatePath
+
+        // 3. Node version managers keep a bin directory PER INSTALLED VERSION,
+        //    so the path cannot be written down — it has to be enumerated.
+        //    nvm and fnm between them cover most Macs that have neither a
+        //    Homebrew node nor a system one.
+        let versionedRoots = [
+            "\(home)/.nvm/versions/node",
+            "\(home)/Library/Application Support/fnm/node-versions",
+            "\(home)/.local/share/fnm/node-versions",
+        ]
+        for root in versionedRoots {
+            for version in directoryLister(root).sorted().reversed() {
+                paths.append("\(root)/\(version)/bin/codex")
+                // fnm nests one level deeper than nvm does.
+                paths.append("\(root)/\(version)/installation/bin/codex")
+            }
         }
-        return resolveCodexOnPathViaLoginShell()
+
+        return paths
     }
 
-    /// Asks a login shell to resolve `codex`, covering an install under a
-    /// directory the fixed list above does not know (a different npm prefix, a
-    /// version manager, a pnpm global bin). Non-interactive and synchronous —
-    /// it only runs when the known paths all miss.
-    private static func resolveCodexOnPathViaLoginShell() -> String? {
+    /// The `prefix=` line from an npmrc, if it names one. Tilde and `$HOME` are
+    /// both expanded because npm accepts either in the file.
+    static func npmGlobalPrefix(fromNpmrc contents: String?, home: String) -> String? {
+        guard let contents else { return nil }
+        for line in contents.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.hasPrefix("#"), !trimmed.hasPrefix(";"),
+                  trimmed.hasPrefix("prefix") else { continue }
+            let parts = trimmed.split(separator: "=", maxSplits: 1)
+            guard parts.count == 2,
+                  parts[0].trimmingCharacters(in: .whitespaces) == "prefix" else { continue }
+            var value = parts[1].trimmingCharacters(in: .whitespaces)
+            value = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            if value.hasPrefix("~/") { value = "\(home)/\(value.dropFirst(2))" }
+            if value.hasPrefix("$HOME/") { value = "\(home)/\(value.dropFirst(6))" }
+            while value.hasSuffix("/") { value.removeLast() }
+            return value.isEmpty ? nil : value
+        }
+        return nil
+    }
+
+    /// Last resort: ask a shell that has actually read the reader's config.
+    ///
+    /// `-i` matters and its absence was the original bug. `.zshrc` — where
+    /// nvm, fnm, volta, asdf and hand-rolled PATH edits all live — is sourced
+    /// for INTERACTIVE shells only, so `zsh -l -c` sees none of it. The
+    /// interactive flag is paired with a scrubbed `ZDOTDIR`-free environment
+    /// and a dumb terminal so ZLE does not try to take over a pipe, and the
+    /// whole thing is bounded: a reader's `.zshrc` may block on anything, and
+    /// this runs while a panel is waiting to draw.
+    private static func resolveCodexOnPathViaShell() -> String? {
         let loginShellPath = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        // Interactive first, then the old login-only form as a fallback for a
+        // shell where `-i` misbehaves.
+        for arguments in [["-i", "-l", "-c", "command -v codex"], ["-l", "-c", "command -v codex"]] {
+            if let resolved = firstExecutablePath(
+                fromShell: loginShellPath, arguments: arguments
+            ) {
+                return resolved
+            }
+        }
+        return nil
+    }
+
+    private static func firstExecutablePath(
+        fromShell shellPath: String, arguments: [String]
+    ) -> String? {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: loginShellPath)
-        process.arguments = ["-l", "-c", "command -v codex"]
+        process.executableURL = URL(fileURLWithPath: shellPath)
+        process.arguments = arguments
+        var environment = ProcessInfo.processInfo.environment
+        environment["TERM"] = "dumb"
+        process.environment = environment
         let outputPipe = Pipe()
         process.standardOutput = outputPipe
         process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
         do {
             try process.run()
         } catch {
             return nil
         }
-        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard let resolvedPath = String(data: outputData, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !resolvedPath.isEmpty,
-              FileManager.default.isExecutableFile(atPath: resolvedPath) else {
+        // A reader's shell config can hang. Give it a bounded window, then
+        // kill it — this runs on the path that decides whether a settings row
+        // says "connected", and that row must not wait on someone's .zshrc.
+        let deadline = DispatchTime.now() + .seconds(6)
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            process.waitUntilExit()
+            finished.signal()
+        }
+        if finished.wait(timeout: deadline) == .timedOut {
+            process.terminate()
             return nil
         }
-        return resolvedPath
+        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        // `command -v` can print several lines when a shim and a real binary
+        // both exist; the first executable one is the answer.
+        for line in (String(data: outputData, encoding: .utf8) ?? "")
+            .components(separatedBy: .newlines) {
+            let candidate = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !candidate.isEmpty, FileManager.default.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+        return nil
     }
 
     // MARK: Where the CLI keeps its login

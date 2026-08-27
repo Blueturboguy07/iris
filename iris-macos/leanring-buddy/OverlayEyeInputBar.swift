@@ -479,6 +479,11 @@ struct OverlayEyeInputBarView: View {
     /// trailer, so it is a real choice and not a convenience.
     @State private var editKind: OnDemandEditKind = .bugFix
 
+    /// Whether the past-conversation list is expanded. Collapsed by default:
+    /// the bar is a small panel over someone's desktop, and history is a thing
+    /// you go looking for, not a thing that should be in the way.
+    @State private var historyIsShowing: Bool = false
+
     @State private var typedMessage: String = ""
 
     /// The one question-and-answer the bar is showing. All the rules about what
@@ -664,6 +669,8 @@ struct OverlayEyeInputBarView: View {
                 }
 
                 textFieldRow
+                historyAndNewChatRow
+                chatHistoryList
                 whateverTheExchangeIsUpTo
             }
         }
@@ -792,8 +799,16 @@ struct OverlayEyeInputBarView: View {
     /// writes, so switching here and switching there are one setting.
     /// True while an app is picked and waiting to be described — the one state
     /// where the bar is a two-purpose composer rather than an ask field.
+    /// The composer offers editing when an app is already picked OR when an
+    /// editable publik app is simply in front. The second half is the fix for
+    /// "the UI doesn't show fix-a-bug when a publik app is at the forefront":
+    /// that affordance used to be two suggestion chips, which an open guide
+    /// suppressed outright and which the exchange card replaced the moment
+    /// anyone asked a single question. On a bar that had already answered
+    /// something, the app's headline feature had no entry point at all.
     private var anAppIsOpenForEditing: Bool {
         onDemandEditCoordinator.phase == .describe
+            || companionManager.frontmostEditableAppForTheComposer != nil
     }
 
     /// The mode actually in force. A reader can be in Ask mode and then sign
@@ -804,7 +819,9 @@ struct OverlayEyeInputBarView: View {
     }
 
     private var openAppName: String {
-        onDemandEditCoordinator.activeAppName ?? "this app"
+        onDemandEditCoordinator.activeAppName
+            ?? companionManager.frontmostEditableAppForTheComposer?.name
+            ?? "this app"
     }
 
     /// The app name and the Ask/Edit switch: one surface, one field, and a
@@ -1084,6 +1101,83 @@ struct OverlayEyeInputBarView: View {
 
     // MARK: What is under the field
 
+    /// History, and the way out of the current conversation.
+    ///
+    /// Both were missing entirely: the bar showed one exchange, kept hundreds
+    /// on disk that nobody could see, and had no way to start over short of
+    /// closing the bar. "New chat" is also what brings the suggestion
+    /// openers back, since those are only offered on a blank exchange.
+    @ViewBuilder
+    private var historyAndNewChatRow: some View {
+        if companionManager.thereIsChatHistoryToShow || exchange.thereIsAnExchangeOnScreen {
+            HStack(spacing: 6) {
+                if companionManager.thereIsChatHistoryToShow {
+                    Button {
+                        historyIsShowing.toggle()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: historyIsShowing ? "chevron.down" : "clock.arrow.circlepath")
+                                .font(.system(size: 9, weight: .semibold))
+                            Text(historyIsShowing ? "Hide history" : "History")
+                                .font(.system(size: 9, weight: .medium))
+                        }
+                    }
+                    .irisTinyButton()
+                    .background(IrisShellBackground(cornerRadius: DS.CornerRadius.small))
+                }
+
+                Spacer(minLength: 0)
+
+                Button {
+                    historyIsShowing = false
+                    companionManager.startANewChat()
+                    exchange.clearTheWholeExchange()
+                    typedMessage = ""
+                    theTextFieldHasKeyboardFocus = true
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "square.and.pencil")
+                            .font(.system(size: 9, weight: .semibold))
+                        Text("New chat")
+                            .font(.system(size: 9, weight: .medium))
+                    }
+                }
+                .irisTinyButton()
+                .background(IrisShellBackground(cornerRadius: DS.CornerRadius.small))
+                .help("Clear this conversation and start fresh")
+            }
+        }
+    }
+
+    /// Past exchanges, newest first. Capped in height so a long history
+    /// scrolls inside the bar instead of growing it off the screen.
+    @ViewBuilder
+    private var chatHistoryList: some View {
+        if historyIsShowing {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(companionManager.recentChatHistory(), id: \.askedAt) { past in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(past.question)
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundColor(DS.Colors.ink)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(past.answer)
+                                .font(.system(size: 10))
+                                .foregroundColor(DS.Colors.textSecondary)
+                                .lineLimit(4)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(10)
+            }
+            .frame(maxHeight: 220)
+            .background(IrisShellBackground(cornerRadius: DS.CornerRadius.large))
+        }
+    }
+
     @ViewBuilder
     private var whateverTheExchangeIsUpTo: some View {
         if exchange.theSuggestionChipsShouldBeOffered {
@@ -1236,7 +1330,15 @@ struct OverlayEyeInputBarView: View {
         if anAppIsOpenForEditing, effectiveComposerMode == .edit {
             let request = typedMessage
             typedMessage = ""
-            onDemandEditCoordinator.describeRequest(request, kind: editKind)
+            if onDemandEditCoordinator.phase == .describe {
+                onDemandEditCoordinator.describeRequest(request, kind: editKind)
+            } else {
+                // Nothing picked yet: bind to the app in front and describe in
+                // one move, so the reader never has to discover a phrase.
+                _ = companionManager.beginOnDemandEditFromTheComposer(
+                    request: request, kind: editKind
+                )
+            }
             return
         }
         send(typedMessage)

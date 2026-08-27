@@ -514,6 +514,37 @@ final class CompanionManager: ObservableObject {
         print("🧠 Restored chat transcript: \(conversationHistory.count) exchanges")
     }
 
+    /// Past exchanges, newest first, for the bar's history view. Reads the same
+    /// on-disk transcript the conversation window is warmed from, so what a
+    /// reader can SEE and what the model was actually told come from one place.
+    func recentChatHistory(limit: Int = 30) -> [ChatTranscriptExchange] {
+        chatTranscriptStore.recentExchanges(limit: limit).reversed()
+    }
+
+    var thereIsChatHistoryToShow: Bool {
+        chatTranscriptStore.mostRecentExchange != nil
+    }
+
+    /// Start a new conversation.
+    ///
+    /// The bar has always shown exactly ONE exchange and had no way to end it:
+    /// `clearTheWholeExchange` ran only when the bar was dismissed, so a reader
+    /// carried one answer around until they closed it. That also silently
+    /// removed the suggestion chips — they are offered only in
+    /// `.composingTheFirstQuestion` — which is how the "fix a bug in…" opener
+    /// disappeared after a single question. Starting a new chat brings both the
+    /// blank slate and those openers back.
+    ///
+    /// The transcript on disk is NOT erased: this ends the conversation the
+    /// model is being told about, it does not destroy the reader's record of
+    /// what they asked. That is what the history view reads.
+    func startANewChat() {
+        currentResponseTask?.cancel()
+        currentResponseTask = nil
+        conversationHistory = []
+        irisTrace("chat: reader started a new conversation")
+    }
+
     /// The currently running AI response task, if any. Cancelled when the user
     /// submits a new message so a new response can begin immediately.
     private var currentResponseTask: Task<Void, Never>?
@@ -1092,8 +1123,38 @@ final class CompanionManager: ObservableObject {
         NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
     }
 
-    /// Door B classification. Returns true — and starts the edit flow — when the
-    /// message is an explicit instruction to EDIT the frontmost catalog app that
+    /// The frontmost catalog app Iris may edit, resolved all the way to what
+    /// `requestOnDemandEdit` needs.
+    ///
+    /// Exists because the ONLY way into the edit flow used to be typing "fix a
+    /// bug in X" and having it recognised. The chips that taught readers that
+    /// phrase were suppressed by an open guide, and replaced by the exchange
+    /// card the moment anyone asked anything — so on a bar that had already
+    /// answered one question, the app's headline feature had no entry point at
+    /// all. Two people hit that on two machines. The composer now offers Edit
+    /// directly, and this is what it targets.
+    var frontmostEditableAppForTheComposer: (slug: String, name: String, stack: BreakAppStack)? {
+        guard let frontmostSlug = appInventoryService.frontmostCatalogAppSlug,
+              let entry = appInventoryService.installedEntriesForDisplay
+                  .first(where: { $0.slug == frontmostSlug }),
+              entry.isLocallyEditable
+        else { return nil }
+        return (entry.slug, entry.name, Self.catalogAppStacksBySlug[entry.slug] ?? .other)
+    }
+
+    /// Start an edit on the frontmost app from the composer, with the request
+    /// the reader already typed. Same binding path as the chips and the typed
+    /// phrase — the live eligibility re-check at start is unchanged.
+    func beginOnDemandEditFromTheComposer(request: String, kind: OnDemandEditKind) -> Bool {
+        guard let target = frontmostEditableAppForTheComposer else { return false }
+        requestOnDemandEdit(
+            forSlug: target.slug, name: target.name, stack: target.stack, preselectedKind: kind
+        )
+        onDemandEditCoordinator.describeRequest(request, kind: kind)
+        return true
+    }
+
+
     /// Iris may edit locally. Returns false for everything else (a question, a
     /// wish to pool, an app that is not editable), which stays on the chat
     /// pipeline. The fix/feature kind is only PRESELECTED here from the phrasing;

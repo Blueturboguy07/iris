@@ -156,6 +156,17 @@ jobs:
           hdiutil create -volname "Iris" -srcfolder dist/dmg-root -ov -format UDZO \
             "dist/Iris-assistant.dmg"
 
+          # Sign the IMAGE too, not just the app inside it. Apple's order is
+          # sign -> notarize -> staple, and a disk image that carries no
+          # signature of its own still staples fine — but `spctl --assess` on
+          # the file people actually download then reports "rejected, source=no
+          # usable signature". The app inside assesses as Notarized Developer
+          # ID either way, which is why this went unnoticed through 0.3.x.
+          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp \
+              "dist/Iris-assistant.dmg"
+          fi
+
       - name: Notarize and staple
         if: steps.signing.outputs.signed == 'true'
         working-directory: iris-macos
@@ -173,6 +184,9 @@ jobs:
             --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" --wait
           xcrun stapler staple dist/Iris-assistant.dmg
+          # Assess what will actually be downloaded, not just what is inside it.
+          spctl --assess --type open --context context:primary-signature -vv \
+            dist/Iris-assistant.dmg
 
       - name: Check the build opens
         working-directory: iris-macos

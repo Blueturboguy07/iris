@@ -303,9 +303,24 @@ jobs:
             iris-windows/out/make/windows-signed.txt
           if-no-files-found: error
 
+  # Publishing is DELIBERATE, never a side effect of pushing a tag.
+  #
+  # This repo has no signing secrets (`gh secret list` is empty), so the build
+  # jobs above downgrade to unsigned — and this job ends in
+  # `gh release upload --clobber`. On a tag that combination replaces a DMG
+  # signed and notarized on a real Mac with an unsigned CI build, silently, a
+  # few minutes after the release goes up. It has been caught twice by hand:
+  # the 0.3.1 and 0.3.2 runs were both cancelled mid-flight for this reason,
+  # which is not a safeguard, it is a person being quick.
+  #
+  # So a tag now builds and verifies but does not publish. Releasing is either
+  # local (build, sign, notarize, staple, `gh release create`) or an explicit
+  # workflow_dispatch with publish=true. Once the secrets exist and CI can
+  # produce a signed build, `startsWith(github.ref, 'refs/tags/')` can come
+  # back and this comment can go.
   publish:
     needs: [build-macos, build-windows]
-    if: startsWith(github.ref, 'refs/tags/') || inputs.publish
+    if: inputs.publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

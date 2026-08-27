@@ -63,8 +63,38 @@ private let irisTraceFilePath = (irisLogDirectoryPath as NSString)
     .appendingPathComponent("iris.log")
 /// Roll at 512 KB; with one backup the log costs at most ~1 MB on disk.
 private let irisTraceMaximumBytes = 512 * 1024
+
+/// Wall-clock stamp for every line, in UTC with milliseconds.
+///
+/// The log used to be bare messages. That made it useless for the one question
+/// it exists to answer — "what happened, and when?" — because a session that
+/// stops mid-step looks identical to one that finished, and there is no way to
+/// tell a run from an hour ago from one from five seconds ago. A real
+/// investigation on 2026-08-27 could establish that a driven `pnpm install`
+/// never reported back, and could NOT establish whether it timed out or the
+/// process went away, purely for want of a clock.
+private let irisTraceTimestampFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
+    formatter.timeZone = TimeZone(identifier: "UTC")
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    return formatter
+}()
+
+/// Which process wrote the line. The app and an `xcodebuild test` host share a
+/// bundle id, so they share this file — and a live test run interleaves its
+/// `maintain:` lines with a reader's real session, indistinguishably. Tagging
+/// the writer is what lets one be read without the other.
+private let irisTraceProcessTag: String = {
+    let name = ProcessInfo.processInfo.processName
+    let isATestHost = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        || ProcessInfo.processInfo.environment["XCTestSessionIdentifier"] != nil
+    return "\(isATestHost ? "test" : name) \(ProcessInfo.processInfo.processIdentifier)"
+}()
+
 func irisTrace(_ message: String) {
-    let line = message + "\n"
+    let stamp = irisTraceTimestampFormatter.string(from: Date())
+    let line = "\(stamp) [\(irisTraceProcessTag)] " + message + "\n"
     irisTraceQueue.async {
         guard let data = line.data(using: .utf8) else { return }
         let fileManager = FileManager.default
@@ -593,15 +623,26 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             guard markerToken == token, finishRunning != nil else { return }
             switch escalation {
             case 0:
+                irisTrace("shell: deadline reached, sending interrupt")
                 terminal?.sendInterrupt()
             case 1:
+                irisTrace("shell: still running after the interrupt, sending end-of-input")
                 terminal?.sendEndOfInput()
             default:
                 // A wedged shell must never strand the guide: kill the whole
-                // group and rebuild at the last known cwd. The scrubbed tail
-                // goes to the console because "the marker never came" is
-                // undebuggable without knowing what the shell did say.
-                print("🖥️ autopilot shell missed its deadline; scrubbed tail:\n\(buffer.tailForTheModel())\n[open line: \(buffer.unterminatedTail)]")
+                // group and rebuild at the last known cwd. The scrubbed tail is
+                // recorded because "the marker never came" is undebuggable
+                // without knowing what the shell did say.
+                //
+                // This used to `print` only. Nothing reads an app's stdout, so
+                // the one event the log most needed to contain — a command that
+                // never came back — was the one event it never mentioned. A
+                // step that ends without a `result=` line and without this line
+                // means the process went away; that distinction is only
+                // legible because this is now written to the same file.
+                irisTrace("shell: MISSED ITS DEADLINE after \(escalation) escalations — killing the group and rebuilding")
+                irisTrace("shell: scrubbed tail at timeout: \(buffer.tailForTheModel())")
+                irisTrace("shell: open line at timeout: \(buffer.unterminatedTail)")
                 let completion = finishRunning
                 finishRunning = nil
                 markerToken = nil

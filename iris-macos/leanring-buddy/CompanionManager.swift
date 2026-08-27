@@ -1488,7 +1488,21 @@ final class CompanionManager: ObservableObject {
             irisTrace("pointing/model: resolved rect=\(Int(rect.origin.x)),\(Int(rect.origin.y)),\(Int(rect.width)),\(Int(rect.height)) (global-screen)")
             return rect
         } catch {
-            irisTrace("pointing/model: capture/model error \(error.localizedDescription)")
+            // Name the transport state rather than relaying `localizedDescription`,
+            // which renders an `AssistantTransportError` as "The operation couldn't
+            // be completed. (Iris.AssistantTransportError error 3.)" — a case index
+            // the reader cannot act on and nobody can decode without the enum in
+            // front of them. Observed on 2026-08-27, twice, while a reader was
+            // parked at a manual step wondering why the eye had stopped pointing.
+            //
+            // These states are not transient: a budget that is spent and a
+            // credential that is gone fail every subsequent point the same way,
+            // so the log says so once, in words.
+            if let transportError = error as? AssistantTransportError {
+                irisTrace("pointing/model: no point — \(transportError.userFacingMessage)")
+            } else {
+                irisTrace("pointing/model: capture/model error \(error.localizedDescription)")
+            }
             return nil
         }
     }

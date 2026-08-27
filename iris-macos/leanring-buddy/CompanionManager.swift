@@ -781,6 +781,28 @@ final class CompanionManager: ObservableObject {
             self?.appInventoryService.installedApplicationURL(forBundleIdentifier: bundleId) != nil
         }
 
+        // "Where is this install actually up to?" — one model call, reading
+        // facts Iris gathered locally. Wired here because the controller stays
+        // free of any transport; a nil return leaves saved progress alone.
+        guideSessionController.askTheModelWhereTheReaderIs = { [weak self] systemPrompt, userMessage in
+            guard let self else { return nil }
+            do {
+                let message = try await self.claudeAPI.continueTextConversation(
+                    systemPrompt: systemPrompt,
+                    messages: [["role": "user", "content": userMessage]],
+                    // Two lines of answer. A cap this tight is also a guard: a
+                    // model that starts writing an essay here has misunderstood
+                    // the task, and the reply will fail to parse rather than
+                    // being acted on.
+                    maximumOutputTokens: 200
+                )
+                return message.text
+            } catch {
+                irisTrace("position: model call failed — \(error)")
+                return nil
+            }
+        }
+
         // The one-time "Let Iris take control of your Mac?" consent, shown the
         // first time the reader starts an autopilot install and then remembered
         // across installs. A modal here (not in the controller, which stays

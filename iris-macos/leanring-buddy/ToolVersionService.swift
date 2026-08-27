@@ -94,6 +94,15 @@ enum ToolVersionService {
         case "java": return (executableName: "java", arguments: ["--version"])
         case "adb": return (executableName: "adb", arguments: ["version"])
         case "xcodebuild": return (executableName: "xcodebuild", arguments: ["-version"])
+        // Added Aug 27 2026. A guide step ran `brew install gh` on a Mac with
+        // no Homebrew and failed with "command not found", and nothing in the
+        // guide installed Homebrew or could even ask whether it was there —
+        // `brew` was not a tool this service knew, so a `toolVersion` watch on
+        // it could never be satisfied. Same for `gh`: without it, a reader who
+        // already had the GitHub CLI was walked through installing it again,
+        // which is the cargo failure wearing different clothes.
+        case "brew": return (executableName: "brew", arguments: ["--version"])
+        case "gh": return (executableName: "gh", arguments: ["--version"])
         default: return nil
         }
     }

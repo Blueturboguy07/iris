@@ -739,7 +739,12 @@ final class GuideSessionController: ObservableObject {
         // must not also advance and double-step.
         self.watchLoop.onVerdict = { [weak self] verdict in
             guard let self, verdict == .completed,
-                  !self.autopilotOwnsTheCurrentStep else {
+                  !self.autopilotOwnsTheCurrentStep,
+                  // A step the reader deliberately went BACK to is theirs to
+                  // leave. Its signal was almost certainly already true when
+                  // they arrived — that is what going back to a finished step
+                  // means — and advancing on it turns Back into a no-op.
+                  !self.readerDeliberatelyReturnedToThisStep else {
                 return
             }
             self.advanceToTheNextStep()
@@ -1219,6 +1224,12 @@ final class GuideSessionController: ObservableObject {
 
     /// Runs whatever the primary button is currently offering.
     func performPrimaryAction() {
+        // Moving on, or acting on the step, hands the step back to the watch
+        // loop: the reader is no longer parked here on purpose.
+        readerDeliberatelyReturnedToThisStep = false
+        // And the note explaining a corrected position belongs to the step it
+        // was about; carried forward it would explain the wrong thing.
+        positionWasCorrectedExplanation = nil
         guard let primaryAction = primaryActionForTheCurrentStep else {
             return
         }
@@ -1809,6 +1820,12 @@ final class GuideSessionController: ObservableObject {
     /// Advance without letting the watch-loop resume path also fire — the
     /// drive loop's own `while` handles the next step.
     private func advanceFromWithinAutopilot() {
+        // Moving on, or acting on the step, hands the step back to the watch
+        // loop: the reader is no longer parked here on purpose.
+        readerDeliberatelyReturnedToThisStep = false
+        // And the note explaining a corrected position belongs to the step it
+        // was about; carried forward it would explain the wrong thing.
+        positionWasCorrectedExplanation = nil
         advanceToTheNextStep()
     }
 
@@ -2264,6 +2281,12 @@ final class GuideSessionController: ObservableObject {
     // MARK: - Navigation
 
     func advanceToTheNextStep() {
+        // Moving on, or acting on the step, hands the step back to the watch
+        // loop: the reader is no longer parked here on purpose.
+        readerDeliberatelyReturnedToThisStep = false
+        // And the note explaining a corrected position belongs to the step it
+        // was about; carried forward it would explain the wrong thing.
+        positionWasCorrectedExplanation = nil
         defer { refreshPointingForTheOpenStep() }
         // The detour must never move the reader's place in the guide, so this
         // refuses outright rather than trusting every caller to check first.
@@ -2319,6 +2342,7 @@ final class GuideSessionController: ObservableObject {
             readerHasFinishedTheGuide = false
         } else if currentStepIndex > 0 {
             currentStepIndex -= 1
+            readerDeliberatelyReturnedToThisStep = true
         } else {
             // Already on the first step. There is nowhere further back, and a
             // negative index would be a crash rather than a wrap-around.
@@ -2347,6 +2371,25 @@ final class GuideSessionController: ObservableObject {
     /// The setup detour is deliberately never watched: it is not the guide, its
     /// steps end in a re-check the reader presses, and advancing "the step" from
     /// inside it would move the reader's place in a guide they have not started.
+    /// True while the reader is on a step because they deliberately navigated
+    /// BACK to it, rather than because the guide brought them here.
+    ///
+    /// The bug this exists for: "I can only click back till step 5." Nothing
+    /// stops at step 5 — the reader is being PUSHED there. Steps 1 through 4 of
+    /// the whimprflow guide watch for git, node, pnpm and cargo, all of which
+    /// are already installed by the time anyone is deep enough to want to go
+    /// back, so each one is satisfied the instant it is watched and advances
+    /// again. Step 5 is the first with no watch block, so that is where the
+    /// bouncing stops.
+    ///
+    /// The underlying mistake is that the watch loop reads a LEVEL ("cargo
+    /// exists") as an EVENT ("they just installed cargo"). Going forward that
+    /// is a feature — a prerequisite already met should not be busywork. Going
+    /// backward it makes the Back button a no-op, which is worse than not
+    /// having one. So a step the reader chose to return to holds until they act
+    /// on it.
+    private var readerDeliberatelyReturnedToThisStep = false
+
     private func pointTheWatchLoopAtTheCurrentStep() {
         guard loadState == .guideIsOpen,
               !readerIsInSetupRecovery,
@@ -2415,6 +2458,25 @@ final class GuideSessionController: ObservableObject {
         currentStepIndex = resumeIndex
         readerHasFinishedTheGuide = savedProgress.isCompleted && !realityCheckFailed
 
+        // The clone/app reality check above answers "is this resume obviously
+        // stale". It cannot answer "step 11 copies something step 10 builds,
+        // and that thing is not there" — which is the reported failure, because
+        // the reader resumed AT the install step rather than past it. So the
+        // machine gets asked properly, off the opening path so nothing waits on
+        // a model call, and advisory throughout.
+        if !readerHasFinishedTheGuide {
+            let branchForTheCheck = branch
+            let indexAtOpen = currentStepIndex
+            let nameForTheCheck = guide.appName
+            Task { [weak self] in
+                await self?.correctTheResumePositionIfTheMachineDisagrees(
+                    branch: branchForTheCheck,
+                    rememberedIndex: indexAtOpen,
+                    guideName: nameForTheCheck
+                )
+            }
+        }
+
         // Opening or switching a branch is itself a position worth remembering:
         // a reader who opens a guide and quits without pressing anything still
         // expects Iris to know which guide they were in.
@@ -2459,6 +2521,142 @@ final class GuideSessionController: ObservableObject {
 
     /// Injected by CompanionManager: is this bundle actually installed?
     var installedDesktopAppCheck: ((String) -> Bool)?
+
+    // MARK: - Working out where the reader actually is
+
+    /// Injected by CompanionManager: one model call, system prompt and user
+    /// message in, reply out, nil on any failure. Injected rather than reached
+    /// for so this whole path is testable without a network.
+    var askTheModelWhereTheReaderIs: ((String, String) async -> String?)?
+
+    /// The facts a machine can establish about itself for this branch, gathered
+    /// with no model involved. See `GuideActualPositionFinder` for why the split
+    /// is drawn here.
+    private func gatherPositionEvidence(forBranch branch: IrisGuideBranch) async -> GuidePositionEvidence {
+        var facts: [GuidePositionFact] = []
+
+        // 1. Every tool any step watches for. These are the cheap, decisive
+        //    ones — "cargo responds" settles whether the Rust step is done far
+        //    better than remembering that somebody pressed Next.
+        var toolNamesAlreadyAsked: Set<String> = []
+        for step in branch.setupSteps + branch.steps {
+            for expectation in step.watch?.expect ?? [] {
+                guard case .toolVersion(let toolName) = expectation,
+                      !toolNamesAlreadyAsked.contains(toolName) else { continue }
+                toolNamesAlreadyAsked.insert(toolName)
+                let row = await checkOneTool(named: toolName)
+                let answer: String
+                switch row.state {
+                case .installedWithVersion(let version): answer = "yes (\(version))"
+                case .notInstalled: answer = GuidePositionEvidence.absent
+                default: answer = GuidePositionEvidence.couldNotCheck
+                }
+                facts.append(GuidePositionFact(
+                    question: "does `\(toolName)` respond on this machine", answer: answer
+                ))
+            }
+        }
+
+        // 2. Every clone a step would create. A guide whose clone is missing is
+        //    at step one whatever storage says.
+        for step in branch.steps {
+            guard let repositoryPath = WatchLoop.repositoryPathAGitCloneWouldCreate(
+                inCommand: step.command
+            ) else { continue }
+            let gitPath = (repositoryPath as NSString).appendingPathComponent(".git")
+            facts.append(GuidePositionFact(
+                question: "does the checkout at \(repositoryPath) exist",
+                answer: FileManager.default.fileExists(atPath: gitPath)
+                    ? "yes" : GuidePositionEvidence.absent
+            ))
+            // 3. THE ONE THAT MATTERS MOST, and the reported failure: the
+            //    artifacts later steps consume. `install-app` copies a bundle
+            //    `package` builds, and resuming at the copy on a machine that
+            //    never ran the build fails with exit 1 and explains nothing.
+            for laterStep in branch.steps {
+                for referencedPath in GuideActualPositionFinder.repositoryRelativePathsReferenced(
+                    byCommand: laterStep.command
+                ) {
+                    let fullPath = (repositoryPath as NSString)
+                        .appendingPathComponent(referencedPath)
+                    facts.append(GuidePositionFact(
+                        question: "does \(referencedPath) exist in the checkout",
+                        answer: FileManager.default.fileExists(atPath: fullPath)
+                            ? "yes" : GuidePositionEvidence.absent
+                    ))
+                }
+            }
+        }
+
+        // 4. Is the finished app actually installed.
+        if let bundleId = branch.installedDesktopAppBundleId {
+            let answer: String
+            if let installedDesktopAppCheck {
+                answer = installedDesktopAppCheck(bundleId) ? "yes" : GuidePositionEvidence.absent
+            } else {
+                answer = GuidePositionEvidence.couldNotCheck
+            }
+            facts.append(GuidePositionFact(
+                question: "is the finished app (\(bundleId)) installed", answer: answer
+            ))
+        }
+
+        return GuidePositionEvidence(facts: facts)
+    }
+
+    /// Ask where the reader actually is, and move them back if the machine says
+    /// they are further along than they are. Advisory throughout: any failure
+    /// leaves the remembered position untouched.
+    private func correctTheResumePositionIfTheMachineDisagrees(
+        branch: IrisGuideBranch,
+        rememberedIndex: Int,
+        guideName: String
+    ) async {
+        guard rememberedIndex > 0, let askTheModelWhereTheReaderIs else { return }
+        let evidence = await gatherPositionEvidence(forBranch: branch)
+        guard evidence.isWorthInterpreting else {
+            irisTrace("position: nothing checkable for \(guideName) — leaving resume at \(rememberedIndex)")
+            return
+        }
+        let steps = branch.steps.enumerated().map { index, step in
+            (index: index, id: step.id, title: step.title, command: step.command)
+        }
+        let userMessage = GuideActualPositionFinder.promptText(
+            guideName: guideName, steps: steps, evidence: evidence
+        )
+        guard let reply = await askTheModelWhereTheReaderIs(
+            GuideActualPositionFinder.systemPrompt, userMessage
+        ) else {
+            irisTrace("position: no reply for \(guideName) — leaving resume at \(rememberedIndex)")
+            return
+        }
+        guard let verdict = GuideActualPositionFinder.verdict(
+            fromReply: reply, numberOfSteps: branch.steps.count
+        ) else {
+            irisTrace("position: unusable reply for \(guideName) — leaving resume at \(rememberedIndex)")
+            return
+        }
+        guard GuideActualPositionFinder.shouldMove(
+            from: rememberedIndex, to: verdict.stepIndex
+        ) else {
+            irisTrace("position: machine agrees with step \(rememberedIndex) for \(guideName)")
+            return
+        }
+        // Still where we left it? A reader who has pressed Next while this ran
+        // owns their position; this check is advisory and must never yank them.
+        guard currentStepIndex == rememberedIndex, !readerHasFinishedTheGuide else { return }
+        irisTrace("position: moving \(guideName) from step \(rememberedIndex) to \(verdict.stepIndex) — \(verdict.reason)")
+        currentStepIndex = verdict.stepIndex
+        positionWasCorrectedExplanation = verdict.reason.isEmpty
+            ? "Iris checked this Mac and picked up where the install actually is."
+            : "Iris checked this Mac and moved you back: \(verdict.reason)"
+        pointTheWatchLoopAtTheCurrentStep()
+        refreshPointingForTheOpenStep()
+    }
+
+    /// Why the reader is not where they left off, when Iris moved them. Shown
+    /// so a position that changes under them is explained rather than eerie.
+    @Published private(set) var positionWasCorrectedExplanation: String?
 
     /// Starts a progress write without blocking whoever asked for it. Pressing
     /// Next has to feel instant, and storage is the one thing in that path that

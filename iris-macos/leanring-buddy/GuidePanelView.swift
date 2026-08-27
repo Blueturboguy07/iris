@@ -408,6 +408,18 @@ struct GuidePanelView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
+                // Why the reader is not where they left off. Rendered because
+                // a position that silently changes under somebody is eerie, and
+                // because an explanation written and never shown is a bug this
+                // codebase has now shipped three times.
+                if let positionCorrection = guideSessionController.positionWasCorrectedExplanation {
+                    Text(positionCorrection)
+                        .font(.system(size: 11))
+                        .foregroundColor(DS.Colors.amber)
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 if let proactiveHint = watchLoop.proactiveHintForTheReader {
                     proactiveHintBanner(proactiveHint)
                 }

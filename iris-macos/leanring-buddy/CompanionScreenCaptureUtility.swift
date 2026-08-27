@@ -195,6 +195,8 @@ enum CompanionScreenCaptureUtility {
             }
 
             let screenLabel = labelDescribingThisImage(
+                imageWidthInPixels: imageWidthInPixels,
+                imageHeightInPixels: imageHeightInPixels,
                 displayIndex: displayIndex,
                 numberOfDisplays: sortedDisplays.count,
                 isCursorScreen: isCursorScreen,
@@ -398,6 +400,8 @@ enum CompanionScreenCaptureUtility {
     /// When no crop was ever asked for — general chat — the label is byte for
     /// byte the one this file has always produced.
     private static func labelDescribingThisImage(
+        imageWidthInPixels: Int,
+        imageHeightInPixels: Int,
         displayIndex: Int,
         numberOfDisplays: Int,
         isCursorScreen: Bool,
@@ -407,9 +411,19 @@ enum CompanionScreenCaptureUtility {
     ) -> String {
         let windowDescription = describeInWords(focusedWindow: focusedWindow)
 
+        // THE PIXEL SIZE, ON EVERY LABEL. The system prompt tells the model
+        // "images are labeled with their pixel dimensions — use those as the
+        // coordinate space", and until 2026-08-27 no label carried them. The
+        // model had to GUESS the size of the image it was answering in, and a
+        // guessed coordinate space is how a point lands nowhere near the thing
+        // it named — the "pointing at random stuff" report. It is worst on a
+        // cropped window, where the dimensions are not a familiar screen size
+        // and there is nothing to guess from at all.
+        let pixelSpace = "\(imageWidthInPixels)x\(imageHeightInPixels) pixels"
+
         if theImageWasCroppedToTheFocusedWindow {
             let whichWindow = windowDescription ?? "the window the user is working in"
-            return "the focused window: \(whichWindow). This image is ONLY that window, cut out of the screen — nothing else on the desktop is in it. Give coordinates in this image's own pixel space."
+            return "the focused window: \(whichWindow). This image is ONLY that window, cut out of the screen — nothing else on the desktop is in it. It is \(pixelSpace); give coordinates in THAT space, measured from this image's own top-left corner, not from the whole screen."
         }
 
         let screenDescription: String
@@ -421,7 +435,9 @@ enum CompanionScreenCaptureUtility {
             screenDescription = "screen \(displayIndex + 1) of \(numberOfDisplays) — secondary screen"
         }
 
-        guard theCallerAskedForACrop else { return screenDescription }
+        let screenDescriptionWithSize = screenDescription + " — \(pixelSpace)"
+
+        guard theCallerAskedForACrop else { return screenDescriptionWithSize }
 
         // A crop was wanted here and could not be made. Say so: a model that
         // believes it is looking at one window when it is looking at a stack of
@@ -432,7 +448,7 @@ enum CompanionScreenCaptureUtility {
         } else {
             whyThisIsTheWholeScreen += " Iris could not tell which window has focus."
         }
-        return screenDescription + " — " + whyThisIsTheWholeScreen
+        return screenDescriptionWithSize + " — " + whyThisIsTheWholeScreen
     }
 
     /// "Terminal — “cue — -zsh — 80×24”", or as much of that as is known.

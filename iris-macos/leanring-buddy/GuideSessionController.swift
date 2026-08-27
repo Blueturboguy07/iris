@@ -1291,12 +1291,30 @@ final class GuideSessionController: ObservableObject {
     /// guide and step, but it lands the reader on this button — it cannot
     /// press it. Nothing about opening a guide calls this.
     func startAutopilot() {
-        guard !autopilotIsRunning,
-              loadState == .guideIsOpen,
-              !readerIsInSetupRecovery,
-              let guide = guideBeingFollowed,
-              let branch = selectedBranch,
-              let makeAutopilotRunner else {
+        // EVERY refusal below names itself. This guard used to be six conditions
+        // and one bare `return`, which is the literal shape of the "I click Let
+        // Iris run it and nothing happens" report: the tap lands, nothing moves,
+        // and the reader is told nothing. The consent paths further down had
+        // already been given explanations for exactly this reason — but see
+        // `autopilotBlockedExplanation`, which until now was set and never
+        // displayed, so even those refusals were silent.
+        if autopilotIsRunning {
+            irisTrace("autopilot: start refused — already running")
+            return
+        }
+        guard loadState == .guideIsOpen, let guide = guideBeingFollowed, let branch = selectedBranch else {
+            autopilotBlockedExplanation = "This guide isn't open any more. Reopen it and try again."
+            irisTrace("autopilot: start refused — guide not open (loadState=\(loadState))")
+            return
+        }
+        guard !readerIsInSetupRecovery else {
+            autopilotBlockedExplanation = "Finish the setup step Iris is helping with first, then Iris can run the rest."
+            irisTrace("autopilot: start refused — reader is in setup recovery")
+            return
+        }
+        guard let makeAutopilotRunner else {
+            autopilotBlockedExplanation = "Iris can't start an install right now. Restart Iris and try again."
+            irisTrace("autopilot: start refused — no runner factory wired")
             return
         }
         // One-time "Let Iris take control of your Mac?" consent, then remembered
@@ -1309,6 +1327,7 @@ final class GuideSessionController: ObservableObject {
                 // No consent seam wired at all. Previously this returned in
                 // silence, which is indistinguishable from a broken button.
                 autopilotBlockedExplanation = "Iris can't ask for permission to run this install right now. Restart Iris and try again."
+                irisTrace("autopilot: start refused — no consent seam wired")
                 return
             }
             guard confirmAutonomousControl() else {
@@ -1317,6 +1336,7 @@ final class GuideSessionController: ObservableObject {
                 // `return` here is exactly the "Let Iris run it does nothing"
                 // report — the tap lands, nothing moves, and no reason is given.
                 autopilotBlockedExplanation = "Iris needs permission to run installs itself. Turn on Auto-install in Iris's settings, or follow the steps by hand below."
+                irisTrace("autopilot: start refused — reader declined, or the consent alert never reached the front")
                 return
             }
             autonomyGrant.grant()

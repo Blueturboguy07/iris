@@ -628,6 +628,20 @@ struct OverlayEyeInputBarView: View {
                             .irisPrimaryPill(isFullWidth: true, isCompact: true)
                     }
 
+                    // Why the tap did nothing. `autopilotBlockedExplanation` was
+                    // set on every refusal path and rendered by NOBODY, so a
+                    // reader who declined the consent alert — or hit any of the
+                    // six silent guard conditions — pressed a button that moved
+                    // nothing and said nothing. That is the reported bug, and
+                    // the reason it survived careful comments about not
+                    // returning in silence: the silence was downstream of them.
+                    if let blocked = guideSessionController.autopilotBlockedExplanation {
+                        Text(blocked)
+                            .font(.system(size: 10.5))
+                            .foregroundColor(DS.Colors.amber)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
                     // While Iris is running the install, the terminal it runs it in
                     // is shown in the centered takeover window (the eye morphs into
                     // it). This under-the-card pane is only the fallback for when

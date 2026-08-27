@@ -126,6 +126,106 @@ final class AppRelaunchService {
         self.gracefulQuitTimeout = gracefulQuitTimeout
     }
 
+    // MARK: - Working out what a clone actually is
+
+    /// What a source clone looks like from outside, reduced to the few facts
+    /// that decide its stack. Separated from the filesystem so the ruling is a
+    /// pure function and can be tested against a real repository's shape
+    /// without one existing.
+    struct CloneStackEvidence: Equatable, Sendable {
+        var packageJSONContents: String?
+        var hasTauriConfig: Bool = false
+        var hasElectronBuilderConfig: Bool = false
+        var hasNextConfig: Bool = false
+        var hasSwiftPackageOrXcodeProject: Bool = false
+    }
+
+    /// Which stack a clone is, from its own contents.
+    ///
+    /// This exists because the stack was a NINE-ENTRY HARDCODED TABLE keyed by
+    /// catalog slug, and anything missing from it fell to `.other` — which
+    /// `stackCanProduceARelaunchableMacArtifact` refuses. NitroAI was never in
+    /// the table, so Iris edited its source twice, committed both times, and
+    /// left the installed app byte-identical, reporting only that it "can't
+    /// rebuild this kind of app yet". It is an Electron app; it always could.
+    /// A curated table is still consulted first, but a slug it has never heard
+    /// of now gets looked at rather than written off.
+    ///
+    /// Ordered, and the order carries the interesting case: NitroAI has BOTH a
+    /// `src-tauri/` directory and electron-builder, because the Tauri shell was
+    /// started and abandoned. What it SHIPS is Electron (`main` is
+    /// `electron/main.mjs`, `dist:mac` runs electron-builder, and the only
+    /// artifacts in `release/` are dmgs). So Electron evidence wins over a
+    /// Tauri directory that may be vestigial — a packaging config and a
+    /// declared dependency are stronger evidence than a directory existing.
+    static func stackDerived(from evidence: CloneStackEvidence) -> BreakAppStack {
+        let dependencies = dependencyNames(inPackageJSON: evidence.packageJSONContents)
+
+        if evidence.hasElectronBuilderConfig
+            || dependencies.contains("electron")
+            || dependencies.contains("electron-builder") {
+            return .electron
+        }
+        if evidence.hasTauriConfig || dependencies.contains("@tauri-apps/cli") {
+            return .tauri
+        }
+        if evidence.hasNextConfig || dependencies.contains("next") {
+            return .nextjs
+        }
+        if evidence.hasSwiftPackageOrXcodeProject {
+            return .swiftMacOS
+        }
+        return .other
+    }
+
+    /// Every dependency named by a package.json, both kinds, as a set. Returns
+    /// empty for anything unparseable — a malformed manifest is not evidence of
+    /// a stack, and guessing from one is how the wrong packager gets run.
+    static func dependencyNames(inPackageJSON contents: String?) -> Set<String> {
+        guard let contents,
+              let data = contents.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return []
+        }
+        var names: Set<String> = []
+        for key in ["dependencies", "devDependencies"] {
+            guard let table = root[key] as? [String: Any] else { continue }
+            names.formUnion(table.keys)
+        }
+        return names
+    }
+
+    /// Read the evidence off a clone on disk.
+    static func cloneStackEvidence(
+        atPath clonePath: String,
+        fileManager: FileManager = .default
+    ) -> CloneStackEvidence {
+        func exists(_ relativePath: String) -> Bool {
+            fileManager.fileExists(atPath: "\(clonePath)/\(relativePath)")
+        }
+        return CloneStackEvidence(
+            packageJSONContents: try? String(
+                contentsOfFile: "\(clonePath)/package.json", encoding: .utf8
+            ),
+            hasTauriConfig: exists("src-tauri/tauri.conf.json"),
+            hasElectronBuilderConfig: ["electron-builder.cjs", "electron-builder.js",
+                                       "electron-builder.json", "electron-builder.yml"]
+                .contains(where: exists),
+            hasNextConfig: ["next.config.js", "next.config.mjs", "next.config.ts"]
+                .contains(where: exists),
+            hasSwiftPackageOrXcodeProject: exists("Package.swift")
+        )
+    }
+
+    /// The stack of the clone at `clonePath`, or `.other` when nothing there
+    /// says.
+    static func stackOfClone(
+        atPath clonePath: String,
+        fileManager: FileManager = .default
+    ) -> BreakAppStack {
+        stackDerived(from: cloneStackEvidence(atPath: clonePath, fileManager: fileManager))
+    }
+
     // MARK: - Stack eligibility
 
     /// Whether this stack can produce a relaunchable macOS artifact AT ALL —

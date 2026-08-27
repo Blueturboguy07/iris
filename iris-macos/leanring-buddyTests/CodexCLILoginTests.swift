@@ -472,6 +472,106 @@ struct CodexExecOutputTests {
         }
     }
 
+    // MARK: Codex inside an application bundle
+
+    /// The report this came from: "It says Codex isn't installed where Iris can
+    /// find it, which is weird because ChatGPT is just in my Applications
+    /// folder." The ChatGPT desktop app ships the real CLI at
+    /// `Contents/Resources/codex` and writes its OAuth tokens to the same
+    /// `~/.codex/auth.json` the CLI reads, so that reader already had Codex and
+    /// was already signed in. Every candidate path was a package-manager
+    /// location, so the lookup could not have found it on any machine.
+    @Test("codex bundled inside an application is a candidate")
+    func aBundledCodexIsFound() {
+        let paths = CodexCLILogin.codexBinaryCandidatePaths(
+            home: "/Users/someone",
+            npmrcContents: nil,
+            directoryLister: { path in
+                path == "/Applications" ? ["ChatGPT.app", "Safari.app"] : []
+            }
+        )
+        #expect(paths.contains("/Applications/ChatGPT.app/Contents/Resources/codex"))
+    }
+
+    /// Enumerated, not named — the same reasoning as the home-directory shapes.
+    /// ChatGPT is the bundle that does this today, not the only one that can,
+    /// and a user-level Applications folder is a normal place to install.
+    @Test("a user-level Applications folder is enumerated too")
+    func aUserLevelApplicationsFolderIsEnumerated() {
+        let paths = CodexCLILogin.codexBinaryCandidatePaths(
+            home: "/Users/someone",
+            npmrcContents: nil,
+            directoryLister: { path in
+                path == "/Users/someone/Applications" ? ["Some Editor.app"] : []
+            }
+        )
+        #expect(paths.contains(
+            "/Users/someone/Applications/Some Editor.app/Contents/Resources/codex"
+        ))
+    }
+
+    /// Anything in Applications that is not a bundle is not a place to look.
+    @Test("non-bundle entries in Applications are skipped")
+    func nonBundleEntriesAreSkipped() {
+        let paths = CodexCLILogin.codexBinaryCandidatePaths(
+            home: "/Users/someone",
+            npmrcContents: nil,
+            directoryLister: { path in
+                path == "/Applications" ? ["Utilities", "README.txt"] : []
+            }
+        )
+        #expect(!paths.contains { $0.hasPrefix("/Applications/Utilities/") })
+        #expect(!paths.contains { $0.hasPrefix("/Applications/README.txt/") })
+    }
+
+    /// A CLI somebody chose to install outranks one that arrived inside an app,
+    /// so the bundle candidates come after every package-manager location.
+    @Test("an explicitly installed codex is preferred over a bundled one")
+    func anInstalledCodexOutranksABundledOne() {
+        let paths = CodexCLILogin.codexBinaryCandidatePaths(
+            home: "/Users/someone",
+            npmrcContents: nil,
+            directoryLister: { path in
+                path == "/Applications" ? ["ChatGPT.app"] : []
+            }
+        )
+        let bundled = paths.firstIndex(of: "/Applications/ChatGPT.app/Contents/Resources/codex")
+        let homebrew = paths.firstIndex(of: "/opt/homebrew/bin/codex")
+        #expect(bundled != nil && homebrew != nil)
+        if let bundled, let homebrew { #expect(homebrew < bundled) }
+    }
+
+    /// A scan turns up the bundled CLI, an installed CLI and internal helpers
+    /// that merely share the name. Asserted against the pure ordering, because
+    /// `rankedCodexPath` can only return paths that exist on the machine
+    /// running the test — through it, this reads as green on any Mac with the
+    /// ChatGPT app and proves nothing.
+    @Test("an installed CLI beats a bundled one, which beats an internal helper")
+    func theThreeShapesRankInThatOrder() {
+        let order = CodexCLILogin.codexPathsInPreferenceOrder([
+            "/Users/someone/.codex/plugins/.plugin-appserver/codex",
+            "/Applications/ChatGPT.app/Contents/Resources/codex",
+            "/Users/someone/.npm-global/bin/codex",
+        ])
+        #expect(order == [
+            "/Users/someone/.npm-global/bin/codex",
+            "/Applications/ChatGPT.app/Contents/Resources/codex",
+            "/Users/someone/.codex/plugins/.plugin-appserver/codex",
+        ])
+    }
+
+    /// Depth is only a tiebreak WITHIN a tier. These two are the same depth,
+    /// so before the tiers existed the winner was decided alphabetically —
+    /// which put `/Applications` ahead of `/Users` for no reason at all.
+    @Test("equal-depth paths are separated by shape, not by alphabet")
+    func equalDepthPathsAreSeparatedByShape() {
+        let order = CodexCLILogin.codexPathsInPreferenceOrder([
+            "/Applications/ChatGPT.app/Contents/Resources/codex",
+            "/Users/someone/.npm-global/bin/codex",
+        ])
+        #expect(order.first == "/Users/someone/.npm-global/bin/codex")
+    }
+
     /// A version manager keeps one bin directory per installed version, so the
     /// path cannot be written down — it has to be enumerated. This is the shape
     /// most likely on a developer's Mac that is not the author's.

@@ -177,6 +177,25 @@ struct BlueCursorView: View {
         interactionGeometryForTheEyeWhereItSitsNow.sideLengthOfTheClickTargetSquare
     }
 
+    /// How far right of the eye's CENTER anything it says has to start.
+    ///
+    /// It used to be 10, which predates the eye: at 32pt across a bubble ten
+    /// points right of centre cleared it, and at 64pt it does not. The eye is
+    /// drawn to a 76pt square centred on `cursorPosition`, so a bubble starting
+    /// at +10 has its first ~28pt underneath the eye — which is what "text
+    /// overlap is a lil' annoying" was a photograph of, with the "o" of "over
+    /// here!" hidden behind the pupil.
+    ///
+    /// Half the click-target square plus a small gap, so the clearance is
+    /// derived from the eye's real size rather than guessed again. It also
+    /// clears the 1.3x pulse mid-flight (38 × 1.3 = 49.4 of visible eye at the
+    /// arc's midpoint, against 46 of offset for a bubble whose own left edge is
+    /// past the widest point of the disc).
+    private var horizontalGapFromTheEyeToWhatItSays: CGFloat {
+        interactionGeometryForTheEyeWhereItSitsNow
+            .horizontalGapFromTheCentreToWhatTheEyeSays
+    }
+
     /// How long after the eye has been dragged a click on it is read as the
     /// mouse-up that ended the drag rather than as a click of its own.
     private static let howLongAClickIsIgnoredAfterTheEyeIsDragged: TimeInterval = 0.3
@@ -358,7 +377,11 @@ struct BlueCursorView: View {
                         }
                     )
                     .opacity(bubbleOpacity)
-                    .position(x: cursorPosition.x + 10 + (bubbleSize.width / 2), y: cursorPosition.y + 18)
+                    .position(
+                        x: cursorPosition.x + horizontalGapFromTheEyeToWhatItSays
+                            + (bubbleSize.width / 2),
+                        y: cursorPosition.y + 18
+                    )
                     .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
                     .animation(.easeOut(duration: 0.5), value: bubbleOpacity)
                     .onPreferenceChange(SizePreferenceKey.self) { newSize in
@@ -377,7 +400,8 @@ struct BlueCursorView: View {
                 .shadow(color: Color.black.opacity(0.4 * companionManager.onboardingVideoOpacity), radius: 12, x: 0, y: 6)
                 .opacity(isCursorOnThisScreen ? companionManager.onboardingVideoOpacity : 0)
                 .position(
-                    x: cursorPosition.x + 10 + (onboardingVideoPlayerWidth / 2),
+                    x: cursorPosition.x + horizontalGapFromTheEyeToWhatItSays
+                        + (onboardingVideoPlayerWidth / 2),
                     y: cursorPosition.y + 18 + (onboardingVideoPlayerHeight / 2)
                 )
                 .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
@@ -404,7 +428,11 @@ struct BlueCursorView: View {
                         }
                     )
                     .opacity(companionManager.onboardingPromptOpacity)
-                    .position(x: cursorPosition.x + 10 + (bubbleSize.width / 2), y: cursorPosition.y + 18)
+                    .position(
+                        x: cursorPosition.x + horizontalGapFromTheEyeToWhatItSays
+                            + (bubbleSize.width / 2),
+                        y: cursorPosition.y + 18
+                    )
                     .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
                     .animation(.easeOut(duration: 0.4), value: companionManager.onboardingPromptOpacity)
                     .onPreferenceChange(SizePreferenceKey.self) { newSize in
@@ -441,7 +469,11 @@ struct BlueCursorView: View {
                     )
                     .scaleEffect(navigationBubbleScale)
                     .opacity(navigationBubbleOpacity)
-                    .position(x: cursorPosition.x + 10 + (navigationBubbleSize.width / 2), y: cursorPosition.y + 18)
+                    .position(
+                        x: cursorPosition.x + horizontalGapFromTheEyeToWhatItSays
+                            + (navigationBubbleSize.width / 2),
+                        y: cursorPosition.y + 18
+                    )
                     .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
                     .animation(.spring(response: 0.4, dampingFraction: 0.6), value: navigationBubbleScale)
                     .animation(.easeOut(duration: 0.5), value: navigationBubbleOpacity)

@@ -584,25 +584,51 @@ struct CompanionPanelView: View {
         .help(title)
     }
 
+    /// Reported twice now, in the same words both times: "it says connected to
+    /// Codex, but in models I can only choose Sonnet or Opus." The reading is
+    /// correct and the UI earned it — a row labelled just "Model", sitting
+    /// under "Connected via Codex", says that Codex ought to be one of these.
+    /// It cannot be: Codex serves EDITING and Anthropic serves CHAT, and these
+    /// two buttons have only ever been the chat model. 0.5.0 hid this toggle
+    /// while an app was open, which fixed the composer and left the settings
+    /// panel — where the "Connected via Codex" line actually lives — saying the
+    /// same confusing thing. Naming the row and stating who serves the other
+    /// half is the fix.
     private var modelPickerRow: some View {
-        HStack {
-            Text("Model")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(DS.Colors.muted)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Chat model")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(DS.Colors.muted)
 
-            Spacer()
+                Spacer()
 
-            HStack(spacing: 3) {
-                modelOptionButton(label: "Sonnet", modelID: "claude-sonnet-4-6")
-                modelOptionButton(label: "Opus", modelID: "claude-opus-4-6")
+                HStack(spacing: 3) {
+                    modelOptionButton(label: "Sonnet", modelID: "claude-sonnet-4-6")
+                    modelOptionButton(label: "Opus", modelID: "claude-opus-4-6")
+                }
+                .padding(3)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.white.opacity(0.055))
+                )
             }
-            .padding(3)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.white.opacity(0.055))
-            )
+            Text(whoServesWhichHalf)
+                .font(.system(size: 9.5))
+                .foregroundColor(DS.Colors.quiet)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.vertical, 4)
+    }
+
+    /// One sentence saying which provider answers questions and which one edits
+    /// apps, because they are genuinely different and can be connected at once.
+    private var whoServesWhichHalf: String {
+        let editProvider = MaintainModelProviderResolver.firstAvailable()?.displayName
+        guard let editProvider else {
+            return "Answers only. No provider is connected for editing apps yet."
+        }
+        return "Answers only — editing apps runs on \(editProvider)."
     }
 
     private func modelOptionButton(label: String, modelID: String) -> some View {
@@ -1069,7 +1095,13 @@ struct CompanionPanelView: View {
                 .irisTextButton(fontSize: 10, isDanger: true)
             }
         } else if accountService.codexLoginState == .codexNotInstalled {
-            Text("Codex isn't installed where Iris can find it. Install it with `npm i -g @openai/codex` to use your ChatGPT account for app editing.")
+            // Deliberately does NOT lead with "Iris can't find it". The first
+            // reader to hit this had the ChatGPT app installed, read the old
+            // wording as a claim about where Iris was looking, and never
+            // reached the install line — which was fair, because Iris really
+            // was looking in the wrong places. Now that bundled Codex is found,
+            // the honest remaining case is "the tool genuinely isn't here".
+            Text("Iris couldn't find the Codex command-line tool on this Mac. If you have the ChatGPT app, updating it to a recent version includes Codex. Otherwise install it with `npm i -g @openai/codex`.")
                 .font(.system(size: 10))
                 .foregroundColor(DS.Colors.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)

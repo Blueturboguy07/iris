@@ -233,6 +233,30 @@ nonisolated enum CodexCLILogin {
             }
         }
 
+        // 5. INSIDE APPLICATION BUNDLES. The ChatGPT desktop app ships the real
+        //    CLI at `Contents/Resources/codex` — a 218MB Mach-O that answers
+        //    `codex exec` exactly like the npm build — and it writes its OAuth
+        //    tokens to the same `~/.codex/auth.json` the CLI reads. So a reader
+        //    who has "ChatGPT" installed already has Codex AND is already
+        //    signed in, while every lookup above looks only at places a package
+        //    manager writes to and concludes they have nothing. That is the
+        //    exact report this came from: "Codex isn't installed where Iris can
+        //    find it, which is weird because ChatGPT is just in my Applications
+        //    folder." They were right and the lookup was wrong.
+        //
+        //    Enumerated rather than named, for the same reason as section 3:
+        //    ChatGPT is the bundle that does this today, not the only one that
+        //    ever will. Last in the order on purpose — a CLI somebody chose to
+        //    install outranks one that arrived inside an app.
+        for applicationsDirectory in ["/Applications", "\(home)/Applications"] {
+            for entry in directoryLister(applicationsDirectory).sorted()
+            where entry.hasSuffix(".app") {
+                paths.append(
+                    "\(applicationsDirectory)/\(entry)/Contents/Resources/codex"
+                )
+            }
+        }
+
         return paths
     }
 
@@ -264,7 +288,7 @@ nonisolated enum CodexCLILogin {
     /// already failed once in the field. Three roots, depth-capped, with the
     /// noisy subtrees pruned so this stays near a second rather than a minute.
     private static func scanForCodexBinary(home: String) -> String? {
-        let findCommand = "find -L \"\(home)\" /usr/local /opt -maxdepth 5 "
+        let findCommand = "find -L \"\(home)\" /usr/local /opt /Applications -maxdepth 5 "
             + "\\( -name Caches -o -name .Trash -o -name node_modules -o -name .git "
             + "-o -name Containers -o -name '*.photoslibrary' \\) -prune -o "
             + "-name codex -type f -perm -111 -print"
@@ -285,17 +309,46 @@ nonisolated enum CodexCLILogin {
     /// binary and fail in a way far more confusing than "not installed". A
     /// command installed to be run lives in a `bin` or `shims` directory;
     /// nothing else is preferred, and shallower wins ties.
+    /// How much a path looks like a command somebody is meant to invoke —
+    /// lower is better. Three tiers, not two, because two collapses into a
+    /// tiebreak on path depth and then on alphabetical order, and
+    /// `/Applications/ChatGPT.app/…` and `/Users/x/.npm-global/bin/codex` are
+    /// the same depth. Alphabetical order is not a reason to prefer a bundled
+    /// CLI over one somebody chose to install.
+    ///
+    /// 0 — a `bin`/`shims` directory: where package managers put commands.
+    /// 1 — `Contents/Resources` in an app bundle: where the ChatGPT app puts
+    ///     the real Codex CLI. A command, but not one anybody asked for.
+    /// 2 — anything else, which includes internal helpers like
+    ///     `~/.codex/plugins/.plugin-appserver/codex` that merely share a name.
+    static func commandLikelihoodRank(_ path: String) -> Int {
+        if path.hasSuffix("/bin/codex") || path.hasSuffix("/shims/codex") {
+            return 0
+        }
+        return path.hasSuffix(".app/Contents/Resources/codex") ? 1 : 2
+    }
+
     static func rankedCodexPath(from matches: [String]) -> String? {
-        let ranked = matches.sorted { left, right in
-            let leftIsBin = left.hasSuffix("/bin/codex") || left.hasSuffix("/shims/codex")
-            let rightIsBin = right.hasSuffix("/bin/codex") || right.hasSuffix("/shims/codex")
-            if leftIsBin != rightIsBin { return leftIsBin }
+        codexPathsInPreferenceOrder(matches)
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    /// The ordering rule with no filesystem in it, so it can be asserted
+    /// directly. `rankedCodexPath` can only ever return a path that exists on
+    /// the machine running it, which makes the preference between two paths
+    /// untestable through it — a test asserting that an npm install outranks
+    /// the ChatGPT bundle silently became a test of whether this Mac happens
+    /// to have both.
+    static func codexPathsInPreferenceOrder(_ matches: [String]) -> [String] {
+        matches.sorted { left, right in
+            let leftRank = commandLikelihoodRank(left)
+            let rightRank = commandLikelihoodRank(right)
+            if leftRank != rightRank { return leftRank < rightRank }
             let leftDepth = left.components(separatedBy: "/").count
             let rightDepth = right.components(separatedBy: "/").count
             if leftDepth != rightDepth { return leftDepth < rightDepth }
             return left < right
         }
-        return ranked.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
     /// Run a command with a hard time limit, returning stdout, or nil if it

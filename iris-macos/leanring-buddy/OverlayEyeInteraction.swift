@@ -345,6 +345,22 @@ struct OverlayEyeInteractionGeometry {
         eyeDiameter + 2 * Self.clickTargetPaddingAroundTheEye
     }
 
+    /// How far right of the eye's CENTRE anything the eye says has to start.
+    ///
+    /// Speech bubbles are positioned from the eye's centre, so the offset has
+    /// to clear the eye's own radius or the first words end up underneath it.
+    /// The overlay used 10 — correct for the 32pt eye it was written for, and
+    /// silently wrong from the moment the eye became 64pt, which put roughly
+    /// 28pt of every bubble behind the pupil. A tester photographed it: the
+    /// "o" of "over here!" was invisible.
+    ///
+    /// Derived from the click-target square rather than chosen again, so it
+    /// cannot fall out of step with the eye's size a second time. The margin
+    /// also absorbs the 1.3x scale pulse mid-flight.
+    var horizontalGapFromTheCentreToWhatTheEyeSays: CGFloat {
+        sideLengthOfTheClickTargetSquare / 2 + 8
+    }
+
     /// The one rectangle of the overlay that may accept a mouse click, in this
     /// screen's SwiftUI overlay coordinates.
     var interactiveRectInSwiftUICoordinates: CGRect {

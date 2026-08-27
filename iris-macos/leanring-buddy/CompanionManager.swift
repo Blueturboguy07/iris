@@ -267,7 +267,7 @@ final class CompanionManager: ObservableObject {
         // `.git` under the packaging build.
         coordinator.relaunchIsAvailableForApp = { [weak self] appSlug in
             guard let self else { return false }
-            let stack = Self.catalogAppStacksBySlug[appSlug] ?? .other
+            let stack = self.appStack(forSlug: appSlug)
             let macBundleId = self.appInventoryService.installedEntriesForDisplay
                 .first { $0.slug == appSlug }?.macBundleId
             let hasKnownBundleId = (macBundleId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
@@ -304,7 +304,7 @@ final class CompanionManager: ObservableObject {
                   let clonePath = self.installProvenanceStore.provenance(forAppSlug: appSlug)?.clonePath else {
                 return .ineligible(reason: "this app's source clone isn't available to rebuild")
             }
-            let stack = Self.catalogAppStacksBySlug[appSlug] ?? .other
+            let stack = self.appStack(forSlug: appSlug)
             return await self.appRelaunchService.packageFreshBuildFromClone(
                 clonePath: clonePath, appStack: stack
             )
@@ -393,6 +393,29 @@ final class CompanionManager: ObservableObject {
 
     /// Slug → stack for signature normalization. Server-provided later; a
     /// table here first because /api/iris/apps does not carry it yet.
+    /// Which stack an app is, curated answer first and the clone's own contents
+    /// second.
+    ///
+    /// The table below used to be the ONLY answer, and everything absent from
+    /// it was `.other` — which `stackCanProduceARelaunchableMacArtifact`
+    /// refuses, so an on-demand edit to such an app applies, commits, and then
+    /// tells the reader Iris "can't rebuild this kind of app yet". That is what
+    /// happened to NitroAI: two edits committed, the installed app left
+    /// byte-identical, and it was an ordinary Electron app the whole time. A
+    /// nine-row list of every app anyone might install is not a thing that can
+    /// be kept current, so an unknown slug is now LOOKED AT.
+    func appStack(forSlug slug: String) -> BreakAppStack {
+        if let curated = Self.catalogAppStacksBySlug[slug] {
+            return curated
+        }
+        guard let clonePath = installProvenanceStore.provenance(forAppSlug: slug)?.clonePath else {
+            return .other
+        }
+        let derived = AppRelaunchService.stackOfClone(atPath: clonePath)
+        irisTrace("stack: \(slug) not in the curated table — derived \(derived.rawValue) from \(clonePath)")
+        return derived
+    }
+
     static let catalogAppStacksBySlug: [String: BreakAppStack] = [
         "cue": .electron,
         "whimprflow": .tauri,
@@ -1080,7 +1103,7 @@ final class CompanionManager: ObservableObject {
             return entry.name.caseInsensitiveCompare(processName) == .orderedSame
         }
         guard let entry else { return nil }
-        let stack = Self.catalogAppStacksBySlug[entry.slug] ?? .other
+        let stack = self.appStack(forSlug: entry.slug)
         return (entry.slug, entry.name, stack)
     }
 
@@ -1090,7 +1113,7 @@ final class CompanionManager: ObservableObject {
     /// settings panel's "Edit this app". Resolves the app's stack from the local
     /// table and hands off to the shared entry point below.
     func requestOnDemandEdit(forEntry entry: CatalogAppInventoryEntry) {
-        let stack = Self.catalogAppStacksBySlug[entry.slug] ?? .other
+        let stack = self.appStack(forSlug: entry.slug)
         requestOnDemandEdit(forSlug: entry.slug, name: entry.name, stack: stack, preselectedKind: nil)
     }
 
@@ -1139,7 +1162,7 @@ final class CompanionManager: ObservableObject {
                   .first(where: { $0.slug == frontmostSlug }),
               entry.isLocallyEditable
         else { return nil }
-        return (entry.slug, entry.name, Self.catalogAppStacksBySlug[entry.slug] ?? .other)
+        return (entry.slug, entry.name, self.appStack(forSlug: entry.slug))
     }
 
     /// Start an edit on the frontmost app from the composer, with the request
@@ -1169,7 +1192,7 @@ final class CompanionManager: ObservableObject {
               entry.isLocallyEditable,
               let preselectedKind = OverlayEyeSuggestions.editInstructionKind(forMessage: trimmed)
         else { return false }
-        let stack = Self.catalogAppStacksBySlug[entry.slug] ?? .other
+        let stack = self.appStack(forSlug: entry.slug)
         requestOnDemandEdit(
             forSlug: entry.slug, name: entry.name, stack: stack, preselectedKind: preselectedKind
         )
@@ -1425,9 +1448,12 @@ final class CompanionManager: ObservableObject {
     - point at anything on screen (see pointing, below).
 
     WHAT IRIS DOES THAT YOU SHOULD HAND OFF TO. you can't install or edit apps from this conversation, but iris can, and the reader opened iris precisely so they wouldn't have to do it themselves. so name iris's own path FIRST, before any manual instructions:
-    - installing an app: the open guide has a "let iris run it" button that runs the whole install hands-off. point at it.
+    - installing an app: on a publik page, "Install and customize" opens the guide IN THE BROWSER — it is a web button and it does not start iris. inside that guide, "Open in Iris" / "Let Iris install it" (before starting) or "Let Iris take over" (partway through) is what hands the install to iris. once iris has it, "let iris run it" runs the whole thing hands-off. name the one that matches where they actually are.
     - changing an app they already have: "fix a bug in…" or "add a feature to…" on the eye bar. iris edits their local source itself.
     never walk someone through steps by hand when one of these would do it for them. if you genuinely can't tell which applies, say what you'd need to know.
+
+    YOU CANNOT PRESS ANYTHING IN A WEB PAGE, and a button in a web page is not iris. only the buttons named above hand work to iris; every other button on a publik page is an ordinary web control that does an ordinary web thing. never tell someone a button will do something you have not been told it does — describing the product you wish existed, in the present tense, reads as a lie to the person clicking it.
+    IF THEY SAY IT DIDN'T WORK, BELIEVE THEM. do not repeat the instruction louder or in more detail — they just told you the outcome, which is information you did not have. say what you actually know, ask what they see on screen, or say you don't know. "you're right, my bad" followed by the same instruction again is the worst answer available.
 
     HOW TO WRITE. one or two sentences by default, direct and dense — but if they ask you to go deeper, go all out with no length limit. all lowercase, casual, warm, no emojis, no bullets or headings, no "simply" or "just". don't paste long code listings; describe what the code does. don't end on "want me to explain more?" — if something bigger is worth trying, plant that seed instead.
 

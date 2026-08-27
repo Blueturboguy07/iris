@@ -404,6 +404,59 @@ struct IrisEyeTests {
     }
 }
 
+// MARK: - What the eye says has to be readable next to the eye
+
+/// The bug these pin: speech bubbles are positioned from the eye's CENTRE with
+/// a fixed offset, and that offset was 10 — a number chosen when the eye was
+/// 32pt across. Nothing failed when the eye doubled to 64pt; the text simply
+/// started appearing underneath it, and it took a tester's screenshot ("text
+/// overlap is a lil' annoying", with the "o" of "over here!" behind the pupil)
+/// to notice. A constant that has to track another constant is exactly the
+/// thing to derive and then assert.
+struct OverlayEyeSpeechClearanceTests {
+
+    @Test func whatTheEyeSaysStartsBeyondTheEyeItself() {
+        let geometry = OverlayEyeInteractionGeometry()
+        let gap = geometry.horizontalGapFromTheCentreToWhatTheEyeSays
+
+        // Clear of the click-target square, which is the widest the eye ever
+        // occupies at rest — not merely clear of the drawn circle.
+        #expect(gap > geometry.sideLengthOfTheClickTargetSquare / 2)
+        // And clear of the old 10pt offset by enough that the regression is
+        // unmistakable rather than marginal.
+        #expect(gap > 10)
+    }
+
+    /// The offset must be DERIVED from the eye, not written down beside it.
+    /// A bigger eye has to move its own speech out of the way.
+    @Test func aBiggerEyePushesItsOwnSpeechFurtherOut() {
+        let small = OverlayEyeInteractionGeometry(eyeDiameter: 32)
+        let shipping = OverlayEyeInteractionGeometry(eyeDiameter: 64)
+
+        #expect(
+            shipping.horizontalGapFromTheCentreToWhatTheEyeSays
+                > small.horizontalGapFromTheCentreToWhatTheEyeSays
+        )
+        #expect(
+            small.horizontalGapFromTheCentreToWhatTheEyeSays
+                > small.sideLengthOfTheClickTargetSquare / 2
+        )
+    }
+
+    /// The flight pulse scales the eye to 1.3x at the arc's midpoint. A bubble
+    /// that clears the resting eye but not the pulsing one overlaps for the
+    /// most visible half-second there is.
+    @Test func theGapSurvivesTheMidFlightScalePulse() {
+        let geometry = OverlayEyeInteractionGeometry()
+        let widestVisibleRadiusMidFlight = (geometry.eyeDiameter / 2) * 1.3
+
+        #expect(
+            geometry.horizontalGapFromTheCentreToWhatTheEyeSays
+                > widestVisibleRadiusMidFlight
+        )
+    }
+}
+
 // MARK: - The click-through guarantee
 
 /// THE MOST IMPORTANT TESTS IN THIS FILE.

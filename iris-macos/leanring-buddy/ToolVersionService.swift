@@ -103,15 +103,45 @@ enum ToolVersionService {
     /// `trusted_tool_fallback_paths` (main.rs:614-626): only Git and Node get
     /// fallbacks, because only their install locations are predictable enough to
     /// hard-code without guessing at somebody else's machine.
+    /// Where to look for a tool when `PATH` does not have it.
+    ///
+    /// This was a two-case switch — `git` and `node` — and everything else got
+    /// an empty list. A Finder-launched app's PATH is
+    /// `/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin`
+    /// and nothing else, so for the other twelve tools the answer to "is this
+    /// installed" was effectively "only if Homebrew put it in /usr/local/bin".
+    /// `cargo` lives in `~/.cargo/bin`, which is on no such PATH, so Iris has
+    /// never once been able to see that a reader has Rust — which is why the
+    /// hickeyfield guide walks somebody who already has it through installing
+    /// it again, and why that step's own comment says the local signal "would
+    /// never fire for anybody".
+    ///
+    /// Now it reuses the discovery written for the Codex lookup, which finds
+    /// the SHAPE a tool installs into (`<dir>/bin`, `<dir>/shims`, npm's
+    /// configured prefix, per-version manager directories) rather than naming
+    /// paths one at a time. `~/.cargo/bin/cargo` needs no special case: it is
+    /// just another `<dir>/bin`.
     static func trustedToolFallbackPaths(for tool: String) -> [String] {
+        let executableName = toolSpecification(for: tool)?.executableName ?? tool
+        var paths = CodexCLILogin.candidatePaths(forExecutableNamed: executableName)
+
+        // System locations the generic discovery deliberately leaves out — it
+        // looks where user installs land, and these are shipped with macOS or
+        // by an installer that owns a fixed path.
+        paths += ["/usr/bin/\(executableName)", "/bin/\(executableName)"]
+
+        // The few tools that live somewhere no amount of shape-guessing finds.
         switch tool {
-        case "git":
-            return ["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"]
-        case "node":
-            return ["/opt/homebrew/bin/node", "/usr/local/bin/node"]
+        case "docker":
+            paths.append("/Applications/Docker.app/Contents/Resources/bin/docker")
+        case "adb":
+            paths.append("\(NSHomeDirectory())/Library/Android/sdk/platform-tools/adb")
+        case "xcodebuild":
+            paths.append("/usr/bin/xcodebuild")
         default:
-            return []
+            break
         }
+        return paths
     }
 
     // MARK: - Locating the executable

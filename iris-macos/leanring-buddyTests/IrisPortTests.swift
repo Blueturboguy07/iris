@@ -318,20 +318,53 @@ struct IrisPortTests {
     }
 
     // MARK: - main.rs: macos_fallbacks_are_fixed_and_limited_to_git_and_node
+    //
+    // DELIBERATELY DIVERGED FROM THE RUST ORIGINAL. Upstream limited the
+    // fallbacks to `git` and `node` and gave every other tool an empty list.
+    // That is a bug once the answer is shown to a reader: a Finder-launched
+    // app's PATH has no `~/.cargo/bin`, so "do you have Rust?" was answered
+    // "no" on every Mac that did, and the hickeyfield guide walked people who
+    // already had Rust through installing it. `install-rust`'s own comment in
+    // that guide describes the symptom — the local signal "would never fire
+    // for anybody".
+    //
+    // What the original test was really protecting is still protected below:
+    // the paths are FIXED (derived by string, never by running a shell, so
+    // nothing in a tool name can be executed) and they remain per-executable.
 
-    @Test func macOSFallbacksAreFixedAndLimitedToGitAndNode() async throws {
-        #expect(ToolVersionService.trustedToolFallbackPaths(for: "git") == [
-            "/opt/homebrew/bin/git",
-            "/usr/local/bin/git",
-            "/usr/bin/git",
-        ])
-        #expect(ToolVersionService.trustedToolFallbackPaths(for: "node") == [
-            "/opt/homebrew/bin/node",
-            "/usr/local/bin/node",
-        ])
-        #expect(ToolVersionService.trustedToolFallbackPaths(for: "sh").isEmpty)
-        #expect(ToolVersionService.trustedToolFallbackPaths(for: "docker").isEmpty)
-        #expect(ToolVersionService.trustedToolFallbackPaths(for: "python3").isEmpty)
+    @Test func macOSFallbacksAreFixedAndCoverEveryToolNotJustGitAndNode() async throws {
+        // The original two keep every path they had — this widened the net, it
+        // did not move it.
+        let gitPaths = ToolVersionService.trustedToolFallbackPaths(for: "git")
+        for expected in ["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"] {
+            #expect(gitPaths.contains(expected), "git lost \(expected)")
+        }
+        let nodePaths = ToolVersionService.trustedToolFallbackPaths(for: "node")
+        for expected in ["/opt/homebrew/bin/node", "/usr/local/bin/node"] {
+            #expect(nodePaths.contains(expected), "node lost \(expected)")
+        }
+
+        // The tools that used to get nothing at all. `cargo` is the one this
+        // was written for.
+        #expect(ToolVersionService.trustedToolFallbackPaths(for: "cargo")
+            .contains("\(NSHomeDirectory())/.cargo/bin/cargo"))
+        #expect(!ToolVersionService.trustedToolFallbackPaths(for: "docker").isEmpty)
+        #expect(!ToolVersionService.trustedToolFallbackPaths(for: "python3").isEmpty)
+
+        // Still per-executable: a lookup for one tool never offers another's
+        // path, which is what makes a hit meaningful.
+        for tool in ["cargo", "docker", "python3", "node", "git"] {
+            let executable = "/" + tool
+            #expect(
+                ToolVersionService.trustedToolFallbackPaths(for: tool)
+                    .allSatisfy { $0.hasSuffix(executable) },
+                "\(tool) offered a path belonging to another tool"
+            )
+        }
+
+        // An unknown tool has no version command, so there is nothing to run
+        // and nothing to look for.
+        #expect(ToolVersionService.toolSpecification(for: "sh") == nil)
     }
 
     // MARK: - Command output bounding (main.rs: bounded_command_output)

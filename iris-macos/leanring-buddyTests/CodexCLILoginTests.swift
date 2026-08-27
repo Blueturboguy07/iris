@@ -747,3 +747,83 @@ struct CodexExecOutputTests {
     }
 }
 
+
+// MARK: - The same discovery, for every other tool
+
+/// Why this suite exists: a Finder-launched app's PATH is
+/// `/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin`.
+/// `ToolVersionService.trustedToolFallbackPaths` had cases for `git` and
+/// `node` and returned nothing for the other twelve, so "do you have Rust?"
+/// could only ever be answered yes if Homebrew happened to own it. The
+/// hickeyfield guide's `install-rust` step says so in its own comment — the
+/// local signal "would never fire for anybody" — and a reader who already had
+/// Rust was walked through installing it.
+@Suite struct ToolLookupUsesTheSameDiscoveryTests {
+
+    @Test("cargo is found in rustup's own directory")
+    func cargoIsFoundWhereRustupPutsIt() {
+        let paths = CodexCLILogin.candidatePaths(
+            forExecutableNamed: "cargo",
+            home: "/Users/someone",
+            npmrcContents: nil,
+            directoryLister: { path in
+                path == "/Users/someone" ? [".cargo", ".npm-global"] : []
+            }
+        )
+        // No special case needed: `~/.cargo/bin` is just another `<dir>/bin`.
+        #expect(paths.contains("/Users/someone/.cargo/bin/cargo"))
+    }
+
+    @Test("the discovery is per-executable, not per-tool-with-a-case")
+    func theDiscoveryIsGeneric() {
+        for executable in ["cargo", "pnpm", "uv", "rustc", "bun"] {
+            let paths = CodexCLILogin.candidatePaths(
+                forExecutableNamed: executable,
+                home: "/Users/someone",
+                npmrcContents: "prefix=/Users/someone/.npm-global\n",
+                directoryLister: { _ in [] }
+            )
+            #expect(paths.contains("/Users/someone/.npm-global/bin/\(executable)"))
+            #expect(paths.contains("/opt/homebrew/bin/\(executable)"))
+            #expect(paths.allSatisfy { $0.hasSuffix("/\(executable)") },
+                    "\(executable) picked up a path for a different tool")
+        }
+    }
+
+    @Test("every supported tool now has somewhere to look")
+    func noToolIsLeftWithAnEmptyList() {
+        for tool in ["git", "node", "npm", "pnpm", "bun", "python", "python3",
+                     "uv", "cargo", "rustc", "docker", "java", "adb", "xcodebuild"] {
+            #expect(!ToolVersionService.trustedToolFallbackPaths(for: tool).isEmpty,
+                    "\(tool) has no fallback paths at all")
+        }
+    }
+
+    /// The tools that live somewhere no shape-guessing reaches.
+    @Test("the awkward tools keep their specific locations")
+    func theAwkwardToolsAreNamed() {
+        #expect(ToolVersionService.trustedToolFallbackPaths(for: "docker")
+            .contains("/Applications/Docker.app/Contents/Resources/bin/docker"))
+        #expect(ToolVersionService.trustedToolFallbackPaths(for: "xcodebuild")
+            .contains("/usr/bin/xcodebuild"))
+        #expect(ToolVersionService.trustedToolFallbackPaths(for: "git")
+            .contains("/usr/bin/git"))
+    }
+
+    /// Codex keeps the application-bundle candidates the generic list has no
+    /// business carrying.
+    @Test("only codex looks inside application bundles")
+    func onlyCodexLooksInsideBundles() {
+        let lister: (String) -> [String] = { path in
+            path == "/Applications" ? ["ChatGPT.app"] : []
+        }
+        #expect(CodexCLILogin.codexBinaryCandidatePaths(
+            home: "/Users/someone", npmrcContents: nil, directoryLister: lister
+        ).contains("/Applications/ChatGPT.app/Contents/Resources/codex"))
+
+        #expect(!CodexCLILogin.candidatePaths(
+            forExecutableNamed: "cargo",
+            home: "/Users/someone", npmrcContents: nil, directoryLister: lister
+        ).contains { $0.contains(".app/Contents/Resources/") })
+    }
+}

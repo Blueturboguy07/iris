@@ -160,11 +160,21 @@ nonisolated enum CodexCLILogin {
         cachedExpensiveLookupResult = nil
     }
 
-    /// Every place `codex` could plausibly be, most-likely first, without
-    /// running anything. Pure and ordered so it can be tested directly — the
-    /// old version's failure was invisible precisely because the whole lookup
-    /// was one opaque function with a subprocess in it.
-    static func codexBinaryCandidatePaths(
+    /// Every place a user-installed command-line tool could plausibly be,
+    /// most-likely first, without running anything.
+    ///
+    /// Written for `codex` and generalised the moment a second thing needed it.
+    /// A GUI app launched from Finder gets a minimal PATH — no `~/.cargo/bin`,
+    /// no npm prefix, no version-manager shims — so ANY lookup that trusts
+    /// PATH reports a tool the reader plainly has as missing. That cost the
+    /// Codex sign-in on two Macs, and it is why the hickeyfield guide walks a
+    /// reader who already has Rust through installing it: `ToolVersionService`
+    /// had trusted fallbacks for exactly `git` and `node`, so `cargo` was
+    /// invisible to every Iris ever shipped.
+    ///
+    /// Pure and ordered so it can be tested directly.
+    static func candidatePaths(
+        forExecutableNamed executableName: String,
         home: String = NSHomeDirectory(),
         npmrcContents: String? = nil,
         directoryLister: (String) -> [String] = { path in
@@ -182,24 +192,24 @@ nonisolated enum CodexCLILogin {
         let npmrc = npmrcContents
             ?? (try? String(contentsOfFile: "\(home)/.npmrc", encoding: .utf8))
         if let configuredPrefix = npmGlobalPrefix(fromNpmrc: npmrc, home: home) {
-            paths.append("\(configuredPrefix)/bin/codex")
+            paths.append("\(configuredPrefix)/bin/\(executableName)")
         }
 
         // 2. Fixed locations: the npm default prefixes, Homebrew on both
         //    architectures, and the runtimes that install their own bin dir.
         paths += [
-            "\(home)/.npm-global/bin/codex",
-            "/opt/homebrew/bin/codex",
-            "/usr/local/bin/codex",
-            "\(home)/.local/bin/codex",
-            "\(home)/.bun/bin/codex",
-            "\(home)/.codex/bin/codex",
-            "\(home)/.volta/bin/codex",
-            "\(home)/.yarn/bin/codex",
-            "\(home)/Library/pnpm/codex",
-            "\(home)/.asdf/shims/codex",
-            "\(home)/.local/share/mise/shims/codex",
-            "/opt/local/bin/codex",
+            "\(home)/.npm-global/bin/\(executableName)",
+            "/opt/homebrew/bin/\(executableName)",
+            "/usr/local/bin/\(executableName)",
+            "\(home)/.local/bin/\(executableName)",
+            "\(home)/.bun/bin/\(executableName)",
+            "\(home)/.codex/bin/\(executableName)",
+            "\(home)/.volta/bin/\(executableName)",
+            "\(home)/.yarn/bin/\(executableName)",
+            "\(home)/Library/pnpm/\(executableName)",
+            "\(home)/.asdf/shims/\(executableName)",
+            "\(home)/.local/share/mise/shims/\(executableName)",
+            "/opt/local/bin/\(executableName)",
         ]
 
         // 3. DISCOVERED, not named. Every tool that installs into the home
@@ -211,8 +221,8 @@ nonisolated enum CodexCLILogin {
         //    time is what made this break on someone else's Mac.
         for parent in [home, "/opt", "/usr/local"] {
             for entry in directoryLister(parent).sorted() {
-                paths.append("\(parent)/\(entry)/bin/codex")
-                paths.append("\(parent)/\(entry)/shims/codex")
+                paths.append("\(parent)/\(entry)/bin/\(executableName)")
+                paths.append("\(parent)/\(entry)/shims/\(executableName)")
             }
         }
 
@@ -227,11 +237,30 @@ nonisolated enum CodexCLILogin {
         ]
         for root in versionedRoots {
             for version in directoryLister(root).sorted().reversed() {
-                paths.append("\(root)/\(version)/bin/codex")
+                paths.append("\(root)/\(version)/bin/\(executableName)")
                 // fnm nests one level deeper than nvm does.
-                paths.append("\(root)/\(version)/installation/bin/codex")
+                paths.append("\(root)/\(version)/installation/bin/\(executableName)")
             }
         }
+
+        return paths
+    }
+
+    /// Where `codex` specifically might be: everywhere a CLI can live, plus
+    /// the application bundles that ship one.
+    static func codexBinaryCandidatePaths(
+        home: String = NSHomeDirectory(),
+        npmrcContents: String? = nil,
+        directoryLister: (String) -> [String] = { path in
+            (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
+        }
+    ) -> [String] {
+        var paths = candidatePaths(
+            forExecutableNamed: "codex",
+            home: home,
+            npmrcContents: npmrcContents,
+            directoryLister: directoryLister
+        )
 
         // 5. INSIDE APPLICATION BUNDLES. The ChatGPT desktop app ships the real
         //    CLI at `Contents/Resources/codex` — a 218MB Mach-O that answers

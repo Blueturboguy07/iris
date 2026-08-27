@@ -575,16 +575,22 @@ struct OverlayEyeInputBarView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if theCenteredTakeoverIsCoveringTheScreen {
-                // While the centered takeover is running the install, the corner
-                // guide card AND the Ask-Iris field would be a cluttered second
-                // copy of the same guide over the desktop. Show nothing here so
-                // the takeover is the only surface. The outer VStack has no
-                // background of its own (each piece below carries its own glass),
-                // so an empty body collapses the bar panel to nothing rather than
-                // leaving an empty glass square. Everything returns the moment the
-                // install finishes (the completion card) or the takeover is torn
-                // down — see `theCenteredTakeoverIsCoveringTheScreen`.
-                EmptyView()
+                // While the centered takeover runs the install, the corner guide
+                // card, the edit card and the under-the-card terminal would each
+                // be a cluttered second copy of what the takeover is already
+                // showing. Those stay hidden.
+                //
+                // The ASK FIELD does not, and hiding it was a real bug: "if I
+                // have a question during setup, like how to set up the api key
+                // stuff, I can't chat with iris." Mid-install is exactly when a
+                // reader has a question, and this was the one moment Iris could
+                // not be asked one. The bar sits at `.screenSaver` and the
+                // takeover panel at `.floating`, so the field draws above it.
+                //
+                // Nothing else is drawn, so the outer VStack still collapses to
+                // just this rather than leaving an empty glass square.
+                textFieldRow
+                whateverTheExchangeIsUpTo
             } else {
                 // A maintain-mode ask outranks everything else in the bar: the
                 // reader's app just crashed, and this is the card the whole
@@ -807,7 +813,12 @@ struct OverlayEyeInputBarView: View {
     /// anyone asked a single question. On a bar that had already answered
     /// something, the app's headline feature had no entry point at all.
     private var anAppIsOpenForEditing: Bool {
-        onDemandEditCoordinator.phase == .describe
+        // Not while a takeover is running. The field is kept alive there so a
+        // reader can ask a question mid-install, and the app being installed is
+        // frequently the frontmost one — without this, the composer would offer
+        // to start an EDIT run on it in the middle of its own install.
+        guard !theCenteredTakeoverIsCoveringTheScreen else { return false }
+        return onDemandEditCoordinator.phase == .describe
             || companionManager.frontmostEditableAppForTheComposer != nil
     }
 

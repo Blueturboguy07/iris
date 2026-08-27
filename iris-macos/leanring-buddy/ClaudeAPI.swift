@@ -534,12 +534,18 @@ class ClaudeAPI {
     func continueTextConversation(
         systemPrompt: String,
         messages: [[String: Any]],
-        maximumOutputTokens: Int
+        maximumOutputTokens: Int,
+        tools: [[String: Any]]? = nil
     ) async throws -> ClaudeStreamedMessage {
+        // `tools` here is for SERVER-side tools only — web search, which
+        // Anthropic runs and resolves inside the same response. A client-side
+        // tool would need a use/result loop this method does not run, and the
+        // caller would get a message whose text is empty.
         try await streamOneMessage(
             systemPrompt: systemPrompt,
             messages: messages,
-            maximumOutputTokens: maximumOutputTokens
+            maximumOutputTokens: maximumOutputTokens,
+            tools: tools
         )
     }
 

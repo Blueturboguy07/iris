@@ -84,10 +84,25 @@ final class AnthropicMaintainProvider: MaintainModelProviding {
         let message = try await byoOnlyAPI.continueTextConversation(
             systemPrompt: systemPrompt,
             messages: messages,
-            maximumOutputTokens: maximumOutputTokens
+            maximumOutputTokens: maximumOutputTokens,
+            // Web search, server-side. Tier C was the ONE part of Iris with no
+            // way to look anything up — the guide fix ladder and chat both
+            // have it — so a request to integrate an API the model does not
+            // already know could not succeed by any route. The search runs on
+            // Anthropic's side, so this gives the model current knowledge
+            // without giving the local jail network access. Codex gets the
+            // same capability from its own `--search` flag.
+            tools: [GuideAutopilotFixProposer.webSearchTool]
         )
+        webSearchQueriesOfTheMostRecentTurn = message.webSearchQueries
         return message.text
     }
+
+    /// The queries this arm searched on its most recent turn, for measurement.
+    /// Not read by the edit loop — `ToolInvocationLiveTests` asks whether the
+    /// model reached for the tool, which the reply text cannot answer honestly
+    /// (a model saying it searched is not evidence that it did).
+    private(set) var webSearchQueriesOfTheMostRecentTurn: [String] = []
 
     /// One turn as Messages-API JSON. A turn with an attached image becomes a
     /// content-block array (image first, then the text — the order the API

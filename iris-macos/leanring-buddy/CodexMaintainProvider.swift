@@ -88,6 +88,21 @@ nonisolated enum CodexExecInvocation {
         arguments += requiredFlags
         arguments += ["--sandbox", requiredSandboxMode]
         arguments += ["--cd", workingDirectory]
+        // Live web search, the provider's own server-side tool. The local jail
+        // is untouched by this: the search runs on OpenAI's side and only its
+        // RESULTS come back as text, so the model gains current knowledge
+        // without the sandbox gaining network. Tier C is the one place in Iris
+        // that had no way to look anything up — the guide fix ladder and chat
+        // both do — and a reader asking to integrate an API Iris has never
+        // heard of had no path that could possibly succeed.
+        //
+        // A CONFIG OVERRIDE, NOT `--search`. That flag exists, but only on the
+        // top-level `codex` command; `codex exec --search` exits 2 with
+        // "unexpected argument". Verified against the CLI rather than its
+        // documentation, and `--strict-config` accepts this key while a made-up
+        // one (`web_search=true`) is rejected — so the override is real and not
+        // being silently ignored.
+        arguments += ["-c", "tools.web_search=true"]
         arguments += ["--json"]
         arguments += ["--output-last-message", finalMessageOutputPath]
         if let model, !model.isEmpty {
@@ -147,10 +162,20 @@ nonisolated enum CodexExecInvocation {
     /// harness, `tools/codex-parity/`.
     static let framingPreamble = """
         You are being used as a text model inside another program. Do not use \
-        your shell, do not read or write files, and do not try to perform the \
-        task yourself — you have no access to the files being discussed and any \
-        attempt will fail. Your entire reply is the deliverable, and it must \
-        follow the output format described below exactly.
+        YOUR OWN shell or file tools to do the task — the directory you are \
+        running in is an empty scratch directory, not the repository being \
+        discussed, so any attempt will silently fail. Your entire reply is the \
+        deliverable, and it must follow the output format described below \
+        exactly.
+
+        You DO have access to the repository, and to the internet. The \
+        repository is reached by emitting the command and edit blocks the \
+        format below describes: the program runs them for you against the real \
+        checkout and gives you the output back. Web search is a normal tool and \
+        you may call it whenever current or unfamiliar information would help. \
+        Never conclude that you cannot read files, cannot edit files, or have \
+        no shell — you can do all three THROUGH THE BLOCKS, and stopping on \
+        that basis is a false refusal.
         """
 
     /// The whole prompt for one step. Pure, so the exact bytes sent are testable.
@@ -194,6 +219,42 @@ nonisolated enum CodexExecOutput {
             lastAgentMessage = text
         }
         return lastAgentMessage
+    }
+
+    /// The raw `--json` event stream of the most recent turn, for measurement.
+    /// Not part of the provider protocol, and never read by the edit loop.
+    nonisolated(unsafe) static var eventStreamOfTheMostRecentTurn: String = ""
+
+    /// Every web search the model ran this turn, as the queries it issued.
+    ///
+    /// Exists to be measured. Giving Tier C a search tool is only half the
+    /// change — the half that matters is whether the model REACHES for it when
+    /// it should, which no prompt can assert and only observation can settle.
+    /// The CLI emits one `item.completed` with `item.type == "web_search"` per
+    /// search; the first such item of a turn can carry an empty `query` with
+    /// `action.type == "other"`, so the queries are read from `action.queries`
+    /// where it is present.
+    static func webSearchQueries(inEventStream eventStreamText: String) -> [String] {
+        var queries: [String] = []
+        for line in eventStreamText.components(separatedBy: .newlines) {
+            guard let lineData = line.data(using: .utf8),
+                  let event = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  event["type"] as? String == "item.completed",
+                  let item = event["item"] as? [String: Any],
+                  item["type"] as? String == "web_search" else { continue }
+            if let action = item["action"] as? [String: Any],
+               let issued = action["queries"] as? [String] {
+                queries += issued
+            } else if let single = item["query"] as? String, !single.isEmpty {
+                queries.append(single)
+            }
+        }
+        return queries
+    }
+
+    /// Whether the model searched the web at all this turn.
+    static func didSearchTheWeb(inEventStream eventStreamText: String) -> Bool {
+        !webSearchQueries(inEventStream: eventStreamText).isEmpty
     }
 
     /// Token accounting from the `turn.completed` event. Used by the parity
@@ -418,6 +479,11 @@ final class CodexMaintainProvider: MaintainModelProviding {
 
         let standardOutputText = outputCollector.collectedText()
         let standardErrorText = errorCollector.collectedText()
+        // Kept so a harness can ask what tools this turn actually used. The
+        // provider protocol returns only the assistant's text, and whether the
+        // model REACHED for web search is not in the text — it is in the event
+        // stream, and it is the thing worth measuring.
+        CodexExecOutput.eventStreamOfTheMostRecentTurn = standardOutputText
 
         if process.terminationStatus != 0 {
             throw CodexExecOutput.failure(

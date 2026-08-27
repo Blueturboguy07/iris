@@ -36,6 +36,25 @@ struct ClaudeStreamedMessage {
     /// The assistant's content blocks as the API defined them, for resending
     /// on pause_turn. Includes server_tool_use and tool-result blocks.
     let assistantContentBlocks: [[String: Any]]
+
+    /// Every web search the model ran, as the queries it issued.
+    ///
+    /// The blocks are already kept for pause_turn resends, so this needs no
+    /// extra parsing — but it is the only way to answer the question that
+    /// matters once Tier C has a search tool: does the model REACH for it when
+    /// it should? A tool the model never calls is not a capability.
+    var webSearchQueries: [String] {
+        assistantContentBlocks.compactMap { block in
+            guard block["type"] as? String == "server_tool_use",
+                  block["name"] as? String == "web_search",
+                  let input = block["input"] as? [String: Any],
+                  let query = input["query"] as? String else { return nil }
+            return query
+        }
+    }
+
+    /// Whether the model searched the web at all.
+    var didSearchTheWeb: Bool { !webSearchQueries.isEmpty }
 }
 
 struct ClaudeSSEMessageAccumulator {

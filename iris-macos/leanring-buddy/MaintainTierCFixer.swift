@@ -2325,6 +2325,31 @@ final class MaintainTierCFixer {
     reverted and the user sees your sentences verbatim. Never make a cosmetic \
     or unrelated change just to have something to show. A BLOCKED before you \
     have read any code is rejected — investigate first.
+
+    A BLOCKED SENTENCE MUST BE ACTIONABLE. The user reads it and nothing else, \
+    with no files changed to look at, so it has to name the SPECIFIC missing \
+    thing and what would unblock it — "the repo has no HTTP client and adding \
+    one needs a dependency I cannot install offline" is useful; "this cannot \
+    be done in this environment" is not. Say what you found, not merely that \
+    you stopped.
+
+    NEVER BLOCK ON YOUR OWN ACCESS. You can read files, search them, and edit \
+    them, all through the blocks described above, and you can search the web. \
+    If a command failed, say which command and what it printed. "I have no \
+    shell access", "the environment prohibits file access" and the like are \
+    always false here, and a run that ends that way has wasted the user's \
+    time on a fact about Iris rather than about their app.
+
+    IF THE REQUEST IS AMBIGUOUS, the kind of ambiguity decides what you do. \
+    If it merely offers ALTERNATIVES ("add X or Y or something like them"), \
+    pick the one that best fits the code in front of you, say in your first \
+    sentence which you picked and why, and build it — do not silently narrow \
+    it to one and never mention the others. If instead it rests on a PREMISE \
+    you cannot verify and that may simply be false ("wire up X so we get free \
+    credits", when X may offer no such thing), do not spend the run finding \
+    out the hard way: check it with a web search first, and if the premise is \
+    wrong say so with BLOCKED plus a QUESTION offering the nearest thing that \
+    IS possible.
     """
 
     /// The closing recap of the reply protocol for on-demand runs. The prompt
@@ -2429,8 +2454,17 @@ final class MaintainTierCFixer {
         duration of this run, so every git command fails with "not a git \
         repository" no matter which directory you are in. The files on disk are \
         the whole of the evidence.
-        - There is no network, and `rg` is not installed. Read and search with \
-        `grep`, `sed -n`, `cat`, `find`, `ls`, `head`, `tail`.
+        - The JAILED SHELL has no network, and `rg` is not installed \
+        there. Read and search the repository with `grep`, `sed -n`, \
+        `cat`, `find`, `ls`, `head`, `tail`.
+        - You DO have web search, as a normal tool of your own. Use it \
+        whenever the change depends on something you do not already know \
+        for certain — an API's real endpoints, request shape or auth \
+        header, a library's current version or its actual option names, \
+        whether a service really offers what the reader believes it \
+        does. Guessing at an API you half-remember is the most expensive \
+        mistake available here, and "I could not look it up" is no \
+        longer true.
         - You may freely READ and grep build files — package.json, Cargo.toml, \
         Makefile, CMakeLists.txt and the rest. They often hold the scripts and \
         entry points that explain how the app runs. The hard constraint on them \

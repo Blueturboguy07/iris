@@ -102,6 +102,11 @@ enum ToolVersionService {
         // already had the GitHub CLI was walked through installing it again,
         // which is the cargo failure wearing different clothes.
         case "brew": return (executableName: "brew", arguments: ["--version"])
+        // The whisper.cpp build needs cmake on BOTH platforms, but only the
+        // Windows branch of the whimprflow guide ever installed it. A macOS
+        // reader reached the build and got "cmake: No such file or directory"
+        // with no step that could fix it, and no way for the guide to notice.
+        case "cmake": return (executableName: "cmake", arguments: ["--version"])
         case "gh": return (executableName: "gh", arguments: ["--version"])
         default: return nil
         }

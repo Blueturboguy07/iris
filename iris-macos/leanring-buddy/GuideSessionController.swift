@@ -1648,6 +1648,21 @@ final class GuideSessionController: ObservableObject {
                 // A manual step: Iris opens what it can and then yields. The
                 // watch loop notices completion and advances, which re-enters
                 // this loop through `advanceToTheNextStep`.
+                // Do NOT open a link for a step that is already done. Since
+                // `cargo` became findable (0.7.1), a reader who has Rust hits
+                // `install-rust`, Iris opens rustup.rs, and the watch loop
+                // advances a moment later — reported as "the rust thing was a
+                // super quick flash" and a browser tab flashing. Opening a
+                // download page for something already installed is noise at
+                // best; here it also steals the frontmost window twice in a
+                // second.
+                if await everyToolThisStepWatchesForIsAlreadyPresent(step) {
+                    irisTrace("drive: \(step.id) already satisfied — advancing without opening anything")
+                    await holdBetweenAutoAdvancedSteps()
+                    guard autopilotIsRunning else { return }
+                    advanceFromWithinAutopilot()
+                    continue
+                }
                 autoOpenIfTheStepPointsSomewhere(step)
                 if stepIsFinishedOnceIrisHasOpenedIt(step)
                     || stepIsAVestigialTerminalStepInAutopilot(step) {
@@ -1758,6 +1773,26 @@ final class GuideSessionController: ObservableObject {
 
     /// Opens an `open`/`web` step's link (once) or a `permission` step's
     /// System Settings pane, so the reader lands where they need to act.
+    /// Whether every tool this step watches for already answers.
+    ///
+    /// Only ever true for a step whose watch is ENTIRELY tool checks — a step
+    /// that also wants a visual confirmation, a window title or a URL host is
+    /// not something this can settle, and claiming otherwise would skip a step
+    /// the reader still has to do.
+    private func everyToolThisStepWatchesForIsAlreadyPresent(_ step: IrisGuideStep) async -> Bool {
+        guard let expectations = step.watch?.expect, !expectations.isEmpty else { return false }
+        var toolNames: [String] = []
+        for expectation in expectations {
+            guard case .toolVersion(let toolName) = expectation else { return false }
+            toolNames.append(toolName)
+        }
+        for toolName in toolNames {
+            let row = await checkOneTool(named: toolName)
+            guard case .installedWithVersion = row.state else { return false }
+        }
+        return true
+    }
+
     private func autoOpenIfTheStepPointsSomewhere(_ step: IrisGuideStep) {
         guard !readerHasTakenThisStepsAction else { return }
         if (step.kind == .open || step.kind == .web), let href = step.href {

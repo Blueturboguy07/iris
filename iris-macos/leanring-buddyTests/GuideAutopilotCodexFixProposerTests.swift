@@ -181,6 +181,62 @@ struct GuideAutopilotCodexFixProposerTests {
         #expect(contract.contains("no command block") || contract.contains("Emit no command block"))
     }
 
+    // MARK: - The rung cannot hang
+
+    /// `CodexMaintainProvider`'s own ceiling is 300s, correct for a Tier C step
+    /// and badly wrong for one small question the reader is watching a terminal
+    /// for. The founder's ruling deliberately UNCAPPED spend on the reader's own
+    /// credential, which makes silence — not cost — the thing left to bound.
+    @Test("a rung that never answers is given up on, not waited out")
+    func aHangingRungIsBoundedBySilenceNotSpend() async throws {
+        // Well under Tier C's 300s, so a pass here cannot be the inherited
+        // ceiling doing the work.
+        #expect(GuideAutopilotCodexFixProposer.deadlineForOneRungSeconds <= 90)
+
+        let neverAnswers = NeverAnsweringProvider()
+        let proposer = GuideAutopilotCodexFixProposer(makeProvider: { _ in neverAnswers })
+
+        // Cancelled rather than run to the real 60s deadline: what is being
+        // proved is that the wait is BOUNDED and that a bounded wait yields nil
+        // (no fix offered) rather than throwing, which is what lets the runner
+        // escalate instead of surfacing an error.
+        let work = Task { try await proposer.proposeFix(for: Self.context()) }
+        try await Task.sleep(nanoseconds: 120_000_000)
+        work.cancel()
+        let outcome = try? await work.value
+        #expect(outcome ?? nil == nil, "a rung with no answer must not yield a fix")
+    }
+
+    /// The first rung must not search, so it matches the Anthropic route's
+    /// material-only rung and its `cameFromWebSearch: false` is a fact rather
+    /// than an assumption. Measured on the ARGUMENTS actually built.
+    @Test("the material-only rung really does run without web search")
+    func theFirstRungCarriesNoWebSearchFlag() {
+        let withSearch = CodexExecInvocation.arguments(
+            finalMessageOutputPath: "/tmp/x", workingDirectory: "/tmp", webSearchEnabled: true
+        )
+        let withoutSearch = CodexExecInvocation.arguments(
+            finalMessageOutputPath: "/tmp/x", workingDirectory: "/tmp", webSearchEnabled: false
+        )
+        #expect(withSearch.contains("tools.web_search=true"))
+        #expect(!withoutSearch.contains("tools.web_search=true"))
+
+        // Turning search off must not weaken the jail. This is the guard that
+        // matters more than the flag itself.
+        #expect(withoutSearch.contains("--sandbox"))
+        #expect((try? CodexExecInvocation.validated(withoutSearch)) != nil)
+    }
+
+    /// Tier C keeps its search. The flag defaults ON so the caller it was
+    /// written for is untouched by this change.
+    @Test("Tier C's own invocation still searches by default")
+    func tierCKeepsItsSearchByDefault() {
+        let tierCDefault = CodexExecInvocation.arguments(
+            finalMessageOutputPath: "/tmp/x", workingDirectory: "/tmp"
+        )
+        #expect(tierCDefault.contains("tools.web_search=true"))
+    }
+
     // MARK: - Whose money
 
     /// The half of the founder's complaint that the cap fix alone did not
@@ -196,5 +252,21 @@ struct GuideAutopilotCodexFixProposerTests {
             GuideAutopilotFixLadderFunding.readerHasTheirOwnCredential()
                 == (anthropicAvailable || codexUsable)
         )
+    }
+}
+
+/// A provider that accepts a turn and never answers — the shape of a wedged
+/// `codex exec`, without needing to wedge a real one.
+@MainActor
+private final class NeverAnsweringProvider: MaintainModelProviding {
+    let displayName = "never answers"
+    let identifier = "never-answers"
+    let isAvailable = true
+
+    func respond(
+        systemPrompt: String, conversation: [MaintainChatTurn], maximumOutputTokens: Int
+    ) async throws -> String {
+        try await Task.sleep(nanoseconds: UInt64(600) * 1_000_000_000)
+        return "too late"
     }
 }

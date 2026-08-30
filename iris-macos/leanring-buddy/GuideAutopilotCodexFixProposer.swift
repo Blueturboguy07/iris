@@ -48,20 +48,37 @@ import Foundation
 @MainActor
 final class GuideAutopilotCodexFixProposer: GuideAutopilotFixProposing {
 
-    /// The provider is injected so this is testable without the CLI installed.
-    private let provider: MaintainModelProviding
+    /// How long ONE rung may take before Iris stops waiting on it.
+    ///
+    /// `CodexMaintainProvider`'s own ceiling is 300s, and that is correct for
+    /// what it was written for — a Tier C step carrying a large context, where
+    /// a reasoning model genuinely can take minutes. It is badly wrong here. A
+    /// fix proposal is one small question, measured live at 8.7s and 5.2s, and
+    /// the reader is WATCHING a terminal while it happens. Inheriting 300s
+    /// would mean a wedged rung shows five minutes of nothing, twice per step,
+    /// with the ladder's progress guard needing five such steps before it gives
+    /// up. That is not a cap on spend — spend is deliberately uncapped on the
+    /// reader's own credential — it is a cap on SILENCE.
+    ///
+    /// 60s is ~7x the measured round trip, so a slow-but-working call still
+    /// lands, and a dead one is admitted while the reader is still watching.
+    static let deadlineForOneRungSeconds: TimeInterval = 60
 
-    /// The default is built here rather than as a default ARGUMENT because
-    /// `CodexMaintainProvider.init` is main-actor isolated and a default
-    /// argument expression is evaluated in a nonisolated context.
-    init(provider: MaintainModelProviding? = nil) {
-        self.provider = provider ?? CodexMaintainProvider()
+    /// Built per rung: the first has no web search, so it matches the Anthropic
+    /// route's material-only rung and `cameFromWebSearch: false` stays a fact.
+    private let makeProvider: @MainActor (_ webSearchEnabled: Bool) -> MaintainModelProviding
+
+    /// Injected so this is testable without the CLI installed. Built in the body
+    /// rather than as a default ARGUMENT because `CodexMaintainProvider.init` is
+    /// main-actor isolated and a default argument is evaluated nonisolated.
+    init(makeProvider: (@MainActor (_ webSearchEnabled: Bool) -> MaintainModelProviding)? = nil) {
+        self.makeProvider = makeProvider ?? { CodexMaintainProvider(webSearchEnabled: $0) }
     }
 
     /// Whether this can be used at all right now — a connected Codex login.
     /// Checked at the moment of use rather than remembered, because the reader
     /// can run `codex logout` between two steps.
-    var isAvailable: Bool { provider.isAvailable }
+    var isAvailable: Bool { makeProvider(false).isAvailable }
 
     func proposeFix(
         for context: GuideAutopilotFailureContext
@@ -79,31 +96,62 @@ final class GuideAutopilotCodexFixProposer: GuideAutopilotFixProposing {
         for context: GuideAutopilotFailureContext,
         cameFromWebSearch: Bool
     ) async throws -> GuideAutopilotProposedFix? {
-        let reply = try await provider.respond(
-            // The Anthropic system prompt verbatim, plus the reply contract.
-            // Verbatim matters: the prompt carries the "keep the install
-            // MOVING" and "never invent a hostname" instructions, and a
-            // paraphrase here would be a second, drifting set of rules.
-            systemPrompt: GuideAutopilotFixProposer.systemPrompt(for: context)
-                + "\n\n" + Self.replyContract,
-            conversation: [
-                MaintainChatTurn(
-                    role: "user",
-                    text: GuideAutopilotFixProposer.failureReport(for: context)
-                )
-            ],
-            // Not honored by `codex exec`, which exposes no output cap. Passed
-            // anyway so the two proposers read the same and a future provider
-            // that DOES honor it needs no change here.
-            maximumOutputTokens: GuideAutopilotFixProposer.maximumOutputTokensPerFixCall
-        )
+        let reply = try await withADeadline {
+            try await self.makeProvider(cameFromWebSearch).respond(
+                // The Anthropic system prompt verbatim, plus the reply contract.
+                // Verbatim matters: the prompt carries the "keep the install
+                // MOVING" and "never invent a hostname" instructions, and a
+                // paraphrase here would be a second, drifting set of rules.
+                systemPrompt: GuideAutopilotFixProposer.systemPrompt(for: context)
+                    + "\n\n" + Self.replyContract,
+                conversation: [
+                    MaintainChatTurn(
+                        role: "user",
+                        text: GuideAutopilotFixProposer.failureReport(for: context)
+                    )
+                ],
+                // Not honored by `codex exec`, which exposes no output cap. Passed
+                // anyway so the two proposers read the same and a future provider
+                // that DOES honor it needs no change here.
+                maximumOutputTokens: GuideAutopilotFixProposer.maximumOutputTokensPerFixCall
+            )
+        }
 
-        guard let proposalObject = Self.proposalObject(inReply: reply) else { return nil }
+        // A rung that timed out or came back unreadable is "no fix offered",
+        // which the runner escalates. That is the safe direction: the reader
+        // gets the step handed to them rather than a stalled terminal.
+        guard let reply, let proposalObject = Self.proposalObject(inReply: reply) else { return nil }
         return GuideAutopilotFixProposer.validatedFix(
             fromProposalObject: proposalObject,
             cameFromWebSearch: cameFromWebSearch,
             context: context
         )
+    }
+
+    /// Runs `work`, giving up after `deadlineForOneRungSeconds`.
+    ///
+    /// Returns nil on timeout rather than throwing, because a rung that did not
+    /// answer in time is not an ERROR the runner should surface as one — it is
+    /// simply a rung with no proposal, which the ladder already knows how to
+    /// escalate past.
+    private func withADeadline(
+        _ work: @escaping @Sendable () async throws -> String
+    ) async throws -> String? {
+        try await withThrowingTaskGroup(of: String?.self) { group in
+            group.addTask { try await work() }
+            group.addTask {
+                try await Task.sleep(
+                    nanoseconds: UInt64(Self.deadlineForOneRungSeconds * 1_000_000_000)
+                )
+                return nil
+            }
+            // Whichever finishes first decides; the other is cancelled with the
+            // group, so a timed-out codex process does not keep running behind
+            // an install that has already moved on.
+            let first = try await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
     }
 
     // MARK: - Asking for something parseable

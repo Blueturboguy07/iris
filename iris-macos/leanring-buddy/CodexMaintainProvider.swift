@@ -82,7 +82,12 @@ nonisolated enum CodexExecInvocation {
         finalMessageOutputPath: String,
         workingDirectory: String,
         attachedImagePaths: [String] = [],
-        model: String? = nil
+        model: String? = nil,
+        // Defaults ON, so Tier C — the caller this was written for — is
+        // untouched. The guide fix ladder turns it OFF for its first rung, so
+        // that rung matches the Anthropic route's material-only rung and its
+        // `cameFromWebSearch: false` is a fact rather than an assumption.
+        webSearchEnabled: Bool = true
     ) -> [String] {
         var arguments = ["exec"]
         arguments += requiredFlags
@@ -102,7 +107,9 @@ nonisolated enum CodexExecInvocation {
         // documentation, and `--strict-config` accepts this key while a made-up
         // one (`web_search=true`) is rejected — so the override is real and not
         // being silently ignored.
-        arguments += ["-c", "tools.web_search=true"]
+        if webSearchEnabled {
+            arguments += ["-c", "tools.web_search=true"]
+        }
         arguments += ["--json"]
         arguments += ["--output-last-message", finalMessageOutputPath]
         if let model, !model.isEmpty {
@@ -433,8 +440,13 @@ final class CodexMaintainProvider: MaintainModelProviding {
     /// The fix loop's own step ceiling is what bounds a run overall.
     private static let stepTimeoutSeconds: TimeInterval = 300
 
-    init(model: String? = nil) {
+    /// Whether this provider's calls may search the web. Always true for Tier C;
+    /// the guide fix ladder's first rung sets it false.
+    private let webSearchEnabled: Bool
+
+    init(model: String? = nil, webSearchEnabled: Bool = true) {
         self.model = model
+        self.webSearchEnabled = webSearchEnabled
     }
 
     var isAvailable: Bool { CodexCLILogin.currentState().isUsable }
@@ -471,6 +483,7 @@ final class CodexMaintainProvider: MaintainModelProviding {
             promptText: promptText,
             attachedImagePNGDataList: attachedImages,
             model: model,
+            webSearchEnabled: webSearchEnabled,
             timeoutSeconds: Self.stepTimeoutSeconds
         )
     }
@@ -485,6 +498,7 @@ final class CodexMaintainProvider: MaintainModelProviding {
         promptText: String,
         attachedImagePNGDataList: [Data],
         model: String?,
+        webSearchEnabled: Bool,
         timeoutSeconds: TimeInterval
     ) async throws -> String {
         // A scratch directory per call: it is the agent's working root, and it
@@ -511,7 +525,8 @@ final class CodexMaintainProvider: MaintainModelProviding {
                 finalMessageOutputPath: finalMessageURL.path,
                 workingDirectory: scratchDirectoryURL.path,
                 attachedImagePaths: attachedImagePaths,
-                model: model
+                model: model,
+                webSearchEnabled: webSearchEnabled
             )
         )
 

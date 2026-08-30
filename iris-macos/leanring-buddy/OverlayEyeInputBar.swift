@@ -438,6 +438,9 @@ struct OverlayEyeInputBarView: View {
 
     @ObservedObject var companionManager: CompanionManager
 
+    /// What the last query cost, when the reader is the one being billed for it.
+    @ObservedObject var spendLedger: AssistantSpendLedger
+
     /// Observed separately from the companion manager because the guide is its
     /// own object, and the suggestions have to follow the step the reader is
     /// actually on rather than the step they were on when the bar opened.
@@ -522,6 +525,7 @@ struct OverlayEyeInputBarView: View {
             wrappedValue: companionManager.onDemandEditCoordinator
         )
         _accountService = ObservedObject(wrappedValue: companionManager.accountService)
+        _spendLedger = ObservedObject(wrappedValue: companionManager.spendLedger)
         self.onDismissRequested = onDismissRequested
         self.onTheBarShouldReleaseTheKeyboard = onTheBarShouldReleaseTheKeyboard
         self.onTheBarShouldTakeTheKeyboardBack = onTheBarShouldTakeTheKeyboardBack
@@ -1341,6 +1345,7 @@ struct OverlayEyeInputBarView: View {
 
             if let whatIrisSaidBack = exchange.whatIrisSaidBack {
                 answerArea(showing: whatIrisSaidBack)
+                whatThatQueryCost
             } else {
                 workingLine
             }
@@ -1377,6 +1382,24 @@ struct OverlayEyeInputBarView: View {
     /// A failure sentence renders here too, in the same place, because from the
     /// reader's side "Iris could not answer" is what came back from what they
     /// asked. Only the colour differs.
+    /// The price of the answer directly above it, and only when there is a real
+    /// price to name. A reader on publik's funded tier, a Claude Code login or
+    /// the Codex CLI pays nothing per query, and the ledger records nothing for
+    /// them — so this row simply does not exist rather than reading "$0.00",
+    /// which would suggest their queries are free in a way that invites the
+    /// wrong conclusion about the ones that are not.
+    @ViewBuilder
+    private var whatThatQueryCost: some View {
+        if let costText = spendLedger.mostRecentCallText {
+            Text(costText)
+                .font(.system(size: 9.5))
+                .foregroundColor(DS.Colors.textTertiary)
+                .monospacedDigit()
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.top, 2)
+        }
+    }
+
     private func answerArea(showing answerText: String) -> some View {
         ScrollView(.vertical) {
             Text(answerText)

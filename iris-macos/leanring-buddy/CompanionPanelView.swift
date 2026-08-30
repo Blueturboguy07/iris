@@ -20,6 +20,11 @@ import SwiftUI
 
 struct CompanionPanelView: View {
     @ObservedObject var companionManager: CompanionManager
+
+    /// What the reader's own key has spent. Observed separately so the total
+    /// re-renders the moment a call finishes rather than on the next unrelated
+    /// change to the manager.
+    @ObservedObject var spendLedger: AssistantSpendLedger
     /// Observed separately from the companion manager so the account rows
     /// redraw the instant a sign-in finishes, rather than on the next thing
     /// that happens to change assistant state.
@@ -75,6 +80,7 @@ struct CompanionPanelView: View {
         _accountService = ObservedObject(wrappedValue: companionManager.accountService)
         _guideSessionController = ObservedObject(wrappedValue: companionManager.guideSessionController)
         _appInventoryService = ObservedObject(wrappedValue: companionManager.appInventoryService)
+        _spendLedger = ObservedObject(wrappedValue: companionManager.spendLedger)
     }
 
     var body: some View {
@@ -672,6 +678,46 @@ struct CompanionPanelView: View {
             } else {
                 signedOutAccountRows
             }
+
+            spendRow
+        }
+    }
+
+    /// What the reader's own key has spent. Shown ONLY once there is something
+    /// to show — a reader on publik's funded tier, on a Claude Code login, or on
+    /// the Codex CLI is not being charged per query, and a "$0.00 spent" row
+    /// against a flat-rate plan is a number that means nothing.
+    @ViewBuilder
+    private var spendRow: some View {
+        if spendLedger.totalCalls > 0 {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text("Spent on your own key")
+                        .font(.system(size: 11))
+                        .foregroundColor(DS.Colors.textTertiary)
+
+                    Spacer()
+
+                    Text(spendLedger.totalSpentText)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .monospacedDigit()
+
+                    Button(action: { spendLedger.clearTheRunningTotal() }) {
+                        Text("Reset")
+                    }
+                    .irisTinyButton()
+                    .nativeTooltip("Clears Iris's running total. It does not change your provider bill.")
+                }
+
+                Text(spendLedger.someCallsCouldNotBePriced
+                    ? "\(spendLedger.totalCalls) queries. Some used a model Iris has no price for, so the real figure is higher."
+                    : "\(spendLedger.totalCalls) queries, priced at published rates. Your provider's bill is the real one.")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, 2)
         }
     }
 

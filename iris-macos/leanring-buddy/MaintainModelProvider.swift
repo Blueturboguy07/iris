@@ -160,7 +160,16 @@ final class AnthropicMaintainProvider: MaintainModelProviding {
     let displayName = "Anthropic (your key)"
     let identifier = "anthropic"
 
-    private lazy var byoOnlyAPI = ClaudeAPI(resolveTransport: {
+    // Tier C never runs on the funded proxy, so every call this makes is on the
+    // reader's own credential. Whether it is METERED is still the transport's
+    // call — a Claude Code login is flat-rate — and the ledger enforces that.
+    private lazy var byoOnlyAPI: ClaudeAPI = {
+        let api = byoOnlyAPIWithoutSpendReporting
+        api.reportSpend = { AssistantSpendLedger.recordOnTheSharedLedger(model: $0, usage: $1, route: $2) }
+        return api
+    }()
+
+    private lazy var byoOnlyAPIWithoutSpendReporting = ClaudeAPI(resolveTransport: {
         // The reader's own credential in either shape — a pasted API key or a
         // connected Claude Code OAuth token — never the funded proxy (D4/D5).
         guard let transport = AnthropicBringYourOwnCredential.currentTransport() else {
@@ -278,7 +287,31 @@ final class OpenAIMaintainProvider: MaintainModelProviding {
                     + "happening connect a different model in settings."
             )
         }
+        // The OpenAI key is always the reader's own — Tier C never runs on the
+        // funded proxy — so every call on this route is metered and belongs in
+        // the ledger. Chat Completions reports usage once, on the finished
+        // response, and folds cached input into `prompt_tokens_details`.
+        if let usagePayload = json["usage"] as? [String: Any] {
+            let cachedInput = (usagePayload["prompt_tokens_details"] as? [String: Any])?["cached_tokens"] as? Int ?? 0
+            let promptTokens = usagePayload["prompt_tokens"] as? Int ?? 0
+            let usage = AssistantTokenUsage(
+                // `prompt_tokens` INCLUDES the cached ones, so the cached count
+                // is subtracted out rather than added — counting it twice would
+                // bill the reader for tokens at full price that they were
+                // charged a tenth for.
+                inputTokens: max(0, promptTokens - cachedInput),
+                cacheReadTokens: cachedInput,
+                outputTokens: usagePayload["completion_tokens"] as? Int ?? 0
+            )
+            reportSpend(Self.model, usage, .theReadersOwnAPIKey)
+        }
         return content
+    }
+
+    /// Told what each finished call consumed. Same shape and same reason as
+    /// `ClaudeAPI.reportSpend`; defaults to a no-op so tests are unaffected.
+    var reportSpend: @Sendable (String, AssistantTokenUsage, AssistantSpendRoute) -> Void = {
+        AssistantSpendLedger.recordOnTheSharedLedger(model: $0, usage: $1, route: $2)
     }
 
     /// One turn as Chat-Completions JSON. A turn with an attached image

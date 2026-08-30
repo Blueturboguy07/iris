@@ -146,6 +146,12 @@ final class CompanionManager: ObservableObject {
     /// directly, and the request pipeline below asks it which route to take.
     let accountService = AccountService()
 
+    /// What the reader's own API key has spent. Only ever told about calls; it
+    /// can neither refuse one nor slow one down — the founder's ruling was that
+    /// a reader paying their own bill does not need Iris inventing a ceiling on
+    /// top of the one their provider already enforces. They need the number.
+    let spendLedger = AssistantSpendLedger()
+
     /// Owns the install guide the reader is currently following, if any. It
     /// lives here rather than in the panel view because an `iris://guide/…`
     /// link can arrive while the panel has never been opened, and the guide has
@@ -461,12 +467,25 @@ final class CompanionManager: ObservableObject {
         // messages and the very next request has to respect that.
         let accountService = self.accountService
         let publikBaseURL = self.publikBaseURL
-        return ClaudeAPI(
+        let api = ClaudeAPI(
             resolveTransport: {
                 await accountService.currentAssistantTransport(publikBaseURL: publikBaseURL)
             },
             model: selectedModel
         )
+        // The hop to the main actor belongs here rather than in every request
+        // path: `ClaudeAPI` is not main-actor isolated and the ledger is. The
+        // ledger drops anything that is not the reader's own metered key, so a
+        // future transport cannot start billing a subscription reader by
+        // forgetting to check at the call site.
+        let ledger = self.spendLedger
+        // Claim the shared sink so the Tier C providers — built inside a static
+        // factory that cannot be handed an instance — report to this same ledger.
+        AssistantSpendLedger.shared = ledger
+        api.reportSpend = { model, usage, route in
+            Task { @MainActor in ledger.record(model: model, usage: usage, route: route) }
+        }
+        return api
     }()
 
     /// The two things a chat message can actually DO — put text on the

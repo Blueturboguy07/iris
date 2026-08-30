@@ -120,6 +120,24 @@ enum AssistantTransport: Sendable {
     /// and caps `max_tokens`; sending a model it will ignore only invites a
     /// reader of the code to believe the client picked it. On the BYO route the
     /// model is genuinely the client's choice and must be sent.
+    /// Whether a call on this transport costs the reader money PER QUERY, and
+    /// so whether a dollar figure is honest to show against it.
+    ///
+    /// The OAuth-token case is the one worth stating out loud: it is the
+    /// reader's own credential, so it looks like the API-key case and is not.
+    /// A Claude Code login is a flat-rate plan — the marginal cost of one more
+    /// query is zero — so pricing its tokens would invent a bill.
+    var spendRoute: AssistantSpendRoute {
+        switch self {
+        case .funded:
+            return .publiksFundedTier
+        case .bringYourOwnKey:
+            return .theReadersOwnAPIKey
+        case .bringYourOwnOAuthToken:
+            return .aFlatRateSubscription
+        }
+    }
+
     var shouldSendModelInRequestBody: Bool {
         switch self {
         case .funded:

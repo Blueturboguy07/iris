@@ -62,6 +62,12 @@ struct ClaudeSSEMessageAccumulator {
     private var text = ""
     private var stopReason: String?
     /// Blocks under construction, keyed by stream index.
+    /// What this message reported consuming. Read here rather than in the
+    /// caller's loop because this is the one place every SSE event of a
+    /// tool-carrying turn already passes through — and the fix ladder, which is
+    /// where a reader's own key does most of its spending, runs on that path.
+    private(set) var usage = AssistantTokenUsage()
+
     private var openBlocks: [Int: [String: Any]] = [:]
     private var openBlockJSONFragments: [Int: String] = [:]
     private var finishedBlocks: [(index: Int, block: [String: Any])] = []
@@ -76,6 +82,8 @@ struct ClaudeSSEMessageAccumulator {
               let eventType = event["type"] as? String else {
             return nil
         }
+
+        ClaudeAPI.readUsage(from: event, ofType: eventType, into: &usage)
 
         switch eventType {
         case "content_block_start":

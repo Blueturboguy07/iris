@@ -40,6 +40,13 @@ class ClaudeAPI {
 
     private let session: URLSession
 
+    /// Told what each finished call consumed, so the reader can see what their
+    /// own key is spending. A closure rather than a reference to the ledger
+    /// because this type is not main-actor isolated and the ledger is; the hop
+    /// belongs at the wiring site, not in every request path. Defaults to a
+    /// no-op so every existing construction — and every test — is unaffected.
+    var reportSpend: @Sendable (String, AssistantTokenUsage, AssistantSpendRoute) -> Void = { _, _, _ in }
+
     init(
         resolveTransport: @escaping @Sendable () async -> Result<AssistantTransport, AssistantTransportError>,
         model: String = "claude-sonnet-4-6"
@@ -330,6 +337,11 @@ class ClaudeAPI {
 
         // Parse SSE stream — each event is "data: {json}\n\n"
         var accumulatedResponseText = ""
+        // What this turn consumed, for the spend ledger. Anthropic splits it
+        // across two events: `message_start` carries the input side (including
+        // the cache counts, which are priced differently), `message_delta`
+        // carries the output count as it finalises.
+        var usageThisTurn = AssistantTokenUsage()
 
         for try await line in byteStream.lines {
             // SSE lines look like: "data: {...}"
@@ -345,6 +357,8 @@ class ClaudeAPI {
                 continue
             }
 
+            Self.readUsage(from: eventPayload, ofType: eventType, into: &usageThisTurn)
+
             // We care about content_block_delta events that contain text chunks
             if eventType == "content_block_delta",
                let delta = eventPayload["delta"] as? [String: Any],
@@ -359,7 +373,43 @@ class ClaudeAPI {
         }
 
         let duration = Date().timeIntervalSince(startTime)
+        reportSpend(model, usageThisTurn, transport.spendRoute)
         return (text: accumulatedResponseText, duration: duration)
+    }
+
+    /// Folds one SSE event's usage numbers into the turn's running total.
+    ///
+    /// Written to be indifferent to which event carries what: Anthropic puts the
+    /// input counts on `message_start` and the output count on `message_delta`,
+    /// and a `max` rather than a `+=` on the output side keeps this correct if a
+    /// stream reports a running figure on several deltas rather than a final one.
+    static func readUsage(
+        from eventPayload: [String: Any],
+        ofType eventType: String,
+        into usage: inout AssistantTokenUsage
+    ) {
+        let usagePayload: [String: Any]?
+        switch eventType {
+        case "message_start":
+            usagePayload = (eventPayload["message"] as? [String: Any])?["usage"] as? [String: Any]
+        case "message_delta":
+            usagePayload = eventPayload["usage"] as? [String: Any]
+        default:
+            return
+        }
+        guard let usagePayload else { return }
+        if let input = usagePayload["input_tokens"] as? Int {
+            usage.inputTokens = max(usage.inputTokens, input)
+        }
+        if let cacheWrite = usagePayload["cache_creation_input_tokens"] as? Int {
+            usage.cacheWriteTokens = max(usage.cacheWriteTokens, cacheWrite)
+        }
+        if let cacheRead = usagePayload["cache_read_input_tokens"] as? Int {
+            usage.cacheReadTokens = max(usage.cacheReadTokens, cacheRead)
+        }
+        if let output = usagePayload["output_tokens"] as? Int {
+            usage.outputTokens = max(usage.outputTokens, output)
+        }
     }
 
     // MARK: - Tool-carrying requests
@@ -604,6 +654,7 @@ class ClaudeAPI {
                 await onTextChunk(textSoFar)
             }
         }
+        reportSpend(model, accumulator.usage, transport.spendRoute)
         return accumulator.finalize()
     }
 

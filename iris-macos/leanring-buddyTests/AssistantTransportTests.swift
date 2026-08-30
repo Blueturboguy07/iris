@@ -400,7 +400,7 @@ struct AssistantTransportTests {
             forStatusCode: 401,
             serverErrorCode: "sign_in_required",
             retryAfterHeaderValue: nil,
-            isFundedTier: true
+            credentialShape: .publiksFundedTier
         )
         #expect(signInRequired == .signInRequired)
         #expect(signInRequired.requiresReSignIn)
@@ -412,7 +412,7 @@ struct AssistantTransportTests {
             forStatusCode: 429,
             serverErrorCode: "rate_limited",
             retryAfterHeaderValue: "45",
-            isFundedTier: true
+            credentialShape: .publiksFundedTier
         )
         #expect(rateLimited == .rateLimited(retryAfterSeconds: 45))
         #expect(rateLimited.requiresReSignIn == false)
@@ -425,7 +425,7 @@ struct AssistantTransportTests {
             forStatusCode: 429,
             serverErrorCode: "daily_budget_exhausted",
             retryAfterHeaderValue: "7200",
-            isFundedTier: true
+            credentialShape: .publiksFundedTier
         )
         #expect(dailyBudgetExhausted == .dailyBudgetExhausted(retryAfterSeconds: 7200))
         #expect(dailyBudgetExhausted.userFacingMessage != rateLimited.userFacingMessage)
@@ -436,7 +436,7 @@ struct AssistantTransportTests {
             forStatusCode: 503,
             serverErrorCode: "assistant_unconfigured",
             retryAfterHeaderValue: nil,
-            isFundedTier: true
+            credentialShape: .publiksFundedTier
         )
         #expect(assistantUnavailable == .assistantUnavailable)
         #expect(assistantUnavailable.requiresReSignIn == false)
@@ -447,7 +447,7 @@ struct AssistantTransportTests {
             forStatusCode: 502,
             serverErrorCode: "upstream_error",
             retryAfterHeaderValue: nil,
-            isFundedTier: true
+            credentialShape: .publiksFundedTier
         ) == .requestFailed(statusCode: 502))
     }
 
@@ -458,7 +458,7 @@ struct AssistantTransportTests {
             forStatusCode: 401,
             serverErrorCode: nil,
             retryAfterHeaderValue: nil,
-            isFundedTier: false
+            credentialShape: .aPastedAnthropicKey
         ) == .bringYourOwnKeyRejected)
         #expect(AssistantTransportError.bringYourOwnKeyRejected.requiresReSignIn == false)
     }
@@ -468,7 +468,7 @@ struct AssistantTransportTests {
             forStatusCode: 429,
             serverErrorCode: "rate_limited",
             retryAfterHeaderValue: nil,
-            isFundedTier: true
+            credentialShape: .publiksFundedTier
         )
         #expect(withoutRetryAfter == .rateLimited(retryAfterSeconds: nil))
         #expect(!withoutRetryAfter.userFacingMessage.isEmpty)
@@ -477,7 +477,7 @@ struct AssistantTransportTests {
             forStatusCode: 429,
             serverErrorCode: "rate_limited",
             retryAfterHeaderValue: "Wed, 21 Oct 2026 07:28:00 GMT",
-            isFundedTier: true
+            credentialShape: .publiksFundedTier
         )
         #expect(withGarbageRetryAfter == .rateLimited(retryAfterSeconds: nil))
     }

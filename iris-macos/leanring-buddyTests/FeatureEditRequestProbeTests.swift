@@ -190,9 +190,25 @@ private final class ScriptedProbeProvider: MaintainModelProviding {
         )
         // The whole point: the reader must see what to DO, never the bridged
         // NSError's "(Iris.AssistantTransportError error 8.)".
+        //
+        // Asserted as "the transport's own advice reaches the reader" rather
+        // than by quoting it. This used to pin the literal sentence, and it
+        // broke the moment that sentence was improved — which made a wording
+        // fix look like a regression instead of the thing the test wanted.
         #expect(reason.hasPrefix("model credential rejected"))
-        #expect(reason.contains("turned that key down"))
+        #expect(reason.contains(AssistantTransportError.bringYourOwnKeyRejected.userFacingMessage))
         #expect(!reason.contains("error 8"))
+    }
+
+    /// A lapsed Claude Code login is a rejected credential too, and it is the
+    /// commonest of the three — the tokens rotate every few hours. It must get
+    /// the same prefix, which is what offers the settings shortcut.
+    @Test func anExpiredClaudeCodeLoginIsAlsoARejectedCredential() {
+        let reason = MaintainTierCFixer.modelCallFailureReason(
+            for: AssistantTransportError.claudeCodeLoginExpired
+        )
+        #expect(reason.hasPrefix("model credential rejected"))
+        #expect(reason.contains("reconnect"))
     }
 
     @Test func otherTransportErrorsAlsoSpeakTheTransportsVocabulary() {

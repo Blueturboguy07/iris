@@ -537,7 +537,43 @@ final class CompanionManager: ObservableObject {
         if transportError.requiresReSignIn {
             await accountService.handleAccessTokenRejectedByServer()
         }
-        return transportError.userFacingMessage
+        return Self.wording(
+            for: transportError,
+            theReaderIsSignedIntoPublik: accountService.signedInAccount != nil
+        )
+    }
+
+    /// What the reader is actually told about a failed request.
+    ///
+    /// Founder report, in two parts. First: "if i am signed out just say im
+    /// signed out dont say anthropic turned that key down." Then, on seeing the
+    /// first attempt at this: "yo its not the sign in."
+    ///
+    /// Both are right, and together they say what the message has to do. The
+    /// original blamed a KEY for what was actually a lapsed Claude Code login —
+    /// wrong twice, since there is no key and nothing to paste. The obvious
+    /// correction, leading with "you're signed out", buried the real cause
+    /// under a state that was not what broke. So the base message now leads
+    /// with the cause and the one action that fixes it, and this function adds
+    /// signing in only as an ALTERNATIVE, and only when it is genuinely
+    /// available.
+    ///
+    /// The sign-in state is READ, never inferred from the route. Inferring it
+    /// would be wrong where it matters most: Tier C and the fix ladder run on
+    /// the BYO transport even for a signed-IN reader, so offering "sign in"
+    /// there would be advice they have already taken.
+    nonisolated static func wording(
+        for transportError: AssistantTransportError,
+        theReaderIsSignedIntoPublik: Bool
+    ) -> String {
+        let message = transportError.userFacingMessage
+        guard !theReaderIsSignedIntoPublik else { return message }
+        switch transportError {
+        case .bringYourOwnKeyRejected, .claudeCodeLoginExpired:
+            return message + " you can also sign in to publik and use iris on us."
+        default:
+            return message
+        }
     }
 
     /// Conversation history so Claude remembers prior exchanges within a session.

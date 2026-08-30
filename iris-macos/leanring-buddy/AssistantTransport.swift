@@ -138,6 +138,25 @@ enum AssistantTransport: Sendable {
         }
     }
 
+    /// Which credential a request rode on. Replaces the `isFundedTier` Bool the
+    /// 401 mapping used to take: a 401 means three different things here, and
+    /// two of them were being told to the reader as the same sentence.
+    enum CredentialShape: Sendable {
+        case publiksFundedTier
+        case aPastedAnthropicKey
+        /// A Claude Code login. NOT a key — you cannot "paste it again", and
+        /// telling somebody to is advice they cannot follow.
+        case aClaudeCodeLogin
+    }
+
+    var credentialShape: CredentialShape {
+        switch self {
+        case .funded: return .publiksFundedTier
+        case .bringYourOwnKey: return .aPastedAnthropicKey
+        case .bringYourOwnOAuthToken: return .aClaudeCodeLogin
+        }
+    }
+
     var shouldSendModelInRequestBody: Bool {
         switch self {
         case .funded:
@@ -352,8 +371,14 @@ enum AssistantTransportError: Error, Equatable, Sendable {
     /// `upstream_error` and every other status. Deliberately vague: the server's
     /// body may quote the model's own words back and is never surfaced.
     case requestFailed(statusCode: Int)
-    /// The user's own key was rejected by Anthropic (HTTP 401 on the BYO route).
+    /// The user's own PASTED key was rejected by Anthropic (401 on the BYO route).
     case bringYourOwnKeyRejected
+    /// The user's connected Claude Code login was rejected (401 on the BYO
+    /// route). Split from the case above because the remedy is different and
+    /// the old shared wording — "check it's still active and paste it again" —
+    /// is impossible advice for a login there is nothing to paste. These tokens
+    /// also rotate every few hours, so this is the commonest of the three.
+    case claudeCodeLoginExpired
     /// The network never got there.
     case transportFailure(reason: String)
     /// The key-isolation property was about to be violated. This should be
@@ -378,7 +403,9 @@ enum AssistantTransportError: Error, Equatable, Sendable {
         case .requestFailed:
             return "hm, something went wrong reaching the assistant. check your connection and try again."
         case .bringYourOwnKeyRejected:
-            return "anthropic turned that key down. check it's still active and paste it again."
+            return "anthropic refused the key iris has saved. check it's still active and paste it again."
+        case .claudeCodeLoginExpired:
+            return "your claude code login has expired — they only last a few hours. reconnect it in settings."
         case .transportFailure:
             return "i couldn't reach the assistant. check your connection and try again."
         case .bringYourOwnKeyWouldLeaveAnthropic:
@@ -393,7 +420,7 @@ enum AssistantTransportError: Error, Equatable, Sendable {
         case .signInRequired:
             return true
         case .noCredentialsAvailable, .rateLimited, .dailyBudgetExhausted, .assistantUnavailable,
-             .requestFailed, .bringYourOwnKeyRejected, .transportFailure,
+             .requestFailed, .bringYourOwnKeyRejected, .claudeCodeLoginExpired, .transportFailure,
              .bringYourOwnKeyWouldLeaveAnthropic:
             return false
         }
@@ -406,7 +433,8 @@ enum AssistantTransportError: Error, Equatable, Sendable {
         case .rateLimited, .dailyBudgetExhausted:
             return true
         case .noCredentialsAvailable, .signInRequired, .assistantUnavailable, .requestFailed,
-             .bringYourOwnKeyRejected, .transportFailure, .bringYourOwnKeyWouldLeaveAnthropic:
+             .bringYourOwnKeyRejected, .claudeCodeLoginExpired, .transportFailure,
+             .bringYourOwnKeyWouldLeaveAnthropic:
             return false
         }
     }
@@ -439,15 +467,20 @@ enum AssistantTransportError: Error, Equatable, Sendable {
         forStatusCode statusCode: Int,
         serverErrorCode: String?,
         retryAfterHeaderValue: String?,
-        isFundedTier: Bool
+        credentialShape: AssistantTransport.CredentialShape
     ) -> AssistantTransportError {
         let retryAfterSeconds = retryAfterHeaderValue.flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
 
         switch statusCode {
         case 401:
-            // The same status means opposite things on the two routes: publik
-            // is saying "sign in again", Anthropic is saying "this key is bad".
-            return isFundedTier ? .signInRequired : .bringYourOwnKeyRejected
+            // One status, three meanings. publik is saying "sign in again";
+            // Anthropic is saying either "this key is bad" or "this login has
+            // expired", and those two need different advice from the reader.
+            switch credentialShape {
+            case .publiksFundedTier: return .signInRequired
+            case .aPastedAnthropicKey: return .bringYourOwnKeyRejected
+            case .aClaudeCodeLogin: return .claudeCodeLoginExpired
+            }
         case 429:
             if serverErrorCode == "daily_budget_exhausted" {
                 return .dailyBudgetExhausted(retryAfterSeconds: retryAfterSeconds)

@@ -865,7 +865,9 @@ final class AccountService: ObservableObject {
                 forStatusCode: httpResponse.statusCode,
                 serverErrorCode: AssistantTransportError.serverErrorCode(inFailureBody: responseData),
                 retryAfterHeaderValue: httpResponse.value(forHTTPHeaderField: "Retry-After"),
-                isFundedTier: false
+                // This is the validation call made the moment a reader pastes a
+                // key, so a 401 here means exactly that key was refused.
+                credentialShape: .aPastedAnthropicKey
             )
         }
     }

@@ -247,13 +247,6 @@ class ClaudeAPI {
         retryAfterHeaderValue: String?,
         transport: AssistantTransport
     ) -> AssistantTransportError {
-        let isFundedTier: Bool
-        if case .funded = transport {
-            isFundedTier = true
-        } else {
-            isFundedTier = false
-        }
-
         let serverErrorCode = AssistantTransportError.serverErrorCode(inFailureBody: failureBodyData)
         // The code and status are worth a console line for whoever is debugging
         // a build; the body itself is not logged, so a model's own words about a
@@ -264,7 +257,7 @@ class ClaudeAPI {
             forStatusCode: statusCode,
             serverErrorCode: serverErrorCode,
             retryAfterHeaderValue: retryAfterHeaderValue,
-            isFundedTier: isFundedTier
+            credentialShape: transport.credentialShape
         )
     }
 

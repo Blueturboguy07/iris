@@ -284,6 +284,27 @@ struct IrisGuideStep: Codable, Equatable, Sendable {
     /// and the resolution ladder in `GuidePointing.swift`.
     let point: IrisStepPointTarget?
 
+    /// The folder this step's command runs in, stated by the guide instead of
+    /// inherited from a `cd` some earlier step left behind in the shell.
+    ///
+    /// Until guides carried this, a step's working directory was live shell
+    /// state and nothing on the wire recorded it: hickeyfield's `enter-folder`
+    /// ran `cd hickeyfield` and steps 8-13 were all written relative to that one
+    /// `cd` still being in effect. A resumed install builds a brand-new
+    /// `GuideAutopilotShellSession`, which starts in the home folder, so
+    /// "BUILD THE APP — 12 of 17" ran there instead:
+    ///
+    ///     % ui/node_modules/.bin/tauri build --bundles app
+    ///     zsh: no such file or directory: ui/node_modules/.bin/tauri   exit 127
+    ///
+    /// and both repairs after it aimed at the home folder too, which is also
+    /// what the failure report told the model was the truth.
+    ///
+    /// Nil keeps the old behaviour exactly — run wherever the shell is — which
+    /// every already-published guide relies on, so this stays optional forever
+    /// rather than becoming required once the guides are backfilled.
+    let workingDirectory: String?
+
     /// An unrecognized `kind` falls back to `terminal` rather than failing the
     /// whole guide, which is exactly what the Tauri panel's `sanitizeGuideStep`
     /// does (`iris-desktop/ui/app.js`). Losing one step's styling is a far
@@ -305,6 +326,11 @@ struct IrisGuideStep: Codable, Equatable, Sendable {
         // Same reasoning as `watch`: a target Iris cannot parse costs the step
         // its arrow, not its existence.
         point = try? container.decodeIfPresent(IrisStepPointTarget.self, forKey: .point)
+        // Same fallback reasoning again: a folder Iris cannot read costs the
+        // step its declaration, not its existence — it falls back to the
+        // inherited working directory, which is where it ran before the field
+        // existed at all.
+        workingDirectory = try? container.decodeIfPresent(String.self, forKey: .workingDirectory)
     }
 
     init(
@@ -318,7 +344,8 @@ struct IrisGuideStep: Codable, Equatable, Sendable {
         actionLabel: String? = nil,
         verifierLabel: String? = nil,
         watch: IrisStepWatch? = nil,
-        point: IrisStepPointTarget? = nil
+        point: IrisStepPointTarget? = nil,
+        workingDirectory: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -331,6 +358,7 @@ struct IrisGuideStep: Codable, Equatable, Sendable {
         self.verifierLabel = verifierLabel
         self.watch = watch
         self.point = point
+        self.workingDirectory = workingDirectory
     }
 }
 

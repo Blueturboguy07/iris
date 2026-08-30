@@ -120,10 +120,18 @@ enum ToolVersionService {
     /// Where to look for a tool when `PATH` does not have it.
     ///
     /// This was a two-case switch — `git` and `node` — and everything else got
-    /// an empty list. A Finder-launched app's PATH is
-    /// `/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin`
-    /// and nothing else, so for the other twelve tools the answer to "is this
-    /// installed" was effectively "only if Homebrew put it in /usr/local/bin".
+    /// an empty list. A Finder-launched app's PATH is the four system
+    /// directories `/usr/bin:/bin:/usr/sbin:/sbin` and nothing else, so for
+    /// the other twelve tools the answer to "is this installed" was
+    /// effectively "no".
+    ///
+    /// That PATH is MEASURED, from a stub .app opened by Finder itself. This
+    /// comment used to claim it was
+    /// `/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
+    /// which is the login/path_helper PATH, not launchd's — and the difference
+    /// is load-bearing rather than pedantic: /usr/local/bin/node exists on the
+    /// machine this was written on, so believing the old string made the
+    /// "Iris can't run any Node tool" bug look impossible to reproduce here.
     /// `cargo` lives in `~/.cargo/bin`, which is on no such PATH, so Iris has
     /// never once been able to see that a reader has Rust — which is why the
     /// hickeyfield guide walks somebody who already has it through installing
@@ -160,10 +168,18 @@ enum ToolVersionService {
 
     // MARK: - Locating the executable
 
-    /// Walks `PATH` for the tool. Never runs a shell, so nothing in the tool
-    /// name can be interpreted as a command.
+    /// Walks `PATH` for the tool. The tool name is never handed to a shell, so
+    /// nothing in it can be interpreted as a command.
+    ///
+    /// The PATH walked is `LoginShellEnvironment`'s — the reader's own login
+    /// shell's, unioned with this process's — and not the raw inherited one.
+    /// An Iris launched from Finder inherits launchd's four system directories,
+    /// which is why a reader with Homebrew, nvm or an npm prefix looked to Iris
+    /// like a reader with nothing installed. (A shell IS run to learn that
+    /// PATH, once per launch, with a constant command that never sees a tool
+    /// name.)
     static func locateExecutableOnSearchPath(named executableName: String) -> ToolExecutableLookupOutcome {
-        guard let searchPathValue = ProcessInfo.processInfo.environment["PATH"] else {
+        guard let searchPathValue = LoginShellEnvironment.searchPathForChildProcesses() else {
             return .searchPathUnreadable(reason: "PATH is not set")
         }
 
@@ -206,6 +222,45 @@ enum ToolVersionService {
 
     // MARK: - Running the check
 
+    /// The environment a version probe is launched in. Named, and used by the
+    /// test that asserts "the executable Iris picks can actually run in the
+    /// environment Iris gives it", so the two can never drift apart.
+    ///
+    /// It used to be nil — inherit whatever Iris itself has — and on an Iris
+    /// launched from Finder that is launchd's `/usr/bin:/bin:/usr/sbin:/sbin`.
+    /// Every Node-based tool a guide can watch for (`pnpm`, `npm`, `npx`,
+    /// `corepack`) is a `#!/usr/bin/env node` script, so the probe found the
+    /// right file, ran it, and got `env: node: No such file or directory` and
+    /// exit 127. That throw became "could not check", and the position finder
+    /// read "could not check pnpm" as a reader who never installed it and sent
+    /// them back to step 2 — the "Iris doesn't remember where I was" report.
+    static func environmentForToolVersionCommands() -> [String: String] {
+        LoginShellEnvironment.environmentForChildProcesses()
+    }
+
+    /// Where a version probe is run from — the reader's home directory, not
+    /// wherever Iris happens to have been launched.
+    ///
+    /// `--version` looks like a question that cannot depend on a directory,
+    /// and for a real binary it does not. But `pnpm` on this Mac is a corepack
+    /// shim that reads the nearest package.json, and it answers by location:
+    /// measured, cwd=/ gives 9.15.9, cwd=<a repo> gives 10.0.0, and cwd=a
+    /// workspace root gives `ERROR packages field missing or empty` and a
+    /// non-zero exit — which is the same "could not check" that discards the
+    /// reader's progress, arriving by a second route. Home is stable, always
+    /// readable, and holds no package.json.
+    static func workingDirectoryForToolVersionCommands() -> URL {
+        let homeDirectoryPath = NSHomeDirectory()
+        var homeIsADirectory: ObjCBool = false
+        let homeExists = FileManager.default.fileExists(
+            atPath: homeDirectoryPath, isDirectory: &homeIsADirectory
+        )
+        guard homeExists && homeIsADirectory.boolValue else {
+            return URL(fileURLWithPath: "/")
+        }
+        return URL(fileURLWithPath: homeDirectoryPath)
+    }
+
     /// Runs the tool's version command off the main thread, mirroring the
     /// `spawn_blocking` the Tauri command uses so a slow tool never stalls the UI.
     static func checkToolVersion(tool: String) async throws -> ToolVersion {
@@ -242,8 +297,8 @@ enum ToolVersionService {
             commandResult = try runCommand(
                 executablePath: executablePath,
                 arguments: toolSpecification.arguments,
-                environment: nil,
-                workingDirectory: nil
+                environment: environmentForToolVersionCommands(),
+                workingDirectory: workingDirectoryForToolVersionCommands()
             )
         } catch {
             throw ToolVersionError.couldNotInspectTool(

@@ -614,6 +614,14 @@ struct OverlayEyeInputBarView: View {
                     )
                 }
 
+                // What Iris already did to an app this session. Without it the
+                // reader who got a real result — Iris wrote and committed a
+                // plan document — closed the card and had nothing left to look
+                // at: "Clicked off Iris, and then back on, still can't see the
+                // chat history with feature or bug overlay, so can't be sure
+                // it's working."
+                finishedEditsList
+
                 // The guide sits above the field, not inside the settings dropdown.
                 // The reader following instructions is doing the main thing Iris is
                 // for; asking a question about the step is the secondary thing, and
@@ -713,6 +721,21 @@ struct OverlayEyeInputBarView: View {
         // text that never changed.
         .onChange(of: companionManager.assistantResponseGenerationCount) { _, _ in
             showWhateverIrisJustSaid()
+        }
+        // A retry that re-enters the describe step with the request prefilled
+        // ("Try again with what Iris learned", the rate-limit retry) lands
+        // HERE, in the composer, because the composer is what draws the
+        // describe step now. `OnDemandEditCard` also listens for this, but the
+        // bar unmounts that card in the very update that carries the prefill —
+        // it is only rendered while the phase is NOT `.describe` — so the
+        // card's listener can never fire for it and the reader's own words
+        // reached no text field on any surface. That is a button that looks
+        // like it did nothing.
+        .onChange(of: onDemandEditCoordinator.describePrefillText) { _, prefill in
+            guard let prefill, !prefill.isEmpty else { return }
+            typedMessage = prefill
+            composerMode = .edit
+            onDemandEditCoordinator.consumeDescribePrefill()
         }
         .animation(DS.Motion.contentIn, value: exchange.phase)
     }
@@ -818,8 +841,31 @@ struct OverlayEyeInputBarView: View {
         // frequently the frontmost one — without this, the composer would offer
         // to start an EDIT run on it in the middle of its own install.
         guard !theCenteredTakeoverIsCoveringTheScreen else { return false }
+        // Not while an edit is actually in flight. The composer's only move for
+        // a request typed at that moment is to START one, which goes through
+        // `pickApp` and resets the flow the reader is looking at — so typing a
+        // follow-up into a plan DELETED the plan. That is the mechanism behind
+        // "Can't send a follow up prompt after the plan into bug feature
+        // overlay since it is gone." The field falls back to asking Iris a
+        // question, which is what a reader mid-plan actually wants and costs
+        // them nothing. (Refining a plan in place is a feature this does not
+        // build; it only stops the destruction.)
+        guard !anEditIsInFlight else { return false }
         return onDemandEditCoordinator.phase == .describe
             || companionManager.frontmostEditableAppForTheComposer != nil
+    }
+
+    /// True between the reader approving a plan and the exchange being closed —
+    /// every phase where the card owns the surface and a second request would
+    /// be a restart rather than a follow-up. The terminal phases are false on
+    /// purpose: a finished card is a fine place to type the next request from.
+    private var anEditIsInFlight: Bool {
+        switch onDemandEditCoordinator.phase {
+        case .pickApp, .describe, .done, .failed, .notEligible, .blockedByModel:
+            return false
+        default:
+            return true
+        }
     }
 
     /// The mode actually in force. A reader can be in Ask mode and then sign
@@ -1189,6 +1235,61 @@ struct OverlayEyeInputBarView: View {
         }
     }
 
+    /// The finished edit exchanges of this session, newest first — the edit
+    /// flow's answer to the chat transcript. Chat got one of these for the
+    /// byte-identical complaint ("when I click off Iris it just gets rid of my
+    /// chat and opens a brand new one"); the edit flow never did, so a reader
+    /// who closed a result card was left with a blank overlay and no way to
+    /// tell whether Iris had done anything at all.
+    ///
+    /// Capped at the three most recent, and each row clamped: this is a 320pt
+    /// panel floating over somebody's desktop, and a full log here would be the
+    /// second panel the bar exists not to be. A row is also a tap back into
+    /// editing that app, which is the other half of the report — "the only way
+    /// to do that that is clear is by going into the menu and selecting it
+    /// every time, very annoying for ease of use".
+    @ViewBuilder
+    private var finishedEditsList: some View {
+        let mostRecentFirst = Array(onDemandEditCoordinator.sessionThread.suffix(3).reversed())
+        if !mostRecentFirst.isEmpty {
+            VStack(alignment: .leading, spacing: 7) {
+                Text("What Iris changed")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundColor(DS.Colors.textTertiary)
+
+                ForEach(mostRecentFirst) { finishedEdit in
+                    Button {
+                        onDemandEditCoordinator.resumeEditing(finishedEdit)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("\(finishedEdit.appName) · \(finishedEdit.kind == .feature ? "feature" : "bug fix")")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundColor(DS.Colors.quiet)
+                            Text(finishedEdit.request)
+                                .font(.system(size: 10.5, weight: .medium))
+                                .foregroundColor(DS.Colors.ink)
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(finishedEdit.outcome)
+                                .font(.system(size: 10))
+                                .foregroundColor(DS.Colors.textSecondary)
+                                .lineLimit(3)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .pointerCursor()
+                    .help("Edit \(finishedEdit.appName) again")
+                }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(IrisShellBackground(cornerRadius: DS.CornerRadius.large))
+        }
+    }
+
     @ViewBuilder
     private var whateverTheExchangeIsUpTo: some View {
         if exchange.theSuggestionChipsShouldBeOffered {
@@ -1342,6 +1443,19 @@ struct OverlayEyeInputBarView: View {
             let request = typedMessage
             typedMessage = ""
             if onDemandEditCoordinator.phase == .describe {
+                onDemandEditCoordinator.describeRequest(request, kind: editKind)
+            } else if let slug = onDemandEditCoordinator.activeAppSlug,
+                      let name = onDemandEditCoordinator.activeAppName,
+                      let stack = onDemandEditCoordinator.activeAppStack {
+                // A finished card still names the app it was about, so the next
+                // request typed over it belongs to THAT app — not to whichever
+                // window happens to be frontmost while the reader reads a
+                // result. Going through the manager keeps the bar-raising and
+                // panel-dismissing side of a pick identical to every other way
+                // in.
+                companionManager.requestOnDemandEdit(
+                    forSlug: slug, name: name, stack: stack, preselectedKind: editKind
+                )
                 onDemandEditCoordinator.describeRequest(request, kind: editKind)
             } else {
                 // Nothing picked yet: bind to the app in front and describe in

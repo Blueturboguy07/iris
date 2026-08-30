@@ -38,9 +38,105 @@ struct MaintainChatTurn: Sendable {
     var attachedImagePNGData: Data? = nil
 }
 
-enum MaintainModelProviderError: Error {
-    case noCredential
+/// Why a Tier C model call could not be made, in cases that carry the
+/// diagnosis and a `userFacingMessage` that lets it out.
+///
+/// THE CONFORMANCE IS THE FIX. A bare Swift `Error` bridges to an NSError whose
+/// domain is this type's name and whose code is the case's RUNTIME index, so
+/// `error.localizedDescription` on one of these read, in full:
+///
+///     "The operation couldn’t be completed.
+///      (Iris.MaintainModelProviderError error 0.)"
+///
+/// That is what a reader was actually shown when an app-edit run died, and
+/// their own words afterwards were "I have the codex CLI?" — a fair question,
+/// because nothing in that sentence is about a CLI, a login, or anything a
+/// person could go and do about it. And "error 0" is `.requestFailed`: Swift
+/// numbers the payload-carrying cases first, so the one case that CARRIES the
+/// real explanation as a String is precisely the one whose explanation got
+/// thrown away on the way out.
+///
+/// `AssistantTransportError` grew `userFacingMessage` after the identical
+/// incident — a reader seeing "(… error 8.)" when their Claude Code token
+/// lapsed. This is that fix, carried across to the sibling enum it was never
+/// applied to, and held to the same bar: the reader is told what to DO, never
+/// a code. `LocalizedError` is conformed as well as the property added because
+/// `userFacingMessage` is what call sites SHOULD reach for and
+/// `localizedDescription` is what they reach for by accident; with
+/// `errorDescription` wired up, the accident now yields the sentence instead of
+/// the case index. The alternative — auditing every present and future call
+/// site — is the audit that was already missed once here.
+enum MaintainModelProviderError: Error, LocalizedError {
+    /// No usable credential, and WHICH kind of "no". A single payload-free
+    /// `.noCredential` collapsed four unrelated problems — the codex command
+    /// isn't where Iris can see it, the codex login isn't active, codex itself
+    /// turned the call down, no OpenAI key is saved — into one opaque code, and
+    /// a reader can act on exactly one of those at a time. Which one is the
+    /// only useful thing Iris knows here, and it used to be the one thing it
+    /// did not say.
+    case noCredential(MissingCredential)
+
+    /// The call was made and failed. The String is the diagnosis, and carrying
+    /// it is the entire reason this case has a payload — so it is written at
+    /// the throw site as a SENTENCE THE READER CAN ACT ON, never a bare dump.
+    /// That is the contract every construction site below keeps: the payload
+    /// is what reaches the reader verbatim, because the alternative is what
+    /// they got before, which was the case index instead.
     case requestFailed(String)
+
+    /// The distinct ways a provider ends up with nothing to call the model
+    /// with. Each one has a different repair, which is why they are different
+    /// cases rather than a shared string.
+    enum MissingCredential: Equatable {
+        /// `CodexCLILogin.locateCodexBinary()` found no `codex` anywhere it
+        /// knows to look. NOT the same as "you never installed it" — an app
+        /// launched from Finder gets a minimal PATH, so a perfectly working
+        /// codex can be invisible to Iris and visible in the reader's terminal.
+        /// The message has to leave room for both, because the reader who hit
+        /// this had in fact installed it.
+        case codexCommandNotFound
+        /// The CLI is there, but `~/.codex/auth.json` holds no usable login.
+        case codexLoginNotUsable
+        /// The call actually reached codex and codex refused it on credential
+        /// grounds. Its own words ride along: Iris is guessing from stderr
+        /// heuristics here, and quoting the tool is how a reader can tell
+        /// whether the guess was right.
+        case codexTurnedTheCallDown(codexSaid: String)
+        /// No OpenAI key in the Keychain.
+        case openAIKeyNotSaved
+    }
+
+    /// What to tell the reader, in the register `AssistantTransportError`
+    /// established: lowercase, one problem, one thing to go and do.
+    var userFacingMessage: String {
+        switch self {
+        case .noCredential(let missingCredential):
+            return missingCredential.userFacingMessage
+        case .requestFailed(let whatWentWrong):
+            // Verbatim. The payload is already the sentence (see the case's own
+            // note); appending a generic tail here would land it after a quoted
+            // stderr block, which reads as a non-sequitur and is how "helpful"
+            // wording turns back into noise.
+            return whatWentWrong
+        }
+    }
+
+    var errorDescription: String? { userFacingMessage }
+}
+
+extension MaintainModelProviderError.MissingCredential {
+    var userFacingMessage: String {
+        switch self {
+        case .codexCommandNotFound:
+            return "iris can't find the `codex` command on this mac. if you've installed it, it's somewhere iris doesn't look — reconnect under \"Sign in with Codex\" in settings; if you haven't, `npm install -g @openai/codex` puts it where iris will."
+        case .codexLoginNotUsable:
+            return "your codex cli is installed but isn't signed in to anything iris can use. run `codex login` in a terminal, or use \"Sign in with Codex\" in settings, then try again."
+        case .codexTurnedTheCallDown(let codexSaid):
+            return "codex turned the call down, which usually means its login has lapsed. sign in again with `codex login`, or reconnect under \"Sign in with Codex\" in settings. codex said: \(codexSaid)"
+        case .openAIKeyNotSaved:
+            return "there's no openai key saved. paste one in settings, or connect a different model, and try again."
+        }
+    }
 }
 
 @MainActor
@@ -150,7 +246,7 @@ final class OpenAIMaintainProvider: MaintainModelProviding {
         maximumOutputTokens: Int
     ) async throws -> String {
         guard let key = KeychainStore.readSecret(ofKind: .openAIAPIKey), !key.isEmpty else {
-            throw MaintainModelProviderError.noCredential
+            throw MaintainModelProviderError.noCredential(.openAIKeyNotSaved)
         }
         var messages: [[String: Any]] = [["role": "system", "content": systemPrompt]]
         messages.append(contentsOf: conversation.map { Self.messagePayload(forTurn: $0) })
@@ -169,14 +265,18 @@ final class OpenAIMaintainProvider: MaintainModelProviding {
         let (data, response) = try await urlSession.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw MaintainModelProviderError.requestFailed(
-                "HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)"
+                "openai turned the request down (HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)). "
+                    + "check the key saved in settings is still active, then try again."
             )
         }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let choices = json["choices"] as? [[String: Any]],
               let message = choices.first?["message"] as? [String: Any],
               let content = message["content"] as? String else {
-            throw MaintainModelProviderError.requestFailed("unparseable response")
+            throw MaintainModelProviderError.requestFailed(
+                "openai sent back a reply iris couldn't read. try again, and if it keeps "
+                    + "happening connect a different model in settings."
+            )
         }
         return content
     }

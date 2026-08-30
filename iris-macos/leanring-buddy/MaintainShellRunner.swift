@@ -77,10 +77,20 @@ nonisolated final class MaintainShellRunner: Sendable {
     }
 
     /// Runs one command via /bin/zsh -c in a directory under the repo root.
-    /// The login environment is rebuilt the same way the autopilot shell's
-    /// is (PATH from the user's dotfiles via the shared ZDOTDIR trick would
-    /// be overkill here — a login zsh -l -c sources .zprofile and .zshenv
-    /// through the normal path because no ZDOTDIR override is set).
+    ///
+    /// `-l` sources .zshenv and .zprofile, which is where cargo and some node
+    /// installs put themselves. What it does NOT source is ~/.zshrc, because
+    /// zsh reads that for interactive shells only — and ~/.zshrc is where
+    /// `brew shellenv`, nvm, fnm, volta and bun actually live. Combined with a
+    /// Finder-launched Iris, whose inherited PATH is launchd's four system
+    /// directories, that is how the Tier C verifier came to report "the
+    /// environment has no `pnpm` executable; the repository explicitly
+    /// requires pnpm 11" about a reader who has pnpm.
+    ///
+    /// So the child is handed `LoginShellEnvironment`'s merged PATH instead of
+    /// Iris's own. `-l` stays: path_helper reorders that PATH but preserves
+    /// every entry (measured), and dropping `-l` would lose the other things
+    /// .zprofile exports that a build needs.
     func run(
         _ commandText: String,
         inSubdirectory subdirectory: String? = nil,
@@ -101,10 +111,12 @@ nonisolated final class MaintainShellRunner: Sendable {
         return await withCheckedContinuation { continuation in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            // -l so PATH comes from the user's login files — cargo lives in
-            // ~/.zshenv, node in .zprofile, exactly the lesson the autopilot
-            // shell already paid for.
+            // -l so the login files still run — cargo lives in ~/.zshenv,
+            // node in .zprofile, exactly the lesson the autopilot shell
+            // already paid for. See the note above for why the login files
+            // alone are not enough to produce a working PATH.
             process.arguments = ["-l", "-c", commandText]
+            process.environment = LoginShellEnvironment.environmentForChildProcesses()
             process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory)
 
             let pipe = Pipe()

@@ -295,11 +295,18 @@ nonisolated enum CodexExecOutput {
     /// working backoff for it and would otherwise burn a step.
     static func failure(fromStandardError standardErrorText: String, exitCode: Int32) -> Error {
         let lowercased = standardErrorText.lowercased()
+        // Codex's own words, kept for every branch below. A heuristic over
+        // human-readable stderr is a guess, and quoting the tool is the only
+        // way a reader can tell whether the guess was right — which is exactly
+        // what the reader who asked "I have the codex CLI?" never got.
+        let trimmedDetail = quotableTail(ofStandardError: standardErrorText)
         if lowercased.contains("not logged in")
             || lowercased.contains("please run `codex login`")
             || lowercased.contains("no credentials")
             || lowercased.contains("unauthorized") {
-            return MaintainModelProviderError.noCredential
+            return MaintainModelProviderError.noCredential(
+                .codexTurnedTheCallDown(codexSaid: trimmedDetail)
+            )
         }
         if lowercased.contains("rate limit")
             || lowercased.contains("usage limit")
@@ -308,12 +315,81 @@ nonisolated enum CodexExecOutput {
                 retryAfterSeconds: retryAfterSeconds(inStandardError: standardErrorText)
             )
         }
-        let trimmedDetail = standardErrorText
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .suffix(300)
+        // THE CLI REFUSED THE ARGUMENT VECTOR IRIS BUILT. Measured against
+        // codex-cli 0.149.1: this exits 2 and prints clap's "error: unexpected
+        // argument '…' found" over a `Usage: codex exec` block. It is not a
+        // credential problem and not a model problem — it is Iris and codex
+        // being out of step, which is the likeliest way a reader who genuinely
+        // HAS the CLI still cannot use it, and it has exactly one repair. Left
+        // in the unrecognised bucket it became "error 0" and told the reader
+        // nothing; recognising it is what turns their own screen into an
+        // instruction.
+        if lowercased.contains("unexpected argument")
+            || lowercased.contains("unrecognized subcommand")
+            || lowercased.contains("unexpected subcommand") {
+            return MaintainModelProviderError.requestFailed(
+                "your codex cli wouldn't accept how iris called it, so the two are out of step. "
+                    + "update codex (`npm install -g @openai/codex@latest`), or update iris, and try again. "
+                    + "codex said: \(trimmedDetail)"
+            )
+        }
+        // Unrecognised. The heuristics above are the only ones worth claiming,
+        // so this branch says so plainly and QUOTES codex rather than
+        // paraphrasing it — the instruction comes first so it survives a long
+        // dump, and the dump comes last because it is evidence, not advice.
+        guard !trimmedDetail.isEmpty else {
+            return MaintainModelProviderError.requestFailed(
+                "codex exec exited \(exitCode) without saying why. try again, and if it keeps "
+                    + "happening connect a different model in settings."
+            )
+        }
         return MaintainModelProviderError.requestFailed(
-            trimmedDetail.isEmpty ? "codex exec exited \(exitCode)" : String(trimmedDetail)
+            "codex couldn't finish that call and iris doesn't recognise why. try again, and if "
+                + "it keeps happening connect a different model in settings. codex said: \(trimmedDetail)"
         )
+    }
+
+    /// Codex's stderr, trimmed to something a person will actually read.
+    ///
+    /// This used to be a flat `.suffix(300)`, which was fine while nothing ever
+    /// showed it to anyone. Now that it does, both shapes measured against
+    /// codex-cli 0.149.1 come out wrong that way: a signed-out run prints the
+    /// SAME `401 Unauthorized` line seven times, so the reader got one and a
+    /// half of them starting mid-token ("::responses_websocket: failed to…"),
+    /// and a refused-argument run's one useful line is its FIRST, which a tail
+    /// drops in favour of the `Usage:` block.
+    ///
+    /// So: whole lines, its own log timestamps dropped so that repeats actually
+    /// collapse, and the FIRST few — in both shapes the primary error leads and
+    /// everything after it is either a cascade or boilerplate. That is a
+    /// heuristic like the rest of this function, and it is stated as one rather
+    /// than dressed up as a parse.
+    static func quotableTail(ofStandardError standardErrorText: String) -> String {
+        var alreadySeen: Set<String> = []
+        var distinctLines: [String] = []
+        for line in standardErrorText.components(separatedBy: .newlines) {
+            let trimmedLine = withoutLeadingLogTimestamp(line.trimmingCharacters(in: .whitespaces))
+            guard !trimmedLine.isEmpty, alreadySeen.insert(trimmedLine).inserted else { continue }
+            distinctLines.append(String(trimmedLine.prefix(200)))
+        }
+        return distinctLines.prefix(3).joined(separator: " ")
+    }
+
+    /// Drops codex's `2026-08-30T04:53:26.352513Z ` log prefix. Without this the
+    /// seven identical 401 lines a signed-out run prints are seven DIFFERENT
+    /// strings — they differ only in microseconds — so the de-duplication above
+    /// collapses nothing and the reader is quoted the same sentence three times.
+    /// A timestamp tells the reader nothing they can use; the sentence does.
+    private static func withoutLeadingLogTimestamp(_ line: String) -> String {
+        guard let firstSpace = line.firstIndex(of: " ") else { return line }
+        let possibleTimestamp = String(line[line.startIndex..<firstSpace])
+        let looksLikeATimestamp = possibleTimestamp.count >= 20
+            && possibleTimestamp.hasSuffix("Z")
+            && possibleTimestamp.contains("T")
+            && possibleTimestamp.prefix(4).allSatisfy(\.isNumber)
+        guard looksLikeATimestamp else { return line }
+        return String(line[line.index(after: firstSpace)...])
+            .trimmingCharacters(in: .whitespaces)
     }
 
     /// Pulls a "try again in N seconds/minutes" hint out of a rate-limit message
@@ -368,11 +444,16 @@ final class CodexMaintainProvider: MaintainModelProviding {
         conversation: [MaintainChatTurn],
         maximumOutputTokens: Int
     ) async throws -> String {
+        // Two different problems that used to throw the same opaque case: the
+        // command isn't findable, and the command is findable but signed out.
+        // The first is often a PATH problem rather than a missing install — a
+        // GUI app gets Finder's minimal PATH — so telling a reader "not
+        // installed" would have been a lie as well as a dead end.
         guard let codexBinaryPath = CodexCLILogin.locateCodexBinary() else {
-            throw MaintainModelProviderError.noCredential
+            throw MaintainModelProviderError.noCredential(.codexCommandNotFound)
         }
         guard CodexCLILogin.currentState().isUsable else {
-            throw MaintainModelProviderError.noCredential
+            throw MaintainModelProviderError.noCredential(.codexLoginNotUsable)
         }
 
         // NOTE on `maximumOutputTokens`: `codex exec` exposes no output cap, so
@@ -450,7 +531,11 @@ final class CodexMaintainProvider: MaintainModelProviding {
         do {
             try process.run()
         } catch {
-            throw MaintainModelProviderError.requestFailed("couldn't start codex: \(error.localizedDescription)")
+            throw MaintainModelProviderError.requestFailed(
+                "iris found the codex command but couldn't start it. reinstall it "
+                    + "(`npm install -g @openai/codex`) or reconnect under \"Sign in with Codex\" in "
+                    + "settings, then try again. the system said: \(error.localizedDescription)"
+            )
         }
 
         // Feed the prompt and close stdin so the CLI stops waiting for more.
@@ -501,7 +586,10 @@ final class CodexMaintainProvider: MaintainModelProviding {
            !recoveredMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return recoveredMessage
         }
-        throw MaintainModelProviderError.requestFailed("codex exec produced no assistant message")
+        throw MaintainModelProviderError.requestFailed(
+            "codex exec produced no assistant message — it ran and exited cleanly without "
+                + "answering. try again, and if it keeps happening connect a different model in settings."
+        )
     }
 }
 

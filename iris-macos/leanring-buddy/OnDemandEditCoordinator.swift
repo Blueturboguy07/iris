@@ -137,6 +137,32 @@ enum OnDemandEditPhase: Equatable, Sendable {
     case blockedByModel(explanation: String)
 }
 
+/// One FINISHED edit exchange, kept for the life of the session.
+///
+/// This is the edit flow's half of what `ChatTranscriptStore` already does for
+/// chat, and it exists for the byte-identical complaint: "Clicked off Iris, and
+/// then back on, still can't see the chat history with feature or bug overlay,
+/// so can't be sure it's working." That reader's run had WORKED — Iris wrote
+/// and committed a plan document — and then the one button on the result card
+/// deleted every trace of it, leaving the overlay drawing nothing.
+///
+/// Session-lifetime on purpose. A durable on-disk store is a much bigger thing
+/// (retention, a privacy story, somewhere to read and delete it) and the loss
+/// being reported happens inside a single sitting: close the card, look again,
+/// nothing is there.
+struct OnDemandEditSessionExchange: Identifiable, Equatable {
+    let id: UUID
+    let appSlug: String
+    let appName: String
+    let appStack: BreakAppStack
+    let kind: OnDemandEditKind
+    /// The scrubbed request, in the reader's own words.
+    let request: String
+    /// The last honest line Iris said about it — the outcome, verbatim.
+    let outcome: String
+    let finishedAt: Date
+}
+
 @MainActor
 final class OnDemandEditCoordinator: ObservableObject {
 
@@ -206,7 +232,20 @@ final class OnDemandEditCoordinator: ObservableObject {
 
     /// The engine's own result, kept so the card can distinguish "applied and
     /// rebuilt" (never "verified") and read the kind / suite result honestly.
+    ///
+    /// NOTHING CLEARS THIS BUT THE NEXT RUN'S RESULT. It used to be nilled by
+    /// both `cancel()` and `pickApp`, which is precisely how a finished
+    /// exchange vanished the instant the reader tapped the result card's only
+    /// button — the name says "last", and it now means it. A value from a
+    /// previous exchange is read by nobody: every card that touches it is a
+    /// phase a fresh run has just written it for.
     @Published private(set) var lastResult: MaintainOnDemandEditResult?
+
+    /// Every finished exchange this session, oldest first. The thread the
+    /// overlay lost — see `OnDemandEditSessionExchange`. Filed when the reader
+    /// closes a finished card, and when a new edit starts over an unclosed one,
+    /// so no exchange leaves the session without a record.
+    @Published private(set) var sessionThread: [OnDemandEditSessionExchange] = []
 
     /// True while the reader is being asked to confirm a PUBLIC publish (posting
     /// to publik's public fix log and marking a pooled request implemented). Its
@@ -431,6 +470,25 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// thrown away — a plain bug).
     private var clarificationAnswerPairsForPrompt: [(question: String, answer: String)] = []
 
+    /// The questions the model asked when it BLOCKED, paired with the answers
+    /// the reader typed under them, carried into the retry's opening message.
+    ///
+    /// This is what makes "Answer and retry" mean its label. The button used to
+    /// call `pickApp` and write the answer into a text-field hint, which ran no
+    /// edit at all — "Hit answer and retry and it didnt do anything", reported
+    /// verbatim. A retry that does not TELL the engine the answer could only
+    /// block on the same question again, so the answer travels here, on the
+    /// same `additionalPromptSections` seam the clarification answers use.
+    /// Accumulates across retries: a second block asks something new, and the
+    /// third attempt should know both answers.
+    private var answersToBlockingQuestionsForPrompt: [(question: String, answer: String)] = []
+
+    /// True once the CURRENT exchange has been filed into `sessionThread`.
+    /// Starts true because there is nothing to file before the first run, and
+    /// it is what stops a Done tap followed by a fresh pick from filing the
+    /// same exchange twice.
+    private var currentExchangeIsFiled = true
+
     /// True while the automatic delivery path owns the relaunch, so the shared
     /// relaunch-result handler routes a fresh build into the symptom re-check
     /// instead of the old "done" ending.
@@ -616,6 +674,12 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// decide whether to even offer the describe step — the binding check is
     /// re-run LIVE at start, so a stale positive here can never cause an edit.
     func pickApp(slug: String, name: String, stack: BreakAppStack) {
+        // File whatever the reader was last shown BEFORE overwriting the app it
+        // was about. Starting a second edit used to erase the first one's
+        // result outright ("when I click out of Iris it doesn't save that chat
+        // in the chatbox there"), so the session kept exactly one exchange and
+        // the one before it left no trace anywhere.
+        fileTheCurrentExchangeIfThereIsOne()
         resetInFlightState()
         activeAppSlug = slug
         activeAppName = name
@@ -624,24 +688,13 @@ final class OnDemandEditCoordinator: ObservableObject {
         suggestedRequests = []
         proposedDiffText = nil
         blockedByBuildScriptEdit = false
-        lastResult = nil
         clarificationQuestions = []
         presentedPlan = nil
 
         switch eligibility(forAppSlug: slug, appStack: stack) {
         case .eligible:
             refusalOffersModelKeySetup = false
-            // Derive the per-repo build/run recipe by READING the clone (plan
-            // §4/§8) so the clarification pass and the plan can reason about how
-            // THIS specific app builds and runs — not the coarse catalog stack
-            // label. Pure static inspection: it only reads files, executes
-            // nothing from the repo, and touches no network. Eligibility already
-            // proved this clone path resolves, so a nil here is purely defensive.
-            if let clonePath = provenanceClonePath(forAppSlug: slug) {
-                let recipe = RepoRecipeService.deriveRecipe(repoRootPath: clonePath)
-                derivedRepoRecipe = recipe
-                derivedRuntimeShape = recipe.runtimeShape
-            }
+            deriveTheRepoRecipe(forAppSlug: slug)
             phase = .describe
             statusLine = nil
             // Prefill "others also wanted…" while the reader types. Best-effort;
@@ -657,6 +710,24 @@ final class OnDemandEditCoordinator: ObservableObject {
             phase = .notEligible(reason: reason)
             statusLine = reason
         }
+    }
+
+    /// Derive the per-repo build/run recipe by READING the clone (plan §4/§8)
+    /// so the clarification pass and the plan can reason about how THIS
+    /// specific app builds and runs — not the coarse catalog stack label. Pure
+    /// static inspection: it only reads files, executes nothing from the repo,
+    /// and touches no network. Eligibility already proved the clone path
+    /// resolves, so a nil here is purely defensive.
+    ///
+    /// Shared by the pick and by the return to describe after a finished
+    /// exchange, because `resetInFlightState()` drops the derived recipe and a
+    /// describe step without one asks the reader how to build an app Iris can
+    /// already read the answer for.
+    private func deriveTheRepoRecipe(forAppSlug slug: String) {
+        guard let clonePath = provenanceClonePath(forAppSlug: slug) else { return }
+        let recipe = RepoRecipeService.deriveRecipe(repoRootPath: clonePath)
+        derivedRepoRecipe = recipe
+        derivedRuntimeShape = recipe.runtimeShape
     }
 
     // MARK: - Step 2 & 3: describe the change and classify it
@@ -972,6 +1043,9 @@ final class OnDemandEditCoordinator: ObservableObject {
         phase = .running
         statusLine = "Working on it under your model key…"
         readerAskedToStopTheRun = false
+        // A run is the thing worth remembering, so from here there is an
+        // exchange owing a record in `sessionThread`.
+        currentExchangeIsFiled = false
         editRunner.beginRun(appName: activeAppName ?? slug, kind: kind)
         // The persisted run transcript — what makes a failed run diagnosable
         // after the fact. Best-effort: a nil log never affects the run.
@@ -1067,6 +1141,22 @@ final class OnDemandEditCoordinator: ObservableObject {
             additionalPromptSections.append(
                 "The user answered these clarifying questions before the run — treat the answers as the user's decisions:\n\(answerLines)"
             )
+        }
+        // The answers to whatever an EARLIER attempt at this same request
+        // stopped to ask. Without this the retry is a fresh attempt that has
+        // never heard the answer, so it can only reach the same wall and block
+        // again — which is what "Answer and retry" used to be worth.
+        if !answersToBlockingQuestionsForPrompt.isEmpty {
+            let answerLines = answersToBlockingQuestionsForPrompt
+                .map { "- Iris asked: \($0.question)\n  The user answered: \($0.answer)" }
+                .joined(separator: "\n")
+            additionalPromptSections.append(
+                "An earlier attempt at this same request stopped and asked the user a question. "
+                + "They answered, and this run is the retry — treat the answers as the user's "
+                + "decisions and do not stop to ask the same thing again:\n\(answerLines)"
+            )
+            editRunner.note("Retrying with your answer to what Iris asked.")
+            runLog?.record("retry: \(answersToBlockingQuestionsForPrompt.count) answered block(s) injected")
         }
         additionalPromptSections.append(contentsOf: extraPromptSectionsForEveryRun())
         var gatheredEvidenceParts: [String] = []
@@ -1684,18 +1774,55 @@ final class OnDemandEditCoordinator: ObservableObject {
         describePrefillText = previousRequest
     }
 
-    /// The reader answered the model's BLOCKED question: re-enter describe
-    /// with the answer folded into the request so the next run opens with it.
+    /// The reader answered the model's BLOCKED question. This RESUMES the run:
+    /// same app, same request, same changeId, with the answer handed to the
+    /// engine as the reader's own decision.
+    ///
+    /// It used to call `pickApp` — which resets the machine to the describe
+    /// form — and write the answer into `describePrefillText`, a hint for a
+    /// text field. No edit was ever re-run, and the field the hint was for is
+    /// not even mounted at `.describe`, so the answer reached nothing that
+    /// could act on it. The reader's report is exact: "Hit answer and retry and
+    /// it didnt do anything."
+    ///
+    /// A genuine resume needed no restructuring, only the nerve to re-enter the
+    /// run instead of the form: everything the run needs (`scrubbedRequest`,
+    /// `changeId`, `classifiedKind`, the app) survives a block — nothing was
+    /// committed and nothing was reset — and `confirmStartAndRun()` re-runs the
+    /// whole binding safety gate (live eligibility, the Iris-repo refusal, the
+    /// per-clone lock, the dirty-tree refusal), so the retry is exactly as
+    /// guarded as the first attempt. The cheaper alternative — relabelling the
+    /// button "Start over" and landing the reader on a prefilled form — would
+    /// have kept a button that makes the reader re-consent to work they already
+    /// asked for, and would have thrown away the run's memory of what it
+    /// already tried.
+    ///
+    /// The answer is scrubbed on the SAME model-egress path the request is: it
+    /// is free text on its way into a prompt, and a reader answering "use the
+    /// key <secret>" must not have it leave in the clear.
     func retryAfterAnsweringBlockedQuestion(_ answer: String) {
         guard case .blockedByModel = phase,
-              let slug = activeAppSlug, let name = activeAppName, let stack = activeAppStack else { return }
-        let question = blockedQuestionForUser ?? ""
-        let previousRequest = scrubbedRequest ?? ""
+              activeAppSlug != nil,
+              activeAppStack != nil,
+              scrubbedRequest != nil,
+              changeId != nil,
+              let kind = classifiedKind else { return }
+
         let trimmedAnswer = answer.trimmingCharacters(in: .whitespacesAndNewlines)
-        pickApp(slug: slug, name: name, stack: stack)
-        describePrefillText = question.isEmpty || trimmedAnswer.isEmpty
-            ? previousRequest
-            : "\(previousRequest)\n\n(Iris asked: \(question) — answer: \(trimmedAnswer))"
+        if !trimmedAnswer.isEmpty {
+            let question = blockedQuestionForUser ?? "how to proceed"
+            answersToBlockingQuestionsForPrompt.append(
+                (question: question, answer: GuideAutopilotOutputBuffer.scrubbed(trimmedAnswer))
+            )
+        }
+        // The block is answered; nothing about it should still be on screen.
+        blockedQuestionForUser = nil
+        blockedByBuildScriptEdit = false
+        failureWasRateLimit = false
+
+        phase = .awaitingStartConsent
+        statusLine = startConsentPrompt(kind: kind)
+        confirmStartAndRun()
     }
 
     /// The card consumed the prefill; clear it so a later pick starts clean.
@@ -2002,10 +2129,37 @@ final class OnDemandEditCoordinator: ObservableObject {
 
     // MARK: - Cancel / reset
 
-    /// The reader backed out before the run completed. Releases the lock if the
-    /// run had taken it, and returns to the app-picker.
+    /// Closing the card. "Done" and "Cancel" are one function in code but two
+    /// acts in meaning, and collapsing them into "forget everything" is the
+    /// whole of the reported complaint: "The follow up view after clicking done
+    /// doesn't allow me to edit the app, the only way to do that that is clear
+    /// is by going into the menu and selecting it every time, very annoying for
+    /// ease of use."
+    ///
+    /// So the rule is where the tap LEAVES the reader, not what the button
+    /// says. From a describe surface, or a refusal, there is nothing behind the
+    /// card to return to and closing means closing — the old behaviour,
+    /// unchanged. From anywhere else the reader has an app open and an exchange
+    /// about it, finished or abandoned; that exchange is filed and the app
+    /// stays picked, so the next edit is one tap in the composer instead of a
+    /// trip back through the menu bar.
     func cancel() {
+        switch phase {
+        case .pickApp, .describe, .notEligible:
+            backOutOfEditingEntirely()
+        default:
+            fileTheExchangeAndStayWithTheApp()
+        }
+    }
+
+    /// The old `cancel()`: forget the app and leave the overlay with nothing to
+    /// draw. Reached only from a surface with nothing behind it — the describe
+    /// form itself, or a refusal the reader has read (including the one that
+    /// sends them to settings to connect a model, where re-offering the same
+    /// refusal would be a loop with no way out).
+    private func backOutOfEditingEntirely() {
         releaseLockIfHeld()
+        fileTheCurrentExchangeIfThereIsOne()
         resetInFlightState()
         phase = .pickApp
         statusLine = nil
@@ -2017,10 +2171,96 @@ final class OnDemandEditCoordinator: ObservableObject {
         proposedDiffText = nil
         blockedByBuildScriptEdit = false
         refusalOffersModelKeySetup = false
-        lastResult = nil
         isAwaitingPublishConsent = false
         clarificationQuestions = []
         presentedPlan = nil
+    }
+
+    /// File the exchange and go back to the describe step ON THE SAME APP —
+    /// `.pickApp` is the phase `OnDemandEditCard` draws as `EmptyView()`, so
+    /// landing there is literally "the overlay is gone".
+    ///
+    /// The app is re-checked on the way, because an app can stop being editable
+    /// between two edits (the clone moved, the model key was removed) and
+    /// offering a describe field for a request that will be refused at start is
+    /// a worse dead end than saying so now.
+    private func fileTheExchangeAndStayWithTheApp() {
+        releaseLockIfHeld()
+        fileTheCurrentExchangeIfThereIsOne()
+        // Only an OUTCOME is worth carrying into the next describe step. A plan
+        // the reader backed out of leaves behind "A couple of quick questions
+        // before Iris starts", which would read as a stale instruction sitting
+        // over an empty field.
+        let outcomeLine: String?
+        switch phase {
+        case .done, .failed, .blockedByModel: outcomeLine = phaseReason
+        default: outcomeLine = nil
+        }
+        resetInFlightState()
+        classifiedKind = nil
+        suggestedRequests = []
+        proposedDiffText = nil
+        blockedByBuildScriptEdit = false
+        isAwaitingPublishConsent = false
+        clarificationQuestions = []
+        presentedPlan = nil
+
+        guard let slug = activeAppSlug, let stack = activeAppStack else {
+            backOutOfEditingEntirely()
+            return
+        }
+        switch eligibility(forAppSlug: slug, appStack: stack) {
+        case .eligible:
+            refusalOffersModelKeySetup = false
+            deriveTheRepoRecipe(forAppSlug: slug)
+            phase = .describe
+            // What Iris last said about this app survives the close. It is the
+            // one line the reader came back looking for, and deleting it is
+            // "closing the result card deleted what Iris said it did".
+            statusLine = outcomeLine
+        case .refused(let reason, let offersModelKeySetup):
+            refusalOffersModelKeySetup = offersModelKeySetup
+            phase = .notEligible(reason: reason)
+            statusLine = reason
+        }
+    }
+
+    /// Put the exchange the reader was last shown into `sessionThread`, once.
+    /// Idempotent through `currentExchangeIsFiled`, so a Done tap followed by a
+    /// fresh pick files it a single time.
+    private func fileTheCurrentExchangeIfThereIsOne() {
+        guard !currentExchangeIsFiled,
+              let slug = activeAppSlug,
+              let stack = activeAppStack else { return }
+        currentExchangeIsFiled = true
+        sessionThread.append(
+            OnDemandEditSessionExchange(
+                id: UUID(),
+                appSlug: slug,
+                appName: activeAppName ?? slug,
+                appStack: stack,
+                kind: classifiedKind ?? .bugFix,
+                request: activeRequestText ?? scrubbedRequest ?? "",
+                outcome: phaseReason ?? statusLine ?? "Finished.",
+                finishedAt: Date()
+            )
+        )
+        // A session can run all day. The overlay shows the newest few and
+        // nothing reads further back, so this is capped rather than grown for
+        // as long as Iris happens to be running.
+        if sessionThread.count > Self.mostFinishedExchangesKept {
+            sessionThread.removeFirst(sessionThread.count - Self.mostFinishedExchangesKept)
+        }
+    }
+
+    private static let mostFinishedExchangesKept = 20
+
+    /// Re-open a filed exchange's app for another edit. The thread is not a
+    /// museum: the reader looking at what Iris did to an app is usually about
+    /// to ask for the next thing, and this is the one tap that gets them there
+    /// without the menu bar.
+    func resumeEditing(_ exchange: OnDemandEditSessionExchange) {
+        pickApp(slug: exchange.appSlug, name: exchange.appName, stack: exchange.appStack)
     }
 
     // MARK: - Eligibility (fail-closed)
@@ -2189,6 +2429,20 @@ final class OnDemandEditCoordinator: ObservableObject {
                 false, false, true
             )
         }
+        // The Tier C loop's prefix for "no usable credential at all" — the codex
+        // command missing, signed out, or refusing, or no OpenAI key saved. It is
+        // deliberately NOT the "rejected" prefix below, whose Claude-Code wording
+        // about a rotated token is wrong for a codex problem — but it is the same
+        // KIND of failure, one a settings tap actually fixes, so it earns the same
+        // shortcut. The reason already carries the one sentence naming which
+        // credential and what to do, so it is passed through, not paraphrased.
+        if reason.contains("model credential missing") {
+            return (
+                "Iris couldn't run the edit because it had no model credential it could use — nothing changed. "
+                    + reason.replacingOccurrences(of: "model credential missing: ", with: ""),
+                false, true, false
+            )
+        }
         // The Tier C loop's `modelCallFailureReason` prefix for an Anthropic
         // 401 on the reader's own credential. The commonest way here is an
         // IMPORTED Claude Code login: Claude Code rotates its token, the
@@ -2275,6 +2529,10 @@ final class OnDemandEditCoordinator: ObservableObject {
         deliveredChangeCanBeUndone = false
         failureWasRateLimit = false
         blockedQuestionForUser = nil
+        // The answered blocks belong to ONE request's chain of attempts. A new
+        // request must not open with the answers to a question asked about a
+        // different one.
+        answersToBlockingQuestionsForPrompt = []
         // Defensive: a log left open by an interrupted flow is closed rather
         // than leaked (normal runs close it on their own result path).
         runLog?.finish(outcome: "flow reset")

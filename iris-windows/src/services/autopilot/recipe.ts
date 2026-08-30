@@ -70,6 +70,22 @@ export interface RecipeStep {
   /// How Iris can tell the step is done without being told. Absent means the
   /// step is finished the moment Iris performs it.
   readonly check?: StepCheck;
+  /// The folder this step's command runs in, stated by the recipe instead of
+  /// inherited from a `cd` some earlier step left behind in the shell.
+  ///
+  /// A resumed install builds a brand-new `ShellSession`, which starts in the
+  /// home folder, so a step written relative to an `enter-folder` step ran
+  /// there instead — the same defect the macOS guides were backfilled to close
+  /// (`IrisGuideStep.workingDirectory`). Absent keeps the old behaviour
+  /// exactly: run wherever the shell already is, which is what every recipe
+  /// written before this field relies on.
+  readonly workingDirectory?: string;
+  /// The macOS/Linux equivalent, for the same reason `posixCommand` exists: the
+  /// two clone steps do not land in the same place on the two platforms. The
+  /// Windows clone runs in `~` and produces `~/publikclip`; the posix one makes
+  /// and enters `~/iris-apps` first, so the same folder is
+  /// `~/iris-apps/publikclip`. Falls back to `workingDirectory` when absent.
+  readonly posixWorkingDirectory?: string;
 }
 
 /// A full install recipe for one app.
@@ -120,6 +136,35 @@ export function totalSteps(recipe: InstallRecipe): number {
 /// (git clone, npm ci) are identical across platforms.
 export function commandForPlatform(step: RecipeStep, platform: NodeJS.Platform): string | undefined {
   return platform === "win32" ? step.command : step.posixCommand ?? step.command;
+}
+
+/// The folder to put the shell in before running this step on this host, or
+/// undefined when the step declares none and should run wherever the shell
+/// already is. Same Windows/posix split as `commandForPlatform`, and an empty
+/// string is treated as "declares none" so a renderer that fills the field in
+/// with `""` cannot turn into a `cd ` with no argument.
+export function workingDirectoryForPlatform(
+  step: RecipeStep,
+  platform: NodeJS.Platform,
+): string | undefined {
+  const declared =
+    platform === "win32"
+      ? step.workingDirectory
+      : step.posixWorkingDirectory ?? step.workingDirectory;
+  return declared !== undefined && declared !== "" ? declared : undefined;
+}
+
+/// The first step whose command clones the repo. Every step from here on runs
+/// somewhere the clone put on disk, so every one of them must say where — the
+/// positional rule the web guides are held to (`checkGuideInvariants`), stated
+/// once here so the recipe suite can hold the built-in recipes to the same bar.
+/// -1 when the recipe clones nothing.
+export function cloneStepIndex(recipe: InstallRecipe): number {
+  return recipe.steps.findIndex(
+    (step) =>
+      (step.command?.includes("git clone") ?? false) ||
+      (step.posixCommand?.includes("git clone") ?? false),
+  );
 }
 
 /// Whether running this recipe clones a source repo — the same test macOS's

@@ -361,7 +361,25 @@ final class MaintainTierCFixer {
     /// A rate limit gets Tier-C-specific wording: the transport's own message
     /// ends "…add your own anthropic key to keep going", which is advice for
     /// the funded tier — this loop ALREADY runs on the reader's own credential.
+    ///
+    /// A PROVIDER error gets the same treatment, and did not used to. Every
+    /// error that was not an `AssistantTransportError` fell through to
+    /// `localizedDescription`, which for `MaintainModelProviderError` bridges
+    /// to "(Iris.MaintainModelProviderError error 0.)" — a reader saw exactly
+    /// that after an edit run died, and "error 0" is `.requestFailed`, the case
+    /// whose String payload was the explanation. So the one line meant to make
+    /// failures legible was the line discarding the diagnosis.
     nonisolated static func modelCallFailureReason(for error: Error) -> String {
+        if let providerError = error as? MaintainModelProviderError {
+            if case .noCredential = providerError {
+                // NOT the "model credential rejected" prefix. That one is the
+                // coordinator's cue for an Anthropic 401 and answers it with
+                // Claude-Code-specific advice about a rotated token — the wrong
+                // thing to say to a reader whose Codex CLI is the problem.
+                return "model credential missing: \(providerError.userFacingMessage)"
+            }
+            return "model call failed: \(providerError.userFacingMessage)"
+        }
         guard let transportError = error as? AssistantTransportError else {
             return "model call failed: \(error.localizedDescription)"
         }

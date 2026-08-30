@@ -19,7 +19,7 @@ struct GuideSessionTests {
 
     // MARK: - Resuming and version bumps
 
-    @Test func resumeLandsOnTheSavedStepAndAVersionBumpStartsOverInstead() async throws {
+    @Test func resumeLandsOnTheSavedStepAndSurvivesAVersionBump() async throws {
         let guideService = try Self.guideServiceAnsweredByTheStub()
         let controller = GuideSessionController(guideService: guideService)
 
@@ -49,9 +49,18 @@ struct GuideSessionTests {
         #expect(controllerReopeningTheSameGuide.currentStepIndex == 2)
         #expect(controllerReopeningTheSameGuide.readerHasFinishedTheGuide == false)
 
-        // A new version of the guide is a new set of steps. Step three of
-        // version two may not exist in version three, or may be something else
-        // entirely, so the reader starts over rather than resuming into it.
+        // This assertion used to read the other way — a version bump started the
+        // reader over — and it passed for years while being the reported bug.
+        // "Step three of version two may not exist in version three" is a real
+        // risk, but the version number cannot tell you whether it happened, and
+        // publik bumps a version for a changed comment. So the question is asked
+        // properly now: the reader's place is re-derived from the ID of the step
+        // they stopped on. This guide's steps are unchanged between v2 and v3,
+        // so they are put back where they were.
+        //
+        // `Test6ProgressDurabilityReproTests` covers the other half — a version
+        // whose steps genuinely changed — which this stub cannot express,
+        // because it serves identical steps for every version of a slug.
         let controllerOpeningTheNewVersion = GuideSessionController(guideService: guideService)
         await controllerOpeningTheNewVersion.openGuide(
             slug: "lunara",
@@ -61,7 +70,8 @@ struct GuideSessionTests {
         )
         #expect(controllerOpeningTheNewVersion.loadState == .guideIsOpen)
         #expect(controllerOpeningTheNewVersion.guideBeingFollowed?.version == 3)
-        #expect(controllerOpeningTheNewVersion.currentStepIndex == 0)
+        #expect(controllerOpeningTheNewVersion.currentStepIndex == 2)
+        #expect(controllerOpeningTheNewVersion.stepTheReaderIsLookingAt?.id == "studio")
     }
 
     @Test func aLinkThatNamesAStepOverridesWhatThisMachineRemembers() async throws {

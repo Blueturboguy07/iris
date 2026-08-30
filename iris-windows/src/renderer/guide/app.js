@@ -497,7 +497,49 @@
       actionLabel: typeof step.actionLabel === "string" ? step.actionLabel : "",
       verifierLabel:
         typeof step.verifierLabel === "string" ? step.verifierLabel : "",
+      // The folder the guide says this step runs in. Kept, and then actually
+      // drawn and copied by `commandToRun` — this panel never reaches the
+      // autopilot runner (there is no takeover from here), so if the folder
+      // does not end up in the text the reader pastes, it does not exist.
+      workingDirectory:
+        typeof step.workingDirectory === "string" ? step.workingDirectory : "",
     };
+  }
+
+  /**
+   * The lines the reader must actually type for a step — the command, with the
+   * `cd` that puts them in the folder the guide says the command belongs to.
+   *
+   * This panel is not the autopilot: nobody's shell is being driven, the reader
+   * is pasting into a Terminal/PowerShell window that Iris cannot see. That is
+   * precisely why the folder has to be IN the text. Someone who comes back the
+   * next day resumes at, say, hickeyfield step 8 — "Build the app",
+   * `ui/node_modules/.bin/tauri build --bundles app` — in a brand-new shell
+   * sitting in their home folder, because the `cd` that made that path work was
+   * three steps and one day ago. They paste, and get
+   * `zsh: no such file or directory`, exit 127. Preserving `workingDirectory`
+   * through `sanitizeGuideStep` and then never drawing it keeps that bug just as
+   * completely as dropping the field did.
+   *
+   * `cd` rather than `Set-Location`: it is a zsh builtin and a PowerShell alias,
+   * so one line is right in both shells this panel hands work to. The folder is
+   * pasted exactly as the guide wrote it (`~/hickeyfield`) so the shell — not
+   * Iris, which is not the one running it — expands `~`.
+   */
+  function commandToRun(step) {
+    if (!step || !step.command) return "";
+    if (!step.workingDirectory) return step.command;
+    // Most clone steps are already written `cd ~` and declare `~` as their
+    // folder — the declaration records what was already true. Prepending
+    // regardless would show `cd ~` twice on every guide's clone step, which
+    // reads as a mistake in the guide and costs the folder line its credibility
+    // on the steps where it is doing real work. Exact match on the first line
+    // only: nothing here guesses whether some other `cd` reaches the same
+    // place, because a wrong guess drops the line the fix exists to add.
+    if (step.command.split("\n")[0].trim() === `cd ${step.workingDirectory}`) {
+      return step.command;
+    }
+    return `cd ${step.workingDirectory}\n${step.command}`;
   }
 
   function validateGuide(candidate) {
@@ -863,7 +905,9 @@
     elements.stepBody.hidden = !stepBody;
 
     elements.commandBlock.hidden = !step.command || step.kind === "check";
-    elements.commandText.textContent = step.command || "";
+    // The folder line is drawn, not just copied: a reader who reads the block
+    // and types it by hand has to see it too.
+    elements.commandText.textContent = commandToRun(step);
     elements.shellLabel.textContent =
       state.branch.shell === "powershell" ? "POWERSHELL" : "TERMINAL";
 
@@ -1054,7 +1098,7 @@
   async function copyCurrentCommand() {
     const step = currentStep();
     if (!step?.command) return false;
-    const copied = await copyText(step.command);
+    const copied = await copyText(commandToRun(step));
     if (!copied) {
       showToast("Copy failed. Try again.");
       state.actionReady = false;

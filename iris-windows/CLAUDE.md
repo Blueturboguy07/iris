@@ -23,10 +23,12 @@ ten seconds. Treat a red workflow as a broken build, because there is no other
 signal.
 
 The unit suite must therefore stay free of network, display, and Windows-only
-APIs, so it runs identically on both. Anything needing real I/O takes it as an
-injected function (`fetchImplementation`, and so on). If a change cannot be
-tested that way, say so in the PR rather than adding a test that only passes on
-one OS.
+APIs, so it runs identically on both. `jsdom` counts as neither a display nor a
+second runner — it is a library the vitest suite imports so the guide panel's
+own rendering can be measured instead of asserted about. Anything needing real
+I/O takes it as an injected function (`fetchImplementation`, and so on). If a
+change cannot be tested that way, say so in the PR rather than adding a test
+that only passes on one OS.
 
 ## Architecture
 
@@ -85,11 +87,22 @@ way. It reaches the shell through `window.__TAURI__`, and
 preload bridge — the bridge is the entire Windows-specific delta, which is what
 keeps the two panels diffable.
 
-Exactly one behavioural change was made to `app.js`: `blockedExternalHost` plus
-the disabled branch at the top of `updatePrimaryAction`, so a step pointing at a
-non-allowlisted host renders a **disabled control naming the host** instead of a
-button that does nothing. If you port a fix from `iris-desktop`, re-apply that
-change rather than dropping it.
+Two behavioural changes have been made to `app.js`, and both must survive a
+port from `iris-desktop`:
+
+1. `blockedExternalHost` plus the disabled branch at the top of
+   `updatePrimaryAction`, so a step pointing at a non-allowlisted host renders a
+   **disabled control naming the host** instead of a button that does nothing.
+2. `commandToRun`, used by `renderStep` and `copyCurrentCommand`, so a step that
+   declares a `workingDirectory` shows and copies `cd <folder>` above its
+   command. This panel drives no shell — the reader pastes into a window Iris
+   cannot see — so a folder that is not in the text does not exist, and a reader
+   who resumes at step 8 the next day pastes a path relative to a `cd` that
+   happened yesterday. Covered by `tests/guide-renderer.test.ts`, which boots
+   this exact file in jsdom.
+
+Change 2 belongs in `iris-desktop/ui/app.js` too (identical five lines); until it
+lands there, the Tauri panel still drops the folder.
 
 The main process answers the command names `app.js` already invokes
 (`take_pending_guide`, `check_tool_version`, `open_external`, `quit_iris`,

@@ -612,17 +612,25 @@ struct IrisPortTests {
 
     // MARK: - Progress storage
 
-    @Test func progressIsKeyedBySlugVersionAndBranch() async throws {
+    @Test func progressIsKeyedBySlugAndBranchAndNotByVersion() async throws {
+        // The version used to be in this key, and that is exactly what made a
+        // republish wipe a reader's place. It lives in the record now.
         #expect(GuideService.progressStorageKey(
+            slug: "cue",
+            branchKey: "macos:ios"
+        ) == "iris:progress:cue:macos:ios")
+        #expect(GuideService.progressStorageKey(
+            slug: "lunara",
+            branchKey: "windows:desktop"
+        ) == "iris:progress:lunara:windows:desktop")
+
+        // The old shape is still spelled out somewhere, because records written
+        // under it are on readers' disks and have to be findable to be rescued.
+        #expect(GuideService.versionPinnedProgressStorageKey(
             slug: "cue",
             version: 7,
             branchKey: "macos:ios"
         ) == "iris:progress:cue:v7:macos:ios")
-        #expect(GuideService.progressStorageKey(
-            slug: "lunara",
-            version: 2,
-            branchKey: "windows:desktop"
-        ) == "iris:progress:lunara:v2:windows:desktop")
     }
 
     @Test func progressSurvivesARoundTripAndIsClampedToTheBranch() async throws {

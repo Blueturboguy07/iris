@@ -191,7 +191,11 @@ enum GitInspectionService {
             "HEAD^{commit}",
         ]
 
-        var gitEnvironment = ProcessInfo.processInfo.environment
+        // The reader's real login-shell PATH, not launchd's four directories:
+        // `git` itself is found by the fallback either way, but a git that
+        // shells out — credential helpers, hooks, `git lfs` — resolves its own
+        // tools from this environment. See LoginShellEnvironment.swift.
+        var gitEnvironment = LoginShellEnvironment.environmentForChildProcesses()
         for (variableName, variableValue) in readOnlyGitEnvironment {
             gitEnvironment[variableName] = variableValue
         }

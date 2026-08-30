@@ -16,7 +16,7 @@
 //
 
 import type { InstallRecipe, RecipeOutput, RecipeStep, StepCheck, StepKind } from "./recipe";
-import { commandForPlatform } from "./recipe";
+import { commandForPlatform, workingDirectoryForPlatform } from "./recipe";
 import type { ApprovedCommand, Provenance } from "./risk";
 import { approve, approveAfterAReaderTap, assess } from "./risk";
 import { friendlyLabel } from "./friendly-label";
@@ -28,6 +28,53 @@ import {
 } from "./shell";
 
 const RECIPE_PROVENANCE: Provenance = "vetted_recipe";
+
+/// A `Set-Location` is instant; anything longer means the shell is wedged, and
+/// waiting the full command deadline for one would just hide that.
+const FOLDER_MOVE_TIMEOUT_MS = 30_000;
+
+/// A folder a recipe may send the shell to: a plain path under home, the root,
+/// or a Windows drive, with nothing in it that a shell would expand, split or
+/// run.
+///
+/// This repeats the web side's `WORKING_DIRECTORY` check rather than trusting
+/// it, because the value can arrive over the wire from a guide table and is
+/// about to become the argument of a real `Set-Location` in the reader's live
+/// shell. `~` is deliberately left unquoted and unexpanded so the shell itself
+/// resolves it against its own home — the one place that always knows the right
+/// answer, on either platform. Mirrors `GuideAutopilotRunner.isAPlainFolder` on
+/// macOS.
+export function isAPlainFolder(folder: string): boolean {
+  if (folder === "") return false;
+  const looksLikeAPath =
+    folder.startsWith("~") || folder.startsWith("/") || /^[A-Za-z]:[\\/]/.test(folder);
+  if (!looksLikeAPath) return false;
+  if (!/^[A-Za-z0-9._~@+\-/\\:]+$/.test(folder)) return false;
+  return !folder.split(/[\\/]/).includes("..");
+}
+
+/// The line that moves a shell into `folder`, in the language of the shell the
+/// runner is actually driving.
+///
+/// This is not cosmetic. `Set-Location` is a PowerShell cmdlet and nothing else:
+/// typed into the zsh session the runner uses when Iris runs on a Mac it is
+/// `command not found`, exit 127 — so every step that declared a folder would
+/// have been surfaced as "Iris couldn't move into …" on macOS, which is the
+/// resume bug wearing the fix's own clothes. `cd` is a builtin in zsh and an
+/// alias for `Set-Location` in PowerShell, but the cmdlet is spelled out on
+/// Windows because that is the shipped platform and its own logs read better.
+export function moveIntoCommandFor(folder: string, platform: NodeJS.Platform): string {
+  return platform === "win32" ? `Set-Location ${folder}` : `cd ${folder}`;
+}
+
+function wrongFolderDiagnosis(folder: string): string {
+  return (
+    `Iris couldn't move into ${folder}, so it didn't run the command — ` +
+    "running it in the wrong folder is how this step failed before. " +
+    "Check that the folder is there; the step that copies the code onto this " +
+    "computer is the one to go back to."
+  );
+}
 
 /// Something the runner did that the UI should render. Plain objects: serialized
 /// straight to the renderer over IPC.
@@ -239,6 +286,21 @@ export class AutopilotRunner {
     shell: ShellSession,
   ): Promise<StepProgress> {
     const rawCommand = this.commandFor(step) ?? "";
+
+    // Put the shell where the step says it runs, before it runs. A step that
+    // declares nothing is left exactly where the shell already is — that is
+    // every recipe written before this field, and it must not change.
+    const folder = workingDirectoryForPlatform(step, this.platform);
+    if (folder !== undefined) {
+      const moved = await this.moveInto(folder, shell);
+      if (!moved) {
+        return {
+          kind: "blocked",
+          status: this.surface(wrongFolderDiagnosis(folder), rawCommand),
+        };
+      }
+    }
+
     this.emit({ type: "commandStarted", text: rawCommand, friendlyLabel: friendlyLabel(rawCommand) });
     const outcome: CommandOutcome = step.longRunning
       ? await shell.runLongRunning(approved, step.readyWhen, LONG_RUNNING_GRACE_MS)
@@ -266,6 +328,32 @@ export class AutopilotRunner {
       case "session_failed":
         return { kind: "blocked", status: { type: "sessionFailed" } };
     }
+  }
+
+  /// Moves `shell` into the folder the step declared, and reports whether it
+  /// landed there.
+  ///
+  /// Deliberately a SEPARATE command whose outcome is checked, not a
+  /// `Set-Location X; <cmd>` chain: PowerShell's `;` does not abort on a failed
+  /// `Set-Location`, so a chain would run the command in whatever folder the
+  /// shell happened to be in — the exact defect this closes, in a new disguise.
+  /// `&&` is not an option either: Windows PowerShell 5.1 does not have it.
+  ///
+  /// The line itself comes from `moveIntoCommandFor`, because the runner drives
+  /// zsh when Iris runs on a Mac and zsh has never heard of `Set-Location`.
+  ///
+  /// It does not emit `commandStarted`, because a hidden move is not work the
+  /// reader is waiting to watch; a move that FAILS is surfaced by the caller.
+  private async moveInto(folder: string, shell: ShellSession): Promise<boolean> {
+    if (!isAPlainFolder(folder)) return false;
+    const approved = approve(
+      moveIntoCommandFor(folder, this.platform),
+      RECIPE_PROVENANCE,
+      this.autonomyGranted,
+    );
+    if (approved === undefined) return false;
+    const outcome = await shell.run(approved, FOLDER_MOVE_TIMEOUT_MS);
+    return outcome.kind === "succeeded";
   }
 
   private instructionFor(step: RecipeStep): string {

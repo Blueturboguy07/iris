@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { InstallRecipe, RecipeStep } from "../src/services/autopilot/recipe";
-import { AutopilotRunner } from "../src/services/autopilot/runner";
+import { AutopilotRunner, isAPlainFolder } from "../src/services/autopilot/runner";
 import { MockShell, type CommandOutcome } from "../src/services/autopilot/shell";
 
 /**
@@ -123,5 +123,101 @@ describe("the autopilot runner", () => {
     const status = await runner.runUntilBlocked(shell);
     expect(status.type).toBe("finished");
     expect(shell.commandsRun).toEqual(["pnpm dev"]);
+  });
+
+  // Parity with the macOS runner's `moveInto` — the resume bug, which is the
+  // same bug on both clients: a resumed install starts a brand-new shell in the
+  // home folder, so a step written relative to an earlier `cd` runs in the
+  // wrong place and fails with a 127 nobody can read.
+  //
+  // The platform is PINNED in both directions, and that is the point of the
+  // second case. This test used to construct the runner with the default
+  // platform — `process.platform`, i.e. darwin on the machine this is written
+  // on — and still assert a `Set-Location`. `MockShell` answers "succeeded" to
+  // any string, so it passed while the real zsh session the runner drives on a
+  // Mac would have answered `command not found: Set-Location`, exit 127, and
+  // surfaced every declared step. The test was measuring that the runner emits
+  // a string, not that the string is a command the shell speaks.
+  it("moves into the folder a step declares before running its command", async () => {
+    const runner = new AutopilotRunner(
+      recipe([
+        { ...commandStep("build", "pnpm build"), workingDirectory: "~/publikclip/app" },
+      ]),
+      "win32",
+    );
+    const shell = MockShell.alwaysSucceeds();
+
+    expect((await runner.runUntilBlocked(shell)).type).toBe("finished");
+    // A SEPARATE Set-Location whose outcome is checked, never a `;` chain:
+    // PowerShell's `;` does not abort on a failed Set-Location.
+    expect(shell.commandsRun).toEqual(["Set-Location ~/publikclip/app", "pnpm build"]);
+  });
+
+  it("uses a folder move the shell it is actually driving understands", async () => {
+    const runner = new AutopilotRunner(
+      recipe([
+        {
+          ...commandStep("build", "pnpm build"),
+          workingDirectory: "~/publikclip/app",
+          posixWorkingDirectory: "~/iris-apps/publikclip/app",
+        },
+      ]),
+      "darwin",
+    );
+    const shell = MockShell.alwaysSucceeds();
+
+    expect((await runner.runUntilBlocked(shell)).type).toBe("finished");
+    // `cd`, not `Set-Location` — and the posix folder, because the two
+    // platforms' clone steps do not land in the same place.
+    expect(shell.commandsRun).toEqual(["cd ~/iris-apps/publikclip/app", "pnpm build"]);
+  });
+
+  it("treats an empty declared folder as no declaration at all", async () => {
+    // The guide renderers fill the field in with "" when a step omits it, and a
+    // `cd` with no argument goes home — which is the bug, not the fix.
+    const runner = new AutopilotRunner(
+      recipe([{ ...commandStep("build", "npm ci"), workingDirectory: "" }]),
+      "win32",
+    );
+    const shell = MockShell.alwaysSucceeds();
+
+    expect((await runner.runUntilBlocked(shell)).type).toBe("finished");
+    expect(shell.commandsRun).toEqual(["npm ci"]);
+  });
+
+  it("leaves a step that declares no folder exactly where the shell already is", async () => {
+    const runner = new AutopilotRunner(recipe([commandStep("build", "npm ci")]));
+    const shell = MockShell.alwaysSucceeds();
+
+    expect((await runner.runUntilBlocked(shell)).type).toBe("finished");
+    expect(shell.commandsRun).toEqual(["npm ci"]);
+  });
+
+  it("stops the step rather than running the command in the wrong folder", async () => {
+    const failedMove: CommandOutcome = { kind: "failed", exitCode: 1, output: "Cannot find path" };
+    const runner = new AutopilotRunner(
+      recipe([
+        { ...commandStep("build", "pnpm build"), workingDirectory: "~/publikclip/app" },
+      ]),
+      "win32",
+    );
+    const shell = new MockShell([failedMove]);
+
+    const status = await runner.runUntilBlocked(shell);
+    expect(status.type).toBe("surfaced");
+    if (status.type === "surfaced") {
+      expect(status.reason).toContain("~/publikclip/app");
+    }
+    // The command itself was never typed — that is the whole point.
+    expect(shell.commandsRun).toEqual(["Set-Location ~/publikclip/app"]);
+  });
+
+  it("refuses a declared folder that is not a plain path", () => {
+    for (const folder of ["~/cue; rm -rf ~", "~/cue/../../etc", "$HOME/cue", '"~/cue"', "cue", ""]) {
+      expect(isAPlainFolder(folder), folder).toBe(false);
+    }
+    for (const folder of ["~/cue", "~/publikclip/app", "/opt/src", "C:\\Users\\me\\cue"]) {
+      expect(isAPlainFolder(folder), folder).toBe(true);
+    }
   });
 });

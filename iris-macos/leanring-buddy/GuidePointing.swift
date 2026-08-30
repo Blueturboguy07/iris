@@ -84,6 +84,92 @@ nonisolated enum GuidePointingDecision: Equatable, Sendable {
     case doNotPoint(GuidePointRefusal)
 }
 
+// MARK: - Not flying the eye somewhere it has already been
+
+/// One flight of the eye: which step asked for it, where it went, and what it
+/// said when it got there.
+nonisolated struct GuideEyeFlight: Equatable, Sendable {
+    /// The step this flight belongs to. A different step is always a different
+    /// flight, however identical the geometry — moving on is the one moment the
+    /// eye absolutely has to fly.
+    let stepIdentity: String
+    /// Global AppKit coordinates, as handed to the overlay.
+    let screenLocation: CGPoint
+    /// What the eye says on arrival — the step title. Part of the identity
+    /// because two steps can point at the same control and still have
+    /// different things to say about it.
+    let label: String
+}
+
+/// Whether the eye has already been flown somewhere, so it is not flown there
+/// all over again.
+///
+/// The symptom: "It also keeps pointing multiple times for whatever reason,
+/// whenever I open the browser, even after installing it." / "Seems to point
+/// every time I interact with the browser that is default."
+///
+/// Pointing is refreshed on every `NSWorkspace` app activation, which is
+/// deliberate and must stay — it is what makes the frontmost-app refusal
+/// self-healing when the reader finally switches into the app the step is
+/// about. What was missing is the other half. There is already a 400ms
+/// coalescer, but a coalescer only merges one cmd-tab's BURST: three deliberate
+/// visits to the browser a minute apart are three settled activations, so they
+/// were three full fly-out / say-the-step-title / hold-three-seconds / fly-home
+/// performances, at the same point, on a step the reader had already finished.
+/// Measured: three activations 750ms apart produced three extra flights, all to
+/// (773, 472), all saying "Download the installer".
+///
+/// So the coalescer answers "how soon" and this answers "again at all". The
+/// unit is the ANSWER, not the notification: an activation that resolves to
+/// something the eye is not already showing still flies, which is why a step
+/// change, a moved window, and the app finally coming forward all survive.
+///
+/// A value type on purpose. The alternative — a shared or static memo — would
+/// mean one guide session suppressing another's first flight, and the first
+/// flight of a step is the entire feature.
+nonisolated struct GuideEyeFlightMemo: Sendable {
+
+    /// Two answers this close together are the same answer. Accessibility
+    /// reports rectangles as floats and a window that has not moved can still
+    /// come back a fraction different; a whole point is far below anything a
+    /// reader could see and comfortably above that jitter.
+    static let distanceAtWhichTwoAnswersAreTheSameAnswer: CGFloat = 1
+
+    private var theFlightTheEyeIsAlreadyShowing: GuideEyeFlight?
+
+    init() {}
+
+    /// True when this is a flight the eye is not already showing — and
+    /// remembers it. False when it is the one it is showing right now, which is
+    /// the repeat the reader was complaining about.
+    mutating func theEyeShouldFly(to flight: GuideEyeFlight) -> Bool {
+        if let theFlightTheEyeIsAlreadyShowing,
+           Self.isTheSameAnswer(theFlightTheEyeIsAlreadyShowing, flight) {
+            return false
+        }
+        theFlightTheEyeIsAlreadyShowing = flight
+        return true
+    }
+
+    /// The eye has stopped pointing — the step lost its target, the reader
+    /// closed the guide, the app went away. Whatever comes next is news again.
+    ///
+    /// Without this the memo would outlive the thing it describes: close a
+    /// guide, reopen it on the same step, and the first flight — the one that
+    /// matters most — would be suppressed as a repeat of a flight that is no
+    /// longer on screen.
+    mutating func theEyeStoppedPointing() {
+        theFlightTheEyeIsAlreadyShowing = nil
+    }
+
+    static func isTheSameAnswer(_ one: GuideEyeFlight, _ other: GuideEyeFlight) -> Bool {
+        one.stepIdentity == other.stepIdentity
+            && one.label == other.label
+            && abs(one.screenLocation.x - other.screenLocation.x) <= distanceAtWhichTwoAnswersAreTheSameAnswer
+            && abs(one.screenLocation.y - other.screenLocation.y) <= distanceAtWhichTwoAnswersAreTheSameAnswer
+    }
+}
+
 /// Decides *what* to look for, before anything looks.
 ///
 /// This is the ladder the user chose: an authored target wins, a command step

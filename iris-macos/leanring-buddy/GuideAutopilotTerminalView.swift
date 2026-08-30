@@ -58,10 +58,11 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
     let onRetrySurfacedStep: () -> Void
     /// The reader tapped "Continue" to move past a step Iris surfaced.
     let onContinuePastSurfacedStep: () -> Void
-    /// The red traffic light — the escape hatch. Mid-step it stops the running
-    /// command and hands the step to the reader; with nothing in flight it
-    /// closes the run. Added after an install wedged on a hung `pnpm install`
-    /// with no way out short of shutting the Mac down.
+    /// The red traffic light — the escape hatch. It closes the takeover in
+    /// every state, killing whatever is still running on the way out. Added
+    /// after an install wedged on a hung `pnpm install` with no way out short
+    /// of shutting the Mac down; made unconditional after a reader reported
+    /// that it closed nothing at a manual gate ("you can't close out of it").
     let onEscapeHatch: () -> Void
     /// nil = the transcript area fills whatever its container gives it (the
     /// takeover window, a fixed frame). A value = that fixed height, for the
@@ -127,7 +128,7 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
         .buttonStyle(.plain)
         .onHover { hovering in escapeHatchIsHovered = hovering }
         .pointerCursor()
-        .nativeTooltip("Stop — Iris hands this step to you")
+        .nativeTooltip("Close — stops the install, keeps your place in the guide")
     }
 
     /// The transcript scrolls and follows its own tail. It used to be a plain

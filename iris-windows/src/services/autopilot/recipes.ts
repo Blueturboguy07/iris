@@ -5,6 +5,19 @@
 // shape and the risk-gate suite can assert over them.
 //
 
+// Every step from the clone onward states the folder it runs in
+// (`workingDirectory`, and `posixWorkingDirectory` where the two platforms
+// clone to different places). Until they said so, the folder was live shell
+// state that only the preceding `cd` step recorded: correct on one linear run,
+// and wrong the moment a step is retried, a session is rebuilt, or a run is
+// resumed — which on macOS is exactly how a reader got
+// `zsh: no such file or directory: ui/node_modules/.bin/tauri`, exit 127, in
+// their home folder. The commands themselves are untouched, including the `cd`
+// steps, so a linear run types byte-identical lines to before; the declarations
+// only decide where each line is typed. Held to the same positional rule the
+// published guides are (`checkGuideInvariants` in publik/lib/guide-invariants.ts)
+// by `tests/autopilot-recipe.test.ts`.
+
 import type { InstallRecipe } from "./recipe";
 
 // OpenASCII — a Node/pnpm local-web app. The Windows steps mirror the shipped
@@ -27,13 +40,23 @@ const OPENASCII: InstallRecipe = {
       // Idempotent on the Mac so the demo can be re-run without a clone error.
       posixCommand:
         "mkdir -p ~/iris-apps; cd ~/iris-apps; [ -d OpenASCII ] || git clone https://github.com/Blueturboguy07/OpenASCII.git",
+      workingDirectory: "~",
     },
-    { id: "enter-folder", title: "Open the OpenASCII folder", kind: "command", command: "cd OpenASCII" },
+    {
+      id: "enter-folder",
+      title: "Open the OpenASCII folder",
+      kind: "command",
+      command: "cd OpenASCII",
+      workingDirectory: "~",
+      posixWorkingDirectory: "~/iris-apps",
+    },
     {
       id: "pin-source",
       title: "Use the reviewed version",
       kind: "command",
       command: "git checkout 8fc32ce16a6536c1a37a36e483fdc39dfd50d5cd",
+      workingDirectory: "~/OpenASCII",
+      posixWorkingDirectory: "~/iris-apps/OpenASCII",
     },
     {
       id: "dependencies",
@@ -41,6 +64,8 @@ const OPENASCII: InstallRecipe = {
       kind: "command",
       command: "corepack.cmd pnpm install",
       posixCommand: "corepack pnpm install",
+      workingDirectory: "~/OpenASCII",
+      posixWorkingDirectory: "~/iris-apps/OpenASCII",
     },
     {
       id: "run",
@@ -48,6 +73,8 @@ const OPENASCII: InstallRecipe = {
       kind: "command",
       command: "corepack.cmd pnpm dev",
       posixCommand: "corepack pnpm dev",
+      workingDirectory: "~/OpenASCII",
+      posixWorkingDirectory: "~/iris-apps/OpenASCII",
       longRunning: true,
       // Port-agnostic: Vite bumps to the next free port when the default is
       // taken, so wait for any localhost line rather than a specific port. The
@@ -128,21 +155,40 @@ const PUBLIKCLIP: InstallRecipe = {
       // Idempotent on the Mac so the demo can be re-run without a clone error.
       posixCommand:
         "mkdir -p ~/iris-apps; cd ~/iris-apps; [ -d publikclip ] || git clone https://github.com/Blueturboguy07/publikclip.git",
+      workingDirectory: "~",
     },
-    { id: "enter-folder", title: "Open the publikclip folder", kind: "command", command: "cd publikclip" },
+    {
+      id: "enter-folder",
+      title: "Open the publikclip folder",
+      kind: "command",
+      command: "cd publikclip",
+      workingDirectory: "~",
+      posixWorkingDirectory: "~/iris-apps",
+    },
     {
       id: "pin-source",
       title: "Use the reviewed version",
       kind: "command",
       command: "git checkout a53a359b985b1d2d666266062936cc186f02340b",
+      workingDirectory: "~/publikclip",
+      posixWorkingDirectory: "~/iris-apps/publikclip",
     },
-    { id: "enter-app", title: "Open the app folder", kind: "command", command: "cd app" },
+    {
+      id: "enter-app",
+      title: "Open the app folder",
+      kind: "command",
+      command: "cd app",
+      workingDirectory: "~/publikclip",
+      posixWorkingDirectory: "~/iris-apps/publikclip",
+    },
     {
       id: "dependencies",
       title: "Install the interface packages",
       kind: "command",
       command: "npm.cmd install",
       posixCommand: "npm install",
+      workingDirectory: "~/publikclip/app",
+      posixWorkingDirectory: "~/iris-apps/publikclip/app",
     },
     {
       id: "package",
@@ -158,6 +204,8 @@ const PUBLIKCLIP: InstallRecipe = {
       // exercise the flow on the dev machine, though the installed exe below is
       // Windows-only.
       posixCommand: 'export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"; npx tauri build --bundles app',
+      workingDirectory: "~/publikclip/app",
+      posixWorkingDirectory: "~/iris-apps/publikclip/app",
     },
     {
       id: "install-app",
@@ -167,6 +215,8 @@ const PUBLIKCLIP: InstallRecipe = {
       // the autopilot. Leaves publikclip-app.exe under %LOCALAPPDATA%\publikclip.
       command:
         '$setup = Get-ChildItem src-tauri\\target\\release\\bundle\\nsis -Filter *-setup.exe | Select-Object -First 1; Start-Process -FilePath $setup.FullName -ArgumentList "/S" -Wait',
+      workingDirectory: "~/publikclip/app",
+      posixWorkingDirectory: "~/iris-apps/publikclip/app",
     },
   ],
 };

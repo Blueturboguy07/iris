@@ -25,6 +25,32 @@
 //  something the code can express — the same structural enforcement
 //  `AssistantTransport` uses for the BYO key.
 //
+//  ── The gate assesses the command AS IT WILL RUN ──
+//
+//  Every rule below is a pattern over command TEXT, and the text of a command
+//  does not say where it runs. That was a real hole the moment a guide step
+//  could declare its own working directory: `cp -R ./Evil.app /Applications/`
+//  asks for a confirm tap, and the identical effect written as
+//  `workingDirectory: "/Applications"` + `cp -R ./Evil.app .` used to run with
+//  no tap at all. Measured, before the fix, from this file's own compiled gate:
+//
+//      cp -R ./Evil.app /Applications/                      -> CONFIRM
+//      cd /Applications ; cp -R ./Evil.app .                -> RUNS-NO-ASK
+//      cp ./x.plist /Library/LaunchAgents/x.plist           -> CONFIRM
+//      cd /Library/LaunchAgents ; cp ./x.plist x.plist      -> RUNS-NO-ASK
+//      rm -rf ~                              (grant ON)     -> REFUSED (floor)
+//      cd ~ ; rm -rf .                       (grant ON)     -> RUNS-NO-ASK
+//
+//  The last pair is the worst of them: the catastrophe floor is the one thing
+//  no consent and no autonomy grant can wave through, and a declared folder
+//  walked a whole-home deletion straight past it.
+//
+//  So `assess` now takes the folder the command will run in and checks every
+//  rule against TWO renderings — the raw text, exactly as before, and the same
+//  command with its relative paths resolved against that folder. The strictest
+//  verdict wins. Resolution is used only for judging; the text that actually
+//  reaches the shell is never rewritten, so a rendering this gets wrong can
+//  only ever cost an extra confirm tap, never change what runs.
 
 import Foundation
 
@@ -65,20 +91,25 @@ nonisolated enum GuideAutopilotRiskAssessment {
     /// control once, and a per-command tap on a vetted install is exactly the
     /// friction the grant removes. When it is `false` (no grant, or an explicit
     /// test), the original three-tier behavior is unchanged.
+    ///
+    /// `inWorkingDirectory` is the folder the command will actually run in —
+    /// the one a step declared, or the one the shell is already sitting in.
+    /// Passing nil assesses raw text only, which is the pre-existing behavior
+    /// and what every caller that genuinely has no folder should do.
     static func assess(
         _ command: String,
+        inWorkingDirectory workingDirectory: String? = nil,
         autonomyGranted: Bool = AutopilotAutonomyGrant.shared.isGranted
     ) -> GuideAutopilotRisk {
+        let renderings = Self.renderingsToAssess(command, inWorkingDirectory: workingDirectory)
+
         // The catastrophe floor is absolute — refused EVEN under the grant.
         // These are commands no install ever needs and no consent should wave
         // through; a hallucinated model-proposed fix that reaches for one is
         // stopped here, silently, without a tap.
         for rule in Self.catastropheRules {
-            if let match = rule.firstMatch(in: command) {
-                return .refusedOutright(reason: GuideAutopilotRiskReason(
-                    plainLanguageSummary: rule.plainLanguageSummary,
-                    trippingSubstring: match
-                ))
+            if let reason = Self.firstReason(from: rule, over: renderings, asWritten: command) {
+                return .refusedOutright(reason: reason)
             }
         }
 
@@ -86,23 +117,59 @@ nonisolated enum GuideAutopilotRiskAssessment {
             return .runsWithoutAsking
         }
 
+        // Checked after the floor and before everything else: the two official
+        // installers, by exact text. See `officialInstallerCommands`. Matched
+        // on the command AS WRITTEN: resolution can only add path prefixes, so
+        // a rendering never becomes an installer that the text was not.
+        if Self.isAnOfficialInstaller(command) {
+            return .runsWithoutAsking
+        }
+
         for rule in Self.nonCatastropheRefusalRules {
-            if let match = rule.firstMatch(in: command) {
-                return .refusedOutright(reason: GuideAutopilotRiskReason(
-                    plainLanguageSummary: rule.plainLanguageSummary,
-                    trippingSubstring: match
-                ))
+            if let reason = Self.firstReason(from: rule, over: renderings, asWritten: command) {
+                return .refusedOutright(reason: reason)
             }
         }
         for rule in Self.confirmRules {
-            if let match = rule.firstMatch(in: command) {
-                return .needsAConfirmTap(reason: GuideAutopilotRiskReason(
-                    plainLanguageSummary: rule.plainLanguageSummary,
-                    trippingSubstring: match
-                ))
+            if let reason = Self.firstReason(from: rule, over: renderings, asWritten: command) {
+                return .needsAConfirmTap(reason: reason)
             }
         }
         return .runsWithoutAsking
+    }
+
+    /// The raw command, plus — when a working directory says the two differ —
+    /// the same command as the shell will really execute it. One entry when
+    /// resolution changes nothing, so a caller with no folder pays nothing.
+    private static func renderingsToAssess(
+        _ command: String,
+        inWorkingDirectory workingDirectory: String?
+    ) -> [String] {
+        let asItWillRun = commandAsItWillRun(command, inWorkingDirectory: workingDirectory)
+        return asItWillRun == command ? [command] : [command, asItWillRun]
+    }
+
+    /// The first rendering this rule matches, turned into a reason.
+    ///
+    /// The confirm row highlights `trippingSubstring` inside the command well,
+    /// which shows the command AS WRITTEN. A match found only in the resolved
+    /// rendering has no such substring — half the reason is the folder, which
+    /// is not in that text — so the highlight is dropped rather than pointing
+    /// at characters that are not there. `GuideAutopilotRiskReason` already
+    /// documents empty as "the whole command is the reason".
+    private static func firstReason(
+        from rule: GuideAutopilotRiskRule,
+        over renderings: [String],
+        asWritten command: String
+    ) -> GuideAutopilotRiskReason? {
+        for rendering in renderings {
+            guard let match = rule.firstMatch(in: rendering) else { continue }
+            return GuideAutopilotRiskReason(
+                plainLanguageSummary: rule.plainLanguageSummary,
+                trippingSubstring: command.contains(match) ? match : ""
+            )
+        }
+        return nil
     }
 
     // MARK: - The only two mints
@@ -113,21 +180,169 @@ nonisolated enum GuideAutopilotRiskAssessment {
     /// granted autopilot mints every non-catastrophe command directly.
     static func approve(
         _ command: String,
+        inWorkingDirectory workingDirectory: String? = nil,
         autonomyGranted: Bool = AutopilotAutonomyGrant.shared.isGranted
     ) -> GuideAutopilotApprovedCommand? {
-        guard case .runsWithoutAsking = assess(command, autonomyGranted: autonomyGranted) else { return nil }
+        guard case .runsWithoutAsking = assess(
+            command, inWorkingDirectory: workingDirectory, autonomyGranted: autonomyGranted
+        ) else { return nil }
         return GuideAutopilotApprovedCommand(text: command)
     }
 
     /// Approves a confirm-tier command after the reader's explicit tap.
-    /// Refused-tier commands stay refused — no tap reaches them.
-    static func approveAfterAReaderTap(_ command: String) -> GuideAutopilotApprovedCommand? {
-        switch assess(command) {
+    /// Refused-tier commands stay refused — no tap reaches them. The folder
+    /// matters here too: the tap was asked for on the command as it will run,
+    /// and this must not re-assess it in a laxer way than the ask did.
+    static func approveAfterAReaderTap(
+        _ command: String,
+        inWorkingDirectory workingDirectory: String? = nil
+    ) -> GuideAutopilotApprovedCommand? {
+        switch assess(command, inWorkingDirectory: workingDirectory) {
         case .runsWithoutAsking, .needsAConfirmTap:
             return GuideAutopilotApprovedCommand(text: command)
         case .refusedOutright:
             return nil
         }
+    }
+
+    // MARK: - Resolving a command against the folder it runs in
+
+    /// The command rewritten so every relative path in it is spelled from the
+    /// root, the way the shell will resolve it in `workingDirectory`. Returns
+    /// the command unchanged when there is no folder to resolve against, or
+    /// when nothing in it is relative.
+    ///
+    /// FOR JUDGING ONLY. The string this returns is handed to the rule tables
+    /// and to nothing else; `GuideAutopilotApprovedCommand` always carries the
+    /// command as written. That is what makes the heuristics below safe to be
+    /// approximate: an argument this resolves that was never a path (`install`
+    /// in `npm install` becomes `~/repo/install`) cannot change what runs, and
+    /// on a home-rooted folder — which is every published guide — it matches no
+    /// rule either. The failure mode is one unnecessary confirm tap.
+    ///
+    /// Deliberately NOT `standardizingPath`: that expands `~` to this Mac's
+    /// real home, and `rm -rf /Users/somebody` does not match the whole-home
+    /// rule that `rm -rf ~` does. `~` is kept literal, exactly as `isAPlainFolder`
+    /// keeps it for the real `cd`.
+    static func commandAsItWillRun(
+        _ command: String,
+        inWorkingDirectory workingDirectory: String?
+    ) -> String {
+        guard var folder = workingDirectory,
+              folder.hasPrefix("~") || folder.hasPrefix("/") else { return command }
+        while folder.count > 1 && folder.hasSuffix("/") { folder.removeLast() }
+
+        var resolved = ""
+        var tokenIsTheProgramName = true
+        for line in command.split(separator: "\n", omittingEmptySubsequences: false) {
+            if !resolved.isEmpty { resolved += "\n" }
+            tokenIsTheProgramName = true
+            for piece in Self.piecesPreservingWhitespace(of: String(line)) {
+                if piece.isWhitespaceRun {
+                    resolved += piece.text
+                    continue
+                }
+                if Self.separatesOneCommandFromTheNext(piece.text) {
+                    resolved += piece.text
+                    tokenIsTheProgramName = true
+                    continue
+                }
+                if tokenIsTheProgramName {
+                    // A program is found on PATH, not in the working folder.
+                    resolved += piece.text
+                    tokenIsTheProgramName = false
+                    continue
+                }
+                resolved += Self.resolving(piece.text, against: folder) ?? piece.text
+            }
+        }
+        return resolved
+    }
+
+    /// `&&`, `||`, `|`, `;` and `&` end one command and start another, so the
+    /// token after one is a program name rather than an argument.
+    private static func separatesOneCommandFromTheNext(_ token: String) -> Bool {
+        ["&&", "||", "|", ";", "&", "(", ")", "{", "}"].contains(token)
+    }
+
+    private struct CommandPiece {
+        let text: String
+        let isWhitespaceRun: Bool
+    }
+
+    /// Splits a line into alternating runs of whitespace and non-whitespace, so
+    /// the rebuilt rendering keeps the original spacing the `\s` in every rule
+    /// depends on.
+    private static func piecesPreservingWhitespace(of line: String) -> [CommandPiece] {
+        var pieces: [CommandPiece] = []
+        var current = ""
+        var currentIsWhitespace: Bool?
+        for character in line {
+            let isWhitespace = character == " " || character == "\t"
+            if currentIsWhitespace == nil || currentIsWhitespace == isWhitespace {
+                current.append(character)
+            } else {
+                pieces.append(CommandPiece(text: current, isWhitespaceRun: currentIsWhitespace == true))
+                current = String(character)
+            }
+            currentIsWhitespace = isWhitespace
+        }
+        if let currentIsWhitespace, !current.isEmpty {
+            pieces.append(CommandPiece(text: current, isWhitespaceRun: currentIsWhitespace))
+        }
+        return pieces
+    }
+
+    /// The characters a path may be spelled with here. Anything else — a quote,
+    /// a `$`, a backtick, a `:` in a URL, a `!`, a bracket — means the token is
+    /// not a plain relative path, and it is left exactly as written. (Text a
+    /// shell would expand or compute already trips the obfuscation rules.)
+    private static let plainPathCharacters = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~@+-/*"
+    )
+
+    /// One argument, rewritten from the root — or nil when it is not a plain
+    /// relative path and must be left alone.
+    private static func resolving(_ token: String, against folder: String) -> String? {
+        // `>out.log` and `>>out.log` write to a path; keep the operator and
+        // resolve what it points at, so the redirect rules see the real target.
+        var redirect = ""
+        var body = token
+        for operatorText in [">>", ">", "<"] where body.hasPrefix(operatorText) {
+            redirect = operatorText
+            body.removeFirst(operatorText.count)
+            break
+        }
+        guard let first = body.unicodeScalars.first else { return nil }
+        // A flag, an already-rooted path, a home-rooted path, or anything the
+        // shell computes: not ours to resolve.
+        guard first != "-", first != "/", first != "~", first != "$" else { return nil }
+        guard body.unicodeScalars.allSatisfy({ plainPathCharacters.contains($0) }) else { return nil }
+        return redirect + normalisedPath(folder + "/" + body)
+    }
+
+    /// Collapses `.` and `..` in a `~`- or `/`-rooted path, keeping a leading
+    /// `~` literal. `..` that would climb past the root stays at the root,
+    /// which is what a shell does.
+    private static func normalisedPath(_ path: String) -> String {
+        let isHomeRooted = path.hasPrefix("~")
+        var components: [String] = []
+        for component in path.split(separator: "/") {
+            switch component {
+            case ".":
+                continue
+            case "..":
+                if components.count > (isHomeRooted ? 1 : 0) {
+                    components.removeLast()
+                }
+            default:
+                components.append(String(component))
+            }
+        }
+        if isHomeRooted {
+            return components.joined(separator: "/")
+        }
+        return "/" + components.joined(separator: "/")
     }
 
     // MARK: - The catastrophe floor: refused EVEN under the autonomy grant
@@ -139,7 +354,13 @@ nonisolated enum GuideAutopilotRiskAssessment {
     // is stopped here with no tap, rather than running.
 
     private static let catastropheRules: [GuideAutopilotRiskRule] = [
-        .init(#"\brm\b[^\n]*\s-[a-z]*(rf|fr)[a-z]*\s+(/|/\*|~|~/|\$HOME)\s*(\n|$|;|&)"#,
+        // `~/\*` and `\$HOME/\*` are here for the same reason the resolution
+        // above exists: `rm -rf *` standing in the home folder is `rm -rf ~`
+        // with a different spelling, and once a step can declare its own
+        // working directory a guide can write it that way. The `/` and `/\*`
+        // alternatives already covered the disk root; these cover the home
+        // folder, which is the half a reader actually loses.
+        .init(#"\brm\b[^\n]*\s-[a-z]*(rf|fr)[a-z]*\s+(/|/\*|~|~/|~/\*|\$HOME|\$HOME/\*)\s*(\n|$|;|&)"#,
               "This deletes the root of the disk or the whole home folder."),
         .init(#"\bdd\b[^\n]*\bof=/dev/"#,
               "This writes raw bytes over a disk device."),
@@ -150,6 +371,49 @@ nonisolated enum GuideAutopilotRiskAssessment {
         .init(#"\(\)\s*\{[^\n}]*\|[^\n}]*&[^\n}]*\}\s*;"#,
               "This is a fork bomb."),
     ]
+
+    // MARK: - The two official installers, by exact text
+    //
+    // Reported from two machines: "Got stuck on the same problem with homebrew
+    // installation, it won't install homebrew if it is not already installed"
+    // and "It still doesn't know what to do if i don't have homebrew
+    // installed." Without the grant, rustup's own one-liner is a `curl … | sh`
+    // and this gate refused it outright, so a guide could only open a web page
+    // and hope; Homebrew's fared little better, tripping the obfuscation rule
+    // on its `$(` and stopping for a tap. The founder's call: "relax homebrew
+    // shit allow them to just install homebrew and rustup in like through the
+    // terminal commands."
+    //
+    // The allowance is the WHOLE COMMAND, matched literally. The alternative
+    // shapes were both worse. Loosening `\b(curl|wget)\b … \|` would reopen
+    // download-and-run generally, which is the one thing no confirm tap can
+    // make informed — the reader cannot read what is on the other end. And an
+    // allowlist of hosts would wave through
+    // `https://raw.githubusercontent.com/Homebrew/install/HEAD/../../evil/x.sh`,
+    // which is on the official host and is not the official script. Matching
+    // the whole string also means a chained `… | sh && sudo …` never matches,
+    // so nothing rides in behind the allowance.
+    //
+    // Widening this is a visible edit to a four-line list rather than a regex
+    // tweak whose blast radius nobody can see. Spelled identically in
+    // lib/guide-invariants.ts (`OFFICIAL_INSTALLER_COMMANDS`), which is the
+    // gate the same command passes on the web side before it can be published.
+
+    private static let officialInstallerCommands: Set<String> = [
+        #"/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)""#,
+        #"NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)""#,
+        "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh",
+        "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
+    ]
+
+    /// True only for one of the exact strings above, ignoring surrounding and
+    /// repeated spaces — never for a command that merely contains one.
+    static func isAnOfficialInstaller(_ command: String) -> Bool {
+        let collapsed = command
+            .split(whereSeparator: { $0 == " " || $0 == "\t" })
+            .joined(separator: " ")
+        return officialInstallerCommands.contains(collapsed)
+    }
 
     // MARK: - Refused only WITHOUT the grant
     //

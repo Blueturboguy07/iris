@@ -76,9 +76,36 @@ final class GuideAutopilotTakeoverController {
     private var entryMorphHasSettled = false
     private var aParkWasRequestedDuringEntry = false
 
-    /// Where the terminal sits while parked (top-right corner). Held so a park
+    /// Where the terminal sits while parked (bottom-right corner). Held so a park
     /// requested during the entry morph can be applied unchanged once it settles.
     private var parkedFrame: CGRect = .zero
+
+    /// Where the READER dragged the terminal to, as a top-left point, or nil
+    /// while they have never touched it. Reported: "the terminal Iris is using
+    /// is not movable at all" — and moving it was only half the complaint,
+    /// because every park and return-to-center calls `setFrame` with Iris's own
+    /// geometry, so a window the reader had just dragged clear of the download
+    /// button was yanked straight back the moment the next step began.
+    ///
+    /// THE CONTRACT: once the reader has placed it, Iris may still RESIZE the
+    /// window (the parked card is 400x340, the running one 760x480 — freezing
+    /// it at the small size for the rest of an install would just be the next
+    /// complaint) but the top-left corner stays where they dropped it. Top-left
+    /// rather than AppKit's bottom-left origin because that is the corner they
+    /// aimed at: anchoring the bottom would slide the visible card 140pt up the
+    /// screen on the very next resize, all by itself.
+    private var readerPlacedTheTerminalTopLeft: CGPoint?
+
+    /// Set while one of Iris's OWN frame animations is running. `didMove` fires
+    /// for every intermediate frame of an animated `setFrame` exactly as it does
+    /// for a drag, so without this the morph, the park, and the collapse would
+    /// each record themselves as "the reader moved it". A count rather than a
+    /// flag because the entry morph and a park deferred behind it can overlap.
+    private var irisOwnFrameAnimationsInFlight = 0
+
+    /// The `didMove` subscription on the terminal panel, kept so it dies with
+    /// the panels rather than outliving them.
+    private var terminalDidMoveObserver: NSObjectProtocol?
 
     private var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
 
@@ -118,6 +145,8 @@ final class GuideAutopilotTakeoverController {
         isParked = false
         entryMorphHasSettled = false
         aParkWasRequestedDuringEntry = false
+        readerPlacedTheTerminalTopLeft = nil
+        irisOwnFrameAnimationsInFlight = 0
 
         // The dim backdrop. Click-through on purpose: a manual sub-step (a
         // download, a drag) still needs the reader to reach the app underneath.
@@ -129,8 +158,25 @@ final class GuideAutopilotTakeoverController {
         self.backdropPanel = backdrop
 
         // The terminal window. Starts eye-sized so it can grow out of the eye.
-        let terminal = Self.makeChromelessPanel(frame: eyeSizedFrame)
+        // `GuideAutopilotTakeoverTerminalPanel` is the class that makes the CARD
+        // draggable rather than just its 24pt title strip — see its own comment.
+        let terminal = Self.makeChromelessPanel(
+            frame: eyeSizedFrame, asA: GuideAutopilotTakeoverTerminalPanel.self
+        )
         terminal.ignoresMouseEvents = false
+        // "The terminal Iris is using is not movable at all." It was true: a
+        // `.borderless` panel has no title bar to grab, and this is the only
+        // drag path AppKit offers without one. The settings panel already made
+        // exactly this fix for exactly this complaint (`MenuBarPanelManager`,
+        // "I can't move shit around"), against the same NSHostingView content,
+        // so the mechanism is known to work here. The backdrop deliberately
+        // does NOT get it — it ignores mouse events and is the whole screen.
+        //
+        // It is kept ON TOP of the panel subclass, not replaced by it: it is
+        // what carries a drag that starts on the parts of the card AppKit is
+        // already happy to move (the title strip, the manual-step bar), and it
+        // costs nothing where the subclass has taken the gesture over.
+        terminal.isMovableByWindowBackground = true
         let takeoverView = GuideAutopilotTakeoverView(
             model: takeoverModel,
             runner: runner,
@@ -147,13 +193,22 @@ final class GuideAutopilotTakeoverController {
         terminal.orderFrontRegardless()
         self.terminalPanel = terminal
 
+        // Remember wherever the reader leaves it. `didMove` cannot tell a drag
+        // from an animated `setFrame`, so Iris's own motion is fenced off by
+        // `irisOwnFrameAnimationsInFlight` rather than by inspecting the frame.
+        terminalDidMoveObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didMoveNotification, object: terminal, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.noteWhereTheReaderPutTheTerminal() }
+        }
+
         NSAnimationContext.runAnimationGroup { context in
             context.duration = reduceMotion ? 0 : 0.35
             backdrop.animator().alphaValue = 1
         }
 
         if reduceMotion {
-            terminal.setFrame(terminalSizedFrame, display: true)
+            setTerminalFrameOurselves(terminal, to: terminalSizedFrame)
             takeoverModel.showsTerminalFace = true
             entryMorphHasSettled = true
             if aParkWasRequestedDuringEntry {
@@ -170,12 +225,15 @@ final class GuideAutopilotTakeoverController {
         let centerFrame = terminalSizedFrame
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
             guard let self, self.terminalPanel === terminal else { return }
+            self.irisOwnFrameAnimationsInFlight += 1
             NSAnimationContext.runAnimationGroup({ context in
                 context.duration = Self.morphDuration
                 context.timingFunction = Self.morphTiming
                 terminal.animator().setFrame(centerFrame, display: true)
             }, completionHandler: { [weak self] in
-                guard let self, self.terminalPanel === terminal else { return }
+                guard let self else { return }
+                self.irisOwnFrameAnimationsInFlight = max(0, self.irisOwnFrameAnimationsInFlight - 1)
+                guard self.terminalPanel === terminal else { return }
                 // The morph has settled; a manual first step can now park the
                 // window without fighting the grow it just finished.
                 self.entryMorphHasSettled = true
@@ -194,7 +252,9 @@ final class GuideAutopilotTakeoverController {
     /// reader can see and reach a manual step's control on their own screen while
     /// the eye drifts to point at it. Called when autopilot hands a manual step
     /// to the reader; `returnToCenter` reverses it when Iris runs the next
-    /// command. Idempotent, and safe to call during the entry morph (it waits).
+    /// command. Safe to call during the entry morph (it waits), and safe to call
+    /// on an already-parked window: the SLIDE is idempotent, the TEXT is not —
+    /// re-parking is how two manual steps in a row change what the card says.
     func parkForManualStep(title: String, instruction: String) {
         pendingManualTitle = title
         pendingManualInstruction = instruction
@@ -202,25 +262,42 @@ final class GuideAutopilotTakeoverController {
         // The very first step can be manual; if the entry morph is still growing
         // the window, defer until it settles so the two do not fight.
         guard entryMorphHasSettled else { aParkWasRequestedDuringEntry = true; return }
-        guard !isParked else { return }
-        isParked = true
+
+        // THE CONTENT IS NOT GUARDED. Reported: "when telling me to install
+        // Cmake, the iris install terminal says Install rust, very confusing."
+        // Two manual steps in a row never unpark in between — `drive()` only
+        // calls `returnToCenter` on the branch that is about to RUN a command,
+        // and a manual gate returns out of the loop before it — so the second
+        // park hits `guard !isParked` below. That guard exists to keep the
+        // WINDOW ANIMATION idempotent (re-running a 0.5s slide on an
+        // already-parked window makes it twitch); it was never meant to decide
+        // what the card SAYS, and the whimprflow guide's back-to-back
+        // install-rust → install-cmake steps are exactly where it showed.
         model?.manualStepTitle = pendingManualTitle
         model?.manualStepInstruction = pendingManualInstruction
         model?.readerMustManuallyContinue = true
         irisTrace("takeover: PARKED + set readerMustManuallyContinue=true, showsTerminalFace=\(model?.showsTerminalFace == true), title=\(pendingManualTitle)")
+
+        // From here down is the window animation, and only that.
+        guard !isParked else { return }
+        isParked = true
         let backdrop = backdropPanel
-        let cornerFrame = parkedFrame
+        let cornerFrame = frameHonoringWhereTheReaderPutTheTerminal(parkedFrame)
         if reduceMotion {
-            terminal.setFrame(cornerFrame, display: true)
+            setTerminalFrameOurselves(terminal, to: cornerFrame)
             backdrop?.alphaValue = 0
             return
         }
-        NSAnimationContext.runAnimationGroup { context in
+        irisOwnFrameAnimationsInFlight += 1
+        NSAnimationContext.runAnimationGroup({ context in
             context.duration = Self.morphDuration
             context.timingFunction = Self.morphTiming
             terminal.animator().setFrame(cornerFrame, display: true)
             backdrop?.animator().alphaValue = 0
-        }
+        }, completionHandler: { [weak self] in
+            guard let self else { return }
+            self.irisOwnFrameAnimationsInFlight = max(0, self.irisOwnFrameAnimationsInFlight - 1)
+        })
     }
 
     /// Bring the terminal back to the center and restore the dim — the reader
@@ -232,18 +309,55 @@ final class GuideAutopilotTakeoverController {
         isParked = false
         model?.readerMustManuallyContinue = false
         let backdrop = backdropPanel
-        let centerFrame = terminalSizedFrame
+        let centerFrame = frameHonoringWhereTheReaderPutTheTerminal(terminalSizedFrame)
         if reduceMotion {
-            terminal.setFrame(centerFrame, display: true)
+            setTerminalFrameOurselves(terminal, to: centerFrame)
             backdrop?.alphaValue = 1
             return
         }
-        NSAnimationContext.runAnimationGroup { context in
+        irisOwnFrameAnimationsInFlight += 1
+        NSAnimationContext.runAnimationGroup({ context in
             context.duration = Self.morphDuration
             context.timingFunction = Self.morphTiming
             terminal.animator().setFrame(centerFrame, display: true)
             backdrop?.animator().alphaValue = 1
+        }, completionHandler: { [weak self] in
+            guard let self else { return }
+            self.irisOwnFrameAnimationsInFlight = max(0, self.irisOwnFrameAnimationsInFlight - 1)
+        })
+    }
+
+    // MARK: - Leaving the terminal where the reader put it
+
+    /// Called from `NSWindow.didMoveNotification`, but only counts while none of
+    /// Iris's own frame animations are running — those post the same
+    /// notification for every frame they interpolate.
+    private func noteWhereTheReaderPutTheTerminal() {
+        guard irisOwnFrameAnimationsInFlight == 0, !isDismissing, let terminal = terminalPanel else {
+            return
         }
+        readerPlacedTheTerminalTopLeft = CGPoint(x: terminal.frame.minX, y: terminal.frame.maxY)
+    }
+
+    /// Iris's own geometry, re-hung from the corner the reader chose. Until they
+    /// move the window this returns the frame unchanged, so nothing about the
+    /// default choreography changes.
+    private func frameHonoringWhereTheReaderPutTheTerminal(_ irisChosenFrame: CGRect) -> CGRect {
+        guard let readerTopLeft = readerPlacedTheTerminalTopLeft else { return irisChosenFrame }
+        return CGRect(
+            x: readerTopLeft.x,
+            y: readerTopLeft.y - irisChosenFrame.height,
+            width: irisChosenFrame.width,
+            height: irisChosenFrame.height
+        )
+    }
+
+    /// An unanimated frame change made BY IRIS — bracketed so the `didMove` it
+    /// posts is not mistaken for the reader dragging the window.
+    private func setTerminalFrameOurselves(_ terminal: NSPanel, to frame: CGRect) {
+        irisOwnFrameAnimationsInFlight += 1
+        terminal.setFrame(frame, display: true)
+        irisOwnFrameAnimationsInFlight = max(0, irisOwnFrameAnimationsInFlight - 1)
     }
 
     /// Fold the terminal back into the eye and tear the panels down. `afterHold`
@@ -279,16 +393,22 @@ final class GuideAutopilotTakeoverController {
             return
         }
 
-        // Reverse of the morph: terminal shrinks back into the eye face.
+        // Reverse of the morph: terminal shrinks back into the eye face. It
+        // shrinks in place if the reader moved the window — flying it back to
+        // the screen centre to fold away would be one last yank.
         withAnimation(.timingCurve(0.2, 0.8, 0.2, 1, duration: Self.morphDuration)) {
             model?.showsTerminalFace = false
         }
+        irisOwnFrameAnimationsInFlight += 1
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = Self.morphDuration
             context.timingFunction = Self.morphTiming
-            terminal.animator().setFrame(eyeSizedFrame, display: true)
+            terminal.animator().setFrame(
+                frameHonoringWhereTheReaderPutTheTerminal(eyeSizedFrame), display: true
+            )
         }, completionHandler: { [weak self] in
             guard let self else { return }
+            self.irisOwnFrameAnimationsInFlight = max(0, self.irisOwnFrameAnimationsInFlight - 1)
             // Fade the eye + backdrop out, then remove the windows.
             NSAnimationContext.runAnimationGroup({ context in
                 context.duration = 0.3
@@ -304,6 +424,10 @@ final class GuideAutopilotTakeoverController {
     }
 
     private func tearDownPanels() {
+        if let terminalDidMoveObserver {
+            NotificationCenter.default.removeObserver(terminalDidMoveObserver)
+            self.terminalDidMoveObserver = nil
+        }
         for panel in [terminalPanel, backdropPanel] {
             panel?.orderOut(nil)
             panel?.contentView = nil
@@ -314,6 +438,10 @@ final class GuideAutopilotTakeoverController {
         isParked = false
         entryMorphHasSettled = false
         aParkWasRequestedDuringEntry = false
+        // The reader's placement belongs to the run they made it in; the next
+        // takeover opens at Iris's own geometry again.
+        readerPlacedTheTerminalTopLeft = nil
+        irisOwnFrameAnimationsInFlight = 0
     }
 
     // MARK: - Geometry
@@ -340,17 +468,32 @@ final class GuideAutopilotTakeoverController {
         )
     }
 
-    /// The parked position: a small window tucked into the top-right, still big
-    /// enough to keep the last commands and the running cursor readable, while
-    /// the rest of the screen is clear for the reader to act on the control the
-    /// eye is pointing at.
+    /// The parked position: a small window tucked into the BOTTOM-right, still
+    /// big enough to keep the last commands and the running cursor readable,
+    /// while the rest of the screen is clear for the reader to act on the
+    /// control the eye is pointing at.
+    ///
+    /// It used to be the TOP-right, and that is the corner every browser keeps
+    /// its download chip in. Reported: "it is not at all useable right now
+    /// because it covers where the download symbol is" — measured on this Mac,
+    /// the parked window (1088, 580, 400, 340) overlapped Safari's and
+    /// Firefox's toolbar right cluster by 216x96pt. A manual step is very often
+    /// "download this installer", so Iris was parking on the one control it had
+    /// just told the reader to click.
+    ///
+    /// Bottom-right rather than either left corner: the top-right also holds
+    /// notifications and Control Center, and the left edge is where a
+    /// left-hand Dock lives (this Mac's `visibleFrame` starts at x=34 for
+    /// exactly that reason), so bottom-right is the only corner clear of all
+    /// three. The eye still flies to whatever the step points at, so nothing
+    /// about the pointing depends on which corner this is.
     private static func parkedFrame(on screen: NSScreen) -> CGRect {
         let width: CGFloat = 400
         let height: CGFloat = 340
         let margin: CGFloat = 24
         return CGRect(
             x: screen.visibleFrame.maxX - width - margin,
-            y: screen.visibleFrame.maxY - height - margin,
+            y: screen.visibleFrame.minY + margin,
             width: width, height: height
         )
     }
@@ -371,7 +514,16 @@ final class GuideAutopilotTakeoverController {
     /// the input bar uses, so the takeover behaves like the rest of Iris's
     /// chrome (never steals focus, rides above full-screen apps).
     private static func makeChromelessPanel(frame: CGRect) -> NSPanel {
-        let panel = NSPanel(
+        makeChromelessPanel(frame: frame, asA: NSPanel.self)
+    }
+
+    /// The same panel, built as a specific `NSPanel` subclass — the terminal
+    /// needs `GuideAutopilotTakeoverTerminalPanel`'s drag behaviour, the
+    /// click-through backdrop deliberately does not.
+    private static func makeChromelessPanel<Panel: NSPanel>(
+        frame: CGRect, asA panelClass: Panel.Type
+    ) -> Panel {
+        let panel = Panel(
             contentRect: frame,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -385,6 +537,219 @@ final class GuideAutopilotTakeoverController {
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         return panel
+    }
+}
+
+// MARK: - Making the whole card draggable, not just its title strip
+
+/// The takeover terminal's own window class, and the only thing in Iris that
+/// moves a window out from under AppKit's own rules.
+///
+/// WHY IT EXISTS. `isMovableByWindowBackground` is the documented way to drag a
+/// borderless window, and it is not enough here. AppKit only starts that drag
+/// when the view under the press answers `true` to `mouseDownCanMoveWindow`,
+/// and SwiftUI backs every selectable `Text` with an `NSTextField`/`NSTextView`
+/// that answers `false`. Measured on a structural replica of the parked card
+/// (400x340: a 24pt title strip, the transcript, the manual-step bar), posting
+/// real `CGEvent` drags of (-150, +60) and reading the window frame back:
+///
+///     grab                     hit view at mouse-down     result
+///     title strip              NSHostingView              MOVED
+///     transcript, top          DocumentView               DID NOT MOVE
+///     transcript, middle       SelectionTextField         DID NOT MOVE
+///     transcript, left gutter  SelectionTextField         DID NOT MOVE
+///
+/// The transcript is 65% of the parked card and 95% of the running one, so
+/// "draggable" meant a 24pt strip with nothing on screen naming it as a handle.
+/// The reader's words were "the terminal Iris is using is not movable at all"
+/// and "please make the terminal movable" — a strip they will never find does
+/// not answer that.
+///
+/// HOW IT WORKS. The press is HELD rather than dispatched, and what the reader
+/// does next decides who gets it:
+///
+///   - the pointer travels past `theSlopAClickIsAllowed` → this window owns the
+///     rest of the gesture and moves itself, one `setFrameOrigin` per dragged
+///     event. It never asks `mouseDownCanMoveWindow`, which is the whole point.
+///   - the button comes back up first → it was a CLICK, not a drag. The
+///     mouse-up is pushed back to the front of the queue and the held mouse-down
+///     is re-sent, so the view underneath sees an untouched click and behaves
+///     exactly as it did before: buttons fire, and a double- or triple-click
+///     still selects a word or a line in the transcript.
+///
+/// WHAT THIS COSTS, stated plainly: click-and-DRAG to select a range of
+/// transcript text now moves the window instead of selecting. That is a real
+/// trade and it is deliberate — the reported bug is a window the reader cannot
+/// get off the download button they are being told to click, and every other
+/// way of copying output survives (double-click a word, triple-click a line,
+/// right-click → Copy, and the wheel still scrolls because only
+/// `.leftMouseDown` is ever intercepted).
+final class GuideAutopilotTakeoverTerminalPanel: NSPanel {
+
+    /// How far the pointer must travel before this stops being a click and
+    /// starts being a drag. Small enough that a deliberate drag is picked up
+    /// immediately, large enough that the hand-shake in a real click is not.
+    private static let theSlopAClickIsAllowed: CGFloat = 3
+
+    /// A mouse held down for this long without moving is not a gesture anyone
+    /// is waiting on; the loop lets go rather than owning the main thread
+    /// forever. It then replays the press as an ordinary click.
+    private static let longestAGestureIsWatched: TimeInterval = 30
+
+    /// True only while a held-back click is being re-sent, so the re-send is
+    /// not caught and held a second time.
+    private var isReplayingAClickItHeldOnTo = false
+
+    /// The card's title strip — the 24pt band the red escape hatch lives in.
+    private static let heightOfTheTitleStrip: CGFloat = 24
+
+    /// How much of the card's width has to stay on a screen. Enough to hold the
+    /// three traffic lights and be grabbed again.
+    private static let narrowestSliverThatStaysReachable: CGFloat = 72
+
+    /// Clamps a dragged origin so the card can be pushed almost anywhere but
+    /// never off the edge of every display.
+    ///
+    /// Before this change the reader could only drag from a 24pt strip; now the
+    /// whole card is a handle, so it is that much easier to shove the thing
+    /// clean off the screen — and the reader's OTHER sentence about this window
+    /// was "you can't close out of it". The red escape hatch is in the title
+    /// strip, so the title strip is what is kept reachable: fully on a display
+    /// vertically, and at least `narrowestSliverThatStaysReachable` of it
+    /// horizontally. An ordinary drag never comes near these bounds.
+    static func keepingTheTitleStripReachable(
+        _ proposedOrigin: CGPoint, forACardOfSize size: CGSize
+    ) -> CGPoint {
+        let everywhereTheReaderCanSee = NSScreen.screens
+            .map(\.visibleFrame)
+            .reduce(CGRect.null) { $0.union($1) }
+        guard !everywhereTheReaderCanSee.isNull, !everywhereTheReaderCanSee.isEmpty else {
+            return proposedOrigin
+        }
+
+        let leftmost = everywhereTheReaderCanSee.minX - size.width + narrowestSliverThatStaysReachable
+        let rightmost = everywhereTheReaderCanSee.maxX - narrowestSliverThatStaysReachable
+        // The strip sits at the TOP of the card, so its band in AppKit's
+        // bottom-left coordinates runs from `origin.y + height - 24` upwards.
+        let lowest = everywhereTheReaderCanSee.minY + heightOfTheTitleStrip - size.height
+        let highest = everywhereTheReaderCanSee.maxY - size.height
+        return CGPoint(
+            x: min(max(proposedOrigin.x, leftmost), max(leftmost, rightmost)),
+            y: min(max(proposedOrigin.y, lowest), max(lowest, highest))
+        )
+    }
+
+    /// Where inside the window the press landed. Window-relative by definition
+    /// for a real event; an event carrying no window carries a SCREEN location
+    /// instead (see `screenLocation(of:)`), so that one is converted.
+    static func grabOffsetInWindow(of mouseDown: NSEvent, in window: NSWindow) -> CGPoint {
+        guard mouseDown.window == nil else { return mouseDown.locationInWindow }
+        return CGPoint(
+            x: mouseDown.locationInWindow.x - window.frame.minX,
+            y: mouseDown.locationInWindow.y - window.frame.minY
+        )
+    }
+
+    /// Where a mouse event happened, in screen coordinates.
+    ///
+    /// An event that belongs to a window carries a window-relative location, and
+    /// this window MOVES underneath the gesture, so converting that back would
+    /// chase its own tail — the live pointer is the honest answer. An event with
+    /// no window (`NSEvent.mouseEvent(with:location:… window: nil …)`) already
+    /// carries a screen location by definition, and reading it is what lets a
+    /// test drive this exact loop with a posted gesture instead of seizing the
+    /// machine's physical mouse.
+    static func screenLocation(of event: NSEvent) -> CGPoint {
+        event.window == nil ? event.locationInWindow : NSEvent.mouseLocation
+    }
+
+    override func sendEvent(_ event: NSEvent) {
+        guard event.type == .leftMouseDown,
+              !isReplayingAClickItHeldOnTo,
+              // A control-click is the context menu, not a drag. Leave it be.
+              !event.modifierFlags.contains(.control),
+              let contentView,
+              // A scrollbar is the one control whose whole job IS the drag, so
+              // it is the one place the window must not take the gesture.
+              // Buttons need no exception: a click on one is replayed intact.
+              !(contentView.hitTest(contentView.convert(event.locationInWindow, from: nil))
+                  is NSScroller)
+        else {
+            super.sendEvent(event)
+            return
+        }
+
+        if theGestureTurnedOutToBeADrag(startingFrom: event) { return }
+
+        // It was a click, and the mouse-up has already been pushed back to the
+        // head of the queue, so the view's own tracking loop finds it waiting
+        // the moment this re-sent mouse-down reaches it.
+        isReplayingAClickItHeldOnTo = true
+        super.sendEvent(event)
+        isReplayingAClickItHeldOnTo = false
+    }
+
+    /// Watches the gesture the held mouse-down opened. Returns true if it became
+    /// a drag (and the window has already been moved and the gesture consumed),
+    /// false if it was a click that still needs delivering.
+    ///
+    /// This is an AppKit tracking loop, the same shape `NSButton` and
+    /// `NSTextView` run while the mouse is down: it pulls the rest of the
+    /// gesture out of the queue itself. It must, because a `SelectionTextField`
+    /// that received the mouse-down would run ITS loop and swallow every
+    /// dragged event before `sendEvent` could see another one.
+    private func theGestureTurnedOutToBeADrag(startingFrom mouseDown: NSEvent) -> Bool {
+        // Where in the CARD the reader took hold of it. The window has not moved
+        // yet, so this is exact — and holding the grab OFFSET rather than a
+        // start position is what makes the drag self-correcting: every frame
+        // simply puts that spot back under the pointer, so a coalesced or
+        // late-delivered event can never leave the card lagging the hand.
+        let whereTheReaderTookHold = Self.grabOffsetInWindow(of: mouseDown, in: self)
+        let whereThePointerWasAtThePress = CGPoint(
+            x: frame.minX + whereTheReaderTookHold.x, y: frame.minY + whereTheReaderTookHold.y
+        )
+        var theWindowIsFollowingThePointer = false
+        let giveUpAt = Date().addingTimeInterval(Self.longestAGestureIsWatched)
+
+        while true {
+            guard let nextEventInTheGesture = NSApp.nextEvent(
+                matching: [.leftMouseUp, .leftMouseDragged],
+                until: giveUpAt,
+                inMode: .eventTracking,
+                dequeue: true
+            ) else {
+                // Timed out with the button still down. Treat it as a click so
+                // the press is not simply lost.
+                return theWindowIsFollowingThePointer
+            }
+
+            if nextEventInTheGesture.type == .leftMouseUp {
+                if theWindowIsFollowingThePointer { return true }
+                NSApp.postEvent(nextEventInTheGesture, atStart: true)
+                return false
+            }
+
+            let pointerNow = Self.screenLocation(of: nextEventInTheGesture)
+            let travelled = CGPoint(
+                x: pointerNow.x - whereThePointerWasAtThePress.x,
+                y: pointerNow.y - whereThePointerWasAtThePress.y
+            )
+            if !theWindowIsFollowingThePointer,
+               hypot(travelled.x, travelled.y) >= Self.theSlopAClickIsAllowed {
+                theWindowIsFollowingThePointer = true
+            }
+            if theWindowIsFollowingThePointer {
+                setFrameOrigin(
+                    Self.keepingTheTitleStripReachable(
+                        CGPoint(
+                            x: pointerNow.x - whereTheReaderTookHold.x,
+                            y: pointerNow.y - whereTheReaderTookHold.y
+                        ),
+                        forACardOfSize: frame.size
+                    )
+                )
+            }
+        }
     }
 }
 
@@ -420,7 +785,7 @@ private struct GuideAutopilotTakeoverView<Runner: AutopilotTerminalPresenting>: 
     /// The reader tapped "I did it — continue" on a manual step Iris parked on
     /// (a permission grant, a sign-in) that has no watch signal to auto-advance.
     let onReaderFinishedManualStep: () -> Void
-    /// The red traffic light — stop the step, or close the run when idle.
+    /// The red traffic light — closes the takeover, whatever Iris is doing.
     let onEscapeHatch: () -> Void
 
     var body: some View {

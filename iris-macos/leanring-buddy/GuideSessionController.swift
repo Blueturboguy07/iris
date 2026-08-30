@@ -444,6 +444,30 @@ final class GuideSessionController: ObservableObject {
 
     private var pointingTask: Task<Void, Never>?
 
+    /// The flight the eye is currently showing, so an app activation that
+    /// resolves to the identical answer does not fly it all over again.
+    ///
+    /// The 400ms coalescer below merges one cmd-tab's burst; this is the other
+    /// half, and the two are not substitutes. Three deliberate visits to the
+    /// browser a minute apart are three SETTLED activations, and each one used
+    /// to be a full fly-out / say-the-step-title / hold-three-seconds /
+    /// fly-home, at the same point, on a step the reader had already finished:
+    /// "It also keeps pointing multiple times for whatever reason, whenever I
+    /// open the browser, even after installing it."
+    ///
+    /// The eye really does re-fly on a repeat rather than sitting still,
+    /// because `OverlayWindow.finishNavigationAndResumeFollowing()` nils
+    /// `detectedElementScreenLocation` when the eye goes home — so the next
+    /// identical location is a change as far as `.onChange` is concerned. The
+    /// cheaper-looking fix of comparing locations in the overlay would have
+    /// been wrong for the same reason: by then the answer has already been
+    /// recomputed and the step re-announced.
+    ///
+    /// Per-controller, not shared: one guide session must never suppress
+    /// another session's first flight, and the first flight of a step is the
+    /// entire feature.
+    private var theFlightTheEyeIsShowing = GuideEyeFlightMemo()
+
     /// Re-aims the eye whenever the reader lands in a different app. The
     /// pointing decision is frontmost-gated — no arrow over a window nobody
     /// can see — and without this the gate was a one-shot race: a permission
@@ -536,6 +560,7 @@ final class GuideSessionController: ObservableObject {
         else {
             pointingDecisionForTheOpenStep = .doNotPoint(.stepHasNothingToPointAt)
             explanationForIrisHavingStoppedPointingAtThisStep = nil
+            theFlightTheEyeIsShowing.theEyeStoppedPointing()
             stopPointingTheEye?()
             return
         }
@@ -614,8 +639,43 @@ final class GuideSessionController: ObservableObject {
                 )
             self.pointingDecisionForTheOpenStep = outcome.decision
             if let location = outcome.screenLocation, let displayFrame = outcome.displayFrame {
-                self.sendTheEyeTo?(location, displayFrame, step.title)
+                // Same step, same place, same words — the eye is already
+                // saying it, so saying it again is noise, not help. Anything
+                // that is genuinely new (the step moved on, the window moved,
+                // the target app finally came forward and turned a refusal
+                // into a point) is a different flight and still flies.
+                let flight = GuideEyeFlight(
+                    stepIdentity: stepIdentityForBudget,
+                    screenLocation: location,
+                    label: step.title
+                )
+                if self.theFlightTheEyeIsShowing.theEyeShouldFly(to: flight) {
+                    self.sendTheEyeTo?(location, displayFrame, step.title)
+                }
             } else {
+                // THE MEMO IS DELIBERATELY NOT CLEARED HERE. This branch is
+                // where "it keeps pointing multiple times whenever I open the
+                // browser" actually comes from: pointing refreshes on every app
+                // activation, and the answer for a step really does go nil the
+                // moment another app is frontmost. Measured on this Mac, same
+                // page still open, same descriptor:
+                //
+                //     …in com.apple.Safari  -> (240, 144, 72, 18)
+                //     …in com.apple.finder  -> nil
+                //     …in com.apple.Terminal -> nil
+                //
+                // So browser → anything → browser used to be fly, forget, fly
+                // again — every single time, on a step the reader had already
+                // finished. Forgetting on "the target went away" made the memo
+                // suppress only two activations that both landed inside the
+                // target app, which is not the reported scenario at all.
+                //
+                // The eye stops pointing either way (`stopPointingTheEye`); what
+                // survives is the knowledge that this reader has ALREADY been
+                // shown this step at this place. A genuinely new answer — the
+                // step moved on, the window moved — is a different flight and
+                // still flies, and the hard reset for "there is no step any
+                // more" is still done by the guard at the top of this method.
                 self.stopPointingTheEye?()
             }
         }
@@ -793,9 +853,9 @@ final class GuideSessionController: ObservableObject {
     /// since retired answers "this version of the guide is no longer
     /// available", which is a worse reply to "put me back" than simply opening
     /// the guide as it stands today — and when the guide really has moved on,
-    /// `restoreSavedProgress` finds nothing saved under the new version and
-    /// starts at step one, which is the honest answer (step 7 of v6 is not
-    /// step 7 of v7).
+    /// `restoreSavedProgress` puts them back on the step they stopped on by ID
+    /// wherever it has moved to, and starts them over only if that step is gone
+    /// from the new version.
     ///
     /// The branch IS carried across, because a reader's place is per-branch:
     /// resuming the Android build into the iPhone branch would be somebody
@@ -1395,27 +1455,41 @@ final class GuideSessionController: ObservableObject {
     func approveThePendingRiskyCommand() { autopilotRunner?.approvePendingCommand() }
     func skipThePendingRiskyCommand() { autopilotRunner?.skipPendingCommand() }
 
-    /// The terminal's red close button — the escape hatch. While Iris is
-    /// mid-step (a command in the shell, a pending confirm tap, or the fix
-    /// ladder), it stops that step: the command is interrupted and the step
-    /// lands on the "Your turn" row, so the install continues on the reader's
-    /// terms. When nothing is in flight — Iris is already waiting on the
-    /// reader — the red button means what it means on every Mac window:
-    /// close. Autopilot ends, the takeover folds away, and the guide stays
-    /// open where they left it.
+    /// The terminal's red traffic light. It CLOSES, in every state, because
+    /// that is what a red traffic light means on a Mac and this one is drawn to
+    /// look exactly like the real thing — down to the × on hover.
+    ///
+    /// It used to mean two different things depending on hidden state, and both
+    /// of them read as broken to the reader who reported it:
+    ///
+    ///   - Mid-drive it aborted the STEP and left the window standing. That is
+    ///     not "mid-command" the way it sounds: `autopilotIsDriving` is true for
+    ///     the whole drive loop, and a manual gate (Install Rust, Install CMake)
+    ///     parks INSIDE that loop — so at the exact moment a reader is most
+    ///     likely to want out, clicking the close button closed nothing. Click
+    ///     it twice and it aborted twice.
+    ///   - The `guard autopilotIsRunning, let runner` in front of it returned
+    ///     silently whenever autopilot had already stopped under a takeover that
+    ///     was still on screen, which is a completely dead button.
+    ///
+    /// Hence: "you can't close out of it". Closing is now unconditional. The
+    /// guide stays open where they left it, so closing costs the reader their
+    /// automation, never their place.
     func abortOrCloseAutopilotFromTheEscapeHatch() {
-        guard autopilotIsRunning, let runner = autopilotRunner else { return }
-        if autopilotIsDriving {
-            // The runner surfaces the step immediately (the "Your turn" row)
-            // and the drive loop does the hand-back itself as the aborted
-            // step unwinds — doing it eagerly here would un-muzzle the watch
-            // loop while the drive loop is still inside the step.
-            irisTrace("escape hatch: aborting the in-flight step")
-            Task { await runner.abortTheCurrentStepBecauseTheReaderAskedToStop() }
-        } else {
-            irisTrace("escape hatch: nothing in flight → stopping autopilot")
-            stopAutopilot()
+        irisTrace("escape hatch: closing the takeover")
+        if let runnerThatMayBeMidStep = autopilotRunner {
+            // Enqueued BEFORE the `endSession` task `stopAutopilot` starts, so
+            // the process group is SIGKILLed while its shell still exists.
+            // `endSession` closes the shell politely, and a heavy build — a Rust
+            // release, electron-builder — ignores polite. This abort is what
+            // actually stops a wedged install, which is the reason the escape
+            // hatch exists at all.
+            Task { await runnerThatMayBeMidStep.abortTheCurrentStepBecauseTheReaderAskedToStop() }
         }
+        // Unconditional on purpose: `stopAutopilot` is also what folds the
+        // takeover away (`onAutopilotDidStop`), so it has to run even when
+        // autopilot already stopped underneath a window that is still up.
+        stopAutopilot()
     }
 
     /// The reader tapped "Try again" on a step Iris surfaced. Re-run the step's
@@ -2460,10 +2534,10 @@ final class GuideSessionController: ObservableObject {
 
     private func restoreSavedProgress(forBranch branch: IrisGuideBranch) async {
         guard let guide = guideBeingFollowed else { return }
-        // The version is baked into the storage key, so a guide that has moved
-        // to a new version simply finds nothing saved and starts at step one.
-        // That is the point: step nine of version two may not exist in version
-        // three, and resuming into it would drop the reader somewhere wrong.
+        // The version is no longer in the storage key — that is what made every
+        // republish throw a reader back to step one. `GuideService.loadProgress`
+        // re-derives the resume from the ID of the step they stopped on, and
+        // only starts them over when that step genuinely no longer exists.
         let savedProgress = await guideService.loadProgress(
             slug: guide.appSlug,
             version: guide.version,

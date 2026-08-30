@@ -159,11 +159,38 @@ final class CompanionManager: ObservableObject {
             let claudeAPI = self?.claudeAPI ?? ClaudeAPI(resolveTransport: {
                 .failure(.transportFailure(reason: "assistant unavailable"))
             })
+            let accountService = self?.accountService
             return GuideAutopilotRunner(
                 shellSession: GuideAutopilotShellSession(),
                 longRunningSession: GuideAutopilotShellSession(),
                 fixProposer: GuideAutopilotFixProposer(claudeAPI: claudeAPI),
-                guideContext: context
+                guideContext: context,
+                // Who pays decides whether publik's funded-tier cap applies at
+                // all, and what Iris may carry on with when publik's own budget
+                // for this install runs out. Signed in means the ladder really
+                // is spending publik's money (AssistantTransport.selectTransport
+                // prefers the funded route); signed out with a connected
+                // credential means it never was.
+                //
+                // A CLOSURE, ASKED AT EVERY SPEND — not the value of
+                // `signedInAccount` at the instant this runner was built. This
+                // factory runs once, when the reader taps "Let Iris run it", and
+                // the install that follows lasts tens of minutes; the fix
+                // proposer above is driven by THIS manager's shared `claudeAPI`,
+                // whose transport is deliberately resolved per request (see its
+                // note below) precisely because a reader can sign in partway
+                // through. Reading sign-in once here and the route per request
+                // meant a reader who signed into publik mid-install ran the fix
+                // ladder on publik's funded tier with the cap switched off.
+                fixLadderFunding: .forThisReader(
+                    whetherTheReaderIsSignedIntoPublikRightNow: {
+                        // No account service means this manager is gone and the
+                        // install is being torn down. Answer "signed in" so
+                        // publik's cap applies — the safe direction to be wrong.
+                        guard let accountService else { return true }
+                        return accountService.signedInAccount != nil
+                    }
+                )
             )
         }
     )

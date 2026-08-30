@@ -163,24 +163,30 @@ struct GuideAutopilotFixLadderFunding {
     /// signed into publik. One call, so the app's runner factory is a one-line
     /// change rather than a second copy of this reasoning.
     ///
-    /// THE CREDENTIAL IRIS CAN FALL BACK TO IS AN ANTHROPIC ONE — a pasted key
-    /// or a connected Claude Code login. That is not a preference. The ladder
-    /// asks for a forced `propose_fix` tool_use over the Anthropic Messages API,
-    /// and `codex exec` cannot serve that wire format; it powers Tier C only
-    /// (CLAUDE.md, "Assistant transports"). So a reader whose ONLY credential is
-    /// the Codex CLI — which is the reader who reported this — still gets
-    /// publik's cap and still gets the honest message, and giving him the
-    /// fallback needs a Codex-backed `GuideAutopilotFixProposing` that runs
-    /// `codex exec` and parses a fix out of the last message, the way
-    /// `CodexMaintainProvider` does for Tier C text turns. That is a real
-    /// component, not a wiring detail, so it is deliberately NOT smuggled in
-    /// here; this seam takes any proposer, so it is one argument away the day it
-    /// exists.
+    /// EITHER OF THE READER'S OWN CREDENTIALS CAN CARRY THE LADDER — an
+    /// Anthropic one (a pasted key or a connected Claude Code login) or the
+    /// Codex CLI. Anthropic is preferred purely on speed: Codex is roughly 9x
+    /// slower per call, so it is the fallback's fallback, not a coin toss.
+    ///
+    /// Codex needed its own proposer to get here. The ladder's Anthropic route
+    /// forces a `propose_fix` tool_use, and `codex exec` has no tool-use wire
+    /// format to force — which is why the reader who reported this ("I have the
+    /// codex CLI? The usage shouldn't be a problem") kept hitting publik's cap
+    /// even after the cap became provider-aware. `GuideAutopilotCodexFixProposer`
+    /// closes it the way Tier C already handles the same CLI: ask for a fenced
+    /// json object and hand it to the SAME validator, guardrails included.
     ///
     /// TAKES A CLOSURE, NOT A BOOL. Sign-in state is not a property of the
     /// moment an install starts; it is a property of the moment a call is
     /// made, and the two are tens of minutes apart. See
     /// `whetherPublikIsPayingForTheseCalls` for what a latched Bool cost.
+    /// Whether the reader has ANY credential of their own the ladder can run on.
+    /// Both count: publik pays for neither, so neither is protected by the cap.
+    @MainActor
+    static func readerHasTheirOwnCredential() -> Bool {
+        AnthropicBringYourOwnCredential.isAvailable || CodexCLILogin.currentState().isUsable
+    }
+
     @MainActor
     static func forThisReader(
         whetherTheReaderIsSignedIntoPublikRightNow: @escaping @MainActor () -> Bool
@@ -200,19 +206,26 @@ struct GuideAutopilotFixLadderFunding {
                 // at all, so keep the funded shape and let the honest "I've used
                 // up what I can spend" message be the one that fires. That is
                 // also the safe direction to be wrong in.
-                return !AnthropicBringYourOwnCredential.isAvailable
+                return !readerHasTheirOwnCredential()
             },
             makeAProposerOnTheReadersOwnCredential: {
-                guard AnthropicBringYourOwnCredential.isAvailable else { return nil }
-                // The same BYO-only shape `MaintainFixAdapter` and
-                // `AnthropicMaintainProvider` use: no account service, no funded
-                // fallback, so a call made here can never land on publik's tier.
-                return GuideAutopilotFixProposer(claudeAPI: ClaudeAPI(resolveTransport: {
-                    guard let transport = AnthropicBringYourOwnCredential.currentTransport() else {
-                        return .failure(.noCredentialsAvailable)
-                    }
-                    return .success(transport)
-                }))
+                // Anthropic first, on speed alone — Codex is about 9x slower per
+                // call, and a ladder rung is something the reader is watching.
+                if AnthropicBringYourOwnCredential.isAvailable {
+                    // The same BYO-only shape `MaintainFixAdapter` and
+                    // `AnthropicMaintainProvider` use: no account service, no funded
+                    // fallback, so a call made here can never land on publik's tier.
+                    return GuideAutopilotFixProposer(claudeAPI: ClaudeAPI(resolveTransport: {
+                        guard let transport = AnthropicBringYourOwnCredential.currentTransport() else {
+                            return .failure(.noCredentialsAvailable)
+                        }
+                        return .success(transport)
+                    }))
+                }
+                // The Codex CLI drives itself and stores nothing in Iris, so
+                // there is no transport to pin here — the CLI owns the token.
+                let codexProposer = GuideAutopilotCodexFixProposer()
+                return codexProposer.isAvailable ? codexProposer : nil
             }
         )
     }

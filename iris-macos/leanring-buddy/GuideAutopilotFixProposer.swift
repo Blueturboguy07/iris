@@ -124,14 +124,33 @@ final class GuideAutopilotFixProposer: GuideAutopilotFixProposing {
         context: GuideAutopilotFailureContext
     ) -> GuideAutopilotProposedFix? {
         guard let toolUse = message.toolUses.first(where: { $0.name == "propose_fix" }),
-              let input = toolUse.inputObject,
-              let diagnosis = input["diagnosis"] as? String,
+              let input = toolUse.inputObject else {
+            // No proposal is a legitimate answer at rung (b) — the model
+            // searched and found nothing. The runner escalates.
+            return nil
+        }
+        return validatedFix(fromProposalObject: input, cameFromWebSearch: cameFromWebSearch, context: context)
+    }
+
+    /// Everything that turns a raw proposal object into a fix Iris will act on,
+    /// INCLUDING the guardrails — not merely a decode.
+    ///
+    /// Split out from `decodedFix` so the Codex proposer shares it byte for
+    /// byte. Codex has no tool-use wire format and hands back a fenced JSON
+    /// object instead, but the object has the same shape, and the host
+    /// allowlist below is the structural answer to an invented hostname. A
+    /// second copy of this for the second provider is exactly how one route
+    /// quietly loses a guardrail the other keeps.
+    static func validatedFix(
+        fromProposalObject input: [String: Any],
+        cameFromWebSearch: Bool,
+        context: GuideAutopilotFailureContext
+    ) -> GuideAutopilotProposedFix? {
+        guard let diagnosis = input["diagnosis"] as? String,
               let confidence = input["confidence"] as? String,
               let retry = input["retryTheOriginalCommandAfterwards"] as? Bool,
               let actionObject = input["action"] as? [String: Any],
               let kind = actionObject["kind"] as? String else {
-            // No proposal is a legitimate answer at rung (b) — the model
-            // searched and found nothing. The runner escalates.
             return nil
         }
 

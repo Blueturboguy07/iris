@@ -244,9 +244,16 @@ import Testing
     @Test func anOrdinaryQuestionIsNeverMistakenForAnEditInstruction() {
         #expect(OverlayEyeSuggestions.editInstructionKind(forMessage: "why does it keep crashing?") == nil)
         #expect(OverlayEyeSuggestions.editInstructionKind(forMessage: "how do I export?") == nil)
-        // Deliberately narrow: a bare "add a dark mode" is a wish to POOL, not a
-        // build instruction — it stays on the chat pipeline, so nil here.
-        #expect(OverlayEyeSuggestions.editInstructionKind(forMessage: "add a dark mode") == nil)
+        // REVERSED by founder ruling (Aug 31 2026). This used to pin "add a
+        // dark mode" to nil — "a wish to POOL, not a build instruction" — and
+        // that narrowness is exactly what the founder reported as broken:
+        // "when i try to type it in the normal text box and enter it points at
+        // some bullshit." The classifier only runs when an app Iris may edit
+        // is FRONTMOST, and the card still asks the reader to confirm the
+        // kind, so an imperative with a change verb now routes to the editor.
+        // Pooling remains what maintain-mode asks do; a typed imperative at an
+        // editable app is an instruction.
+        #expect(OverlayEyeSuggestions.editInstructionKind(forMessage: "add a dark mode") == .feature)
     }
 
     @Test func theSuggestedKindPreselectFollowsThePhrasing() {

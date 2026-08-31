@@ -863,6 +863,25 @@ final class CompanionManager: ObservableObject {
             self?.appInventoryService.installedApplicationURL(forBundleIdentifier: bundleId) != nil
         }
 
+        // A freshly installed guide build is ad-hoc signed, which identifies it
+        // to TCC by the hash of that exact binary — so every rebuild loses the
+        // reader's permission grants. Give it the stable identity before its
+        // first launch, so the very first grant is one that survives. See
+        // InstallSignatureStabilizer for the measurements.
+        guideSessionController.stabilizeInstalledAppSignature = { [weak self] bundleId in
+            guard let installedURL = self?.appInventoryService
+                .installedApplicationURL(forBundleIdentifier: bundleId) else { return }
+            let outcome = await InstallSignatureStabilizer.stabilize(bundleAtPath: installedURL.path)
+            switch outcome {
+            case .stabilized:
+                irisTrace("install-signing: stabilized \(bundleId) — grants now survive rebuilds")
+            case .alreadyStable:
+                irisTrace("install-signing: \(bundleId) already carries a certificate; left alone")
+            case .couldNotStabilize(let reason):
+                irisTrace("install-signing: could not stabilize \(bundleId) — \(reason)")
+            }
+        }
+
         // "Where is this install actually up to?" — one model call, reading
         // facts Iris gathered locally. Wired here because the controller stays
         // free of any transport; a nil return leaves saved progress alone.

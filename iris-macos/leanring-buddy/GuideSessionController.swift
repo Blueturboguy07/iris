@@ -2405,6 +2405,18 @@ final class GuideSessionController: ObservableObject {
         }
         let lastStepIndex = branch.steps.count - 1
         let wasAlreadyFinished = readerHasFinishedTheGuide
+        // Leaving the install step means the bundle just landed on disk. Give
+        // it the stable signing identity NOW, before the open step launches it
+        // and the reader starts granting permissions to a cdhash that the next
+        // rebuild invalidates. Fire-and-forget: a slow or failed signing must
+        // never hold up the guide, and the stabilizer itself never breaks an
+        // install — worst case the app stays exactly as built.
+        if let installStepIndex = indexOfTheStepThatInstallsTheApp(inBranch: branch),
+           currentStepIndex == installStepIndex,
+           let bundleId = branch.installedDesktopAppBundleId,
+           let stabilizeInstalledAppSignature {
+            Task { await stabilizeInstalledAppSignature(bundleId) }
+        }
         if currentStepIndex >= lastStepIndex {
             // Past the last step is the completion card, never a step index the
             // branch does not have.
@@ -2630,6 +2642,16 @@ final class GuideSessionController: ObservableObject {
 
     /// Injected by CompanionManager: is this bundle actually installed?
     var installedDesktopAppCheck: ((String) -> Bool)?
+
+    /// Called with the branch's bundle id the moment the install step
+    /// completes — after the bundle lands in /Applications, BEFORE the open
+    /// step launches it. That ordering is the point: the reader grants
+    /// permissions on first launch, and a grant made against the ad-hoc
+    /// identity `tauri build` produces dies on the next rebuild, while one
+    /// made against the stable identity survives every rebuild after. Wired by
+    /// CompanionManager to `InstallSignatureStabilizer`; nil (tests, a
+    /// headless controller) changes nothing about the install.
+    var stabilizeInstalledAppSignature: ((_ bundleId: String) async -> Void)?
 
     // MARK: - Working out where the reader actually is
 

@@ -417,6 +417,10 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// produces a relaunchable macOS artifact (`AppRelaunchService`). When nil or
     /// false, `keepChange()` degrades to the honest manual "Relaunch <App>
     /// yourself" terminal state — the same one the crash path uses today.
+    /// The sentence the model stopped on, kept so a rebuild that fails can put
+    /// the blocked card back exactly as it was rather than losing the diagnosis.
+    private var lastBlockedExplanation = ""
+
     var relaunchIsAvailableForApp: ((_ appSlug: String) -> Bool)?
 
     /// Package a fresh, launchable artifact FROM the clone (design §4 Option A).
@@ -1287,8 +1291,90 @@ final class OnDemandEditCoordinator: ObservableObject {
             clonePathLock.release(clonePath: resolvedClonePath)
             self.resolvedClonePath = nil
             blockedQuestionForUser = questionForUser
+            lastBlockedExplanation = explanation
             phase = .blockedByModel(explanation: explanation)
             statusLine = explanation
+        }
+    }
+
+    // MARK: - Rebuilding, when that is what the block was actually asking for
+
+    /// Whether Iris can carry out the thing it just stopped on, instead of
+    /// handing the reader a command.
+    ///
+    /// Founder report, on being told to run `ui/node_modules/.bin/tauri build
+    /// --bundles app` himself: "lol shouldnt iris run that shit itself."
+    ///
+    /// He is right, and the gap was faintly absurd: `AppRelaunchService` already
+    /// DERIVES that exact invocation for this stack — its own comment cites the
+    /// whimprflow run that produced `ui/node_modules/.bin/tauri` — and the
+    /// success path already packages and relaunches with it. The blocked path
+    /// simply never asked, because it only knew how to stop.
+    ///
+    /// A whole class of block is not "this code cannot be changed" but "the
+    /// binary on disk is stale or was built outside the signed `.app` workflow",
+    /// which no source edit can fix and a rebuild fixes completely. That is
+    /// exactly what the model diagnosed here.
+    var irisCanRebuildTheBlockedApp: Bool {
+        guard case .blockedByModel = phase, let slug = activeAppSlug else { return false }
+        return relaunchIsAvailableForApp?(slug) == true
+            && packageEditedAppFromClone != nil
+            && terminateAndRelaunchEditedApp != nil
+    }
+
+    /// Rebuild the app from its clone and relaunch it, after a block that a
+    /// rebuild would resolve.
+    ///
+    /// Offered rather than automatic, deliberately. Nothing was changed by the
+    /// run, so this is not delivering an edit — it is replacing a running binary
+    /// on the reader's behalf, which is the destructive consent (§Consent #3)
+    /// the success path also asks for. One tap is the difference between Iris
+    /// doing its job and Iris dictating a command.
+    func rebuildAndRelaunchTheBlockedApp() {
+        guard irisCanRebuildTheBlockedApp,
+              let slug = activeAppSlug,
+              let package = packageEditedAppFromClone,
+              let relaunch = terminateAndRelaunchEditedApp else { return }
+        let appName = activeAppName ?? slug
+
+        phase = .delivering
+        deliveryIsAutomatic = false
+        statusLine = "Rebuilding \(appName) from its clone…"
+        editRunner.note("Rebuilding \(appName) from the clone — nothing in the source was changed.")
+
+        Task { @MainActor in
+            let packaging = await package(slug)
+            guard case .artifactReady(let artifactPath, let signingSummary) = packaging else {
+                editRunner.note("Iris couldn't build \(appName) from its clone.")
+                editRunner.finishStopped()
+                statusLine = "Couldn't rebuild \(appName). The command the block named is still the way in."
+                phase = .blockedByModel(explanation: lastBlockedExplanation)
+                return
+            }
+            packagedArtifactPath = artifactPath
+            editRunner.note("Built a fresh \(appName) from the clone (\(signingSummary)).")
+
+            let launch = await relaunch(slug, artifactPath, false)
+            editRunner.finishApplied()
+            phase = .done
+            switch launch {
+            case .relaunchedFreshBuild:
+                editRunner.note("\(appName) is running the freshly built bundle.")
+                // Said out loud because it is the thing that will surprise them
+                // next: a fresh from-source build is a different signed identity
+                // to macOS, so the grants do NOT carry over. That is the same
+                // mechanism the model diagnosed as the original problem.
+                statusLine = "Rebuilt \(appName) and relaunched it. macOS sees a fresh build as a new app, so grant its permissions once more."
+            case .runningAppWouldNotQuit:
+                editRunner.note("\(appName) wouldn't quit — probably an unsaved-work dialog. Iris did not force it.")
+                statusLine = "Built a fresh \(appName), but the running copy wouldn't quit. Close it yourself, then open \(artifactPath)."
+            case .launchFailedPriorAppRestored(let reason):
+                editRunner.note("The fresh build wouldn't launch (\(reason)); Iris put the previous one back.")
+                statusLine = "Built \(appName) at \(artifactPath), but it wouldn't launch: \(reason). Your previous copy is running again."
+            case .ineligible(let reason):
+                editRunner.note("Iris couldn't relaunch \(appName): \(reason)")
+                statusLine = "Built a fresh \(appName) at \(artifactPath). Quit the running copy and open that one."
+            }
         }
     }
 

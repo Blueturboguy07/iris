@@ -505,6 +505,14 @@ final class AppRelaunchService {
     /// workspace-layout ambiguity (`target/` vs `src-tauri/target/`) is resolved
     /// at the ARTIFACT-DISCOVERY step below by searching both, so the command
     /// itself stays layout-agnostic.
+    /// Test-only passthrough. `packageCommand` stays private — which stacks Iris
+    /// can package is an internal decision — but whether a stack is packageable
+    /// is exactly what decides if the blocked card may offer a rebuild, so it
+    /// needs to be assertable.
+    static func packageCommandForTesting(forStack stack: BreakAppStack, clonePath: String) -> String? {
+        packageCommand(forStack: stack, clonePath: clonePath)
+    }
+
     private static func packageCommand(forStack stack: BreakAppStack, clonePath: String) -> String? {
         switch stack {
         case .tauri:

@@ -788,6 +788,25 @@ struct OnDemandEditCard: View {
                 .font(.system(size: 10.5))
                 .foregroundColor(DS.Colors.textSecondary)
 
+            // A whole class of block is not "this code cannot be changed" but
+            // "the binary on disk is stale or was built outside the signed .app
+            // workflow" — which no source edit fixes and a rebuild fixes
+            // completely. Iris already derives that exact build command for this
+            // app's stack and already runs it on the success path, so handing
+            // the reader a command to paste was the one thing it should not do.
+            if coordinator.irisCanRebuildTheBlockedApp {
+                Button("Rebuild \(appName) for me") {
+                    coordinator.rebuildAndRelaunchTheBlockedApp()
+                }
+                .irisPrimaryPill(isFullWidth: true, isCompact: true)
+                .padding(.top, 2)
+
+                Text("Runs the build this project declares, from its clone, then relaunches it.")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             HStack(spacing: 8) {
                 Button("Done") { coordinator.cancel() }
                     .irisTextButton()

@@ -601,22 +601,69 @@ enum OverlayEyeSuggestions {
     /// still makes an explicit fix/feature choice there, because that choice
     /// drives the honesty label and the commit trailer and must never be
     /// silently inferred.
+    /// Verbs that open an instruction to CHANGE the app in front of you. A
+    /// message starting with one of these, while a publik app you can edit is
+    /// frontmost, is a request to edit it.
+    static let changeVerbs = [
+        "fix", "add", "build", "make", "change", "remove", "delete", "rename",
+        "move", "hide", "show", "disable", "enable", "replace", "update",
+        "improve", "stop", "increase", "decrease", "reduce", "support", "let",
+    ]
+
+    /// Openers that mean a QUESTION, never an instruction. Checked first, so
+    /// "what should i change here" stays a question even though it contains a
+    /// change verb.
+    static let questionOpeners = [
+        "what", "why", "how", "when", "where", "who", "which", "is", "are",
+        "was", "were", "do", "does", "did", "can", "could", "should", "would",
+        "will", "tell me", "explain", "show me how", "help me understand",
+    ]
+
+    /// Whether a typed message is an instruction to edit the app in front of
+    /// the reader, and which kind to PRESELECT in the card if so.
+    ///
+    /// This used to match six exact prefixes — "fix a bug", "add a feature" and
+    /// four near-variants — which made the whole feature chip-only in practice.
+    /// Founder report: "when i try to type it in the normal text box and enter
+    /// it points at some bullshit." He is right; "fix the export crash" is not
+    /// "fix the bug", so it fell through to chat, and chat points.
+    ///
+    /// Widening is safe HERE specifically, and only here, because the caller
+    /// (`CompanionManager.beginOnDemandEditIfMessageIsAnEditInstruction`) has
+    /// already established that a catalog app Iris may edit locally is the
+    /// frontmost window. "Fix the export crash" said while looking at WhimprFlow
+    /// has one plausible meaning. The kind is only PRESELECTED — the reader
+    /// makes the binding fix/feature choice in the card — so an imperfect guess
+    /// costs a click, never a wrong commit trailer.
     static func editInstructionKind(forMessage message: String) -> OnDemandEditKind? {
         let lowered = message
             .lowercased()
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        // Feature openers — deliberately narrow, matching the chip and its close
-        // free-text variants only.
+        guard !lowered.isEmpty else { return nil }
+
+        // A question is never an instruction, however it is worded. Checked
+        // before anything else so "how do i fix the export" stays chat.
+        if lowered.hasSuffix("?") { return nil }
+        for opener in questionOpeners where lowered == opener || lowered.hasPrefix(opener + " ") {
+            return nil
+        }
+
+        // The explicit chip openers still win outright, because they state the
+        // kind rather than implying it.
         for opener in ["add a feature", "add the feature", "add feature", "build a feature"]
         where lowered.hasPrefix(opener) {
             return .feature
         }
-        // Fix openers — likewise narrow.
-        for opener in ["fix a bug", "fix the bug", "fix bug"]
-        where lowered.hasPrefix(opener) {
+        for opener in ["fix a bug", "fix the bug", "fix bug"] where lowered.hasPrefix(opener) {
             return .bugFix
         }
-        return nil
+
+        // Otherwise: an imperative opening with a change verb.
+        let firstWord = lowered.split(whereSeparator: { $0 == " " || $0 == "\n" }).first.map(String.init)
+        guard let firstWord, changeVerbs.contains(firstWord) else { return nil }
+        // "add"/"build"/"support"/"let" read as new behaviour; everything else
+        // reads as something that is wrong. Both are a preselection only.
+        return ["add", "build", "support", "let"].contains(firstWord) ? .feature : .bugFix
     }
 
     /// What the bar says while Iris is working, which is a different sentence

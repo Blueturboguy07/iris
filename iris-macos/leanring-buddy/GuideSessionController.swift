@@ -349,6 +349,27 @@ final class GuideSessionController: ObservableObject {
     /// True while the drive loop is running, so the watch-loop resume path
     /// cannot start a second concurrent loop.
     private var autopilotIsDriving = false
+
+    /// Which step the takeover is parked on, waiting for the reader to say they
+    /// did it — the "I did it — continue" bar's step, and nil whenever that bar
+    /// is not the thing on screen.
+    ///
+    /// It exists because that button had no memory at all, and a reader whose
+    /// press appears to do nothing presses it again. Reported: "The I did it -
+    /// continue button is not working when trying to install cmake." Measured
+    /// at HEAD (`Test7ManualGateContinueRepro`): two presses at one gate ran
+    /// `advanceToTheNextStep` twice, so the guide moved TWO steps while
+    /// `resumeAutopilotAfterAdvance` — which refuses to re-enter a drive loop
+    /// that is already in flight — started nothing for the first of them. The
+    /// step immediately after the gate was skipped without ever being run, and
+    /// the only outward sign was the step counter creeping upward. His own
+    /// forensics show that shape: parked at the CMake gate, nothing running,
+    /// and a relaunch that resumed three steps further on.
+    ///
+    /// So the gate is cleared ONCE. A second press on the same parked step is
+    /// answered with a trace and nothing else, which is what "I did it" already
+    /// means the second time somebody says it.
+    private var theStepTheReaderIsBeingAskedToFinish: Int?
     /// True when autopilot ran into something on the current step it could not
     /// do on its own — it surfaced the step, skipped a risky command, or handed
     /// back a sensitive one — and is now waiting on the reader. It matters
@@ -1442,6 +1463,9 @@ final class GuideSessionController: ObservableObject {
         autopilotIsRunning = false
         runnerSessionHasStarted = false
         autopilotIsShownAsTakeover = false
+        // No install, no gate. A latch left set here would let a stray press
+        // move the reader off a step nobody is running.
+        theStepTheReaderIsBeingAskedToFinish = nil
         let runner = autopilotRunner
         autopilotRunner = nil
         Task { await runner?.endSession() }
@@ -1536,10 +1560,64 @@ final class GuideSessionController: ObservableObject {
     /// read, so there is no watch signal to auto-advance and the reader tells it
     /// when they are done. Advance and resume the install, exactly as the watch
     /// loop does for a step it CAN confirm.
+    ///
+    /// EVERY WAY OUT OF THIS FUNCTION SAYS SO IN THE LOG. It used to be three
+    /// lines with one bare `guard` and no trace at all, and that is why the
+    /// recurrence could not be diagnosed from the tester's own machine: his
+    /// forensics for "The I did it - continue button is not working when trying
+    /// to install cmake" could only report that Iris "parked with
+    /// readerMustManuallyContinue=true. No same-process continuation was
+    /// logged" — because there was nothing here that could log one, in either
+    /// direction. A press that did nothing and a press that never arrived left
+    /// identical evidence: none.
     func readerFinishedTheGatedStep() {
-        guard autopilotIsRunning else { return }
+        // A press with autopilot already stopped underneath a takeover that is
+        // still on screen used to return in silence. That is exactly the shape
+        // that made the red traffic light read as broken ("you can't close out
+        // of it") until it was made unconditional, and this button never got
+        // the same treatment. The reader has told us they did the step, so the
+        // guide moves on whether or not there is still an install to resume.
+        guard autopilotIsRunning else {
+            irisTrace("gate: reader tapped continue with autopilot stopped — advancing the guide anyway")
+            theStepTheReaderIsBeingAskedToFinish = nil
+            advanceToTheNextStep()
+            return
+        }
+        // Clear the gate ONCE. A second press on the same parked step must not
+        // walk the guide past a step Iris never ran — see
+        // `theStepTheReaderIsBeingAskedToFinish`.
+        guard let gatedStepIndex = theStepTheReaderIsBeingAskedToFinish else {
+            irisTrace("gate: reader tapped continue but no gate is open (step \(currentStepIndex)) — ignored")
+            return
+        }
+        theStepTheReaderIsBeingAskedToFinish = nil
+        // THE BAR NAMES A STEP, AND THAT IS THE STEP "I did it" IS ABOUT.
+        //
+        // The guide's own index can move out from under a bar that is still on
+        // screen: `GuidePanelView`'s Back button is live during a takeover and
+        // writes `currentStepIndex` directly (`returnToThePreviousStep`), as do
+        // `restartTheGuide` and the resume-position correction. This used to
+        // answer that divergence with a `return`, and the result was strictly
+        // worse than the bug being fixed — MEASURED: park at the CMake gate,
+        // press Back once, then press "I did it — continue" twice, and neither
+        // press ran a command, advanced a step, or took the bar down (the bar
+        // is only cleared by `returnToCenter`, which the stopped drive loop
+        // never reaches). A permanently dead button on a stranded install.
+        //
+        // So the divergence is RECONCILED rather than refused: the guide goes
+        // back to the step the bar is about and then moves past it, which is
+        // what the reader asked for and the only reading of that sentence that
+        // is true. The one-shot latch above still holds — a SECOND press on the
+        // same bar finds no gate and is ignored — so the double-press skip this
+        // whole latch exists to stop is unaffected.
+        if gatedStepIndex != currentStepIndex {
+            irisTrace("gate: reader tapped continue for step \(gatedStepIndex) but the guide is on \(currentStepIndex) — honouring the bar")
+            currentStepIndex = gatedStepIndex
+        }
+        irisTrace("gate: reader finished step \(gatedStepIndex) — advancing and resuming autopilot")
         autopilotHandedTheCurrentStepToTheReader = false
         advanceToTheNextStep()
+        irisTrace("gate: after continue, step=\(currentStepIndex) driving=\(autopilotIsDriving) running=\(autopilotIsRunning)")
     }
 
     /// What the chat model is told about the guide the reader is on, so a
@@ -1715,8 +1793,30 @@ final class GuideSessionController: ObservableObject {
             // is restored here rather than trusting every advance path to clear
             // the hand-back flag.
             autopilotHandedTheCurrentStepToTheReader = false
-            let step = branch.steps[currentStepIndex]
-            irisTrace("drive: step[\(self.currentStepIndex)] id=\(step.id) kind=\(String(describing: step.kind)) exec=\(self.stepIsAutopilotExecutable(step))")
+            // THE STEP THIS ITERATION IS ABOUT, pinned for the whole iteration.
+            //
+            // Every `await` below is a place the guide can move underneath this
+            // loop, because the watch loop advances on its own timer and its
+            // `advanceToTheNextStep` cannot start a second drive loop (its
+            // `!autopilotIsDriving` guard is true for the WHOLE of this
+            // function, a suspension included). Re-reading `currentStepIndex`
+            // after an await therefore mixes one step's decision with another
+            // step's index. MEASURED, in the full suite, on the tester's own
+            // guide shape: the watch loop cleared `install-rust` while this loop
+            // was suspended inside `everyToolThisStepWatchesForIsAlreadyPresent`
+            // for `install-cmake`, so the CMake gate parked with the index of
+            // the step AFTER it — and the reader's "I did it — continue" then
+            // advanced past `clone`, which was never run. `iris.log`:
+            //   drive: step[2] id=install-cmake … MANUAL branch, waiting at gate
+            //   gate: reader finished step 3 — advancing and resuming autopilot
+            //   drive: step[4] id=build
+            // That is the tester's own forensic shape — "parked at the CMake
+            // gate, nothing running, and a relaunch that picked up three steps
+            // further on" — and no amount of care inside the gate button can
+            // repair a gate that was recorded against the wrong step.
+            let stepIndexBeingDriven = currentStepIndex
+            let step = branch.steps[stepIndexBeingDriven]
+            irisTrace("drive: step[\(stepIndexBeingDriven)] id=\(step.id) kind=\(String(describing: step.kind)) exec=\(self.stepIsAutopilotExecutable(step))")
 
             guard stepIsAutopilotExecutable(step) else {
                 // A manual step: Iris opens what it can and then yields. The
@@ -1730,10 +1830,14 @@ final class GuideSessionController: ObservableObject {
                 // download page for something already installed is noise at
                 // best; here it also steals the frontmost window twice in a
                 // second.
-                if await everyToolThisStepWatchesForIsAlreadyPresent(step) {
+                let everyWatchedToolIsPresent =
+                    await everyToolThisStepWatchesForIsAlreadyPresent(step)
+                guard theGuideIsStillOn(stepIndexBeingDriven, having: step) else { continue }
+                if everyWatchedToolIsPresent {
                     irisTrace("drive: \(step.id) already satisfied — advancing without opening anything")
                     await holdBetweenAutoAdvancedSteps()
                     guard autopilotIsRunning else { return }
+                    guard theGuideIsStillOn(stepIndexBeingDriven, having: step) else { continue }
                     advanceFromWithinAutopilot()
                     continue
                 }
@@ -1751,6 +1855,7 @@ final class GuideSessionController: ObservableObject {
                     // on a blank terminal. Advance it ourselves after a beat.
                     await holdBetweenAutoAdvancedSteps()
                     guard autopilotIsRunning else { return }
+                    guard theGuideIsStillOn(stepIndexBeingDriven, having: step) else { continue }
                     advanceFromWithinAutopilot()
                     continue
                 }
@@ -1762,6 +1867,11 @@ final class GuideSessionController: ObservableObject {
                 // did it and advances, which resumes the install for the rest.
                 irisTrace("drive: step \(step.id) → MANUAL branch, waiting at gate (return)")
                 handTheCurrentStepBackToTheReader()
+                // This is the step the "I did it — continue" bar is about, and
+                // the only one it may clear. It is the index this iteration was
+                // pinned to, NOT whatever `currentStepIndex` reads now — see
+                // `stepIndexBeingDriven` above.
+                theStepTheReaderIsBeingAskedToFinish = stepIndexBeingDriven
                 onAutopilotWaitingForReaderAtGate?(step.title, step.body)
                 return
             }
@@ -1772,10 +1882,14 @@ final class GuideSessionController: ObservableObject {
             onAutopilotResumedFromGate?()
             irisTrace("drive: executing \(step.id)…")
             let result = await runner.executeStepCommand(
-                step: step, stepIndex: currentStepIndex, totalSteps: branch.steps.count
+                step: step, stepIndex: stepIndexBeingDriven, totalSteps: branch.steps.count
             )
             irisTrace("drive: \(step.id) result=\(String(describing: result))")
             numberOfCommandsAutopilotHasExecuted += 1
+            // A command takes real time, and the watch loop can advance the
+            // guide during it. Advancing again from the NEW index would skip a
+            // step nobody ran, which is the same defect the gate hit.
+            guard theGuideIsStillOn(stepIndexBeingDriven, having: step) else { continue }
             switch result {
             case .succeeded:
                 advanceFromWithinAutopilot()
@@ -1789,6 +1903,7 @@ final class GuideSessionController: ObservableObject {
                     // and stalling the whole install here.
                     await holdBetweenAutoAdvancedSteps()
                     guard autopilotIsRunning else { return }
+                    guard theGuideIsStillOn(stepIndexBeingDriven, having: step) else { continue }
                     advanceFromWithinAutopilot()
                     continue
                 }
@@ -1807,6 +1922,26 @@ final class GuideSessionController: ObservableObject {
                 return
             }
         }
+    }
+
+    /// Whether the guide is still on the step one iteration of the drive loop
+    /// was pinned to. False means somebody else — the watch loop confirming a
+    /// step, the reader's own navigation — moved the guide while this iteration
+    /// was suspended at an `await`.
+    ///
+    /// A false answer is never an error: the drive loop's `while` re-reads
+    /// `currentStepIndex`, so `continue` picks up the step the guide is actually
+    /// on. What it prevents is this iteration acting on a step it no longer owns
+    /// — advancing from the new index (which skips a step nobody ran) or
+    /// recording a gate against it.
+    private func theGuideIsStillOn(
+        _ stepIndexBeingDriven: Int, having step: IrisGuideStep
+    ) -> Bool {
+        guard currentStepIndex != stepIndexBeingDriven else { return true }
+        irisTrace(
+            "drive: the guide moved from step \(stepIndexBeingDriven) (\(step.id)) to \(currentStepIndex) while it was in flight — re-driving from there"
+        )
+        return false
     }
 
     /// Marks the current step the reader's to finish and re-aims the watch loop
@@ -2436,6 +2571,10 @@ final class GuideSessionController: ObservableObject {
         // watching a step autopilot is about to execute and the two would race
         // to advance it.
         autopilotHandedTheCurrentStepToTheReader = false
+        // And the gate the reader was being asked to finish belongs to the step
+        // that has just been left. Whoever advanced — the reader's tap, the
+        // watch loop, or the drive loop itself — that question is answered.
+        theStepTheReaderIsBeingAskedToFinish = nil
         cancelAnyWorkFromThePreviousStep()
         prepareToolCheckRowsForTheCurrentStep()
         pointTheWatchLoopAtTheCurrentStep()
@@ -2479,6 +2618,10 @@ final class GuideSessionController: ObservableObject {
         defer { refreshPointingForTheOpenStep() }
         guard selectedBranch != nil else { return }
         currentStepIndex = 0
+        // Starting over abolishes the gate rather than diverging from it: a
+        // press on a bar left over from the old run must not drag the reader
+        // back to where they just chose to leave.
+        theStepTheReaderIsBeingAskedToFinish = nil
         readerHasFinishedTheGuide = false
         cancelAnyWorkFromThePreviousStep()
         prepareToolCheckRowsForTheCurrentStep()
@@ -2744,6 +2887,15 @@ final class GuideSessionController: ObservableObject {
         guideName: String
     ) async {
         guard rememberedIndex > 0, let askTheModelWhereTheReaderIs else { return }
+        // An install that is already RUNNING owns its position, and there is no
+        // point spending the reader's own model call on an opinion that will be
+        // thrown away. Checked here and again after the reply lands, because
+        // this whole function is a `Task` fired when the guide opened and the
+        // reader can tap "Let Iris run it" at any point inside it.
+        guard !autopilotIsRunning else {
+            irisTrace("position: \(guideName) is already installing — not asking where the reader is")
+            return
+        }
         let evidence = await gatherPositionEvidence(forBranch: branch)
         guard evidence.isWorthInterpreting else {
             irisTrace("position: nothing checkable for \(guideName) — leaving resume at \(rememberedIndex)")
@@ -2776,6 +2928,20 @@ final class GuideSessionController: ObservableObject {
         // Still where we left it? A reader who has pressed Next while this ran
         // owns their position; this check is advisory and must never yank them.
         guard currentStepIndex == rememberedIndex, !readerHasFinishedTheGuide else { return }
+        // And an install that has already STARTED owns its position outright.
+        // This is a `Task` fired when the guide opened, and the reader can tap
+        // "Let Iris run it" long before a model call comes back — so this used
+        // to reach in and move the step index under a running drive loop. It is
+        // the first line of the tester's own runtime evidence: "Iris moved
+        // WhimprFlow from step 11 back to the CMake step, entered the manual
+        // CMake gate, and parked" — mid-install, on a machine where the reader
+        // had asked Iris to run the thing, not to re-plan it. An advisory
+        // opinion about where somebody probably is has no business overruling
+        // an install that is actually in flight.
+        guard !autopilotIsRunning else {
+            irisTrace("position: \(guideName) is mid-install — leaving autopilot at step \(currentStepIndex)")
+            return
+        }
         irisTrace("position: moving \(guideName) from step \(rememberedIndex) to \(verdict.stepIndex) — \(verdict.reason)")
         currentStepIndex = verdict.stepIndex
         positionWasCorrectedExplanation = verdict.reason.isEmpty

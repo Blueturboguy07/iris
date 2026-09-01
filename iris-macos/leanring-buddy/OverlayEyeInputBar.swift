@@ -256,6 +256,12 @@ final class OverlayEyeInputBarPanelManager {
             theAnswerIsAFailureMessage: false
         )
         exchange.registerTheReaderWentBackToTheField()
+        // Marked LAST, because `registerTheReaderAsked` above deliberately
+        // clears the flag — asking is what makes an exchange this sitting's.
+        // Replaying the transitions and then stamping the result is what keeps
+        // both facts true: it is a state a real conversation could have
+        // reached, and it did not happen just now.
+        exchange.markAsRestoredFromAnEarlierSitting()
         return exchange
     }
 
@@ -557,6 +563,18 @@ struct OverlayEyeInputBarView: View {
         !typedMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// Whether pressing send would actually do anything.
+    ///
+    /// The second half is new: while a request is being sized up,
+    /// `describeRequest` restarts the probe from scratch rather than queueing a
+    /// second request, so a reader who pressed Return again — which is exactly
+    /// what somebody does when nothing appears to have happened — quietly threw
+    /// away the work already in flight. The arrow goes grey instead, next to
+    /// the row that says what Iris is doing with the first one.
+    private var theSendButtonIsLive: Bool {
+        thereIsSomethingToSend && !theRequestIsBeingSizedUp
+    }
+
     /// True while the centered takeover window is covering the screen with a
     /// running install. The corner guide card + Ask-Iris field are hidden in that
     /// case so they are not a cluttered second copy of the same guide. Gated on
@@ -616,6 +634,37 @@ struct OverlayEyeInputBarView: View {
                         coordinator: onDemandEditCoordinator,
                         preselectedKind: companionManager.onDemandEditPreselectedKind
                     )
+                    // WHY A PLATE UNDER A TERMINAL CARD. The card's text is
+                    // `.textSelection(.enabled)`, but a selection the reader
+                    // cannot copy is not much of a gift: this panel's
+                    // `canBecomeKey` is false for every phase except "a question
+                    // is being composed", and a window that cannot become key is
+                    // never sent a key event, so ⌘C has nowhere to go. (Measured:
+                    // SwiftUI does install an Edit menu with Copy for an
+                    // accessory app, so the key window is the only thing
+                    // missing.) Clicking a finished card asks for the keyboard
+                    // back, which is what makes ⌘C reach the selection.
+                    //
+                    // It is a `.background`, not an `.overlay`, so the card's own
+                    // buttons — Copy, "Set aside and continue", Undo — take their
+                    // clicks first and only the inert areas fall through here.
+                    //
+                    // GATED HARD, on purpose. Only the three terminal phases,
+                    // and only while the bar is not already holding the keyboard.
+                    // A bar that takes the keyboard whenever it feels like it is
+                    // the "randomly wouldn't let me type in it" bug, which is why
+                    // `releaseTheKeyboardSoTheReadersOwnAppGetsItBack` exists at
+                    // all. Nothing here moves the caret into the text field
+                    // either: the reader asked to copy, not to write.
+                    .background {
+                        if theEditCardHasAFinishedResultToRead {
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    onTheBarShouldTakeTheKeyboardBack()
+                                }
+                        }
+                    }
                 }
 
                 // What Iris already did to an app this session. Without it the
@@ -817,7 +866,13 @@ struct OverlayEyeInputBarView: View {
             } else {
                 modelSelectorRow
             }
+            // With nothing attached this is EmptyView, so the bar is byte for
+            // byte the bar it has always been until the reader pastes a picture.
+            OverlayEyePastedImageThumbnailRow()
             fieldAndSendRow
+            if theRequestIsBeingSizedUp {
+                theRequestIrisJustTook
+            }
             if anAppIsOpenForEditing {
                 servingProviderFooter
             }
@@ -825,6 +880,61 @@ struct OverlayEyeInputBarView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
         .background(IrisShellBackground(cornerRadius: DS.CornerRadius.extraLarge))
+    }
+
+    /// Whether a request the reader just sent is still being sized up, and the
+    /// composer is therefore the surface that owes them a sign of life.
+    ///
+    /// Only in EDIT mode: a reader can perfectly well ask a question while a
+    /// request is being assessed, and the ask path has its own working line.
+    private var theRequestIsBeingSizedUp: Bool {
+        anAppIsOpenForEditing
+            && effectiveComposerMode == .edit
+            && onDemandEditCoordinator.isAssessingRequest
+    }
+
+    /// THE READER'S SENTENCE, ECHOED BACK, AND A SPINNER UNDER IT.
+    ///
+    /// "After I put a prompt into feature or bug fix, I get no feedback of if
+    /// it has gone through, a loading thing or something would be really
+    /// helpful."
+    ///
+    /// He is describing this exactly. `describeRequest` accepts the request and
+    /// leaves the flow in `.describe` while the §7 request probe runs — up to a
+    /// twenty-second watchdog — and the bar draws its OWN composer for that
+    /// phase, because `OnDemandEditCard` is only rendered while the phase is
+    /// NOT `.describe`. The card's describe step has carried a "Sizing up the
+    /// request…" row all along; the composer that replaced it never brought
+    /// that row across. Measured at HEAD: the bar rendered to the same 250.5pt
+    /// and byte-identical pixels before and after a request was accepted.
+    ///
+    /// The echo matters as much as the spinner. Sending clears the field, so
+    /// his own words vanished at the same moment — leaving him nothing to look
+    /// at that proved the app had even read them.
+    private var theRequestIrisJustTook: some View {
+        HStack(alignment: .top, spacing: 6) {
+            ProgressView()
+                .progressViewStyle(.circular)
+                .controlSize(.small)
+                .scaleEffect(0.62)
+                .frame(width: 13, height: 13)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Sent — Iris is sizing up the request…")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+                if let requestText = onDemandEditCoordinator.activeRequestText,
+                   !requestText.isEmpty {
+                    Text("“\(requestText)”")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// The Sonnet/Opus toggle, trailing-aligned above the field. Bound straight
@@ -1079,6 +1189,12 @@ struct OverlayEyeInputBarView: View {
                 .font(.system(size: 13))
                 .foregroundColor(DS.Colors.ink)
                 .focused($theTextFieldHasKeyboardFocus)
+                // cmd-V with a picture on the clipboard. The field editor's
+                // readable types are text types, so without this the keystroke
+                // does the only thing it can — nothing, silently. Rides in
+                // `.background`, so it takes no layout space and leaves the
+                // field's focus, submit and styling exactly as they were.
+                .acceptsAnImagePastedIntoTheField()
                 .onSubmit {
                     sendWhatIsTyped()
                 }
@@ -1123,11 +1239,11 @@ struct OverlayEyeInputBarView: View {
             } label: {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.system(size: 20, weight: .medium))
-                    .foregroundColor(thereIsSomethingToSend ? DS.Colors.accent : DS.Colors.quiet)
+                    .foregroundColor(theSendButtonIsLive ? DS.Colors.accent : DS.Colors.quiet)
             }
             .buttonStyle(.plain)
-            .pointerCursor(isEnabled: thereIsSomethingToSend)
-            .disabled(!thereIsSomethingToSend)
+            .pointerCursor(isEnabled: theSendButtonIsLive)
+            .disabled(!theSendButtonIsLive)
         }
     }
 
@@ -1294,10 +1410,70 @@ struct OverlayEyeInputBarView: View {
         }
     }
 
+    /// True while `OnDemandEditCard` is drawing a real card at the top of the
+    /// bar. `.describe` is excluded because the bar draws that step itself as
+    /// the composer, and `.pickApp` because the card renders `EmptyView()` for
+    /// it — in both, nothing is above the field and there is nothing to be
+    /// confused with.
+    private var theEditCardOwnsTheSurface: Bool {
+        onDemandEditCoordinator.phase != .pickApp
+            && onDemandEditCoordinator.phase != .describe
+    }
+
+    /// True while the edit card is showing a FINISHED result whose words the
+    /// reader may well want to keep — a failure, a refusal, or the model's own
+    /// "I can't do this". These are the phases where the reader is reading
+    /// rather than waiting, and the only ones where clicking the card is worth
+    /// spending the keyboard on.
+    ///
+    /// `.done` is deliberately absent. A run that finished carries its own
+    /// summary and its own controls, and the sentences worth copying out of Iris
+    /// are the ones that explain why something did NOT happen.
+    private var theEditCardHasAFinishedResultToRead: Bool {
+        switch onDemandEditCoordinator.phase {
+        case .failed, .notEligible, .blockedByModel:
+            return true
+        default:
+            return false
+        }
+    }
+
     @ViewBuilder
     private var whateverTheExchangeIsUpTo: some View {
         if exchange.theSuggestionChipsShouldBeOffered {
-            suggestionChips
+            // Openers like "what's on my screen?" under an edit card would be
+            // three invitations to change the subject, stacked under the thing
+            // Iris is actually waiting on.
+            if !theEditCardOwnsTheSurface {
+                suggestionChips
+            }
+        } else if theEditCardOwnsTheSurface && exchange.wasRestoredFromAnEarlierSitting {
+            // SUPPRESSED, and this is the whole reason the "restored" flag
+            // exists. Reopening the bar brings back the last general-chat
+            // question and answer (`exchangeShowingTheLastThingThatWasSaid`),
+            // which is right when the bar is a chat bar — and wrong when an
+            // edit card is sitting above it, because the two then read as one
+            // conversation. The reader, looking at exactly this: "the chat
+            // below is linked to a general chat … super confusing." Measured at
+            // HEAD: an edit card in the bar grew from 315.5pt to 404.5pt purely
+            // to lay out an old answer about installing Node underneath it.
+            //
+            // Suppressed at RENDER time, not thrown away: the exchange is still
+            // in this view's state, so the moment the edit card is closed the
+            // reader's conversation is back where they left it.
+            EmptyView()
+        } else if theEditCardOwnsTheSurface {
+            // A live exchange — one the reader asked for while the card was up,
+            // which the composer still allows — is theirs and stays. It just
+            // has to be visibly a different thing from the edit above it.
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Chat with Iris")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .textCase(.uppercase)
+                    .padding(.leading, 2)
+                exchangeCard
+            }
         } else {
             exchangeCard
         }
@@ -1461,7 +1637,9 @@ struct OverlayEyeInputBarView: View {
     /// the reader picked it on the switch above, and the footer says what will
     /// serve it. Guessing here is what the old two-box layout effectively did.
     private func sendWhatIsTyped() {
-        guard thereIsSomethingToSend else { return }
+        // `onSubmit` fires on Return whether or not the button is enabled, so
+        // the guard the button already draws has to exist here too.
+        guard theSendButtonIsLive else { return }
         if anAppIsOpenForEditing, effectiveComposerMode == .edit {
             let request = typedMessage
             typedMessage = ""

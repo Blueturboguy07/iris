@@ -72,6 +72,71 @@ struct CompanionScreenCapture {
 @MainActor
 enum CompanionScreenCaptureUtility {
 
+    // MARK: - What one chat message is allowed to look at
+
+    /// The images one chat message carries, and the captures the pointing maths
+    /// needs to undo them.
+    ///
+    /// Ordinarily that is every connected display, exactly as it has always
+    /// been. But when the reader has PASTED an image into the bar, the message
+    /// carries THAT and nothing else — no screenshot at all.
+    ///
+    /// WHY THE SCREEN IS DROPPED RATHER THAN ADDED TO. The reader who reported
+    /// "I CANNOT PASTE IMAGES INTO THE CHAT BOX" pasted a *specific* picture
+    /// because that picture is what the question is about. Sending their
+    /// desktop alongside it would be wrong twice over: the model gets two
+    /// images and no way to know which one the question means — the same
+    /// confusion that made a browser behind a terminal read as part of it —
+    /// and Iris would be photographing a screen nobody asked it to look at. A
+    /// paste is the reader choosing what Iris sees.
+    ///
+    /// The empty capture list is load-bearing too: `sendUserMessageToClaudeWithScreenshot`
+    /// resolves a `[POINT]` tag against these captures, so with none of them
+    /// there is nothing to point at, and the eye stays where it is instead of
+    /// flying at a coordinate the model invented for a screen it never saw.
+    static func imageryForOneChatMessage(
+        theReaderPasted pastedImage: OverlayEyePastedImage?
+    ) async throws -> (labeledImages: [(data: Data, label: String)], screenCaptures: [CompanionScreenCapture]) {
+        if let pastedImage {
+            return (
+                labeledImages: [(data: pastedImage.imageData, label: labelForTheImageTheReaderPasted(pastedImage))],
+                screenCaptures: []
+            )
+        }
+
+        let screenCaptures = try await captureAllScreensAsJPEG()
+        return (labeledImages: labeledImages(forScreenCaptures: screenCaptures), screenCaptures: screenCaptures)
+    }
+
+    /// The screen labels chat has always sent — the capture's own label with the
+    /// pixel dimensions appended. Lifted out of `CompanionManager` so the two
+    /// ways a message can be assembled agree by construction rather than by
+    /// somebody remembering to keep them in step.
+    static func labeledImages(
+        forScreenCaptures screenCaptures: [CompanionScreenCapture]
+    ) -> [(data: Data, label: String)] {
+        screenCaptures.map { capture in
+            let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
+            return (data: capture.imageData, label: capture.label + dimensionInfo)
+        }
+    }
+
+    /// What the model is told about an image that is NOT a screenshot.
+    ///
+    /// Every other label in this file describes a screen, and the system prompt
+    /// is written for a model that is looking at one — so an unannounced
+    /// picture would be read as the reader's desktop and answered about as
+    /// though it were. It has to say what it is, say that there is no screen in
+    /// this message, and say what to do instead of pointing.
+    static func labelForTheImageTheReaderPasted(_ pastedImage: OverlayEyePastedImage) -> String {
+        """
+        an image the user PASTED into the input bar — this is not a screenshot of their screen, \
+        and it is the only image in this message. It is \(pastedImage.pixelWidth)x\(pastedImage.pixelHeight) pixels. \
+        Answer about this image. Iris did not look at their screen for this question, so there is \
+        nothing on screen to point at: end your reply with [POINT:none].
+        """
+    }
+
     /// Captures all connected displays as JPEG data, labeling each with
     /// whether the user's cursor is on that screen. This gives the AI
     /// full context across multiple monitors.

@@ -13,6 +13,9 @@ coding-plans/
 .build-check/
 .build-release/
 .build-progress/
+.build-adv/
+.build-gate/
+.build-repair/
 
 # The edit battery's fixtures are committed as FILES; their git repos are built
 # on first use by `battery.py`'s ensure_fixture_repo. A .git nested inside this

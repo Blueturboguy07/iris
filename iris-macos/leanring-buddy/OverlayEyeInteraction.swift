@@ -95,6 +95,77 @@ struct OverlayEyeActivation: Equatable {
     }
 }
 
+// MARK: - What the eye owes the reader when the bar is not there to say it
+
+/// What Iris's eye has to say about an edit the reader can no longer see.
+///
+/// THE READER'S OWN WORDS, verbatim: "After I put a prompt into feature or bug
+/// fix, I get no feedback of if it has gone through, a loading thing or
+/// something would be really helpful, or if I click off Iris and it reverts
+/// back to the eye, once the response is done loading and needs my
+/// intervention, it should ping me or change the UI to show me it needs my
+/// approval."
+///
+/// WHAT ACTUALLY HAPPENED TO HIM. Both of his submissions were refused by the
+/// dirty-clone preflight, and he never saw either refusal. Dismissing the bar
+/// destroys the view that would have drawn it (`hideInputBar` drops the hosting
+/// view outright), and the eye it collapses back into draws a mood computed
+/// from `CompanionManager.assistantState` — a value only the CHAT pipeline ever
+/// writes. Measured at HEAD by rendering the real overlay twice, once quiet and
+/// once with the coordinator sitting in a refusal: byte-identical pixels. So an
+/// edit could run, stop, and wait for him with the eye drawing "nothing is
+/// happening" the whole time.
+///
+/// This is the missing wire, as a plain value so the decision about which
+/// states are the reader's turn is testable without a screen.
+enum OverlayEyeAttention: Equatable {
+    /// Nothing of Iris's is in flight and nothing is waiting on a person.
+    case nothingToSay
+    /// Iris is working. No answer is owed yet — the eye only has to look busy.
+    case working
+    /// Iris has stopped and cannot go on until the reader looks at it.
+    case needsTheReader
+}
+
+extension OverlayEyeAttention {
+
+    /// The one place that decides which of the edit flow's states are the
+    /// reader's turn.
+    ///
+    /// Every phase is listed rather than defaulted, so a phase added later
+    /// cannot silently inherit "say nothing" — which is the exact failure this
+    /// whole type exists to end.
+    static func forEditFlow(
+        phase: OnDemandEditPhase,
+        theRequestIsBeingAssessed: Bool
+    ) -> OverlayEyeAttention {
+        switch phase {
+        case .pickApp:
+            return .nothingToSay
+
+        case .describe:
+            // THE SUBMIT-FEEDBACK GAP. Accepting a request does NOT move the
+            // phase: `describeRequest` leaves the flow in `.describe` while the
+            // §7 request probe runs, for up to the twenty-second watchdog. That
+            // whole window is real work with nothing to approve, so the eye
+            // spins rather than sitting idle.
+            return theRequestIsBeingAssessed ? .working : .nothingToSay
+
+        case .running, .committing, .relaunching, .delivering:
+            return .working
+
+        // Every state below is Iris stopped with a question, a choice, or a
+        // result that only a person can settle — including the terminal ones,
+        // because a refusal nobody ever saw is precisely what happened here.
+        case .clarifying, .presentingPlan, .awaitingStartConsent, .previewDiff,
+             .awaitingRelaunchConsent, .awaitingManifestConsent,
+             .awaitingSymptomConfirmation, .awaitingForceQuitConsent,
+             .done, .failed, .notEligible, .blockedByModel:
+            return .needsTheReader
+        }
+    }
+}
+
 // MARK: - The exchange the bar is showing
 
 /// Which of the four things the bar is showing at this instant.
@@ -144,7 +215,28 @@ struct OverlayEyeExchange: Equatable {
 
     private(set) var phase: OverlayEyeExchangePhase = .composingTheFirstQuestion
 
+    /// True when this exchange came back off disk rather than being asked in
+    /// this sitting — the last general-chat question and answer, restored by
+    /// `exchangeShowingTheLastThingThatWasSaid` so reopening the bar continues
+    /// the conversation instead of pretending nothing was ever asked.
+    ///
+    /// It has to be distinguishable because of what the reader hit: with an
+    /// edit card owning the bar, that restored answer rendered directly
+    /// underneath it, in the same glass, about a completely different subject.
+    /// His words: "the chat below is linked to a general chat … super
+    /// confusing." A live answer he just asked for is his own doing; a
+    /// week-old one about installing Node is not, and only this tells the two
+    /// apart.
+    private(set) var wasRestoredFromAnEarlierSitting: Bool = false
+
     init() {}
+
+    /// Marks an exchange as rebuilt from the transcript rather than asked now.
+    /// Set once, by the restore path; asking anything clears it, because from
+    /// that moment the exchange is this sitting's.
+    mutating func markAsRestoredFromAnEarlierSitting() {
+        wasRestoredFromAnEarlierSitting = true
+    }
 
     /// Whether the bar should be holding the keyboard right now.
     ///
@@ -189,6 +281,9 @@ struct OverlayEyeExchange: Equatable {
         whatIrisSaidBack = nil
         whatIrisSaidBackIsAFailureMessage = false
         phase = .waitingForIrisToAnswer
+        // Whatever this exchange used to be, the reader just asked it. It is
+        // this sitting's now, so it stops being suppressible as stale.
+        wasRestoredFromAnEarlierSitting = false
     }
 
     /// Iris answered, or failed in a way that has a sentence for the reader.
@@ -225,6 +320,7 @@ struct OverlayEyeExchange: Equatable {
         whatIrisSaidBack = nil
         whatIrisSaidBackIsAFailureMessage = false
         phase = .composingTheFirstQuestion
+        wasRestoredFromAnEarlierSitting = false
     }
 }
 

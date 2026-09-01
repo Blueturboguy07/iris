@@ -707,13 +707,30 @@ struct GuidePanelView: View {
                     primaryActionButton(primaryAction)
                 }
 
-                if guideSessionController.canReturnToThePreviousStep {
+                HStack(spacing: 12) {
+                    if guideSessionController.canReturnToThePreviousStep {
+                        Button(action: {
+                            guideSessionController.returnToThePreviousStep()
+                        }) {
+                            Text("Back")
+                        }
+                        .irisTextButton(fontSize: 10)
+                    }
+                    // THE VISIBLE WAY TO ASK, reported in Test 7: "There should
+                    // be a visual help button … so that Iris can point them to
+                    // it." It is the same control the takeover terminal's title
+                    // strip carries and it means the same thing in both places
+                    // (`GuideAutopilotHelpRequest`), because a reader who found
+                    // it once must not have to find it again somewhere else.
+                    // The question they type reaches the model with this step
+                    // and the real terminal output already attached.
                     Button(action: {
-                        guideSessionController.returnToThePreviousStep()
+                        GuideAutopilotHelpRequest.theReaderAskedForHelp()
                     }) {
-                        Text("Back")
+                        Text("Help")
                     }
                     .irisTextButton(fontSize: 10)
+                    .nativeTooltip("Stuck? Ask Iris about this step — it can see where you are")
                 }
             }
         }

@@ -96,6 +96,22 @@ final class GuideAutopilotTakeoverController {
     /// screen on the very next resize, all by itself.
     private var readerPlacedTheTerminalTopLeft: CGPoint?
 
+    /// The size the READER dragged the card to, or nil while they have never
+    /// resized it. Reported, in one flat sentence: "You cannot resize the
+    /// terminal tab."
+    ///
+    /// THE SAME CONTRACT THE DRAGGED POSITION GETS. Once they have chosen a
+    /// size, Iris keeps it: parking no longer shrinks the card to 400x340 and
+    /// returning to center no longer grows it to 760x480, because a window that
+    /// snaps back to Iris's idea of the right size on the next step is not
+    /// really resizable — that is exactly the complaint the moved-position
+    /// latch was added for, one property along. Iris still MOVES it (a park
+    /// slides it to the corner unless the reader has placed it), and the
+    /// fold-back-into-the-eye collapse still shrinks it to eye size, because
+    /// that one is an animation ending in the window going away rather than a
+    /// size anybody has to live with.
+    private var readerChoseTheTerminalSize: CGSize?
+
     /// Set while one of Iris's OWN frame animations is running. `didMove` fires
     /// for every intermediate frame of an animated `setFrame` exactly as it does
     /// for a drag, so without this the morph, the park, and the collapse would
@@ -146,6 +162,7 @@ final class GuideAutopilotTakeoverController {
         entryMorphHasSettled = false
         aParkWasRequestedDuringEntry = false
         readerPlacedTheTerminalTopLeft = nil
+        readerChoseTheTerminalSize = nil
         irisOwnFrameAnimationsInFlight = 0
 
         // The dim backdrop. Click-through on purpose: a manual sub-step (a
@@ -177,6 +194,11 @@ final class GuideAutopilotTakeoverController {
         // already happy to move (the title strip, the manual-step bar), and it
         // costs nothing where the subclass has taken the gesture over.
         terminal.isMovableByWindowBackground = true
+        // "You cannot resize the terminal tab." Now they can, by its left,
+        // right and bottom edges — and once they have, Iris keeps their size.
+        terminal.onReaderResizedTheCard = { [weak self] sizeTheReaderChose in
+            MainActor.assumeIsolated { self?.readerChoseTheTerminalSize = sizeTheReaderChose }
+        }
         let takeoverView = GuideAutopilotTakeoverView(
             model: takeoverModel,
             runner: runner,
@@ -190,6 +212,14 @@ final class GuideAutopilotTakeoverController {
         let hostingView = NSHostingView(rootView: takeoverView)
         hostingView.autoresizingMask = [.width, .height]
         terminal.contentView = hostingView
+        // Hover feedback for the resize, over the top of the SwiftUI content.
+        // Without it the only way to discover the edges is to guess: the grip is
+        // paint, the window is borderless, and nothing under the pointer ever
+        // changed. It draws nothing and takes no clicks — it exists purely so
+        // the pointer says "this edge moves" before the reader commits.
+        let resizeCursorView = GuideAutopilotResizeCursorView(frame: hostingView.bounds)
+        resizeCursorView.autoresizingMask = [.width, .height]
+        hostingView.addSubview(resizeCursorView)
         terminal.orderFrontRegardless()
         self.terminalPanel = terminal
 
@@ -339,16 +369,33 @@ final class GuideAutopilotTakeoverController {
         readerPlacedTheTerminalTopLeft = CGPoint(x: terminal.frame.minX, y: terminal.frame.maxY)
     }
 
-    /// Iris's own geometry, re-hung from the corner the reader chose. Until they
-    /// move the window this returns the frame unchanged, so nothing about the
-    /// default choreography changes.
-    private func frameHonoringWhereTheReaderPutTheTerminal(_ irisChosenFrame: CGRect) -> CGRect {
-        guard let readerTopLeft = readerPlacedTheTerminalTopLeft else { return irisChosenFrame }
+    /// Iris's own geometry, re-hung from the corner the reader chose and resized
+    /// to the size they chose. Until they touch the window this returns the
+    /// frame unchanged, so nothing about the default choreography changes.
+    ///
+    /// `honoringTheirSize: false` is the collapse: the fold back into the eye
+    /// has to reach eye size or there is no morph.
+    private func frameHonoringWhereTheReaderPutTheTerminal(
+        _ irisChosenFrame: CGRect, honoringTheirSize: Bool = true
+    ) -> CGRect {
+        let size = (honoringTheirSize ? readerChoseTheTerminalSize : nil) ?? irisChosenFrame.size
+        guard let readerTopLeft = readerPlacedTheTerminalTopLeft else {
+            // They have resized it but never moved it: keep Iris's placement,
+            // re-hung from the top-left so a taller card grows downward rather
+            // than lifting off the corner it was parked in.
+            guard size != irisChosenFrame.size else { return irisChosenFrame }
+            return CGRect(
+                x: irisChosenFrame.minX,
+                y: irisChosenFrame.maxY - size.height,
+                width: size.width,
+                height: size.height
+            )
+        }
         return CGRect(
             x: readerTopLeft.x,
-            y: readerTopLeft.y - irisChosenFrame.height,
-            width: irisChosenFrame.width,
-            height: irisChosenFrame.height
+            y: readerTopLeft.y - size.height,
+            width: size.width,
+            height: size.height
         )
     }
 
@@ -404,7 +451,10 @@ final class GuideAutopilotTakeoverController {
             context.duration = Self.morphDuration
             context.timingFunction = Self.morphTiming
             terminal.animator().setFrame(
-                frameHonoringWhereTheReaderPutTheTerminal(eyeSizedFrame), display: true
+                frameHonoringWhereTheReaderPutTheTerminal(
+                    eyeSizedFrame, honoringTheirSize: false
+                ),
+                display: true
             )
         }, completionHandler: { [weak self] in
             guard let self else { return }
@@ -438,9 +488,10 @@ final class GuideAutopilotTakeoverController {
         isParked = false
         entryMorphHasSettled = false
         aParkWasRequestedDuringEntry = false
-        // The reader's placement belongs to the run they made it in; the next
-        // takeover opens at Iris's own geometry again.
+        // The reader's placement and size belong to the run they made them in;
+        // the next takeover opens at Iris's own geometry again.
         readerPlacedTheTerminalTopLeft = nil
+        readerChoseTheTerminalSize = nil
         irisOwnFrameAnimationsInFlight = 0
     }
 
@@ -603,6 +654,130 @@ final class GuideAutopilotTakeoverTerminalPanel: NSPanel {
     /// The card's title strip — the 24pt band the red escape hatch lives in.
     private static let heightOfTheTitleStrip: CGFloat = 24
 
+    // MARK: - Resizing ("You cannot resize the terminal tab.")
+
+    /// How close to an edge a press has to land to mean "resize" instead of
+    /// "move". A real window's resize border is about this wide.
+    static let theGripAlongTheEdges: CGFloat = 7
+
+    /// How far into the bottom-right corner a press still takes hold of BOTH
+    /// edges. Deliberately wider than the edge band, for two reasons.
+    ///
+    /// The first is that the only thing on screen that says "this window
+    /// resizes" is the painted grip, and it did not fit inside a 7pt band: it is
+    /// an 11pt glyph inset 4pt from each edge (`GuideAutopilotResizeGrip`, laid
+    /// out at `.bottomTrailing` with `.padding(4)`), so its ink runs from 4pt to
+    /// 15pt in and its CENTRE — where anybody aiming at a handle aims — sat 9.5pt
+    /// in, outside the band. MEASURED before this change: a real gesture posted
+    /// at (width - 9.5, 9.5) MOVED the card instead of resizing it. A reader who
+    /// aims at the one affordance drawn for them got the wrong behaviour, which
+    /// is indistinguishable from "you cannot resize the terminal tab".
+    ///
+    /// The second is that a corner is what a person actually grabs to resize a
+    /// window, and every real Mac window gives it a bigger target than its
+    /// edges. 16pt covers the whole glyph with a point to spare.
+    static let theCornerGripSquare: CGFloat = 16
+
+    /// The smallest the reader may make the card. Below this the transcript is
+    /// too narrow to read a command on and the manual-step bar has nowhere to
+    /// put its button — which would be a new way to strand somebody, not a
+    /// smaller window.
+    static let smallestTheCardMayBeMade = CGSize(width: 300, height: 200)
+
+    /// The reader let go of a resize, at this size. The controller listens so it
+    /// can keep their size for the rest of the run, the same courtesy the
+    /// dragged-to POSITION already gets.
+    var onReaderResizedTheCard: ((CGSize) -> Void)?
+
+    /// Which edges a press takes hold of, or an empty set for a press that is
+    /// somewhere in the body and therefore a move.
+    struct EdgesUnderThePress: OptionSet {
+        let rawValue: Int
+        static let left = EdgesUnderThePress(rawValue: 1 << 0)
+        static let right = EdgesUnderThePress(rawValue: 1 << 1)
+        static let bottom = EdgesUnderThePress(rawValue: 1 << 2)
+    }
+
+    /// THE TOP EDGE IS NOT A RESIZE HANDLE, deliberately. The title strip is
+    /// only 24pt tall and the red escape hatch sits inside it — a 7pt band
+    /// across the top would turn the top of the close button into a resize
+    /// grip, and "you can't close out of it" is a sentence this window has
+    /// already earned once. Left, right and bottom are plenty: between them
+    /// they reach every dimension, and the left edge stands down under the
+    /// title strip for the same reason.
+    static func edgesUnderThePress(
+        at pointInWindow: CGPoint, forACardOfSize size: CGSize
+    ) -> EdgesUnderThePress {
+        // A card at or under the minimum can still be made BIGGER, so the grip
+        // stays live at every size.
+        guard size.width > theGripAlongTheEdges * 3,
+              size.height > heightOfTheTitleStrip + theGripAlongTheEdges * 2 else {
+            return []
+        }
+        var edges: EdgesUnderThePress = []
+        let isBesideTheTitleStrip = pointInWindow.y > size.height - heightOfTheTitleStrip
+        // The bottom-right corner first, because it is the one the grip is
+        // painted in and it must take hold of both edges at once — see
+        // `theCornerGripSquare`.
+        if pointInWindow.y <= theCornerGripSquare,
+           pointInWindow.x >= size.width - theCornerGripSquare,
+           !isBesideTheTitleStrip {
+            return [.bottom, .right]
+        }
+        if pointInWindow.y <= theGripAlongTheEdges { edges.insert(.bottom) }
+        if pointInWindow.x >= size.width - theGripAlongTheEdges, !isBesideTheTitleStrip {
+            edges.insert(.right)
+        }
+        if pointInWindow.x <= theGripAlongTheEdges, !isBesideTheTitleStrip {
+            edges.insert(.left)
+        }
+        return edges
+    }
+
+    /// The frame a resize lands on: the grabbed edges follow the pointer, the
+    /// opposite ones stay exactly where they are, and nothing goes below the
+    /// minimum. Pure, so the whole geometry is testable without a gesture.
+    ///
+    /// The edge keeps the offset it had from the pointer when it was grabbed,
+    /// which is the same self-correcting trick the MOVE uses (`whereTheReader
+    /// TookHold`): snapping the edge onto the pointer instead would jump the
+    /// card by however many points inside the 7pt grip the press landed, before
+    /// the reader had moved at all.
+    static func frameResized(
+        from startingFrame: CGRect,
+        by edges: EdgesUnderThePress,
+        pointerAtThePress: CGPoint,
+        pointerNow: CGPoint
+    ) -> CGRect {
+        var frame = startingFrame
+        let travelled = CGPoint(
+            x: pointerNow.x - pointerAtThePress.x, y: pointerNow.y - pointerAtThePress.y
+        )
+        if edges.contains(.right) {
+            frame.size.width = max(
+                smallestTheCardMayBeMade.width, startingFrame.width + travelled.x
+            )
+        }
+        if edges.contains(.left) {
+            // The RIGHT edge is the anchor, so the origin moves with the width.
+            let rightEdge = startingFrame.maxX
+            frame.size.width = max(
+                smallestTheCardMayBeMade.width, startingFrame.width - travelled.x
+            )
+            frame.origin.x = rightEdge - frame.size.width
+        }
+        if edges.contains(.bottom) {
+            // The TOP edge is the anchor: the reader is dragging the bottom of
+            // a card whose title strip must not walk up the screen under them.
+            let topEdge = startingFrame.maxY
+            frame.size.height = max(
+                smallestTheCardMayBeMade.height, startingFrame.height - travelled.y
+            )
+            frame.origin.y = topEdge - frame.size.height
+        }
+        return frame
+    }
+
     /// How much of the card's width has to stay on a screen. Enough to hold the
     /// three traffic lights and be grabbed again.
     private static let narrowestSliverThatStaysReachable: CGFloat = 72
@@ -679,6 +854,21 @@ final class GuideAutopilotTakeoverTerminalPanel: NSPanel {
             return
         }
 
+        // An edge grip is a RESIZE, and it is checked before the move because
+        // the whole card is a drag handle — without this, the one gesture every
+        // reader tries for a window that is the wrong size would just slide it
+        // ("You cannot resize the terminal tab."). It is handled here rather
+        // than by AppKit's own `.resizable` border for the same reason the move
+        // is: this panel holds every left mouse-down for its own tracking loop,
+        // so a border drag would never survive to reach AppKit.
+        let edgesUnderThePress = Self.edgesUnderThePress(
+            at: Self.grabOffsetInWindow(of: event, in: self), forACardOfSize: frame.size
+        )
+        if !edgesUnderThePress.isEmpty {
+            theGestureResizedTheCard(startingFrom: event, by: edgesUnderThePress)
+            return
+        }
+
         if theGestureTurnedOutToBeADrag(startingFrom: event) { return }
 
         // It was a click, and the mouse-up has already been pushed back to the
@@ -687,6 +877,56 @@ final class GuideAutopilotTakeoverTerminalPanel: NSPanel {
         isReplayingAClickItHeldOnTo = true
         super.sendEvent(event)
         isReplayingAClickItHeldOnTo = false
+    }
+
+    /// Runs a resize the same way `theGestureTurnedOutToBeADrag` runs a move:
+    /// this window pulls the rest of the gesture out of the queue itself,
+    /// because a view that received the mouse-down would run its own loop and
+    /// swallow every dragged event before `sendEvent` saw another one.
+    ///
+    /// No slop here, unlike the move. A press that lands on a 7pt edge is a
+    /// resize the moment it lands — that is how every other window on the Mac
+    /// behaves, and a resize of zero costs the reader nothing.
+    private func theGestureResizedTheCard(
+        startingFrom mouseDown: NSEvent, by edges: EdgesUnderThePress
+    ) {
+        let frameAtThePress = frame
+        let whereTheReaderTookHold = Self.grabOffsetInWindow(of: mouseDown, in: self)
+        let pointerAtThePress = CGPoint(
+            x: frameAtThePress.minX + whereTheReaderTookHold.x,
+            y: frameAtThePress.minY + whereTheReaderTookHold.y
+        )
+        let giveUpAt = Date().addingTimeInterval(Self.longestAGestureIsWatched)
+        var theReaderActuallyResizedIt = false
+
+        while true {
+            guard let nextEventInTheGesture = NSApp.nextEvent(
+                matching: [.leftMouseUp, .leftMouseDragged],
+                until: giveUpAt,
+                inMode: .eventTracking,
+                dequeue: true
+            ) else { break }
+
+            if nextEventInTheGesture.type == .leftMouseUp { break }
+
+            let resized = Self.frameResized(
+                from: frameAtThePress,
+                by: edges,
+                pointerAtThePress: pointerAtThePress,
+                pointerNow: Self.screenLocation(of: nextEventInTheGesture)
+            )
+            if resized != frame {
+                theReaderActuallyResizedIt = true
+                setFrame(resized, display: true)
+            }
+        }
+
+        // Only a resize that changed something counts as the reader choosing a
+        // size. A stray press on the edge must not freeze the card at whatever
+        // size Iris happened to have it at.
+        if theReaderActuallyResizedIt {
+            onReaderResizedTheCard?(frame.size)
+        }
     }
 
     /// Watches the gesture the held mouse-down opened. Returns true if it became
@@ -844,6 +1084,98 @@ private struct GuideAutopilotTakeoverView<Runner: AutopilotTerminalPresenting>: 
                 }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            // The affordance for the resize the panel implements. A borderless
+            // window shows nothing at its edges, and a handle nobody can see is
+            // the same to a reader as no handle at all — which is how "You
+            // cannot resize the terminal tab" survived a window that was always
+            // going to need to be a different size on somebody's screen.
+            //
+            // `allowsHitTesting(false)`: the grip is paint. The geometry lives
+            // in `GuideAutopilotTakeoverTerminalPanel.edgesUnderThePress`, which
+            // sees the press before any view does.
+            if model.showsTerminalFace {
+                GuideAutopilotResizeGrip()
+                    .frame(width: 11, height: 11)
+                    .padding(4)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+}
+
+/// The pointer feedback for the resize: a transparent, click-through view that
+/// does nothing but publish cursor rectangles over the same bands
+/// `GuideAutopilotTakeoverTerminalPanel.edgesUnderThePress` reads.
+///
+/// It is a plain `NSView` rather than anything in SwiftUI because cursor
+/// rectangles belong to AppKit's window machinery, and because the press itself
+/// is intercepted in `sendEvent` before any view sees it — so the feedback and
+/// the behaviour have to be described in the same coordinates twice, from the
+/// one set of constants, and NOT by hit-testing.
+///
+/// `hitTest` returns nil so this never takes a click; cursor rectangles are
+/// computed from the view's geometry by the window, not by hit-testing, so the
+/// two do not conflict.
+final class GuideAutopilotResizeCursorView: NSView {
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        typealias Panel = GuideAutopilotTakeoverTerminalPanel
+        let band = Panel.theGripAlongTheEdges
+        let corner = Panel.theCornerGripSquare
+        // This view's own coordinates are the window's content coordinates, and
+        // both are bottom-left origin — the same space `edgesUnderThePress`
+        // measures in — so the rectangles below are that function drawn out.
+        let size = bounds.size
+        guard size.width > band * 3, size.height > corner * 2 else { return }
+
+        addCursorRect(
+            NSRect(x: 0, y: corner, width: band, height: size.height - corner - 24),
+            cursor: .resizeLeftRight
+        )
+        addCursorRect(
+            NSRect(x: size.width - band, y: corner,
+                   width: band, height: size.height - corner - 24),
+            cursor: .resizeLeftRight
+        )
+        addCursorRect(
+            NSRect(x: band, y: 0, width: size.width - corner - band, height: band),
+            cursor: .resizeUpDown
+        )
+        addCursorRect(
+            NSRect(x: size.width - corner, y: 0, width: corner, height: corner),
+            cursor: Self.theCornerCursor
+        )
+    }
+
+    /// The diagonal corner cursor when the OS has one to give (macOS 15+), and
+    /// the honest horizontal fallback when it does not. Never a crosshair: this
+    /// resizes a window, it does not pick a point.
+    private static var theCornerCursor: NSCursor {
+        if #available(macOS 15.0, *) {
+            return NSCursor.frameResize(position: .bottomRight, directions: .all)
+        }
+        return .resizeLeftRight
+    }
+}
+
+/// Three short diagonals in the bottom-right corner — the shape every Mac
+/// window has used to say "this edge moves" for thirty years.
+private struct GuideAutopilotResizeGrip: View {
+    var body: some View {
+        GeometryReader { geometry in
+            Path { path in
+                let side = min(geometry.size.width, geometry.size.height)
+                for inset in stride(from: side, through: side / 3, by: -side / 3) {
+                    path.move(to: CGPoint(x: side - inset, y: side))
+                    path.addLine(to: CGPoint(x: side, y: side - inset))
+                }
+            }
+            .stroke(Color.white.opacity(0.28), style: StrokeStyle(lineWidth: 1.2, lineCap: .round))
         }
     }
 }

@@ -71,6 +71,7 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
     let fixedTranscriptHeight: CGFloat?
 
     @State private var escapeHatchIsHovered = false
+    @State private var helpIsHovered = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -98,6 +99,7 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
                 Circle().fill(GuideAutopilotTerminalTheme.trafficYellow).frame(width: 11, height: 11)
                 Circle().fill(GuideAutopilotTerminalTheme.trafficGreen).frame(width: 11, height: 11)
                 Spacer(minLength: 0)
+                helpButton
             }
             Text("iris — install")
                 .font(.system(size: 10.5, weight: .medium))
@@ -107,6 +109,44 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
         .frame(height: 24)
         .frame(maxWidth: .infinity)
         .background(GuideAutopilotTerminalTheme.titleBarBackground)
+    }
+
+    /// THE VISIBLE WAY OUT WHEN SOMEBODY IS STUCK.
+    ///
+    /// Reported in Test 7: "There should be a visual help button … so that Iris
+    /// can point them to it." Until now there was nothing to point AT. A reader
+    /// watching an install they do not understand had the red light (which ends
+    /// it) and nothing else; asking for help meant knowing that the eye behind
+    /// the takeover opens a bar if you click it, which is exactly the knowledge
+    /// somebody stuck does not have.
+    ///
+    /// It opens the ask bar — `GuideAutopilotHelpRequest` posts the same
+    /// `clickySummonAskBar` the summon hotkey does — and the question the reader
+    /// types there already arrives with the step and the REAL terminal output
+    /// attached (`GuideSessionController.chatContextForTheAssistant`). So this
+    /// is a door onto an answer that can see what they are looking at, not a
+    /// link to a support page.
+    private var helpButton: some View {
+        Button(action: { GuideAutopilotHelpRequest.theReaderAskedForHelp() }) {
+            HStack(spacing: 3) {
+                Image(systemName: "questionmark.circle")
+                    .font(.system(size: 9.5, weight: .semibold))
+                Text("Help")
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .foregroundColor(Color.white.opacity(helpIsHovered ? 0.95 : 0.6))
+            .padding(.horizontal, 6)
+            .frame(height: 16)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(Color.white.opacity(helpIsHovered ? 0.14 : 0.07))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in helpIsHovered = hovering }
+        .pointerCursor()
+        .nativeTooltip("Stuck? Ask Iris about this step — it can see the command and its output")
     }
 
     /// The red traffic light is a real button, and shows the × on hover the
@@ -451,5 +491,34 @@ private struct BlinkingBlockCursor: View {
                     isVisible.toggle()
                 }
             }
+    }
+}
+
+// MARK: - Asking for help
+
+/// The one place "the reader asked for help" is turned into something that
+/// happens, so the guide card and the takeover terminal cannot drift into two
+/// different ideas of what Help does.
+///
+/// Reported in Test 7: "There should be a visual help button … so that Iris can
+/// point them to it." The button is the visible thing; this is what it means.
+/// It deliberately does NOT open a web page or a support form: the reader is
+/// mid-install on their own machine, and the only answer worth anything is one
+/// that can see the step they are on and the output of the command that just
+/// failed — which is what the ask bar already gets, through
+/// `GuideSessionController.chatContextForTheAssistant()`.
+enum GuideAutopilotHelpRequest {
+
+    /// Opens the ask bar under the eye, the same surface the summon hotkey and
+    /// a click on the eye open. Nothing else: a reader who asked for help gets
+    /// a place to type, with their install already in the model's hands.
+    ///
+    /// A notification rather than a call because the overlay that owns the bar
+    /// is one per screen and is not reachable from a SwiftUI view inside a
+    /// takeover panel; the overlay showing the eye is the one that answers,
+    /// which is the same one-screen guard the hotkey relies on.
+    static func theReaderAskedForHelp() {
+        irisTrace("help: reader asked for help — opening the ask bar")
+        NotificationCenter.default.post(name: .clickySummonAskBar, object: nil)
     }
 }

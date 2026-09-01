@@ -401,6 +401,19 @@ final class CompanionManager: ObservableObject {
             }
             return "Posted to publik's public listing for \(canonicalRepo)"
         }
+
+        // THE WIRE TO THE EYE, INSTALLED WHERE THE COORDINATOR IS BORN.
+        //
+        // Not in `startMaintainMode()`, where the takeover's own phase
+        // subscription lives. Two reasons, and the second is the one that
+        // matters: the on-demand edit flow is something the READER starts and
+        // has nothing to do with crash watching, and a manager whose maintain
+        // mode never started would otherwise have an edit flow the eye could
+        // not see — which is the very silence this fixes, reintroduced through
+        // a side door. Born with the coordinator, it cannot be missing while
+        // there is a coordinator to be silent about.
+        self.watchTheEditFlowSoTheEyeCanSpeakForIt(coordinator)
+
         return coordinator
     }()
 
@@ -415,7 +428,52 @@ final class CompanionManager: ObservableObject {
     /// honesty label and the commit trailer and must never be silently inferred.
     @Published private(set) var onDemandEditPreselectedKind: OnDemandEditKind?
 
+    /// WHAT THE EYE IS ALLOWED TO SAY WHEN THE BAR IS GONE.
+    ///
+    /// The reader: "if I click off Iris and it reverts back to the eye, once
+    /// the response is done loading and needs my intervention, it should ping
+    /// me or change the UI to show me it needs my approval."
+    ///
+    /// Until this existed there was no wire at all between the edit flow and
+    /// the eye. The eye's mood is computed from `assistantState`, which only
+    /// the chat pipeline writes, so a run that stopped on a question — or, as
+    /// happened to him, on a dirty-clone refusal — left the eye drawing its
+    /// resting idle mood. He submitted twice, was refused twice, and saw
+    /// neither refusal.
+    ///
+    /// Visual state only, by explicit decision: no notification, no sound, and
+    /// the overlay still never takes focus. The eye changes, and clicking it
+    /// puts the card that is waiting in front of him.
+    @Published private(set) var attentionTheEyeShouldShow: OverlayEyeAttention = .nothingToSay
+
+    /// How many times the edit flow has announced a phase this session.
+    ///
+    /// It counts ANNOUNCEMENTS, not distinct phases, and that distinction is
+    /// the whole reason it is a number rather than the phase itself. The reader
+    /// submitted TWICE and was refused BOTH times by the same preflight, so the
+    /// two refusals are the same value of `OnDemandEditPhase` down to the
+    /// sentence inside it. A mark that remembered "he has seen
+    /// `.notEligible(reason: …)`" would answer the first refusal and then
+    /// swallow the second one — reinstating the exact silence this exists to
+    /// end, in the exact case that produced the report. Counting events cannot
+    /// make that mistake: the flow saying something again is something new to
+    /// say, whatever it says.
+    private var timesTheEditFlowHasAnnouncedItsPhase = 0
+
+    /// The announcement the reader has already had in front of them, so a
+    /// signal they have answered stops being shown. Without it the badge would
+    /// light on a terminal phase and stay lit for the rest of the session — and
+    /// a permanent badge is decoration, which says nothing at all.
+    private var editFlowAnnouncementTheReaderHasAlreadySeen: Int?
+
     private var onDemandEditPhaseCancellable: AnyCancellable?
+
+    /// The eye's own two subscriptions to the edit flow, kept separate from the
+    /// takeover's `onDemandEditPhaseCancellable` because they are installed at
+    /// a different moment and for a different reason — see
+    /// `watchTheEditFlowSoTheEyeCanSpeakForIt`.
+    private var onDemandEditAttentionCancellable: AnyCancellable?
+    private var onDemandEditAssessmentCancellable: AnyCancellable?
 
     private var crashArtifactWatcher: CrashArtifactWatcher?
     private let hangProbe = HangProbe()
@@ -1034,6 +1092,9 @@ final class CompanionManager: ObservableObject {
         accountStateChangeCancellable?.cancel()
         maintainAskCancellable?.cancel()
         onDemandEditPhaseCancellable?.cancel()
+        onDemandEditAttentionCancellable?.cancel()
+        onDemandEditAssessmentCancellable?.cancel()
+        attentionTheEyeShouldShow = .nothingToSay
         onDemandEditTakeoverIsUp = false
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
@@ -1334,6 +1395,72 @@ final class CompanionManager: ObservableObject {
                 onDemandEditTakeoverIsUp = false
             }
         }
+    }
+
+    /// Subscribe the eye to the two things about an edit flow it has to know:
+    /// which phase the flow is in, and whether a request the reader just sent
+    /// is still being sized up. BOTH are needed, because accepting a request
+    /// does not move the phase — the flow stays in `.describe` while the probe
+    /// runs — so the phase alone cannot see the moment the reader complained
+    /// about.
+    ///
+    /// The coordinator is passed in rather than read off `self`, because this
+    /// is called from inside the lazy property's own initializer and reading it
+    /// there would be reading a variable that is still being made.
+    private func watchTheEditFlowSoTheEyeCanSpeakForIt(
+        _ coordinator: OnDemandEditCoordinator
+    ) {
+        onDemandEditAttentionCancellable = coordinator.$phase
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                // Counted here rather than compared to the last value, because
+                // `@Published` fires on every write and two of the reader's
+                // refusals in a row are the same value — see
+                // `timesTheEditFlowHasAnnouncedItsPhase`.
+                self?.timesTheEditFlowHasAnnouncedItsPhase += 1
+                self?.refreshTheEyesAttention(readingFrom: coordinator)
+            }
+        onDemandEditAssessmentCancellable = coordinator.$isAssessingRequest
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.refreshTheEyesAttention(readingFrom: coordinator)
+            }
+    }
+
+    /// Re-decide what the eye should be saying about the edit flow.
+    ///
+    /// Both properties are read live rather than taken from whichever publisher
+    /// fired, because the answer depends on the pair of them and either one can
+    /// be the thing that moved.
+    private func refreshTheEyesAttention(readingFrom coordinator: OnDemandEditCoordinator) {
+        let phase = coordinator.phase
+        let whatTheFlowIsAsking = OverlayEyeAttention.forEditFlow(
+            phase: phase,
+            theRequestIsBeingAssessed: coordinator.isAssessingRequest
+        )
+        // A request the reader has already had in front of them is not a
+        // request any more. Only the "your turn" signal is answerable this way;
+        // "working" is a fact about Iris, not a question, so looking at it
+        // cannot make it untrue.
+        if whatTheFlowIsAsking == .needsTheReader,
+           editFlowAnnouncementTheReaderHasAlreadySeen == timesTheEditFlowHasAnnouncedItsPhase {
+            attentionTheEyeShouldShow = .nothingToSay
+        } else {
+            attentionTheEyeShouldShow = whatTheFlowIsAsking
+        }
+    }
+
+    /// The eye's bar is open in front of the reader. Whatever Iris was asking
+    /// for, they are looking at it now — the card renders at the top of the bar
+    /// — so the signal that brought them here comes down.
+    ///
+    /// Called from the overlay every time the bar is presented, by a click on
+    /// the eye or by the summon hotkey. The moment the flow says ANYTHING again
+    /// — a new phase, or the same refusal a second time — that is a new thing
+    /// the reader has not seen, and the signal comes back.
+    func theReaderIsLookingAtTheEyesBar() {
+        editFlowAnnouncementTheReaderHasAlreadySeen = timesTheEditFlowHasAnnouncedItsPhase
+        refreshTheEyesAttention(readingFrom: onDemandEditCoordinator)
     }
 
     /// Morph the eye into the centered terminal that streams the edit run —
@@ -1867,20 +1994,18 @@ final class CompanionManager: ObservableObject {
             assistantState = .capturing
 
             do {
-                // Capture all connected screens so the AI has full context
-                let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+                // What this message looks at: the image the reader pasted, or
+                // — when they pasted nothing — every connected screen, exactly
+                // as before. `takeTheImageForThisMessage` spends the
+                // attachment, so it rides one message and one only.
+                let (labeledImages, screenCaptures) = try await CompanionScreenCaptureUtility
+                    .imageryForOneChatMessage(
+                        theReaderPasted: OverlayEyePastedImageAttachment.shared.takeTheImageForThisMessage()
+                    )
 
                 guard !Task.isCancelled else { return }
 
                 assistantState = .thinking
-
-                // Build image labels with the actual screenshot pixel dimensions
-                // so Claude's coordinate space matches the image it sees. We
-                // scale from screenshot pixels to display points ourselves.
-                let labeledImages = screenCaptures.map { capture in
-                    let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
-                    return (data: capture.imageData, label: capture.label + dimensionInfo)
-                }
 
                 // Pass conversation history so Claude remembers prior exchanges
                 let historyForAPI = conversationHistory.map { entry in

@@ -31,7 +31,37 @@
 //  in re-measures as the card grows and shrinks between phases.
 //
 
+import AppKit
 import SwiftUI
+
+/// THE WORDS OFF A FAILURE CARD, AS ONE BLOCK OF TEXT.
+///
+/// Test 7 (Akrit, 0.9.1 build 17), reading a refusal he did not understand:
+/// "i can't copy paste text on that tab with the error" — the same complaint
+/// Test 4 made. `.textSelection(.enabled)` on every line is half the answer and
+/// only half, and the missing half is not a SwiftUI detail: this card lives in
+/// the eye's input-bar panel, whose `canBecomeKey` is FALSE for every phase
+/// except "a question is being composed" (`OverlayEyeInputBar`, by design — a
+/// panel that keeps the keyboard swallows the reader's typing in their own
+/// app). A window that cannot become key is never sent a key event, so ⌘C on a
+/// failure card has nowhere to go no matter how selectable the text is.
+///
+/// A button needs no key window. So the words also come off the card the one
+/// way that cannot be blocked by focus, and this is the text it copies:
+/// everything the reader can see, in reading order, so what lands on the
+/// clipboard is what was on screen.
+enum OnDemandEditFailureText {
+    static func everythingOnTheCard(title: String, lines: [String]) -> String {
+        ([title] + lines.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+            .joined(separator: "\n\n")
+    }
+
+    /// Replaces the clipboard's contents with the card's words.
+    static func copyToTheClipboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+}
 
 struct OnDemandEditCard: View {
     @ObservedObject var coordinator: OnDemandEditCoordinator
@@ -62,6 +92,10 @@ struct OnDemandEditCard: View {
     /// The reader's answer to the model's BLOCKED question, typed into the
     /// blocked card before "Answer and retry".
     @State private var blockedQuestionAnswerText: String = ""
+
+    /// Momentary, so the Copy button can say it worked. See
+    /// `copyTheseWordsButton`.
+    @State private var justCopiedTheWords: Bool = false
 
     var body: some View {
         Group {
@@ -760,12 +794,14 @@ struct OnDemandEditCard: View {
             Text(explanation)
                 .font(.system(size: 11.5))
                 .foregroundColor(DS.Colors.textPrimary)
+                .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
 
             if let question = coordinator.blockedQuestionForUser {
                 Text("Iris needs to know: \(question)")
                     .font(.system(size: 11))
                     .foregroundColor(DS.Colors.amber)
+                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                 TextField("Your answer", text: $blockedQuestionAnswerText, axis: .vertical)
                     .textFieldStyle(.plain)
@@ -787,6 +823,7 @@ struct OnDemandEditCard: View {
             Text("Nothing was changed.")
                 .font(.system(size: 10.5))
                 .foregroundColor(DS.Colors.textSecondary)
+                .textSelection(.enabled)
 
             // A whole class of block is not "this code cannot be changed" but
             // "the binary on disk is stale or was built outside the signed .app
@@ -804,10 +841,21 @@ struct OnDemandEditCard: View {
                 Text("Runs the build this project declares, from its clone, then relaunches it.")
                     .font(.system(size: 10))
                     .foregroundColor(DS.Colors.textTertiary)
+                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             HStack(spacing: 8) {
+                // Copy sits leftmost on BOTH terminal cards, so a reader who
+                // has found it once knows where it is the next time.
+                copyTheseWordsButton(
+                    title: "Iris stopped on purpose",
+                    lines: [
+                        explanation,
+                        coordinator.blockedQuestionForUser.map { "Iris needs to know: \($0)" } ?? "",
+                        "Nothing was changed.",
+                    ]
+                )
                 Button("Done") { coordinator.cancel() }
                     .irisTextButton()
                 Spacer(minLength: 0)
@@ -998,26 +1046,60 @@ struct OnDemandEditCard: View {
         // those two cases.
         let offersModelKeySetup = coordinator.refusalOffersModelKeySetup
         let wasRateLimited = !isRefusal && coordinator.failureWasRateLimit
+        // The dirty-clone refusal arrives through `.failed` — it is decided
+        // inside the run, after the eligibility gate — but it is a REFUSAL, and
+        // heading it "That didn't work" tells a reader something went wrong
+        // when in fact Iris declined to start. It also carries the one terminal
+        // state with a real way out, so it gets its own icon, title and action.
+        // (An `if` chain rather than a fourth nested ternary: four of them
+        // stacked is a puzzle, not a decision.)
+        let dirtyCloneRefusal = coordinator.dirtyCloneRefusal
+        let headerIcon: String
+        let headerTitle: String
+        if dirtyCloneRefusal != nil {
+            headerIcon = "tray.full"
+            headerTitle = "Your clone has changes Iris won't touch"
+        } else if wasRateLimited {
+            headerIcon = "clock.arrow.circlepath"
+            headerTitle = "Rate-limited — try again shortly"
+        } else if offersModelKeySetup {
+            headerIcon = "key.fill"
+            headerTitle = isRefusal
+                ? "Connect a model to edit apps"
+                : "Your model credential stopped working"
+        } else {
+            headerIcon = isRefusal ? "hand.raised" : "exclamationmark.triangle"
+            headerTitle = isRefusal ? "Iris can't edit this" : "That didn't work"
+        }
         return card {
-            header(
-                icon: wasRateLimited
-                    ? "clock.arrow.circlepath"
-                    : (offersModelKeySetup
-                        ? "key.fill"
-                        : (isRefusal ? "hand.raised" : "exclamationmark.triangle")),
-                title: wasRateLimited
-                    ? "Rate-limited — try again shortly"
-                    : (offersModelKeySetup
-                        ? (isRefusal ? "Connect a model to edit apps" : "Your model credential stopped working")
-                        : (isRefusal ? "Iris can't edit this" : "That didn't work"))
-            )
+            header(icon: headerIcon, title: headerTitle)
 
+            // `.textSelection(.enabled)` on every reader-facing line here, and
+            // on every one in the blocked card below, because the reader of
+            // Test 7 hit exactly this card and said "i can't copy paste text on
+            // that tab with the error" — the same complaint Test 4 already
+            // made. A failure message you cannot copy cannot be pasted into a
+            // search, a bug report, or a message to somebody who can help, so
+            // the one moment a reader most needs the words is the one moment
+            // they could not have them. Selection is HALF the answer — the
+            // other half is the Copy button in the row below, because this card
+            // lives in a panel that refuses key status and ⌘C is a key event.
+            // See `OnDemandEditFailureText`.
             Text(reason)
                 .font(.system(size: 11.5))
                 .foregroundColor(DS.Colors.textPrimary)
+                .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
 
+            if dirtyCloneRefusal != nil {
+                setAsideAndContinueAction
+            }
+
             HStack(spacing: 8) {
+                copyTheseWordsButton(
+                    title: headerTitle,
+                    lines: [reason]
+                )
                 Spacer(minLength: 0)
                 Button("Done") { coordinator.cancel() }
                     .irisTextButton()
@@ -1032,11 +1114,75 @@ struct OnDemandEditCard: View {
         }
     }
 
+    /// The one tap out of the dirty-clone dead end.
+    ///
+    /// The caption is not decoration. The reader is being asked to let Iris
+    /// write to their own repository over changes they may not recognise, so
+    /// the card has to say where the work goes and how to get it back — "set
+    /// aside" is only an honest phrase if `git stash pop` is on screen next to
+    /// it. Nothing here runs on its own; the button is the whole consent.
+    @ViewBuilder
+    private var setAsideAndContinueAction: some View {
+        if coordinator.isSettingAsideDirtyChanges {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .controlSize(.small)
+                    .scaleEffect(0.62)
+                    .frame(width: 13, height: 13)
+                Text("Setting them aside…")
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.textSecondary)
+                    .textSelection(.enabled)
+            }
+        } else {
+            Button("Set aside and continue") {
+                coordinator.setAsideDirtyChangesAndRetry()
+            }
+            .irisPrimaryPill(isFullWidth: true, isCompact: true)
+            .padding(.top, 2)
+            .help("Runs git stash in that clone, then retries your edit. Nothing is deleted.")
+
+            Text("Sets the changes aside in git stash — nothing is deleted, and `git stash pop` in that clone puts them all back — then Iris retries your edit.")
+                .font(.system(size: 10))
+                .foregroundColor(DS.Colors.textTertiary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     /// Opens Iris's settings panel — where a model is connected, by key or by CLI
     /// login — and clears this refusal, so the reader lands where the fix is
     /// rather than being told to go find it. `cancel()` returns the flow to the
     /// app picker, so re-tapping the edit chip after connecting a model re-runs
     /// eligibility cleanly.
+    /// "Copy" — the words off this card, on the clipboard, in one tap.
+    ///
+    /// It is a BUTTON and not just selectable text for the reason spelled out
+    /// on `OnDemandEditFailureText`: the bar's panel deliberately refuses key
+    /// status once a question has been sent, and ⌘C is a key event. Selection
+    /// still earns its place (a reader who has clicked back into the field has
+    /// a key window, and partial copies want a drag) — this is the half that
+    /// works when the window cannot take the keystroke at all.
+    ///
+    /// It confirms itself for a moment, because a copy that says nothing is
+    /// indistinguishable from a button that did nothing — and this card's whole
+    /// problem is a reader unable to tell what happened.
+    @ViewBuilder
+    private func copyTheseWordsButton(title: String, lines: [String]) -> some View {
+        Button(justCopiedTheWords ? "Copied" : "Copy") {
+            OnDemandEditFailureText.copyToTheClipboard(
+                OnDemandEditFailureText.everythingOnTheCard(title: title, lines: lines)
+            )
+            justCopiedTheWords = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
+                justCopiedTheWords = false
+            }
+        }
+        .irisTextButton()
+        .help("Copies this whole message to the clipboard.")
+    }
+
     private func openSettingsToConnectAModel() {
         NotificationCenter.default.post(name: .clickyShowPanel, object: nil)
         coordinator.cancel()
@@ -1049,9 +1195,14 @@ struct OnDemandEditCard: View {
             Image(systemName: icon)
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundColor(DS.Colors.accent)
+            // Selectable like the body beneath it: a reader copying a failure
+            // out of this card almost always wants the heading with it, and a
+            // selection that stops dead at the first line is the same "i can't
+            // copy paste text on that tab" complaint in a smaller form.
             Text(title)
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundColor(DS.Colors.textPrimary)
+                .textSelection(.enabled)
         }
     }
 

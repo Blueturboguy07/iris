@@ -329,6 +329,18 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// re-enters the describe step folded into the request.
     @Published private(set) var blockedQuestionForUser: String?
 
+    /// Set ONLY while the current terminal failure is the dirty-clone refusal —
+    /// the changes Iris found in the reader's clone, named and dated. Two
+    /// things read it: the card, to title the refusal as a refusal rather than
+    /// as "That didn't work", and to offer "Set aside and continue"; and
+    /// nothing else. Cleared the moment a run starts or the flow resets, so the
+    /// offer can never outlive the state it is about.
+    @Published private(set) var dirtyCloneRefusal: OnDemandEditDirtyTreeReport?
+
+    /// True while `git stash` is running in the reader's clone, so the button
+    /// they just tapped becomes a working line instead of staying tappable.
+    @Published private(set) var isSettingAsideDirtyChanges: Bool = false
+
     /// True from the moment the reader asks a `.running` edit to stop until
     /// the engine acknowledges (it polls this at every step boundary, reverts
     /// everything, and returns the stopped result). Published so the Stop
@@ -1047,6 +1059,9 @@ final class OnDemandEditCoordinator: ObservableObject {
         phase = .running
         statusLine = "Working on it under your model key…"
         readerAskedToStopTheRun = false
+        // A previous attempt's dirty-clone refusal is about a tree that is
+        // being re-read right now — the offer must not survive into a run.
+        dirtyCloneRefusal = nil
         // A run is the thing worth remembering, so from here there is an
         // exchange owing a record in `sessionThread`.
         currentExchangeIsFiled = false
@@ -1091,17 +1106,40 @@ final class OnDemandEditCoordinator: ObservableObject {
         // `git clean -fd`, which would delete the reader's own untracked files
         // and revert their uncommitted edits. Starting from a clean tree is what
         // makes that revert safe (it can then only ever clean files Iris made).
+        //
+        // The refusal NAMES what it found. It used to say only that "your clone
+        // has uncommitted changes — commit or stash them first", which is a true
+        // sentence that reads as an accusation: Test 7's reader hit it twice and
+        // answered "i made no changes this doesn't make sense as to why that is
+        // the error." His clone held ONE modification, five days old, left by an
+        // earlier build or guide run. Iris was holding the filename — this very
+        // `git status` — and the date was one `stat` away, and it discarded both
+        // before speaking. See `OnDemandEditDirtyTreeReport`.
         let status = try? await runner.run("git status --porcelain", deadline: 60)
-        let treeIsDirty = (status?.outputTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
-        if treeIsDirty {
-            editRunner.note("Your clone of \(activeAppName ?? slug) has uncommitted changes, so Iris stopped — it never discards work you haven't committed.")
-            editRunner.finishStopped()
-            runLog?.finish(outcome: "not started: the clone has uncommitted changes")
-            runLog = nil
-            failRun(
-                reason: "your clone has uncommitted changes — commit or stash them first so Iris never touches your own work",
-                resolvedClonePath: resolvedClonePath
+        // Read EXACTLY what git wrote. Porcelain's first status column is very
+        // often a space (` M path`), so trimming the block before parsing it
+        // eats the first character of the first path — which is not
+        // hypothetical: the first cut of this did exactly that and told a test
+        // reader their dirty file was "cripts/dev.sh". Only the emptiness test
+        // gets a trimmed copy.
+        let porcelainOutput = status?.outputTail ?? ""
+        let theCloneIsDirty = !porcelainOutput
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if theCloneIsDirty {
+            let dirtyTree = OnDemandEditDirtyTreeReport.read(
+                porcelainOutput: porcelainOutput, repoRootPath: resolvedClonePath
             )
+            let refusal = dirtyTree.refusalSentence(appName: activeAppName ?? slug)
+            editRunner.note(refusal)
+            editRunner.finishStopped()
+            runLog?.finish(
+                outcome: "not started: the clone has uncommitted changes (\(dirtyTree.pathsForTheRunLog))"
+            )
+            runLog = nil
+            // Published BEFORE the phase flips, so the card that renders the
+            // refusal can offer "Set aside and continue" in the same frame.
+            dirtyCloneRefusal = dirtyTree
+            failRun(reason: refusal, resolvedClonePath: resolvedClonePath)
             return
         }
 
@@ -1911,6 +1949,133 @@ final class OnDemandEditCoordinator: ObservableObject {
         confirmStartAndRun()
     }
 
+    // MARK: - The one tap out of the dirty-clone refusal
+
+    /// "Set aside and continue": stash whatever is sitting in the reader's
+    /// clone, then run the edit they already asked for.
+    ///
+    /// The old refusal was a dead end with a shell instruction inside it —
+    /// "commit or stash them first" — handed to somebody working entirely in a
+    /// GUI, about changes they had not made. Stashing is something Iris can do
+    /// in one tap, and it honors the never-touch-your-work rule BETTER than the
+    /// dead end did: a stash preserves the work and `git stash pop` puts it
+    /// back, while refusing preserves the work and delivers nothing.
+    ///
+    /// It is never automatic. This writes to the reader's repository, so it
+    /// happens only on a tap on a card that says plainly what it does and that
+    /// nothing is deleted.
+    ///
+    /// The retry goes back through `confirmStartAndRun()`, not around it, so
+    /// the live eligibility re-check, the Iris-repo refusal, the per-clone lock
+    /// and the dirty-tree read all run again exactly as they did the first
+    /// time. If the stash somehow left the tree dirty, the second pass refuses
+    /// again rather than proceeding on an assumption.
+    func setAsideDirtyChangesAndRetry() {
+        guard case .failed = phase,
+              dirtyCloneRefusal != nil,
+              !isSettingAsideDirtyChanges,
+              let slug = activeAppSlug,
+              let kind = classifiedKind,
+              scrubbedRequest != nil,
+              changeId != nil,
+              let clonePath = provenanceClonePath(forAppSlug: slug),
+              let resolvedPath = try? GitInspectionService.allowedRepositoryPath(clonePath) else { return }
+
+        let stashName = Self.setAsideStashName()
+        isSettingAsideDirtyChanges = true
+        statusLine = "Setting your changes aside as \(stashName)…"
+
+        Task { [weak self] in
+            guard let self else { return }
+            let outcome = await Self.setChangesAside(inCloneAt: resolvedPath, named: stashName)
+            self.isSettingAsideDirtyChanges = false
+            switch outcome {
+            case .setAside:
+                self.dirtyCloneRefusal = nil
+                self.phase = .awaitingStartConsent
+                self.statusLine = self.startConsentPrompt(kind: kind)
+                self.confirmStartAndRun()
+                // NOTED AFTER THE RETRY, NOT BEFORE IT. `confirmStartAndRun`
+                // reaches `editRunner.beginRun`, which clears the transcript to
+                // open a fresh run — so a note written before the call is wiped
+                // in the same turn and the reader never sees it. The card's
+                // caption promises `git stash pop` BEFORE the tap; this is the
+                // half of that promise that has to survive it, and it now opens
+                // the run's own transcript, which is where the reader is
+                // looking. (Caught by the repro test, not by reading.)
+                self.editRunner.note(
+                    "Set your changes aside as `\(stashName)`. Nothing was deleted — running `git stash pop` in that clone brings them all back."
+                )
+            case .couldNotSetAside(let reason):
+                // Still a refusal and still nothing touched — but now an honest
+                // one about a DIFFERENT problem, with the offer withdrawn
+                // rather than left on screen to be tapped forever.
+                self.dirtyCloneRefusal = nil
+                let refusal = "Iris couldn't set those changes aside, so it hasn't touched anything: \(reason). Your clone is exactly as it was."
+                self.editRunner.note(refusal)
+                self.editRunner.finishStopped()
+                self.phase = .failed(reason: refusal)
+                self.statusLine = refusal
+            }
+        }
+    }
+
+    private enum SetAsideOutcome {
+        case setAside
+        case couldNotSetAside(reason: String)
+    }
+
+    /// `iris/set-aside-2026-08-31` — a name the reader can find in
+    /// `git stash list` and still recognise months later. POSIX-fixed on
+    /// purpose: this is an identifier written into somebody's repository, not a
+    /// date drawn on a card, so its shape must not follow the machine's locale.
+    nonisolated static func setAsideStashName(now: Date = Date()) -> String {
+        let dateFormatter = DateFormatter()
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        return "iris/set-aside-\(dateFormatter.string(from: now))"
+    }
+
+    /// The stash itself. `--include-untracked` is not optional: the danger the
+    /// dirty-tree refusal exists to prevent is the engine's revert running
+    /// `git clean -fd`, which DELETES untracked files — so the set-aside has to
+    /// cover exactly what the danger covers, or it would be moving the reader's
+    /// tracked work to safety while leaving their new files in front of the bus.
+    private static func setChangesAside(
+        inCloneAt resolvedClonePath: String,
+        named stashName: String
+    ) async -> SetAsideOutcome {
+        guard let runner = try? MaintainShellRunner(repoRootPath: resolvedClonePath) else {
+            return .couldNotSetAside(reason: "the clone path is not usable")
+        }
+        // The message is code-authored (a fixed prefix plus digits from
+        // `setAsideStashName`), never reader text, so the single quotes below
+        // enclose nothing that could break out of them.
+        guard let stashResult = try? await runner.run(
+            "git stash push --include-untracked -m '\(stashName)'", deadline: 180
+        ) else {
+            return .couldNotSetAside(reason: "git didn't answer")
+        }
+        guard stashResult.succeeded else {
+            let lastThingGitSaid = stashResult.outputTail
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .components(separatedBy: "\n").last ?? ""
+            return .couldNotSetAside(
+                reason: lastThingGitSaid.isEmpty ? "git refused" : lastThingGitSaid
+            )
+        }
+        // PROVE it rather than trust the exit code: `git stash push` exits 0
+        // when it finds nothing to stash, and a clone that is still dirty here
+        // would walk straight back into the same refusal a second later.
+        let statusAfterwards = try? await runner.run("git status --porcelain", deadline: 60)
+        let theCloneIsStillDirty = statusAfterwards?.outputTail
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        if theCloneIsStillDirty {
+            return .couldNotSetAside(reason: "the clone still has changes after the stash")
+        }
+        return .setAside
+    }
+
     /// The card consumed the prefill; clear it so a later pick starts clean.
     func consumeDescribePrefill() {
         describePrefillText = nil
@@ -2614,6 +2779,8 @@ final class OnDemandEditCoordinator: ObservableObject {
         offersRetryWithMemory = false
         deliveredChangeCanBeUndone = false
         failureWasRateLimit = false
+        dirtyCloneRefusal = nil
+        isSettingAsideDirtyChanges = false
         blockedQuestionForUser = nil
         // The answered blocks belong to ONE request's chain of attempts. A new
         // request must not open with the answers to a question asked about a
@@ -2686,3 +2853,182 @@ enum OnDemandEditSymptomVerdict: String, Sendable {
         }
     }
 }
+
+// MARK: - The dirty-clone refusal, with the changes NAMED
+
+/// What `git status --porcelain` actually said at the instant Iris refused to
+/// touch a clone — kept whole, so the refusal can NAME the changes instead of
+/// only asserting that some exist.
+///
+/// Test 7 (Akrit, 0.9.1 build 17). Two feature requests, both rejected before
+/// anything ran, both with the same sentence: "your clone has uncommitted
+/// changes — commit or stash them first so Iris never touches your own work".
+/// His reply was "i made no changes this doesn't make sense as to why that is
+/// the error." He was right, and so was Iris: the clone held exactly ONE
+/// modification, five days old, left behind by an earlier build or guide run.
+/// A true sentence that reads as an accusation is still a bad sentence, and
+/// this one read as one for a simple reason — it named nothing and dated
+/// nothing, so there was no way for the reader to see it was not about them.
+///
+/// Iris already had every fact needed to defuse that. It had just run `git
+/// status --porcelain`, and each file's own mtime is one `stat` away. It threw
+/// all of it away before speaking. This type is that discarded evidence, kept.
+struct OnDemandEditDirtyTreeReport: Equatable, Sendable {
+
+    /// One line of `git status --porcelain`, parsed.
+    struct DirtyEntry: Equatable, Sendable {
+        /// The path exactly as Git named it, relative to the clone root.
+        let path: String
+        /// The raw two-column porcelain code (" M", "??", "A ", "D ", …), kept
+        /// rather than pre-interpreted so the wording can say "untracked" where
+        /// Git means untracked without a second git call.
+        let statusCode: String
+        /// The file's own modification date, or nil when there is nothing left
+        /// to stat (a deletion, or a path Git can name that the filesystem
+        /// cannot). Nil is reported as an absent date, never as "now" — a
+        /// guessed date is exactly the kind of thing this type exists to stop.
+        let lastModified: Date?
+
+        /// The plain-English word for what Git says happened to this path.
+        var whatHappenedToIt: String {
+            if statusCode.contains("?") { return "untracked" }
+            if statusCode.contains("D") { return "deleted" }
+            if statusCode.contains("R") { return "renamed" }
+            if statusCode.contains("A") { return "added" }
+            return "modified"
+        }
+    }
+
+    let entries: [DirtyEntry]
+
+    /// At most this many paths are named in one sentence; the rest are counted.
+    /// A clone with forty dirty files does not need forty filenames to make the
+    /// point, and this sentence renders in a 320pt bar over someone's desktop.
+    static let mostPathsNamed = 3
+
+    /// Older than this, and Iris says out loud that the change probably was not
+    /// the reader's. Six hours is deliberately conservative: long enough that
+    /// "i made no changes" is almost certainly true, short enough that work
+    /// from this morning is never waved away as somebody else's.
+    static let olderThanThisWasProbablyNotTheReaders: TimeInterval = 6 * 60 * 60
+
+    var isDirty: Bool { !entries.isEmpty }
+
+    /// Paths only, for the run log — the prose belongs on screen, not in a file
+    /// a human reads to reconstruct a run.
+    var pathsForTheRunLog: String {
+        entries.map(\.path).joined(separator: ", ")
+    }
+
+    /// Reads what git already answered. Pure apart from one `stat` per named
+    /// path: nothing here can change a byte of the reader's repository.
+    static func read(
+        porcelainOutput: String,
+        repoRootPath: String,
+        fileManager: FileManager = .default
+    ) -> OnDemandEditDirtyTreeReport {
+        var entries: [DirtyEntry] = []
+        for rawLine in porcelainOutput.split(separator: "\n", omittingEmptySubsequences: true) {
+            let line = String(rawLine).replacingOccurrences(of: "\r", with: "")
+            // `XY <path>`: two status columns, a space, then the path. Anything
+            // shorter is not a porcelain record, and is skipped rather than
+            // guessed at.
+            guard line.count >= 3 else { continue }
+            let statusCode: String
+            var path: String
+            if line.dropFirst(2).hasPrefix(" ") {
+                statusCode = String(line.prefix(2))
+                path = String(line.dropFirst(3))
+            } else if let firstSpace = line.firstIndex(of: " ") {
+                // A caller that trimmed the block before handing it over leaves
+                // `M path` where git wrote ` M path`. Recovering the path is
+                // strictly better than confidently eating its first letter, and
+                // that failure mode has already happened once.
+                statusCode = String(line[..<firstSpace])
+                path = String(line[line.index(after: firstSpace)...])
+            } else {
+                continue
+            }
+            // The staged/unstaged columns pad wider paths (`A  file`); the
+            // padding is git's, not the filename's.
+            path = path.trimmingCharacters(in: .whitespaces)
+            // A rename is `R  old -> new`. The reader cares where the work is
+            // NOW, so the destination is the path worth naming.
+            if let arrowRange = path.range(of: " -> ") {
+                path = String(path[arrowRange.upperBound...])
+            }
+            // Git quotes a path containing unusual bytes (core.quotepath). The
+            // quotes are Git's, not the filename's.
+            if path.count >= 2, path.hasPrefix("\""), path.hasSuffix("\"") {
+                path = String(path.dropFirst().dropLast())
+            }
+            guard !path.isEmpty else { continue }
+            let absolutePath = (repoRootPath as NSString).appendingPathComponent(path)
+            let lastModified = (try? fileManager.attributesOfItem(atPath: absolutePath))?[.modificationDate] as? Date
+            entries.append(
+                DirtyEntry(path: path, statusCode: statusCode, lastModified: lastModified)
+            )
+        }
+        return OnDemandEditDirtyTreeReport(entries: entries)
+    }
+
+    /// The refusal the reader actually reads. It names the files and dates
+    /// them, because the entire failure of the old sentence was that a reader
+    /// who had made no changes had no way to see it was not talking about them.
+    func refusalSentence(appName: String, now: Date = Date()) -> String {
+        guard !entries.isEmpty else {
+            // Unreachable from the refusal path, which only fires on a dirty
+            // tree — and a sentence that names nothing is the defect, so this
+            // stays honest instead of inventing a list.
+            return "Iris stopped before touching anything: your clone of \(appName) has uncommitted changes."
+        }
+        let namedChanges = entries.prefix(Self.mostPathsNamed).map { entry -> String in
+            guard let lastModified = entry.lastModified else {
+                return "\(entry.path) (\(entry.whatHappenedToIt))"
+            }
+            return "\(entry.path) (\(entry.whatHappenedToIt) \(Self.dayAndMonth(lastModified)))"
+        }
+        var sentence = "Iris stopped before touching anything: your clone of \(appName) has "
+        sentence += entries.count == 1
+            ? "one change that isn't committed"
+            : "\(entries.count) changes that aren't committed"
+        sentence += " — " + namedChanges.joined(separator: ", ")
+        if entries.count > Self.mostPathsNamed {
+            sentence += ", and \(entries.count - Self.mostPathsNamed) more"
+        }
+        sentence += "."
+        if let ageNote = probablyNotTheReadersNote(now: now) {
+            sentence += " " + ageNote
+        }
+        sentence += " Iris only edits a clean clone: if a run fails it reverts, and a revert would take whatever is sitting there with it."
+        return sentence
+    }
+
+    /// The half of the sentence that answers "i made no changes". Said only
+    /// when the file dates support it — a file the reader edited ten minutes
+    /// ago earns no such note, because guessing wrong in that direction would
+    /// be its own small lie.
+    func probablyNotTheReadersNote(now: Date = Date()) -> String? {
+        guard let newestChange = entries.compactMap(\.lastModified).max() else { return nil }
+        let age = now.timeIntervalSince(newestChange)
+        guard age >= Self.olderThanThisWasProbablyNotTheReaders else { return nil }
+        let wholeDays = Int(age / (24 * 60 * 60))
+        let howOld = wholeDays >= 1
+            ? "\(wholeDays) day\(wholeDays == 1 ? "" : "s") old"
+            : "hours old"
+        return "Nothing there is from this session — the newest is \(howOld) — so it was most likely left behind by a build or an earlier run rather than by you."
+    }
+
+    /// "Aug 25". Localized rather than POSIX-fixed: this is a date a person
+    /// reads. (The stash NAME below is the opposite case and stays POSIX.)
+    static func dayAndMonth(_ date: Date) -> String {
+        dayAndMonthFormatter.string(from: date)
+    }
+
+    private static let dayAndMonthFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.setLocalizedDateFormatFromTemplate("MMMd")
+        return formatter
+    }()
+}
+

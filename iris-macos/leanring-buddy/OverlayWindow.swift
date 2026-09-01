@@ -236,6 +236,11 @@ struct BlueCursorView: View {
     /// When the eye was last actually dragged, on the uptime clock.
     @State private var whenTheEyeWasLastDragged: TimeInterval?
 
+    /// Where the "Iris needs you" badge is in its slow breath. Held here rather
+    /// than derived so the pulse is a real animation the reader's eye catches
+    /// at the edge of their vision, which is the entire point of it.
+    @State private var attentionBadgeIsBreathingOut = false
+
     init(
         screenFrame: CGRect,
         isFirstAppearance: Bool,
@@ -524,6 +529,16 @@ struct BlueCursorView: View {
                     width: sideOfTheEyesClickTargetSquare,
                     height: sideOfTheEyesClickTargetSquare
                 )
+                // The badge rides in the corner of the CLICK SQUARE, which is a
+                // few points wider than the eye's disc, so it sits just off the
+                // edge of the eye instead of on top of the track. Inside the
+                // frame, so it can never widen what the window's gate has to
+                // agree with — see `sideLengthOfTheClickTargetSquare`.
+                .overlay(alignment: .topTrailing) {
+                    if theEyeIsAskingForTheReader {
+                        theBadgeThatSaysIrisNeedsYou
+                    }
+                }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -651,15 +666,77 @@ struct BlueCursorView: View {
     /// | `thinking` | `thinking` | the track spins for as long as Claude is answering |
     /// | `pointing`, still flying | `ready` | alert and locked on to the target, but it has not landed yet |
     /// | `pointing`, arrived | `done` | the site's found-it green, held steady on the thing it is pointing at |
+    ///
+    /// THE FIFTH ROW, AND WHY IT IS NOT IN THE TABLE. `assistantState` is
+    /// written by the CHAT pipeline and nothing else — the on-demand edit flow
+    /// never touches it. So while an edit ran, stopped, and waited for the
+    /// reader, this returned `.idle` and the eye drew its resting mood. A
+    /// reader submitted two edits, was refused both times by the dirty-clone
+    /// preflight, dismissed the bar in between, and the eye told him nothing:
+    /// "once the response is done loading and needs my intervention, it should
+    /// … change the UI to show me it needs my approval." The edit flow's own
+    /// state is therefore folded in HERE, under `.idle` — never over a chat
+    /// state, because a chat the reader is actually watching outranks a
+    /// background edit for the one eye they can see.
     private var eyeMood: IrisEyeMood {
         switch companionManager.assistantState {
         case .idle:
-            return .idle
+            switch companionManager.attentionTheEyeShouldShow {
+            case .nothingToSay:
+                return .idle
+            case .working:
+                // The same spinning track a chat answer gets. From the reader's
+                // side an edit being worked on and a question being answered
+                // are the same fact: Iris is busy on something of mine.
+                return .thinking
+            case .needsTheReader:
+                // Alert and locked on, with no spin and no idle wander — an eye
+                // that has stopped what it was doing and is looking at you.
+                return .ready
+            }
         case .capturing, .thinking:
             return .thinking
         case .pointing:
             return buddyNavigationMode == .pointingAtTarget ? .done : .ready
         }
+    }
+
+    /// Whether the eye is currently asking for the reader, and there is an eye
+    /// rather than a gear to ask with.
+    ///
+    /// Gated on the bar being shut on purpose: while the bar is open the card
+    /// itself is on screen a few points below, so a badge would be pointing at
+    /// something the reader is already reading.
+    private var theEyeIsAskingForTheReader: Bool {
+        companionManager.attentionTheEyeShouldShow == .needsTheReader
+            && !eyeActivation.theInputBarIsOpen
+    }
+
+    /// The one mark that says "Iris needs you" without a notification, a sound,
+    /// or a window that takes focus — all three of which were ruled out.
+    ///
+    /// Amber is the design system's colour for a pending state that wants a
+    /// person (`DS.Colors.amber`), it sits in the corner of the eye's click
+    /// square rather than on the eye's own disc so it never covers the iris,
+    /// and it breathes slowly so it reads as waiting rather than as an error.
+    /// It takes no clicks: the whole square is one button, and the thing to
+    /// click is the eye.
+    private var theBadgeThatSaysIrisNeedsYou: some View {
+        Circle()
+            .fill(DS.Colors.amber)
+            .frame(width: 13, height: 13)
+            .overlay(Circle().strokeBorder(Color.white.opacity(0.9), lineWidth: 1.5))
+            .shadow(color: DS.Colors.amber.opacity(0.65), radius: 5, x: 0, y: 0)
+            .scaleEffect(attentionBadgeIsBreathingOut ? 1.0 : 0.76)
+            .opacity(attentionBadgeIsBreathingOut ? 1.0 : 0.72)
+            .offset(x: 1, y: -1)
+            .allowsHitTesting(false)
+            .onAppear {
+                attentionBadgeIsBreathingOut = false
+                withAnimation(.easeInOut(duration: 0.95).repeatForever(autoreverses: true)) {
+                    attentionBadgeIsBreathingOut = true
+                }
+            }
     }
 
     /// Whether the buddy should be visible on this screen.
@@ -832,8 +909,24 @@ struct BlueCursorView: View {
         presentTheInputBar()
     }
 
-    private func presentTheInputBar() {
+    /// Internal rather than private ON PURPOSE: this is the ONLY path a click on
+    /// the eye or the summon hotkey takes into the bar, and both things it does
+    /// here — answering the attention signal, and raising the bar — were
+    /// previously provable only by a test that called each half by hand. That
+    /// left the ORDER and the CALL itself uncovered: deleting
+    /// `theReaderIsLookingAtTheEyesBar()` below kept every test green while the
+    /// badge stayed lit for the rest of the session, which is the exact failure
+    /// this line exists to prevent. `Test7ForeignEditWiringTests` now calls this
+    /// function.
+    func presentTheInputBar() {
         guard let inputBarPanelManager else { return }
+        // THE OTHER HALF OF THE BADGE. Opening the bar puts the card that was
+        // waiting directly in front of the reader — `OnDemandEditCard` renders
+        // at the top of the bar for every phase except `.describe` — so the
+        // thing that was asking is answered by the act of looking, and the
+        // badge comes down. Without this it would stay lit forever on a
+        // terminal phase and stop meaning anything.
+        companionManager.theReaderIsLookingAtTheEyesBar()
         inputBarPanelManager.showInputBar(
             forEyeAtInteractionGeometry: interactionGeometryForTheEyeWhereItSitsNow,
             onScreenWithFrame: screenFrame,

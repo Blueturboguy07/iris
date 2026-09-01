@@ -332,6 +332,16 @@ final class CompanionManager: ObservableObject {
             )
         }
 
+        // The machine-state channel (broadened scope, Sep 1 2026): runs one
+        // reader-approved command on the Mac itself, OUTSIDE the Tier C jail.
+        // The gate has already cleared it past the refusal floor; this only
+        // executes it and hands back the two facts the model gets about any
+        // command — exit status and a scrubbed output tail. No shell string
+        // interpolation: the command is split into argv, so nothing in it is
+        // re-interpreted by a shell.
+        coordinator.runMachineCommandOnThisMac = { command in
+            await MachineCommandRunner.run(command)
+        }
         coordinator.packageEditedAppFromClone = { [weak self] appSlug in
             guard let self,
                   let clonePath = self.installProvenanceStore.provenance(forAppSlug: appSlug)?.clonePath else {

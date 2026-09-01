@@ -122,6 +122,8 @@ struct OnDemandEditCard: View {
                 committingCard
             case .awaitingManifestConsent:
                 manifestConsentCard
+            case .awaitingMachineCommandConsent:
+                machineCommandConsentCard
             case .delivering:
                 deliveringCard
             case .awaitingSymptomConfirmation:
@@ -710,6 +712,58 @@ struct OnDemandEditCard: View {
                     .irisTextButton()
                 Spacer(minLength: 0)
                 Button("Allow") { coordinator.approveManifestChange() }
+                    .irisPrimaryPill(isFullWidth: false, isCompact: true)
+            }
+        }
+    }
+
+    // MARK: - Machine-state command consent (broadened scope, Sep 1 2026)
+
+    /// Iris found the cause on the Mac itself, not in the app, and wants to run
+    /// one command to fix it. The command is shown verbatim and selectable —
+    /// consent to a command you cannot read is not consent — and the run
+    /// happens only on Allow, outside the jail, still past the risk gate.
+    private var machineCommandConsentCard: some View {
+        card {
+            header(icon: "gearshape.2", title: "Iris wants to fix this on your Mac")
+
+            Text(coordinator.pendingMachineCommandReason.isEmpty
+                ? "The cause is a setting on this Mac, not the app's code."
+                : coordinator.pendingMachineCommandReason)
+                .font(.system(size: 11.5))
+                .foregroundColor(DS.Colors.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+
+            if let command = coordinator.pendingMachineCommand {
+                Text(command)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(DS.Colors.ink)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
+                            .fill(DS.Colors.surfaceRaised)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
+                                    .strokeBorder(DS.Colors.line, lineWidth: 1)
+                            )
+                    )
+            }
+
+            Text("Iris runs this on your Mac, not inside the app's folder. It never edited your source. Nothing has run yet.")
+                .font(.system(size: 10.5))
+                .foregroundColor(DS.Colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                Button("Not now") { coordinator.declinePendingMachineCommand() }
+                    .irisTextButton()
+                Spacer(minLength: 0)
+                Button("Run it") { coordinator.approvePendingMachineCommand() }
                     .irisPrimaryPill(isFullWidth: false, isCompact: true)
             }
         }

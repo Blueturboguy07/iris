@@ -286,6 +286,8 @@ import Testing
             Issue.record("unexpected notEligible")
         case .blockedByModel:
             Issue.record("unexpected blockedByModel")
+        case .machineCommandRequested:
+            Issue.record("unexpected machineCommandRequested")
         }
     }
 

@@ -106,6 +106,14 @@ enum OnDemandEditPhase: Equatable, Sendable {
     /// Allow/Decline before Iris's own code applies it and builds with it.
     /// `pendingManifestChangeSummary` is the one sentence to decide on.
     case awaitingManifestConsent
+    /// The model concluded the cause lives in MACHINE STATE, not the app —
+    /// a permission record keyed to a dead build's identity, a stale defaults
+    /// key — and asked to run ONE command on the Mac. Nothing has run and
+    /// nothing was changed; the reader's Allow is the only way it ever does.
+    /// Founder decision, Sep 1 2026 ("broaden Iris' scope"), after two runs
+    /// edited WhimprFlow source over a ghost TCC grant no source edit could
+    /// reach. The command still passes the risk gate's refusal floor.
+    case awaitingMachineCommandConsent
     /// FULLY AUTOMATIC delivery (founder decision, Aug 22 2026): the change is
     /// applied, so Iris is recording it, rebuilding the app from the clone
     /// (signed with a stable identity when one exists), and relaunching it —
@@ -498,6 +506,21 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// Accumulates across retries: a second block asks something new, and the
     /// third attempt should know both answers.
     private var answersToBlockingQuestionsForPrompt: [(question: String, answer: String)] = []
+
+    // MARK: - The machine-state channel (broadened scope, Sep 1 2026)
+
+    /// The one command the model asked Iris to run on the Mac, awaiting the
+    /// reader's tap. Shown verbatim on the consent card — a reader consenting
+    /// to a command they cannot read is not consenting.
+    @Published private(set) var pendingMachineCommand: String?
+    @Published private(set) var pendingMachineCommandReason: String = ""
+
+    /// Runs an approved machine command OUTSIDE the jail. Injected by
+    /// CompanionManager (a real Process); nil in tests and headless builds, in
+    /// which case approval honestly reports it cannot run. Returns the exit
+    /// status and a scrubbed output tail — the same two facts the model gets
+    /// about any command.
+    var runMachineCommandOnThisMac: ((_ command: String) async -> (exitStatus: Int32, outputTail: String))?
 
     /// True once the CURRENT exchange has been filed into `sessionThread`.
     /// Starts true because there is nothing to file before the first run, and
@@ -1332,6 +1355,26 @@ final class OnDemandEditCoordinator: ObservableObject {
             lastBlockedExplanation = explanation
             phase = .blockedByModel(explanation: explanation)
             statusLine = explanation
+
+        case .machineCommandRequested(let command, let why):
+            // The broadened scope (founder, Sep 1 2026): the model may conclude
+            // the cause is machine state and hand Iris ONE command to run
+            // outside the jail — but only ever through the reader's tap. The
+            // tree is already reverted; the command has not run.
+            editRunner.note("Iris found the cause on this Mac, not in the app: \(why)")
+            editRunner.note("It wants to run: \(command)")
+            editRunner.finishStopped()
+            runLog?.finish(outcome: "machine command requested: \(command) | why: \(why)")
+            runLog = nil
+            recordMemory(
+                outcome: "machine command requested: \(command) — \(why)", kind: kind
+            )
+            clonePathLock.release(clonePath: resolvedClonePath)
+            self.resolvedClonePath = nil
+            pendingMachineCommand = command
+            pendingMachineCommandReason = why
+            phase = .awaitingMachineCommandConsent
+            statusLine = why
         }
     }
 
@@ -1947,6 +1990,68 @@ final class OnDemandEditCoordinator: ObservableObject {
         phase = .awaitingStartConsent
         statusLine = startConsentPrompt(kind: kind)
         confirmStartAndRun()
+    }
+
+    // MARK: - The machine command's two taps
+
+    /// The reader allowed the one machine command. It still has to clear the
+    /// risk gate's refusal floor — the tap satisfies the CONFIRM tier, never
+    /// the refusal tier, so a catastrophe-shaped command stays unrunnable no
+    /// matter who asks or agrees. On success the run re-enters exactly the way
+    /// an answered block does, with the command's outcome folded into the next
+    /// prompt so the model can verify its own diagnosis.
+    func approvePendingMachineCommand() {
+        guard phase == .awaitingMachineCommandConsent,
+              let command = pendingMachineCommand,
+              let kind = classifiedKind else { return }
+
+        // TWO independent gates, both of which the tap satisfies neither of:
+        // the machine-command allowlist (only local state tools, no URLs, no
+        // shell operators — this is where `curl … | sh` is refused, which the
+        // guide gate alone let through), and the guide risk gate's catastrophe
+        // floor (belt and braces for the destroyers it does know).
+        guard MachineCommandRunner.isAnAllowedMachineCommand(command),
+              GuideAutopilotRiskAssessment.approveAfterAReaderTap(command) != nil else {
+            statusLine = "Iris won't run that even with your OK — it isn't an allowed machine command. Nothing was changed."
+            pendingMachineCommand = nil
+            phase = .done
+            return
+        }
+        guard let runMachineCommandOnThisMac else {
+            statusLine = "Iris can't run commands on this Mac in this build. The command it wanted: \(command)"
+            pendingMachineCommand = nil
+            phase = .done
+            return
+        }
+
+        statusLine = "Running on this Mac: \(command)"
+        Task { @MainActor in
+            let outcome = await runMachineCommandOnThisMac(command)
+            let summary = "ran `\(command)` on the Mac with my consent — exit \(outcome.exitStatus)"
+                + (outcome.outputTail.isEmpty ? "" : ", output: \(outcome.outputTail)")
+            answersToBlockingQuestionsForPrompt.append(
+                (question: "you asked to run a command on this Mac", answer: summary)
+            )
+            pendingMachineCommand = nil
+            pendingMachineCommandReason = ""
+            // Re-enter through the front door, same as an answered block: the
+            // eligibility re-check, the lock, and the dirty-tree read all run
+            // again rather than being assumed still true.
+            phase = .awaitingStartConsent
+            statusLine = startConsentPrompt(kind: kind)
+            confirmStartAndRun()
+        }
+    }
+
+    /// The reader declined. Nothing ran, nothing changed — said in exactly
+    /// those words, with the command kept visible in the status for anyone who
+    /// wants to run it themselves.
+    func declinePendingMachineCommand() {
+        guard phase == .awaitingMachineCommandConsent else { return }
+        statusLine = "Declined — nothing was run or changed. The command Iris wanted was: \(pendingMachineCommand ?? "")"
+        pendingMachineCommand = nil
+        pendingMachineCommandReason = ""
+        phase = .done
     }
 
     // MARK: - The one tap out of the dirty-clone refusal

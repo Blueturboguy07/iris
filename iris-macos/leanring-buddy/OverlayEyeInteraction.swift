@@ -159,6 +159,7 @@ extension OverlayEyeAttention {
         // because a refusal nobody ever saw is precisely what happened here.
         case .clarifying, .presentingPlan, .awaitingStartConsent, .previewDiff,
              .awaitingRelaunchConsent, .awaitingManifestConsent,
+             .awaitingMachineCommandConsent,
              .awaitingSymptomConfirmation, .awaitingForceQuitConsent,
              .done, .failed, .notEligible, .blockedByModel:
             return .needsTheReader

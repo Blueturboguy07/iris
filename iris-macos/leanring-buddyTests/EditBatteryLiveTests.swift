@@ -856,6 +856,9 @@ struct EditBatteryLiveTests {
         case .blockedByModel(let explanation, let question):
             result.engineOutcome = "blockedByModel"
             result.engineReason = explanation + (question.map { "  |  Q: \($0)" } ?? "")
+        case .machineCommandRequested(let command, let why):
+            result.engineOutcome = "machineCommandRequested"
+            result.engineReason = "\(command)  |  \(why)"
         case .notEligible(let reason):
             result.engineOutcome = "notEligible"
             result.engineReason = reason

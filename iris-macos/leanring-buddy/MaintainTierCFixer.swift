@@ -82,6 +82,17 @@ enum MaintainOnDemandEditResult: Sendable {
     /// steps, changed nothing, edited a build-script file, or failed
     /// verification. `reason` is user-safe.
     case couldNotComplete(reason: String)
+    /// The model declared, after investigating, that the cause lives in MACHINE
+    /// STATE outside the repository — a stale permission record, a launch agent,
+    /// a defaults key — and asked Iris to run ONE command on the Mac to fix it.
+    /// Nothing has been changed anywhere: the tree is reverted, and the command
+    /// has NOT run. It runs only if the reader taps consent, outside the jail,
+    /// through the same risk gate the guide autopilot uses (whose refusal tier
+    /// and catastrophe floor still refuse it regardless of the tap). Grown from
+    /// a real failure: two runs edited WhimprFlow's source over a ghost TCC
+    /// grant recorded for a dead build's identity — a bug no source edit could
+    /// reach, which one reset command fixed in a line.
+    case machineCommandRequested(command: String, why: String)
     /// The model itself declared, after investigating, that the change cannot
     /// be made under the harness's constraints (not a source bug, needs a fact
     /// only the user has, …) — its own sentence verbatim, plus an optional
@@ -543,6 +554,11 @@ final class MaintainTierCFixer {
             // The crash path has no question-and-retry surface; the model's
             // honest refusal reads as a could-not-fix with its sentence.
             return .couldNotFix(reason: "the model declined: \(explanation)")
+        case .machineRequested(_, let why):
+            // The crash path has no consent surface either, and an unattended
+            // machine command is exactly what must never run. The diagnosis
+            // still reaches the user as the reason.
+            return .couldNotFix(reason: "the fix needs a change to this Mac, not the app: \(why)")
         }
     }
 
@@ -671,6 +687,8 @@ final class MaintainTierCFixer {
             return .notEligible(reason: reason)
         case .blockedByModel(let explanation, let questionForUser):
             return .blockedByModel(explanation: explanation, questionForUser: questionForUser)
+        case .machineRequested(let command, let why):
+            return .machineCommandRequested(command: command, why: why)
         }
     }
 
@@ -684,6 +702,7 @@ final class MaintainTierCFixer {
         case couldNotFix(reason: String)
         case notEligible(reason: String)
         case blockedByModel(explanation: String, questionForUser: String?)
+        case machineRequested(command: String, why: String)
     }
 
     /// The one jailed loop → `.git` restore → optional build-script block →
@@ -1098,6 +1117,26 @@ final class MaintainTierCFixer {
                     text: "That manifest block was NOT accepted: \(rejection.modelFacingMessage) Fix it and resend, or continue in source without it."
                 ))
                 continue
+            }
+
+            // The machine-state verb. Same investigate-first bar as BLOCKED —
+            // a machine command proposed before reading anything is a guess
+            // wearing a syringe — and the same full revert, because the point
+            // of this verb is that NO source edit is the fix. The command does
+            // not run here; the coordinator runs it outside the jail after a
+            // reader tap, and only past the risk gate's refusal floor.
+            if let machine = Self.machineCommandDeclaration(in: reply) {
+                if commandsAlreadyRun.isEmpty {
+                    conversation.append(MaintainChatTurn(
+                        role: "user",
+                        text: "You have not investigated yet. Read the relevant code and evidence first; declare a machine command only once the evidence shows the cause is outside the repository."
+                    ))
+                    continue
+                }
+                await restoreGit()
+                _ = try? await runner.run("git checkout -- . && git clean -fd --quiet", deadline: 120)
+                irisTrace("maintain: tier-c model requested a machine command at step \(step)")
+                return .machineRequested(command: machine.command, why: machine.why)
             }
 
             // The honest refusal verb. Rejected with a steer before any
@@ -2333,6 +2372,42 @@ final class MaintainTierCFixer {
     /// only exits were DONE or a stall, so a correct "this isn't a source bug"
     /// or "I need one fact from the user" had to masquerade as a cosmetic
     /// change. A BLOCKED before any investigation is rejected with a steer.
+    /// The machine-state channel and its steering rule. Grown from a real
+    /// double failure: a reader's Accessibility grant sat in macOS's records
+    /// keyed to a DEAD build's identity — Settings said granted, the running
+    /// app heard no — and two edit runs changed source over it in opposite
+    /// directions, because source was the only verb the loop had. The model's
+    /// own injected memory even said "cannot be repaired by an ordinary
+    /// source-file change", and it edited source anyway.
+    static let onDemandMachinePromptAddendum = """
+    THE MACHINE-STATE CHANNEL. Some causes live OUTSIDE the repository: a \
+    permission record keyed to an older build's signing identity, a stale \
+    defaults key, a launch agent, a cache. No source edit can reach those. \
+    When the evidence points there, do NOT edit source. Declare exactly one \
+    command for Iris to run on the Mac itself:
+
+    ```machine
+    <the one command>
+    <one or two sentences: what this fixes and why source cannot>
+    ```
+
+    Iris shows it to the user for consent and runs it OUTSIDE your shell if \
+    they agree; their answer and the command's output come back to you in the \
+    next run. The command must be reversible or re-grantable (a permission \
+    reset the user re-grants with one click is fine; deleting user data is \
+    not), must not need sudo, and must never fetch-and-execute anything.
+
+    THE STEERING RULE THAT EXISTS BECAUSE OF A REAL FAILURE: when the user \
+    says a permission or setting IS granted/enabled but the app's API says it \
+    is not, the likeliest cause is a grant recorded against an older build's \
+    identity — machine state, not code. Reach for BLOCKED with a QUESTION \
+    ("does System Settings show it as already granted?") or for ```machine, \
+    BEFORE any source edit. And when an injected memory says an earlier fix \
+    for this same symptom did not cure it — especially one that says the cause \
+    is not repairable by a source change — believe it: another source edit is \
+    the one move known to be wrong.
+    """
+
     static let onDemandBlockedPromptAddendum = """
     If, AFTER investigating the code and the evidence, the change genuinely \
     cannot be made under these constraints — the real cause is not in this \
@@ -2608,7 +2683,8 @@ final class MaintainTierCFixer {
                      MaintainManifestApplier.modelFacingProtocolPromptAddendum,
                      MaintainDiagnosticProbe.promptSection,
                      onDemandReproPromptAddendum,
-                     onDemandBlockedPromptAddendum] + additionalOnDemandSections
+                     onDemandBlockedPromptAddendum,
+                     onDemandMachinePromptAddendum] + additionalOnDemandSections
                     + [onDemandReplyFormatRecap])
                 .joined(separator: "\n\n")
         case .onDemand(_, .feature):
@@ -2617,7 +2693,8 @@ final class MaintainTierCFixer {
                      onDemandFileEditPromptAddendum,
                      MaintainManifestApplier.modelFacingProtocolPromptAddendum,
                      MaintainDiagnosticProbe.promptSection,
-                     onDemandBlockedPromptAddendum]
+                     onDemandBlockedPromptAddendum,
+                     onDemandMachinePromptAddendum]
                     + additionalOnDemandSections + [onDemandReplyFormatRecap])
                 .joined(separator: "\n\n")
         }
@@ -2927,6 +3004,27 @@ final class MaintainTierCFixer {
 
     /// A `BLOCKED: <sentence>` line (with an optional `QUESTION: <sentence>`
     /// line) — the model's honest refusal verb. Nil when the reply has none.
+    /// A ```machine block: the first line is the ONE command the model wants
+    /// Iris to run on the Mac itself, everything after it is the reason shown
+    /// on the consent card. Declared here, never executed here — the jail stays
+    /// sealed; the coordinator runs it outside it only after a reader tap.
+    nonisolated static func machineCommandDeclaration(
+        in reply: String
+    ) -> (command: String, why: String)? {
+        for block in fencedBlocks(in: reply) where block.tag == "machine" {
+            let lines = block.body
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .components(separatedBy: .newlines)
+            guard let commandLine = lines.first?.trimmingCharacters(in: .whitespaces),
+                  !commandLine.isEmpty else { continue }
+            let why = lines.dropFirst().joined(separator: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return (command: commandLine, why: why.isEmpty
+                ? "the model gave no reason — treat that as a reason to decline" : why)
+        }
+        return nil
+    }
+
     nonisolated static func blockedDeclaration(in reply: String) -> (explanation: String, question: String?)? {
         func firstLineValue(prefix: String) -> String? {
             for rawLine in reply.components(separatedBy: .newlines) {

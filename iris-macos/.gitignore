@@ -11,6 +11,8 @@ coding-plans/
 # someone measured it, and it shows as untracked, so it is one `git add -A`
 # away from the history of a public repo.
 .build-check/
+.build-report/
+.build-*/
 .build-release/
 .build-progress/
 .build-adv/

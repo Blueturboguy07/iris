@@ -332,6 +332,28 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// CompanionManager from the inventory's bundle id; nil = no undo offer.
     var installedApplicationPathForApp: ((_ appSlug: String) -> String?)?
 
+    /// Replace the reader's INSTALLED copy of an app with the freshly built one
+    /// (founder override, Sep 2 2026: the app they open should carry the change,
+    /// not a parallel copy in the clone). Returns whether a copy was replaced,
+    /// where, and a pre-delivery backup path for undo. Wired by CompanionManager.
+    var deliverEditedAppOverInstalledApp: (
+        (_ appSlug: String, _ freshBuildArtifactPath: String) async
+            -> AppRelaunchService.InstalledDeliveryResult
+    )?
+
+    /// Put the pre-delivery installed bundle back (used by undo). Wired by
+    /// CompanionManager to `AppRelaunchService.restoreInstalledAppFromBackup`.
+    var restoreInstalledAppFromBackup: (
+        (_ installedPath: String, _ backupPath: String) async -> Bool
+    )?
+
+    /// The installed app path the most recent delivery replaced, and the
+    /// snapshot of the bundle that was there before it — so an undo can restore
+    /// the original rather than relaunch the very change it is meant to remove.
+    /// Non-nil only between a successful over-install and its undo/reset.
+    private var deliveredInstalledAppPath: String?
+    private var deliveredInstalledBackupPath: String?
+
     /// The question the model asked when it declared BLOCKED (nil when it
     /// only explained). The card shows it with an answer field; the answer
     /// re-enters the describe step folded into the request.
@@ -1224,6 +1246,14 @@ final class OnDemandEditCoordinator: ObservableObject {
             runLog?.record("retry: \(answersToBlockingQuestionsForPrompt.count) answered block(s) injected")
         }
         additionalPromptSections.append(contentsOf: extraPromptSectionsForEveryRun())
+        // A feature the reader asked to SEE must be visible by default (founder
+        // decision, Sep 2 2026). A whimprflow "add a panel to Insights" run
+        // buried the panel behind a new off-by-default setting nobody asked for,
+        // so the rebuilt app showed nothing until a toggle was flipped — and the
+        // adversarial reviewer flagged exactly that. This tells the maker not to.
+        if kind == .feature {
+            additionalPromptSections.append(Self.featureVisibilityGuidance)
+        }
         var gatheredEvidenceParts: [String] = []
         if runtimeEvidence.appWindowScreenshotPNG != nil {
             gatheredEvidenceParts.append("a screenshot of its window")
@@ -1432,10 +1462,15 @@ final class OnDemandEditCoordinator: ObservableObject {
                 phase = .blockedByModel(explanation: lastBlockedExplanation)
                 return
             }
-            packagedArtifactPath = artifactPath
             editRunner.note("Built a fresh \(appName) from the clone (\(signingSummary)).")
 
-            let launch = await relaunch(slug, artifactPath, false)
+            // The block this answers is "the binary on disk is stale", so the
+            // fix is to replace the INSTALLED copy — not launch a parallel one
+            // and leave the stale binary in place (founder override, Sep 2 2026).
+            let launchPath = await deliverOverInstalledAppThenResolveLaunchPath(
+                slug: slug, appName: appName, artifactPath: artifactPath
+            )
+            let launch = await relaunch(slug, launchPath, false)
             editRunner.finishApplied()
             phase = .done
             switch launch {
@@ -1711,12 +1746,60 @@ final class OnDemandEditCoordinator: ObservableObject {
                 }
             }
         }
+        // 1b) Deliver the fresh build OVER the reader's installed copy so the
+        //     app they actually open carries the change (founder override,
+        //     Sep 2 2026). Resolves the path to launch — the installed copy on a
+        //     successful swap, else the build-dir artifact — and records the
+        //     installed path + pre-delivery backup for a later undo.
+        let launchArtifactPath = await deliverOverInstalledAppThenResolveLaunchPath(
+            slug: slug, appName: appName, artifactPath: artifactPath
+        )
         // 2) Quit the running app (gracefully — a save dialog still routes to
         //    the force-quit consent, the one destructive act that can corrupt
-        //    data) and launch the fresh build.
+        //    data) and launch the delivered build.
         statusLine = "Quitting \(appName) and opening the rebuilt one…"
-        let launch = await relaunch(slug, artifactPath, false)
+        let launch = await relaunch(slug, launchArtifactPath, false)
         applyRelaunchLaunchResult(launch, allowedForceQuit: false)
+    }
+
+    /// Deliver the fresh build OVER the reader's installed copy (founder
+    /// override, Sep 2 2026) and return the path that should now be launched —
+    /// the installed copy when the swap succeeds, else the build-dir artifact.
+    /// Records the installed path and the pre-delivery backup for a later undo,
+    /// and updates `packagedArtifactPath` so a force-quit RETRY (which reuses it)
+    /// relaunches the same delivered copy.
+    private func deliverOverInstalledAppThenResolveLaunchPath(
+        slug: String, appName: String, artifactPath: String
+    ) async -> String {
+        deliveredInstalledAppPath = nil
+        deliveredInstalledBackupPath = nil
+        guard let deliver = deliverEditedAppOverInstalledApp else {
+            packagedArtifactPath = artifactPath
+            return artifactPath
+        }
+        statusLine = "Installing the rebuilt \(appName) over your copy…"
+        let launchPath: String
+        switch await deliver(slug, artifactPath) {
+        case .replacedInstalledApp(let installedPath, let backupPath, let grantsMayReset):
+            launchPath = installedPath
+            deliveredInstalledAppPath = installedPath
+            deliveredInstalledBackupPath = backupPath
+            let permissionNote = grantsMayReset
+                ? " — it was signed differently, so macOS may reset its permissions and re-ask."
+                : "."
+            editRunner.note("Replaced your installed \(appName) with the rebuilt one\(permissionNote)")
+            runLog?.record("delivered: replaced installed app at \(installedPath) (grantsMayReset: \(grantsMayReset))")
+        case .noInstalledCopyToReplace:
+            launchPath = artifactPath
+            editRunner.note("No separately installed \(appName) to replace — running the rebuilt copy from the clone.")
+            runLog?.record("delivered: no installed copy — running from build dir")
+        case .deliveryFailed(let reason):
+            launchPath = artifactPath
+            editRunner.note("Couldn't replace your installed \(appName) (\(reason)) — running the rebuilt copy from the clone instead.")
+            runLog?.record("delivered: replace failed (\(reason)) — running from build dir")
+        }
+        packagedArtifactPath = launchPath
+        return launchPath
     }
 
     /// The rebuilt app is up. Give it a moment, look again (window + logs),
@@ -1875,6 +1958,23 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// memory (the diagnostic probe vocabulary lands here once merged).
     /// Overridable seam for the production wiring.
     var extraPromptSectionsForEveryRun: () -> [String] = { [] }
+
+    /// Injected for FEATURE requests (founder decision, Sep 2 2026): a feature
+    /// the reader asked to SEE must be visible and reachable by default. A
+    /// whimprflow "add a panel to Insights" run buried the panel behind a new
+    /// off-by-default setting nobody asked for, so the rebuilt app showed
+    /// nothing until a toggle was flipped — and the adversarial reviewer flagged
+    /// exactly that, correctly. This tells the maker not to do it.
+    static let featureVisibilityGuidance = """
+    Making the requested behavior VISIBLE BY DEFAULT is part of implementing it. \
+    The reader asked to be able to see or use this feature, so it must be \
+    reachable the moment the app launches: do NOT gate it behind a new setting, \
+    preference, feature flag, or toggle that defaults to off, and do NOT require \
+    an extra configuration step to reveal it, UNLESS the reader explicitly asked \
+    for a toggle or an opt-in. If you add a control to turn the feature off, that \
+    control must default to ON. A feature a user cannot see without first \
+    changing a setting they never asked for is not implemented.
+    """
     // (The diagnostic probe vocabulary is assembled inside the fixer's own
     // system prompt — `MaintainDiagnosticProbe.promptSection` — so it rides
     // every on-demand run without a seam; this hook is for app-specific
@@ -1895,10 +1995,24 @@ final class OnDemandEditCoordinator: ObservableObject {
         statusLine = "Undoing — bringing back the installed \(appName)…"
         Task { [weak self] in
             guard let self else { return }
-            if let installedPath = self.installedApplicationPathForApp?(slug),
-               let relaunch = self.terminateAndRelaunchEditedApp {
-                _ = await relaunch(slug, installedPath, false)
+            let installedPath = self.deliveredInstalledAppPath
+                ?? self.installedApplicationPathForApp?(slug)
+            if let installedPath {
+                // If the delivery OVER-INSTALLED the change (founder default,
+                // Sep 2 2026), the bundle on disk now IS the change — so restore
+                // the pre-delivery snapshot first, otherwise "undo" would just
+                // relaunch the very change it is meant to remove.
+                if let backupPath = self.deliveredInstalledBackupPath,
+                   let restore = self.restoreInstalledAppFromBackup {
+                    let restored = await restore(installedPath, backupPath)
+                    self.runLog?.record("undo: restored installed app from backup — \(restored)")
+                }
+                if let relaunch = self.terminateAndRelaunchEditedApp {
+                    _ = await relaunch(slug, installedPath, false)
+                }
             }
+            self.deliveredInstalledAppPath = nil
+            self.deliveredInstalledBackupPath = nil
             if let runner = try? MaintainShellRunner(repoRootPath: resolved) {
                 let restore = (self.originalHeadRef.map { $0 != "HEAD" } == true)
                     ? "git checkout '\(self.originalHeadRef!)' --quiet"
@@ -2273,10 +2387,15 @@ final class OnDemandEditCoordinator: ObservableObject {
             }
             self.packagedArtifactPath = artifactPath
             self.freshBuildSigningSummary = signingSummary
-            // 2) Terminate the running app (graceful only) and launch the fresh
-            //    build. A refusal to quit surfaces the force-quit consent.
+            // 1b) Deliver over the installed copy (founder override, Sep 2 2026),
+            //     then launch whichever copy that resolved to.
+            let launchPath = await self.deliverOverInstalledAppThenResolveLaunchPath(
+                slug: slug, appName: self.activeAppName ?? slug, artifactPath: artifactPath
+            )
+            // 2) Terminate the running app (graceful only) and launch the
+            //    delivered build. A refusal to quit surfaces the force-quit consent.
             self.statusLine = "Quitting \(self.activeAppName ?? slug) and opening your edited build…"
-            let launch = await relaunch(slug, artifactPath, false)
+            let launch = await relaunch(slug, launchPath, false)
             self.applyRelaunchLaunchResult(launch, allowedForceQuit: false)
         }
     }
@@ -3065,6 +3184,8 @@ final class OnDemandEditCoordinator: ObservableObject {
         symptomRecheckSummary = nil
         offersRetryWithMemory = false
         deliveredChangeCanBeUndone = false
+        deliveredInstalledAppPath = nil
+        deliveredInstalledBackupPath = nil
         failureWasRateLimit = false
         dirtyCloneRefusal = nil
         isSettingAsideDirtyChanges = false

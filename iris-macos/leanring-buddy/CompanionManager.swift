@@ -377,6 +377,34 @@ final class CompanionManager: ObservableObject {
             return NSWorkspace.shared.urlForApplication(withBundleIdentifier: macBundleId)?.path
         }
 
+        // Replace the reader's INSTALLED copy with the freshly built one
+        // (founder override, Sep 2 2026: the app they open should carry the
+        // change, not a parallel copy left in the clone). The installed copy is
+        // found by the same inventory bundle id, EXCLUDING the clone's own build
+        // output; a snapshot is taken first so `restoreInstalledAppFromBackup`
+        // can undo it. Falls back to launching the build-dir artifact when there
+        // is no separate installed copy or the swap fails.
+        coordinator.deliverEditedAppOverInstalledApp = { [weak self] appSlug, freshBuildArtifactPath in
+            guard let self,
+                  let macBundleId = self.appInventoryService.installedEntriesForDisplay
+                      .first(where: { $0.slug == appSlug })?.macBundleId,
+                  !macBundleId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  let clonePath = self.installProvenanceStore.provenance(forAppSlug: appSlug)?.clonePath else {
+                return .deliveryFailed(reason: "Iris doesn't have a bundle id or a source clone for this app")
+            }
+            return await self.appRelaunchService.installFreshBuildOverInstalledApp(
+                macBundleId: macBundleId,
+                freshBuildArtifactPath: freshBuildArtifactPath,
+                clonePath: clonePath
+            )
+        }
+        coordinator.restoreInstalledAppFromBackup = { [weak self] installedPath, backupPath in
+            guard let self else { return false }
+            return await self.appRelaunchService.restoreInstalledAppFromBackup(
+                installedPath: installedPath, backupPath: backupPath
+            )
+        }
+
         // Runtime evidence for the edit agent: a screenshot of the picked
         // app's window + a scrubbed tail of its unified log / newest crash
         // report, gathered the moment a consented run starts. The bundle id

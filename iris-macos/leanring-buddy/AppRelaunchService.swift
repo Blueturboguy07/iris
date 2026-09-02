@@ -442,6 +442,252 @@ final class AppRelaunchService {
         )
     }
 
+    // MARK: - Step 2b: deliver the fresh build OVER the installed app
+
+    /// The outcome of trying to replace the reader's INSTALLED copy of an app
+    /// with the freshly built one. This is the founder's Sep 2 2026 override of
+    /// the original Option-A design (this file's header): after a green build,
+    /// the app the reader actually opens should carry the change — not a
+    /// parallel copy left in the clone's build dir that they have to be told to
+    /// open by an absolute path. When there is no separate installed copy to
+    /// replace, this reports so honestly and the caller falls back to launching
+    /// the build-dir artifact, exactly as before.
+    enum InstalledDeliveryResult: Sendable, Equatable {
+        /// The installed bundle at `installedPath` now holds the fresh build.
+        /// The bundle that was there was snapshotted to `backupPath` FIRST, so
+        /// the delivery is undoable by restoring it. `grantsMayReset` is true
+        /// when the fresh build's signing identity differs from the installed
+        /// copy's (or either is unsigned/ad-hoc), so macOS may treat it as a
+        /// different app and reset its TCC grants — disclosed, never hidden.
+        case replacedInstalledApp(installedPath: String, backupPath: String, grantsMayReset: Bool)
+        /// No installed copy of this bundle id exists apart from the clone's own
+        /// build output, so there is nothing to replace. Not an error — the
+        /// caller launches the build-dir artifact as it always did.
+        case noInstalledCopyToReplace
+        /// An installed copy exists but replacing it failed (an unwritable
+        /// /Applications, a copy or swap error). Nothing was left half-installed
+        /// — the installed app is intact — and the caller falls back to the
+        /// build-dir artifact.
+        case deliveryFailed(reason: String)
+    }
+
+    /// Replace the installed copy of `macBundleId` with the freshly built
+    /// artifact. The installed copy is found by bundle id, EXCLUDING anything
+    /// inside `clonePath` (the build output is not "the installed app"), and
+    /// preferring /Applications. The swap is atomic: the current bundle is
+    /// snapshotted for undo, the fresh build is staged beside the installed app,
+    /// and `FileManager.replaceItemAt` moves it into place — so a failure leaves
+    /// the installed app exactly as it was.
+    func installFreshBuildOverInstalledApp(
+        macBundleId: String,
+        freshBuildArtifactPath: String,
+        clonePath: String
+    ) async -> InstalledDeliveryResult {
+        let bundleId = macBundleId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !bundleId.isEmpty,
+              FileManager.default.fileExists(atPath: freshBuildArtifactPath) else {
+            return .deliveryFailed(reason: "the freshly built app is not on disk to install")
+        }
+        let appBundleName = URL(fileURLWithPath: freshBuildArtifactPath).lastPathComponent
+        guard let installedPath = Self.installedAppPath(
+            forBundleId: bundleId, appBundleName: appBundleName, excludingClonePath: clonePath
+        ) else {
+            return .noInstalledCopyToReplace
+        }
+        // Read both signing identities BEFORE the swap, so the disclosure is
+        // about the app being replaced rather than the one that replaced it.
+        let freshTeam = await Self.developerTeamIdentifier(atPath: freshBuildArtifactPath)
+        let installedTeam = await Self.developerTeamIdentifier(atPath: installedPath)
+        let grantsMayReset = freshTeam == nil || installedTeam == nil || freshTeam != installedTeam
+
+        let backupPath = Self.deliveryBackupPath(forBundleId: bundleId, appBundleName: appBundleName)
+        let swap = await Task.detached(priority: .userInitiated) {
+            Self.atomicallyReplaceBundle(
+                installedPath: installedPath,
+                withBundleAt: freshBuildArtifactPath,
+                snapshotTo: backupPath
+            )
+        }.value
+        switch swap {
+        case .success:
+            return .replacedInstalledApp(
+                installedPath: installedPath, backupPath: backupPath, grantsMayReset: grantsMayReset
+            )
+        case .failure(let reason):
+            return .deliveryFailed(reason: reason)
+        }
+    }
+
+    /// Put the pre-delivery installed bundle back (used by undo). Best-effort and
+    /// atomic where it can be: the backup is staged beside the installed app and
+    /// moved into place. Returns whether the installed app is once again the
+    /// original.
+    func restoreInstalledAppFromBackup(installedPath: String, backupPath: String) async -> Bool {
+        guard FileManager.default.fileExists(atPath: backupPath) else { return false }
+        return await Task.detached(priority: .userInitiated) {
+            Self.atomicallyReplaceBundle(
+                installedPath: installedPath,
+                withBundleAt: backupPath,
+                snapshotTo: nil
+            ).isSuccess
+        }.value
+    }
+
+    // MARK: - Delivery helpers (nonisolated: pure filesystem + argv tool work)
+
+    /// The installed copy of `bundleId` to replace, or nil when the only copy is
+    /// the clone's own build output. Considers Launch Services' registered copy
+    /// and `/Applications/<Name>.app` on disk, both filtered so nothing inside
+    /// `clonePath` is ever returned, and prefers a copy in /Applications.
+    nonisolated static func installedAppPath(
+        forBundleId bundleId: String,
+        appBundleName: String,
+        excludingClonePath clonePath: String
+    ) -> String? {
+        let registered = NSWorkspace.shared
+            .urlForApplication(withBundleIdentifier: bundleId)?.path
+        let applicationsCopy = "/Applications/\(appBundleName)"
+        let applicationsPath = FileManager.default.fileExists(atPath: applicationsCopy)
+            ? applicationsCopy : nil
+        return chooseInstalledBundlePath(
+            registeredPath: registered, applicationsPath: applicationsPath, clonePath: clonePath
+        )
+    }
+
+    /// Pure: pick which candidate is "the installed app" to replace. Anything
+    /// inside `clonePath` (the build output) is excluded; a copy under
+    /// /Applications wins over any other registered location. nil when no
+    /// candidate survives — the caller then leaves the installed side untouched.
+    nonisolated static func chooseInstalledBundlePath(
+        registeredPath: String?,
+        applicationsPath: String?,
+        clonePath: String
+    ) -> String? {
+        let clonePrefix = clonePath.hasSuffix("/") ? clonePath : clonePath + "/"
+        func outsideClone(_ path: String) -> Bool {
+            !clonePath.isEmpty ? (path != clonePath && !path.hasPrefix(clonePrefix)) : true
+        }
+        var candidates: [String] = []
+        if let registeredPath, outsideClone(registeredPath) { candidates.append(registeredPath) }
+        if let applicationsPath, outsideClone(applicationsPath), !candidates.contains(applicationsPath) {
+            candidates.append(applicationsPath)
+        }
+        return candidates.first { $0.hasPrefix("/Applications/") } ?? candidates.first
+    }
+
+    /// Where a pre-delivery snapshot of an installed bundle is kept so a delivery
+    /// can be undone. One slot per bundle id under Application Support, replaced
+    /// each delivery — only the most recent delivery is undoable, which matches
+    /// the single "Undo this change" affordance the card shows.
+    nonisolated static func deliveryBackupPath(forBundleId bundleId: String, appBundleName: String) -> String {
+        let base = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory())
+                .appendingPathComponent("Library/Application Support")
+        let safeId = bundleId.replacingOccurrences(of: "/", with: "_")
+        return base
+            .appendingPathComponent("Iris/edit-delivery-backups/\(safeId)")
+            .appendingPathComponent(appBundleName)
+            .path
+    }
+
+    // Not private so the live filesystem round-trip test can drive the real
+    // swap on real (temp) bundles — this is the one genuinely-unverified,
+    // corruption-risking primitive, so it earns direct coverage.
+    nonisolated enum BundleSwapOutcome: Sendable, Equatable {
+        case success
+        case failure(reason: String)
+        var isSuccess: Bool { if case .success = self { return true } else { return false } }
+    }
+
+    /// Snapshot the current installed bundle to `snapshotPath` (when given),
+    /// `ditto` the replacement beside the installed app, then atomically move it
+    /// into place with `FileManager.replaceItemAt`. `ditto` (not a plain copy)
+    /// preserves the code signature and extended attributes. Blocking — call off
+    /// the main actor. The installed app is left intact on any failure.
+    nonisolated static func atomicallyReplaceBundle(
+        installedPath: String,
+        withBundleAt source: String,
+        snapshotTo snapshotPath: String?
+    ) -> BundleSwapOutcome {
+        let fileManager = FileManager.default
+        let installedURL = URL(fileURLWithPath: installedPath)
+        let installedDirectory = installedURL.deletingLastPathComponent()
+        let bundleName = installedURL.lastPathComponent
+
+        // 1. Snapshot the current installed bundle for undo.
+        if let snapshotPath {
+            let snapshotURL = URL(fileURLWithPath: snapshotPath)
+            try? fileManager.createDirectory(
+                at: snapshotURL.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
+            try? fileManager.removeItem(at: snapshotURL)
+            guard dittoBundle(from: installedPath, to: snapshotPath) else {
+                return .failure(reason: "couldn't snapshot the installed app before replacing it")
+            }
+        }
+
+        // 2. Stage the replacement beside the installed app (same volume, so the
+        //    swap is atomic), then move it into place. A leftover stage from a
+        //    prior interrupted run is cleared first.
+        let stagingURL = installedDirectory.appendingPathComponent(".iris-delivery-\(bundleName)")
+        try? fileManager.removeItem(at: stagingURL)
+        guard dittoBundle(from: source, to: stagingURL.path) else {
+            return .failure(reason: "couldn't stage the build next to the installed app")
+        }
+        do {
+            _ = try fileManager.replaceItemAt(installedURL, withItemAt: stagingURL)
+            return .success
+        } catch {
+            try? fileManager.removeItem(at: stagingURL)
+            return .failure(reason: "couldn't move the build into place: \(error.localizedDescription)")
+        }
+    }
+
+    /// Copy an app bundle with `ditto`, which preserves the code signature and
+    /// extended attributes a plain file copy can drop. Returns success.
+    nonisolated private static func dittoBundle(from source: String, to destination: String) -> Bool {
+        runArgvTool(executablePath: "/usr/bin/ditto", arguments: [source, destination]).succeeded
+    }
+
+    /// The Developer Team identifier a bundle is signed with, or nil when it is
+    /// unsigned / ad-hoc / unreadable. Used ONLY to disclose whether a delivery
+    /// may reset TCC grants — never to gate the delivery itself.
+    nonisolated static func developerTeamIdentifier(atPath path: String) async -> String? {
+        await Task.detached(priority: .userInitiated) {
+            let result = runArgvTool(
+                executablePath: "/usr/bin/codesign", arguments: ["-dvvv", path]
+            )
+            guard result.succeeded else { return nil }
+            for line in result.output.components(separatedBy: .newlines) {
+                guard let range = line.range(of: "TeamIdentifier=") else { continue }
+                let value = String(line[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+                return (value.isEmpty || value == "not set") ? nil : value
+            }
+            return nil
+        }.value
+    }
+
+    /// Launch one tool by absolute path with an argument array — no shell, so
+    /// nothing in an argument is reinterpreted as a command. Drains stdout+stderr
+    /// as the process runs (readDataToEndOfFile), so it can't deadlock on a full
+    /// pipe. Blocking; call off the main actor.
+    nonisolated private static func runArgvTool(
+        executablePath: String, arguments: [String]
+    ) -> (succeeded: Bool, output: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        process.standardInput = FileHandle.nullDevice
+        do { try process.run() } catch { return (false, "") }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (process.terminationStatus == 0, String(data: data, encoding: .utf8) ?? "")
+    }
+
     // MARK: - Terminate + wait mechanics
 
     private enum TerminationOutcome {

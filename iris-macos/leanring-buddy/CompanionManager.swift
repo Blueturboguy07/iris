@@ -2031,15 +2031,25 @@ final class CompanionManager: ObservableObject {
                     return messageText + "\n\n" + liveAppStatus
                 }()
 
-                // During a guide, hand the model the current step and the real
-                // terminal output. Answering "why is this failing" from the
-                // actual command and its stderr is what stops the fabricated
-                // diagnosis that started this whole feature.
-                let promptWithGuideContext: String = {
-                    guard let guideContext = guideSessionController.chatContextForTheAssistant() else {
+                // What Iris itself has the reader in the middle of: an install
+                // guide, OR an on-demand edit. During a guide, hand the model
+                // the current step and the real terminal output — answering
+                // "why is this failing" from the actual command and its stderr
+                // is what stops the fabricated diagnosis that started this whole
+                // feature. During an edit, hand it the plan / blocked reason /
+                // running state, so "is the above plan a good plan?" is
+                // answerable instead of "i can't see what plan you're asking
+                // about" (field report, Iris 0.9.4). Only ONE of the two is ever
+                // the reader-facing thing at once — see the helper.
+                let promptWithGuideOrEditContext: String = {
+                    guard let selfStateContext = Self.assistantSelfStateContext(
+                        editContext: onDemandEditCoordinator.chatContextForTheAssistant(),
+                        guideContext: guideSessionController.chatContextForTheAssistant(),
+                        aGuideIsOpenOnScreen: guideSessionController.aGuideIsOpenOnScreen
+                    ) else {
                         return promptWithLiveAppStatus
                     }
-                    return promptWithLiveAppStatus + "\n\n" + guideContext
+                    return promptWithLiveAppStatus + "\n\n" + selfStateContext
                 }()
 
                 // What this Mac actually has on it: the OS, the shell, and
@@ -2057,9 +2067,9 @@ final class CompanionManager: ObservableObject {
                         publikBaseURL: publikBaseURL.absoluteString,
                         installedCatalogApps: installedCatalogApps
                     ) else {
-                        return promptWithGuideContext
+                        return promptWithGuideOrEditContext
                     }
-                    return promptWithGuideContext + "\n\n" + machineFacts
+                    return promptWithGuideOrEditContext + "\n\n" + machineFacts
                 }()
 
                 // Which app the reader is actually in.
@@ -2308,6 +2318,38 @@ final class CompanionManager: ObservableObject {
         /// one of these can forget to say, and so callers that only want the
         /// coordinate are unaffected.
         var outcome: PointingTagOutcome = .noTagInTheReply
+    }
+
+    /// Which of Iris's own two "the reader is in the middle of something" states
+    /// — an install guide, or an on-demand edit — to append to a chat message,
+    /// and the decision of which one wins. Pure and static so "what does chat get
+    /// told about the edit plan on screen" is a unit test, not a property of the
+    /// live screenshot pipeline it is called from.
+    ///
+    /// A reader is following an install guide OR running an on-demand edit, never
+    /// both at once: an open guide hands the whole panel to `GuidePanelView`,
+    /// while starting an edit dismisses that panel and raises its card at the
+    /// eye. So when an edit is active its context is what is actually on screen,
+    /// and it WINS over a guide the reader merely followed EARLIER and has since
+    /// closed — the guide context still speaks to a remembered install even after
+    /// the card is gone, and without this "is the above plan a good plan?" would
+    /// be answered beside a stale "you were last following the Cue install" blurb
+    /// that is nowhere on screen. `aGuideIsOpenOnScreen` is the invariant guard:
+    /// an ACTIVE edit and an OPEN guide must be mutually exclusive, so choosing
+    /// the edit here never overrides a guide that is genuinely open.
+    static func assistantSelfStateContext(
+        editContext: String?,
+        guideContext: String?,
+        aGuideIsOpenOnScreen: Bool
+    ) -> String? {
+        if let editContext {
+            assert(
+                !aGuideIsOpenOnScreen,
+                "an on-demand edit and an open install guide cannot both be the reader-facing surface"
+            )
+            return editContext
+        }
+        return guideContext
     }
 
     /// Parses a [POINT:x,y:label:screenN] or [POINT:none] tag from the end of Claude's response.

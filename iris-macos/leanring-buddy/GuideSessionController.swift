@@ -1620,6 +1620,18 @@ final class GuideSessionController: ObservableObject {
         irisTrace("gate: after continue, step=\(currentStepIndex) driving=\(autopilotIsDriving) running=\(autopilotIsRunning)")
     }
 
+    /// True while a guide is actually OPEN in the panel — a step is on screen,
+    /// as opposed to a guide merely remembered from an earlier sitting (which
+    /// `chatContextForTheAssistant()` still speaks to). The chat pipeline reads
+    /// this to assert the invariant an on-demand edit's context leans on: an
+    /// OPEN guide and an ACTIVE edit are never the reader-facing thing at once
+    /// (an open guide hands the whole panel to `GuidePanelView`, while starting
+    /// an edit dismisses that panel and raises its card at the eye), so the two
+    /// contexts can ride the same prompt slot without fighting over it.
+    var aGuideIsOpenOnScreen: Bool {
+        loadState == .guideIsOpen
+    }
+
     /// What the chat model is told about the guide the reader is on, so a
     /// "why is this failing" question is answered from the step and the real
     /// terminal output — not inferred from a screenshot. This is the direct

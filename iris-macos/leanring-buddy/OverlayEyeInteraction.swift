@@ -794,3 +794,162 @@ enum OverlayEyeSuggestions {
         return keptPortion + "…"
     }
 }
+
+// MARK: - The first-run setup helper
+
+//  A brief, skippable walkthrough of how to use Iris, shown once on first
+//  launch and re-openable from the settings panel.
+//
+//  WHY IT EXISTS. A tester who had installed Iris and granted every permission
+//  still could not tell how to use it — his words: "when you first install the
+//  app, it is hard to know how to use it, like using it in settings, to click
+//  on the eye, things like that, so a setup helper … could be really cool." The
+//  animated eye demo (`CompanionManager.triggerOnboarding`) shows the eye
+//  moving; it never spells out the three things a new reader cannot guess: that
+//  Control+Option summons Iris, that the eye by the pointer is where you ask and
+//  edit, and that this panel is where the settings live. This is that, in
+//  words, in Iris's own visual language.
+//
+//  Everything here is a pure value — the step wording (which is the whole
+//  point), the forward/back navigation, the show-it-once gate, and the seen
+//  flag's storage — so all of it is testable without a SwiftUI view. The card
+//  that draws it lives in `CompanionPanelView`.
+
+/// Which piece of Iris a setup-helper step is teaching, so the card can show
+/// the right mark beside it: the summon shortcut, the real Iris eye, or the
+/// settings gear the eye becomes.
+enum IrisSetupHelperGlyph: Equatable {
+    case summonShortcut
+    case theEye
+    case theSettingsGear
+}
+
+/// One step of the "how to use Iris" walkthrough: a mark to show, a short
+/// title, and one plain sentence.
+struct IrisSetupHelperStep: Equatable {
+    let glyph: IrisSetupHelperGlyph
+    let title: String
+    let body: String
+}
+
+/// The walkthrough itself, as a pure value the card holds in `@State` and
+/// drives. There is exactly one step on screen at a time; this owns which, and
+/// the only ways to move — forward, back, and restart — each keep the index in
+/// range so the card can read `currentStep` without a bounds check of its own.
+struct IrisSetupHelperWalkthrough: Equatable {
+
+    /// The steps, in order. Three, because "brief" is the whole brief: a new
+    /// reader who has to read a manual has already lost. Each names one thing
+    /// Iris can actually do and where the control for it is — and the wording is
+    /// pinned by tests so "Control + Option", "the eye", and "settings" cannot
+    /// quietly drift out of the sentences the tester asked to have spelled out.
+    static let steps: [IrisSetupHelperStep] = [
+        IrisSetupHelperStep(
+            glyph: .summonShortcut,
+            title: "Summon Iris anytime",
+            body: "Press Control + Option to open this panel from anywhere. Iris lives in your menu bar — there's no dock icon and no window to hunt for."
+        ),
+        IrisSetupHelperStep(
+            glyph: .theEye,
+            title: "Ask at the eye",
+            body: "Click the eye beside your pointer to ask what's on your screen — or to fix a bug or add a feature to an app you installed through publik."
+        ),
+        IrisSetupHelperStep(
+            glyph: .theSettingsGear,
+            title: "Your settings live here",
+            body: "These are your settings — your model, permissions, apps, and account. When the eye's bar is open, the eye becomes a gear that brings you right back here."
+        ),
+    ]
+
+    /// Which step is on screen. Kept in range at every mutation.
+    private(set) var currentStepIndex: Int = 0
+
+    init() {}
+
+    var currentStep: IrisSetupHelperStep {
+        // Defended rather than trusted: an out-of-range index would crash the
+        // whole panel, and the cost of clamping is one comparison.
+        let safeIndex = min(max(currentStepIndex, 0), Self.steps.count - 1)
+        return Self.steps[safeIndex]
+    }
+
+    var isOnFirstStep: Bool { currentStepIndex <= 0 }
+    var isOnLastStep: Bool { currentStepIndex >= Self.steps.count - 1 }
+
+    /// "1 of 3" for the quiet progress line.
+    var progressLabel: String {
+        let humanStepNumber = min(max(currentStepIndex, 0), Self.steps.count - 1) + 1
+        return "\(humanStepNumber) of \(Self.steps.count)"
+    }
+
+    /// The primary button's words: it walks forward until the last step, where
+    /// it becomes the dismissal.
+    var primaryActionLabel: String {
+        isOnLastStep ? "Got it" : "Next"
+    }
+
+    mutating func advanceToTheNextStep() {
+        guard !isOnLastStep else { return }
+        currentStepIndex += 1
+    }
+
+    mutating func goBackToThePreviousStep() {
+        guard !isOnFirstStep else { return }
+        currentStepIndex -= 1
+    }
+
+    /// Back to step one, so re-opening the helper from settings starts at the
+    /// beginning rather than wherever it was last left.
+    mutating func restartFromTheFirstStep() {
+        currentStepIndex = 0
+    }
+}
+
+/// Whether the first-run setup helper should present itself, as a pure decision
+/// so the "show it exactly once, and only when there is nothing more urgent on
+/// screen" rule is testable without UserDefaults or a running app.
+enum FirstRunSetupHelper {
+    /// The helper auto-presents only the first time the reader reaches a fully
+    /// set-up panel: permissions granted and onboarding done, and never seen
+    /// before. A reader still granting permissions is mid-setup and has the
+    /// permissions UI to read; dropping a walkthrough on top of that would be a
+    /// second thing to dismiss at the worst moment.
+    static func shouldAutomaticallyPresent(
+        theReaderHasSeenItBefore: Bool,
+        thePanelIsReadyForEverydayUse: Bool
+    ) -> Bool {
+        guard thePanelIsReadyForEverydayUse else { return false }
+        return !theReaderHasSeenItBefore
+    }
+}
+
+/// Remembers whether the reader has already met the setup helper. A protocol so
+/// the gate can be tested against an in-memory answer, and so the one real
+/// implementation (UserDefaults) is the only thing that touches disk.
+protocol IrisSetupHelperSeenStore {
+    var theReaderHasSeenTheSetupHelper: Bool { get }
+    func rememberThatTheReaderHasSeenTheSetupHelper()
+}
+
+/// The real store: one bool in UserDefaults, under a key of its own.
+struct UserDefaultsSetupHelperSeenStore: IrisSetupHelperSeenStore {
+    /// Distinct from "hasCompletedOnboarding" on purpose: that flag gates the
+    /// animated eye demo and the Start button, and this one gates the textual
+    /// walkthrough. Conflating the two would make granting permissions silently
+    /// suppress the how-to, or vice versa.
+    static let seenDefaultsKey = "iris.hasSeenSetupHelper"
+
+    let userDefaults: UserDefaults
+
+    init(userDefaults: UserDefaults = .standard) {
+        self.userDefaults = userDefaults
+    }
+
+    var theReaderHasSeenTheSetupHelper: Bool {
+        userDefaults.bool(forKey: Self.seenDefaultsKey)
+    }
+
+    func rememberThatTheReaderHasSeenTheSetupHelper() {
+        userDefaults.set(true, forKey: Self.seenDefaultsKey)
+    }
+}

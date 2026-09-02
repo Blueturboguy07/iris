@@ -303,13 +303,15 @@ private struct LiveTakeover {
         // Find a grab point in the transcript that AppKit's own background drag
         // REFUSES. If there is no such point the defect cannot recur, and the
         // rest of this test would be measuring nothing — so say so out loud.
+        let controlFrames = (takeover.terminal as? GuideAutopilotTakeoverTerminalPanel)?.interactiveControlFrames ?? []
         var whereAppKitRefusesToDrag: CGPoint?
         var heightOfTheCardAppKitRefuses: CGFloat = 0
         var dy: CGFloat = 4
         while dy < cardFrame.height {
             let pointInWindow = CGPoint(x: cardFrame.width / 2, y: dy)
             let viewUnderThePoint = contentView.hitTest(contentView.convert(pointInWindow, from: nil))
-            if viewUnderThePoint?.mouseDownCanMoveWindow == false {
+            if viewUnderThePoint?.mouseDownCanMoveWindow == false
+                && !controlFrames.contains(where: { $0.contains(CGPoint(x: pointInWindow.x, y: cardFrame.height - pointInWindow.y)) }) {
                 heightOfTheCardAppKitRefuses += 20
                 if whereAppKitRefusesToDrag == nil { whereAppKitRefusesToDrag = pointInWindow }
             }

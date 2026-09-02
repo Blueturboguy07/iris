@@ -207,7 +207,13 @@ final class GuideAutopilotTakeoverController {
             onRetrySurfacedStep: onRetrySurfacedStep,
             onContinuePastSurfacedStep: onContinuePastSurfacedStep,
             onReaderFinishedManualStep: onReaderFinishedManualStep,
-            onEscapeHatch: onEscapeHatch
+            onEscapeHatch: onEscapeHatch,
+            // Let a press on a button reach the button instead of dragging the
+            // window: the SwiftUI controls report their frames and the panel
+            // excludes them from its drag loop.
+            onControlFramesChanged: { [weak terminal] controlFrames in
+                MainActor.assumeIsolated { terminal?.interactiveControlFrames = controlFrames }
+            }
         )
         let hostingView = NSHostingView(rootView: takeoverView)
         hostingView.autoresizingMask = [.width, .height]
@@ -689,6 +695,45 @@ final class GuideAutopilotTakeoverTerminalPanel: NSPanel {
     /// dragged-to POSITION already gets.
     var onReaderResizedTheCard: ((CGSize) -> Void)?
 
+    // MARK: - Letting a click on a button reach the button, not the drag loop
+
+    /// The frames of the terminal's interactive controls — Try again, Continue
+    /// past it, Run it / Skip, the red escape hatch, Help, the "I did it —
+    /// continue" manual-step button — in this window's CONTENT-view coordinates
+    /// (top-left origin, y DOWN: SwiftUI `.global` inside the `NSHostingView`
+    /// that IS this panel's content view). The SwiftUI layer reports them
+    /// (`TakeoverControlFramesKey`); the controller forwards them here.
+    ///
+    /// WHY THE VIEW HAS TO TELL US. Reported: "Hit try again, the button
+    /// doesn't work though. Continue past it button not working either, it is
+    /// just moving the terminal around." A press on one of those buttons was
+    /// being HELD by this window and — the moment the pointer drifted the 3pt of
+    /// `theSlopAClickIsAllowed`, which a real click routinely does — taken as a
+    /// window MOVE, so the button never fired. The obvious fix, "don't hold a
+    /// press that lands on a control", cannot be done with `hitTest`: SwiftUI
+    /// backs a `Button` with NO AppKit view of its own, so `hitTest` on the
+    /// "Try again" pill returns this window's `NSHostingView` exactly as it does
+    /// for bare background (measured — the same reason `isMovableByWindowBackground`
+    /// alone could never have dragged the transcript). A button is invisible to
+    /// AppKit hit-testing, so the controls name their own frames instead.
+    var interactiveControlFrames: [CGRect] = []
+
+    /// Whether a press lands on one of the terminal's interactive controls, so
+    /// it must be delivered straight to SwiftUI rather than held for this
+    /// window's drag/resize loop. Pure + static so the exclusion is testable
+    /// without a gesture.
+    ///
+    /// `pressInWindow` is AppKit window coordinates (bottom-left origin), the
+    /// space `grabOffsetInWindow` returns; the control frames are content-view
+    /// coordinates (top-left origin). The content view fills the window, so the
+    /// only difference is the y flip through the window height.
+    static func pressLandsOnAControl(
+        _ pressInWindow: CGPoint, windowHeight: CGFloat, controls: [CGRect]
+    ) -> Bool {
+        let pressInContent = CGPoint(x: pressInWindow.x, y: windowHeight - pressInWindow.y)
+        return controls.contains { $0.contains(pressInContent) }
+    }
+
     /// Which edges a press takes hold of, or an empty set for a press that is
     /// somewhere in the body and therefore a move.
     struct EdgesUnderThePress: OptionSet {
@@ -854,6 +899,25 @@ final class GuideAutopilotTakeoverTerminalPanel: NSPanel {
             return
         }
 
+        // A press on one of the terminal's own buttons is delivered STRAIGHT
+        // THROUGH — never held for this window's drag/resize loop. This is the
+        // whole of "Hit try again, the button doesn't work though ... it is just
+        // moving the terminal around": the loop below turns any press that
+        // drifts 3pt into a window move, and a real click drifts. Handing the
+        // press to `super` lets SwiftUI's own button tracking run, which fires
+        // the action on release regardless of that drift. It must come before
+        // the resize AND the move so a control near an edge is still a click.
+        // See `interactiveControlFrames` for why a button cannot be found by
+        // hit-testing and has to name its own frame.
+        if Self.pressLandsOnAControl(
+            Self.grabOffsetInWindow(of: event, in: self),
+            windowHeight: frame.height,
+            controls: interactiveControlFrames
+        ) {
+            super.sendEvent(event)
+            return
+        }
+
         // An edge grip is a RESIZE, and it is checked before the move because
         // the whole card is a drag handle — without this, the one gesture every
         // reader tries for a window that is the wrong size would just slide it
@@ -995,12 +1059,17 @@ final class GuideAutopilotTakeoverTerminalPanel: NSPanel {
 
 // MARK: - The dim backdrop
 
-/// The scrim behind the terminal. A flat dim with a soft center vignette so the
-/// eye is drawn to the middle where the terminal grows.
+/// The scrim behind the terminal. A soft center vignette so the eye is drawn to
+/// the middle where the terminal grows — but a LIGHT one. Reported: "the rest of
+/// the computer being darker is not super nice." It used to run 0.34 → 0.62,
+/// which read as the lights going out on the reader's own desktop; a takeover is
+/// meant to focus attention, not black the machine out. This still darkens
+/// toward the edges enough to lift the terminal off the desktop, while leaving
+/// the reader's windows plainly legible underneath.
 private struct GuideAutopilotTakeoverBackdrop: View {
     var body: some View {
         RadialGradient(
-            colors: [Color.black.opacity(0.34), Color.black.opacity(0.62)],
+            colors: [Color.black.opacity(0.16), Color.black.opacity(0.40)],
             center: .center,
             startRadius: 120,
             endRadius: 900
@@ -1027,6 +1096,11 @@ private struct GuideAutopilotTakeoverView<Runner: AutopilotTerminalPresenting>: 
     let onReaderFinishedManualStep: () -> Void
     /// The red traffic light — closes the takeover, whatever Iris is doing.
     let onEscapeHatch: () -> Void
+    /// The frames of every interactive control the terminal drew this pass, in
+    /// `.global` space (the hosting view that IS the panel's content view), so
+    /// the panel can deliver a press on one to the control instead of eating it
+    /// as a window drag. See `GuideAutopilotTakeoverTerminalPanel.interactiveControlFrames`.
+    let onControlFramesChanged: ([CGRect]) -> Void
 
     var body: some View {
         ZStack {
@@ -1075,6 +1149,7 @@ private struct GuideAutopilotTakeoverView<Runner: AutopilotTerminalPresenting>: 
                     Button("I did it — continue", action: onReaderFinishedManualStep)
                         .irisPrimaryPill(isFullWidth: true, isCompact: true)
                         .padding(.top, 2)
+                        .reportsFrameAsATakeoverControl()
                 }
                 .padding(14)
                 .frame(maxWidth: .infinity)
@@ -1101,6 +1176,11 @@ private struct GuideAutopilotTakeoverView<Runner: AutopilotTerminalPresenting>: 
                     .padding(4)
                     .allowsHitTesting(false)
             }
+        }
+        // Collect every control's reported frame and hand it to the panel, so a
+        // press on a button reaches the button rather than moving the window.
+        .onPreferenceChange(TakeoverControlFramesKey.self) { controlFrames in
+            onControlFramesChanged(controlFrames)
         }
     }
 }

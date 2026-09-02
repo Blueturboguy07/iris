@@ -75,6 +75,22 @@ struct CompanionPanelView: View {
     /// What the reader types into the inline Codex terminal.
     @State private var codexSignInInput: String = ""
 
+    /// The first-run "how to use Iris" walkthrough. `isShowingSetupHelper` drives
+    /// whether the card is on screen; `setupHelperWalkthrough` is which of its
+    /// steps. It presents itself once — the first time the panel is fully set up
+    /// and the reader has not seen it — and is re-openable from the "See how Iris
+    /// works" link below. See `IrisSetupHelperWalkthrough` / `FirstRunSetupHelper`.
+    @State private var isShowingSetupHelper = false
+    @State private var setupHelperWalkthrough = IrisSetupHelperWalkthrough()
+    /// Persists that the reader has met the helper, so it never nags twice.
+    /// A stored value rather than a fresh one each render so the seen flag is
+    /// read and written through the one place that owns the key.
+    private let setupHelperSeenStore: IrisSetupHelperSeenStore = UserDefaultsSetupHelperSeenStore()
+
+    /// Honoured for the card's reveal and its step-to-step motion: a reader who
+    /// asked the system to reduce motion gets the same content with no movement.
+    @Environment(\.accessibilityReduceMotion) private var readerAskedToReduceMotion
+
     init(companionManager: CompanionManager) {
         self.companionManager = companionManager
         _accountService = ObservedObject(wrappedValue: companionManager.accountService)
@@ -164,6 +180,12 @@ struct CompanionPanelView: View {
         .onChange(of: appInventoryService.installedEntriesForDisplay.count) { _, _ in
             NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
         }
+        // The first time the panel opens fully set up, meet the reader with the
+        // brief how-to they could not otherwise guess. Marks itself seen the
+        // instant it presents, so it shows once and never ambushes them again.
+        .onAppear {
+            autoPresentTheSetupHelperIfThisIsTheFirstReadyLaunch()
+        }
     }
 
     /// Everything the panel shows when no guide is open: the model picker, the
@@ -172,11 +194,40 @@ struct CompanionPanelView: View {
     @ViewBuilder
     private var settingsAndAccountContent: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // The first thing a new reader sees, when it is showing: the brief
+            // how-to, above everything else. It is ordinary content in the
+            // scroll, never a modal, so it can never block or steal focus.
+            if shouldRenderTheSetupHelperCard {
+                IrisSetupHelperCard(
+                    walkthrough: setupHelperWalkthrough,
+                    eyeLook: eyeLook,
+                    onBack: {
+                        withSetupHelperMotion { setupHelperWalkthrough.goBackToThePreviousStep() }
+                    },
+                    onPrimaryAction: {
+                        advanceOrFinishTheSetupHelper()
+                    },
+                    onSkip: {
+                        dismissTheSetupHelper()
+                    }
+                )
+                .padding(.top, 16)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 2)
+                .transition(readerAskedToReduceMotion ? .identity : DS.Motion.contentTransition)
+            }
+
             permissionsCopySection
                 .padding(.top, 16)
                 .padding(.horizontal, 16)
 
             if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
+                if !isShowingSetupHelper {
+                    setupHelperReopenLink
+                        .padding(.top, 8)
+                        .padding(.horizontal, 16)
+                }
+
                 Spacer()
                     .frame(height: 12)
 
@@ -210,6 +261,15 @@ struct CompanionPanelView: View {
                 Spacer()
                     .frame(height: 14)
 
+                // "It is hard to know which repos to install after the first
+                // one." The installed apps are above; this is where the reader
+                // finds the rest of the catalog and picks the next one.
+                DiscoverAppsSectionView(appInventoryService: appInventoryService)
+                    .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 14)
+
                 accountSection
                     .padding(.horizontal, 16)
             }
@@ -228,6 +288,88 @@ struct CompanionPanelView: View {
 
                 startButton
                     .padding(.horizontal, 16)
+            }
+        }
+    }
+
+    // MARK: - Setup helper
+
+    /// The card shows only when it is meant to AND the panel is in its ready
+    /// state — the same guard the rest of the ready content sits behind, so the
+    /// card can never render over the permissions flow it must not interrupt.
+    private var shouldRenderTheSetupHelperCard: Bool {
+        isShowingSetupHelper
+            && companionManager.hasCompletedOnboarding
+            && companionManager.allPermissionsGranted
+    }
+
+    /// The quiet way back into the walkthrough once it has been dismissed.
+    private var setupHelperReopenLink: some View {
+        Button(action: { openTheSetupHelperFromSettings() }) {
+            HStack(spacing: 5) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 9, weight: .medium))
+                Text("See how Iris works")
+            }
+        }
+        .irisTextButton(fontSize: 11)
+    }
+
+    /// Presents the helper the first time the panel opens fully set up. Reading
+    /// the seen flag here — not just at launch — means the check runs whenever
+    /// the panel appears, so a reader who finished setup this session meets it
+    /// the next time they open the panel rather than only after a relaunch.
+    private func autoPresentTheSetupHelperIfThisIsTheFirstReadyLaunch() {
+        guard !isShowingSetupHelper else { return }
+        let thePanelIsReadyForEverydayUse =
+            companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted
+        guard FirstRunSetupHelper.shouldAutomaticallyPresent(
+            theReaderHasSeenItBefore: setupHelperSeenStore.theReaderHasSeenTheSetupHelper,
+            thePanelIsReadyForEverydayUse: thePanelIsReadyForEverydayUse
+        ) else { return }
+
+        setupHelperWalkthrough.restartFromTheFirstStep()
+        withSetupHelperMotion { isShowingSetupHelper = true }
+        // Remembered the instant it presents, so quitting mid-read never makes
+        // it reappear uninvited — it is always one tap away from the link above.
+        setupHelperSeenStore.rememberThatTheReaderHasSeenTheSetupHelper()
+        NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+    }
+
+    private func openTheSetupHelperFromSettings() {
+        setupHelperWalkthrough.restartFromTheFirstStep()
+        withSetupHelperMotion { isShowingSetupHelper = true }
+        NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+    }
+
+    private func advanceOrFinishTheSetupHelper() {
+        if setupHelperWalkthrough.isOnLastStep {
+            dismissTheSetupHelper()
+        } else {
+            withSetupHelperMotion { setupHelperWalkthrough.advanceToTheNextStep() }
+            NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+        }
+    }
+
+    private func dismissTheSetupHelper() {
+        withSetupHelperMotion { isShowingSetupHelper = false }
+        // Reset so re-opening starts at step one, and confirm the seen flag so a
+        // reader who skips before the auto-present had a chance to set it (a
+        // manual re-open on a fresh install) still is not shown it again.
+        setupHelperWalkthrough.restartFromTheFirstStep()
+        setupHelperSeenStore.rememberThatTheReaderHasSeenTheSetupHelper()
+        NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+    }
+
+    /// Animates a setup-helper change with the Iris ease, unless the reader has
+    /// asked the system to reduce motion — then the same change happens with no
+    /// movement at all.
+    private func withSetupHelperMotion(_ changes: () -> Void) {
+        if readerAskedToReduceMotion {
+            changes()
+        } else {
+            withAnimation(DS.Motion.contentIn) {
+                changes()
             }
         }
     }
@@ -1406,4 +1548,147 @@ struct CompanionPanelView: View {
         }
     }
 
+}
+
+// MARK: - The setup helper card
+
+/// The first-run "how to use Iris" card, shown once at the top of the settings
+/// panel and re-openable from it. One step at a time: a mark (the summon
+/// shortcut, the real Iris eye, or the settings gear), a title, a sentence, and
+/// the way forward.
+///
+/// Deliberately in Iris's own language — the same eye the panel header draws,
+/// the same ink-on-glass primary pill, one periwinkle accent — so it reads as a
+/// part of Iris rather than a tour bolted over it. The memorable detail is the
+/// second step: the actual living eye appears, glancing toward the pointer, so
+/// the reader meets the thing they are about to click before they click it.
+private struct IrisSetupHelperCard: View {
+    let walkthrough: IrisSetupHelperWalkthrough
+    /// The panel's live eye-gaze, so the eye on the "ask at the eye" step
+    /// glances toward the pointer exactly like the header eye does.
+    let eyeLook: CGSize
+    let onBack: () -> Void
+    let onPrimaryAction: () -> Void
+    let onSkip: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var readerAskedToReduceMotion
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            eyebrowRow
+
+            HStack(alignment: .top, spacing: 12) {
+                glyphMark
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(walkthrough.currentStep.title)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(DS.Colors.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text(walkthrough.currentStep.body)
+                        .font(.system(size: 11.5))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .lineSpacing(1.5)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            // Each step fades up as it arrives — the one small moment of motion,
+            // skipped entirely for a reader who asked to reduce it. The `.id`
+            // makes SwiftUI treat a step change as a fresh view so the
+            // transition actually plays.
+            .transition(readerAskedToReduceMotion ? .identity : DS.Motion.stepTransition)
+            .id(walkthrough.currentStepIndex)
+
+            actionsRow
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
+                .fill(DS.Colors.surfaceRaised)
+        )
+        .overlay(
+            // A periwinkle hairline instead of the usual white one — the same
+            // accent as the eye's iris, the detail that marks this out as the
+            // one welcoming surface in a panel of settings.
+            RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
+                .strokeBorder(DS.Colors.accent.opacity(0.22), lineWidth: 1)
+        )
+    }
+
+    private var eyebrowRow: some View {
+        HStack {
+            Text("NEW TO IRIS")
+                .font(.system(size: 9, weight: .semibold))
+                .tracking(0.8)
+                .foregroundColor(DS.Colors.accent.opacity(0.85))
+
+            Spacer()
+
+            Text(walkthrough.progressLabel)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundColor(DS.Colors.quiet)
+                .monospacedDigit()
+        }
+    }
+
+    /// A 44pt disc seating the step's mark, so all three steps share one shape
+    /// and the eye in the middle reads as framed rather than loose.
+    private var glyphMark: some View {
+        ZStack {
+            Circle()
+                .fill(DS.Colors.eyeShell)
+                .frame(width: 44, height: 44)
+                .overlay(
+                    Circle().strokeBorder(DS.Colors.line, lineWidth: 1)
+                )
+
+            switch walkthrough.currentStep.glyph {
+            case .summonShortcut:
+                // The chord itself, in the wordmark's tight system font.
+                Text("⌃⌥")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(DS.Colors.accent)
+            case .theEye:
+                IrisEyeView(mood: .watching, look: eyeLook)
+            case .theSettingsGear:
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundColor(DS.Colors.accent)
+            }
+        }
+    }
+
+    private var actionsRow: some View {
+        HStack(spacing: 8) {
+            Button("Skip", action: onSkip)
+                .irisTextButton(fontSize: 10)
+
+            Spacer(minLength: 8)
+
+            stepDots
+
+            Spacer(minLength: 8)
+
+            if !walkthrough.isOnFirstStep {
+                Button("Back", action: onBack)
+                    .irisTextButton(fontSize: 10)
+            }
+
+            Button(walkthrough.primaryActionLabel, action: onPrimaryAction)
+                .irisPrimaryPill(isFullWidth: false, isCompact: true)
+        }
+    }
+
+    private var stepDots: some View {
+        HStack(spacing: 5) {
+            ForEach(0..<IrisSetupHelperWalkthrough.steps.count, id: \.self) { stepIndex in
+                Circle()
+                    .fill(stepIndex == walkthrough.currentStepIndex ? DS.Colors.accent : DS.Colors.line)
+                    .frame(width: 5, height: 5)
+            }
+        }
+        .animation(DS.Motion.quick, value: walkthrough.currentStepIndex)
+    }
 }

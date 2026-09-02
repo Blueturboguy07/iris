@@ -440,6 +440,27 @@ final class CodexMaintainProvider: MaintainModelProviding {
     /// The fix loop's own step ceiling is what bounds a run overall.
     private static let stepTimeoutSeconds: TimeInterval = 300
 
+    /// How many times ONE step will re-run a `codex exec` that exited cleanly
+    /// but handed back NO assistant message — an empty `--output-last-message`
+    /// and no `agent_message` in the event stream — before it gives up and
+    /// surfaces the honest failure. A clean exit with no answer is not the model
+    /// declining; it is the same shape as a dropped call, and the failure text
+    /// the reader would otherwise see literally tells them to "try again". So
+    /// Iris tries again ITSELF first, a bounded number of times. Mirrors
+    /// `MaintainTierCFixer.maximumTransportDropRetriesPerRun`, which retries the
+    /// sibling transient (a dropped model call) for exactly this reason.
+    /// `nonisolated` because `runCodexExec` (off the main actor) reads it and a
+    /// test asserts on it — the same reason `MaintainTierCFixer`'s own retry
+    /// constants are reachable off-actor.
+    nonisolated static let maximumEmptyReplyRetriesPerStep = 3
+
+    /// The pause before re-running after an empty reply. Mirrors
+    /// `MaintainTierCFixer.transportDropRetryWaitSeconds` — long enough to ride
+    /// out a momentary provider blip, short enough that even the full ladder of
+    /// retries (three, at five seconds each) stays inside the fix ladder's own
+    /// 60s per-rung deadline once the real ~9s round trips are added in.
+    nonisolated static let emptyReplyRetryWaitSeconds = 5
+
     /// Whether this provider's calls may search the web. Always true for Tier C;
     /// the guide fix ladder's first rung sets it false.
     private let webSearchEnabled: Bool
@@ -490,17 +511,78 @@ final class CodexMaintainProvider: MaintainModelProviding {
 
     // MARK: - Running the process
 
-    /// Spawns one `codex exec`, feeds it the prompt on stdin, and returns its
-    /// final assistant turn. `nonisolated` so the blocking wait happens off the
-    /// main actor — the panel must stay live while a step is in flight.
+    /// Runs `codex exec` for one step and returns its final assistant turn.
+    ///
+    /// A thin retry wrapper over `runCodexExecOnce`. A single run that exits
+    /// cleanly but hands back NO assistant message is a TRANSIENT empty, not a
+    /// permanent failure — the same dropped-call shape the fix loop already
+    /// retries — and the failure text the reader would otherwise see literally
+    /// tells them to try again. So Iris tries again ITSELF first, a bounded
+    /// number of times with a short backoff, and only surfaces that honest
+    /// message once the empties KEEP coming. A non-zero exit is a real failure
+    /// and is not retried here: it throws straight out of `runCodexExecOnce`,
+    /// already mapped by `CodexExecOutput.failure`.
     nonisolated static func runCodexExec(
         codexBinaryPath: String,
         promptText: String,
         attachedImagePNGDataList: [Data],
         model: String?,
         webSearchEnabled: Bool,
-        timeoutSeconds: TimeInterval
+        timeoutSeconds: TimeInterval,
+        // The pause between empty-reply retries (see
+        // `maximumEmptyReplyRetriesPerStep`). Defaults to the real backoff; a
+        // test drives it to 0 to exercise the whole retry ladder in
+        // milliseconds. It changes only the wait BETWEEN retries, never how many
+        // happen, so production behavior is untouched.
+        emptyReplyRetryWaitSecondsOverride: Double? = nil
     ) async throws -> String {
+        let backoffSeconds = emptyReplyRetryWaitSecondsOverride
+            ?? Double(emptyReplyRetryWaitSeconds)
+        var emptyReplyRetriesRemaining = maximumEmptyReplyRetriesPerStep
+        while true {
+            if let assistantMessage = try await runCodexExecOnce(
+                codexBinaryPath: codexBinaryPath,
+                promptText: promptText,
+                attachedImagePNGDataList: attachedImagePNGDataList,
+                model: model,
+                webSearchEnabled: webSearchEnabled,
+                timeoutSeconds: timeoutSeconds
+            ) {
+                return assistantMessage
+            }
+            // A clean exit (status 0) with no assistant message: the process ran
+            // and simply wrote nothing. Retry it a bounded number of times with
+            // a short backoff before surfacing the honest failure.
+            guard emptyReplyRetriesRemaining > 0 else {
+                throw MaintainModelProviderError.requestFailed(
+                    "codex exec produced no assistant message — it ran and exited cleanly without "
+                        + "answering. try again, and if it keeps happening connect a different model in settings."
+                )
+            }
+            emptyReplyRetriesRemaining -= 1
+            irisTrace(
+                "maintain: codex exec exited cleanly with no assistant message, retrying "
+                    + "(\(emptyReplyRetriesRemaining) retries left)"
+            )
+            if backoffSeconds > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
+            }
+        }
+    }
+
+    /// Spawns one `codex exec`, feeds it the prompt on stdin, and returns its
+    /// final assistant turn — or `nil` when the process exits cleanly (status 0)
+    /// but produces no assistant message, which the caller treats as a transient
+    /// empty to retry. `nonisolated` so the blocking wait happens off the main
+    /// actor — the panel must stay live while a step is in flight.
+    nonisolated static func runCodexExecOnce(
+        codexBinaryPath: String,
+        promptText: String,
+        attachedImagePNGDataList: [Data],
+        model: String?,
+        webSearchEnabled: Bool,
+        timeoutSeconds: TimeInterval
+    ) async throws -> String? {
         // A scratch directory per call: it is the agent's working root, and it
         // is deliberately EMPTY and outside any repo, so even a read-only shell
         // has nothing of the reader's to look at.
@@ -565,9 +647,29 @@ final class CodexMaintainProvider: MaintainModelProviding {
         let outputCollector = PipeCollector(fileHandle: standardOutputPipe.fileHandleForReading)
         let errorCollector = PipeCollector(fileHandle: standardErrorPipe.fileHandleForReading)
 
+        // The watchdog ESCALATES, and that escalation is load-bearing. A single
+        // `terminate()` (SIGTERM) is not enough: a `codex exec` blocked on a
+        // network read, or one that has spawned children, can ignore it — and
+        // then `waitUntilExit()` never returns and the whole call hangs forever,
+        // which a full-suite run actually hit (a 20-minute hang on a stuck
+        // codex). Worse under the empty-reply retry above, which must never sit
+        // on top of an unkillable process. So: SIGTERM, a short grace period,
+        // then SIGKILL the whole PROCESS GROUP (negative pid) so any children
+        // die with it. A killed process comes back with a non-zero
+        // terminationStatus, which throws below and is NOT retried — a hang is
+        // not a transient empty.
         let watchdog = Task {
             try await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
-            if process.isRunning { process.terminate() }
+            guard process.isRunning else { return }
+            let processIdentifier = process.processIdentifier
+            process.terminate()
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard process.isRunning else { return }
+            // SIGKILL the group; fall back to the single pid if the group send
+            // is rejected (e.g. the child changed its own process group).
+            if killpg(processIdentifier, SIGKILL) != 0 {
+                kill(processIdentifier, SIGKILL)
+            }
         }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -601,10 +703,10 @@ final class CodexMaintainProvider: MaintainModelProviding {
            !recoveredMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return recoveredMessage
         }
-        throw MaintainModelProviderError.requestFailed(
-            "codex exec produced no assistant message — it ran and exited cleanly without "
-                + "answering. try again, and if it keeps happening connect a different model in settings."
-        )
+        // Clean exit, nothing written. Report the empty as `nil` and let the
+        // caller (`runCodexExec`) decide whether to retry it or surface it — an
+        // empty here is a transient, not proof the model refused.
+        return nil
     }
 }
 

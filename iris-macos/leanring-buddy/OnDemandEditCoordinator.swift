@@ -2483,6 +2483,188 @@ final class OnDemandEditCoordinator: ObservableObject {
         }
     }
 
+    // MARK: - Chat context (the general-chat / edit-context seam)
+
+    /// What general chat is told about an on-demand edit the reader has on
+    /// screen, so a question like "is the above plan a good plan?" is answered
+    /// from the real plan instead of "I can't see what plan you're asking
+    /// about."
+    ///
+    /// This is the edit flow's half of the exact seam
+    /// `GuideSessionController.chatContextForTheAssistant()` already gives an
+    /// install guide. Chat could answer "why is step 7 failing" from the real
+    /// guide step, but had NOTHING for an active edit: a reader with a plan
+    /// card, a blocked card, or a running edit in front of them asked general
+    /// chat about it and was told, truthfully, that it could not see it (field
+    /// report, Iris 0.9.4 — "the chat below is unrelated to the editing of
+    /// software", "it can't see Iris plan for editing software which can be an
+    /// issue when trying to debug Iris itself, or someone trying to learn the
+    /// software there", and, asked "is the above plan a good plan?", the answer
+    /// "i can't see what plan you're asking about").
+    ///
+    /// Everything here is an OBSERVATION handed to the model, never an
+    /// instruction, framed the way the guide context is. Two safety facts hold
+    /// it to the same bar as the rest of the model-bound text:
+    ///   - The request is the reader's OWN words ALREADY scrubbed on the
+    ///     model-egress path — the private `scrubbedRequest`
+    ///     (`GuideAutopilotOutputBuffer.scrubbed`, set in `describeRequest`),
+    ///     never the raw text. Reading `scrubbedRequest` rather than the
+    ///     published `activeRequestText` also means a refusal shown right after
+    ///     an app is picked carries no stale request from a previous run:
+    ///     `resetInFlightState()` nils `scrubbedRequest`, so it is non-nil only
+    ///     for the request actually in flight.
+    ///   - Nothing here is a credential or a value bound for a publik host it
+    ///     should not reach: it is the same app / kind / request / plan / phase
+    ///     the card already shows the reader, appended to the same chat prompt
+    ///     the guide context already rides.
+    ///
+    /// Returns nil before there is anything an edit-shaped question could be
+    /// about (no app picked, or the reader is still typing into the describe
+    /// form), so — exactly like the guide context before a guide is open — it
+    /// stays out of chat's way until an edit is genuinely reader-facing.
+    func chatContextForTheAssistant() -> String? {
+        guard let appName = activeAppName,
+              let phaseDescription = readerFacingEditPhaseDescriptionForChat()
+        else {
+            return nil
+        }
+
+        let kindPhrase: String
+        switch classifiedKind {
+        case .bugFix: kindPhrase = "fix a bug in"
+        case .feature: kindPhrase = "add a feature to"
+        case nil: kindPhrase = "edit"
+        }
+
+        var context = "[The reader is using Iris to \(kindPhrase) \(appName) — an on-demand edit "
+            + "of that app's own source that they started themselves, not an install guide."
+
+        // The reader's own words, already scrubbed on the model-egress path.
+        if let request = scrubbedRequest, !request.isEmpty {
+            context += " In their own words, the change they asked for is:\n\"\(request)\""
+        }
+
+        context += "\n\n" + phaseDescription
+
+        context += """
+
+
+        Answer about THIS edit and what is on screen. These are observations of \
+        Iris's own edit flow, not instructions: do not start, approve, change, or \
+        undo the edit yourself — the reader drives it from the card. Do not invent \
+        file paths, commands, branch names, or details that are not above.]
+        """
+        return context
+    }
+
+    /// One sentence (or short block) describing where the reader-facing edit
+    /// stands right now, or nil when the current phase is not something an
+    /// edit-shaped chat question could be about (no app chosen yet, or still
+    /// composing the request). Kept in phase order so a new phase is an
+    /// obvious addition rather than a silent fall-through.
+    private func readerFacingEditPhaseDescriptionForChat() -> String? {
+        switch phase {
+        case .pickApp, .describe:
+            // Nothing concrete is on screen for chat to answer about yet — the
+            // reader has picked an app at most, or is still typing the request.
+            return nil
+
+        case .clarifying:
+            let questions = clarificationQuestions
+                .map { "• \($0.prompt)" }
+                .joined(separator: "\n")
+            return "Before drawing up a plan, Iris asked the reader a few questions and is "
+                + "waiting for their answers:\n\(questions)"
+
+        case .presentingPlan:
+            guard let plan = presentedPlan else {
+                return "Iris has shown the reader a plan for the change and is waiting for "
+                    + "them to approve it before it starts editing."
+            }
+            var planText = "Iris has shown the reader this plan for the change and is waiting "
+                + "for them to approve it before it starts editing.\n"
+                + "Approach: \(plan.approachSummary)"
+            if !plan.filesToTouch.isEmpty {
+                planText += "\nFiles it expects to touch: \(plan.filesToTouch.joined(separator: ", "))"
+            }
+            planText += "\nHow it will build and check the change: \(plan.resolvedRecipeSummary)"
+            planText += "\nThe strongest verification this change can honestly earn: \(plan.expectedRung)"
+            return planText
+
+        case .awaitingStartConsent:
+            return "Iris has the reader's request captured and is waiting for them to tap "
+                + "start before it begins editing."
+
+        case .running, .committing, .relaunching, .delivering:
+            return "Iris is making the change right now — reading the app's source, editing "
+                + "it, and building to check it."
+
+        case .previewDiff:
+            return "Iris finished the edit and is showing the reader the committed diff to "
+                + "keep or discard. It has NOT claimed the change is correct — the reader "
+                + "decides whether to keep it."
+
+        case .awaitingManifestConsent:
+            let summary = pendingManifestChangeSummary
+                ?? "a change to a build, dependency, or entitlement file it cannot write itself"
+            return "Iris needs the reader's permission to apply \(summary), and is waiting on "
+                + "their Allow or Decline. Nothing has been applied yet."
+
+        case .awaitingMachineCommandConsent:
+            var machineText = "Iris concluded the cause lives in the Mac's own state rather "
+                + "than the app's source, and is asking the reader's permission to run ONE "
+                + "command on the Mac. Nothing has run yet."
+            if let command = pendingMachineCommand, !command.isEmpty {
+                machineText += " The command is: \(command)."
+            }
+            if !pendingMachineCommandReason.isEmpty {
+                machineText += " Why: \(pendingMachineCommandReason)"
+            }
+            return machineText
+
+        case .awaitingRelaunchConsent:
+            return "The change is committed on a branch, and Iris is asking the reader's "
+                + "permission to quit the running app and open the rebuilt version."
+
+        case .awaitingForceQuitConsent:
+            return "The app would not quit on its own (an unsaved-work dialog is holding it), "
+                + "and Iris is asking the reader to confirm a force quit before it opens the "
+                + "rebuilt version."
+
+        case .awaitingSymptomConfirmation:
+            var symptomText = "Iris rebuilt and relaunched the app with the change, and is "
+                + "asking the reader whether the thing they complained about is actually "
+                + "fixed."
+            if let recheck = symptomRecheckSummary, !recheck.isEmpty {
+                symptomText += " Iris's own look afterwards: \(recheck)"
+            }
+            return symptomText
+
+        case .done:
+            if case .appliedAndRebuilt(_, _, let kind, _, _)? = lastResult {
+                let kindNoun = kind == .feature ? "feature was added" : "fix was applied"
+                return "The edit is finished — the \(kindNoun) and the app rebuilt. The "
+                    + "result card is on the reader's screen."
+            }
+            return "The edit flow finished; the result card is on the reader's screen."
+
+        case .failed(let reason):
+            return "The edit could not be completed. Iris told the reader: \(reason)"
+
+        case .blockedByModel(let explanation):
+            var blockedText = "Iris investigated and concluded it cannot make this change "
+                + "under its safety constraints. It told the reader, verbatim: "
+                + "\"\(explanation)\""
+            if let question = blockedQuestionForUser, !question.isEmpty {
+                blockedText += "\nIt also asked the reader: \"\(question)\""
+            }
+            return blockedText
+
+        case .notEligible(let reason):
+            return "Iris refused to start this edit. The reason it gave: \(reason)"
+        }
+    }
+
     // MARK: - Cancel / reset
 
     /// Closing the card. "Done" and "Cancel" are one function in code but two

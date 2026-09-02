@@ -23,6 +23,44 @@
 
 import SwiftUI
 
+// MARK: - Telling the takeover window where its buttons are
+
+/// The on-screen frames (in `.global` space — which, inside the takeover, is the
+/// `NSHostingView` that IS the drag-intercepting panel's content view) of every
+/// interactive control in the terminal. `GuideAutopilotTakeoverTerminalPanel`
+/// holds each left mouse-down for its own drag loop, so a press on a button had
+/// to be re-delivered as a click — and any press that drifted the loop's 3pt
+/// slop (a real click routinely does) was taken as a window MOVE instead, so
+/// the button never fired: "Hit try again, the button doesn't work though.
+/// Continue past it button not working either, it is just moving the terminal
+/// around." A SwiftUI `Button` has no AppKit view of its own for the panel to
+/// recognise by `hitTest`, so each control reports its frame up here and the
+/// panel delivers a press inside one straight to SwiftUI.
+struct TakeoverControlFramesKey: PreferenceKey {
+    static var defaultValue: [CGRect] { [] }
+    static func reduce(value: inout [CGRect], nextValue: () -> [CGRect]) {
+        value.append(contentsOf: nextValue())
+    }
+}
+
+extension View {
+    /// Marks this view as an interactive control whose frame the takeover panel
+    /// must exclude from its drag hit-testing, so a click on it reaches it
+    /// rather than moving the window. Harmless where the terminal is hosted
+    /// outside the takeover (the under-the-card pane): nothing reads the
+    /// preference there, so it is simply dropped.
+    func reportsFrameAsATakeoverControl() -> some View {
+        background(
+            GeometryReader { geometryInsideTheControl in
+                Color.clear.preference(
+                    key: TakeoverControlFramesKey.self,
+                    value: [geometryInsideTheControl.frame(in: .global)]
+                )
+            }
+        )
+    }
+}
+
 // Generic over the presenter (`AutopilotTerminalPresenting`) rather than tied to
 // the concrete `GuideAutopilotRunner`, so the exact same terminal — the traffic
 // lights, the typed-out commands, the exit lines, the scroll-to-tail — renders a
@@ -147,6 +185,7 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
         .onHover { hovering in helpIsHovered = hovering }
         .pointerCursor()
         .nativeTooltip("Stuck? Ask Iris about this step — it can see the command and its output")
+        .reportsFrameAsATakeoverControl()
     }
 
     /// The red traffic light is a real button, and shows the × on hover the
@@ -160,15 +199,20 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
                     .foregroundColor(Color.black.opacity(0.55))
                     .opacity(escapeHatchIsHovered ? 1 : 0)
             }
-            // A hit target a little bigger than the 11pt dot, so stopping a
-            // runaway install is not a precision exercise.
-            .frame(width: 15, height: 15)
+            // A hit target well bigger than the 11pt dot, so stopping a
+            // runaway install — or closing a stuck edit — is not a precision
+            // exercise. Enlarged from 15 to 22 after Test 8: the close was the
+            // reader's only escape from an errored run ("if there's an error you
+            // need to restart Iris"), and a 15pt dot in the title strip was hard
+            // to land on. Still fits the 24pt title bar.
+            .frame(width: 22, height: 22)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hovering in escapeHatchIsHovered = hovering }
         .pointerCursor()
         .nativeTooltip("Close — stops the install, keeps your place in the guide")
+        .reportsFrameAsATakeoverControl()
     }
 
     /// The transcript scrolls and follows its own tail. It used to be a plain
@@ -357,9 +401,11 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
             HStack(spacing: 8) {
                 Button("Continue past it", action: onContinuePastSurfacedStep)
                     .irisTextButton()
+                    .reportsFrameAsATakeoverControl()
                 Spacer(minLength: 0)
                 Button("Try again", action: onRetrySurfacedStep)
                     .irisPrimaryPill(isFullWidth: false, isCompact: true)
+                    .reportsFrameAsATakeoverControl()
             }
         }
         .padding(.horizontal, 10)
@@ -402,8 +448,10 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
                 Spacer(minLength: 0)
                 Button("Skip", action: onSkipRiskyCommand)
                     .irisTextButton()
+                    .reportsFrameAsATakeoverControl()
                 Button(request.isFromAFix ? "Run the fix" : "Run it", action: onApproveRiskyCommand)
                     .irisPrimaryPill(isFullWidth: false, isCompact: true)
+                    .reportsFrameAsATakeoverControl()
             }
         }
     }

@@ -94,8 +94,32 @@ nonisolated enum GuideAutopilotCommandShape {
     /// "bun: command not found", and a script whose interpreter is missing says
     /// "env: node: No such file or directory".
     static func programsEachLineWouldRun(_ command: String) -> [String] {
-        command.split(separator: "\n").compactMap { line in
-            line.split(whereSeparator: { $0 == " " || $0 == "\t" }).first.map(String.init)
+        command.split(separator: "\n").flatMap { line -> [String] in
+            // One line can be several commands — `cd apps/mobile && bun run
+            // build` is the exact shape of the second command that died with
+            // exit 127 in the cofounder's Test 9 log — and the tool that step
+            // needs is the second one, not `cd`. Each chained command is looked
+            // at on its own so its program is seen.
+            let chainedCommands = String(line)
+                .replacingOccurrences(of: "&&", with: "\u{1F}")
+                .replacingOccurrences(of: "||", with: "\u{1F}")
+                .replacingOccurrences(of: ";", with: "\u{1F}")
+                .replacingOccurrences(of: "|", with: "\u{1F}")
+                .split(separator: "\u{1F}")
+            return chainedCommands.compactMap { chainedCommand in
+                let words = chainedCommand
+                    .split(whereSeparator: { $0 == " " || $0 == "\t" })
+                    .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "()")) }
+                    .filter { !$0.isEmpty }
+                // A shell reads these as prefixes, not as the program: an env
+                // assignment (`FOO=bar bun install`), `sudo`, `env`, `command`.
+                return words.first(where: { word in
+                    let isAnEnvironmentAssignment =
+                        word.contains("=") && !word.hasPrefix("-") && !word.contains("/")
+                    let isAPrefixWord = word == "sudo" || word == "env" || word == "command"
+                    return !isAnEnvironmentAssignment && !isAPrefixWord
+                })
+            }
         }
     }
 

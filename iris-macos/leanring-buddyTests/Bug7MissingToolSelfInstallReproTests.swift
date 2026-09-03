@@ -423,6 +423,24 @@ struct Bug7MissingToolSelfInstallReproTests {
         return condition()
     }
 
+    // MARK: The program a chained line runs
+
+    /// Test 9's build-editor step is `cd apps/mobile && bun run build` on one
+    /// line — the second command that died with exit 127 in the log. The
+    /// self-install only helps if the tool it looks up is `bun`, not the `cd`
+    /// in front of it; and a `sudo` or an env assignment in front of a program
+    /// is not the program either.
+    @Test func theToolAChainedLineNeedsIsTheOneAfterTheCd() {
+        #expect(GuideAutopilotCommandShape.programsEachLineWouldRun(
+            "cd apps/mobile && bun run build") == ["cd", "bun"])
+        #expect(GuideAutopilotCommandShape.programsEachLineWouldRun(
+            "(cd ui && pnpm build) && cargo build --release") == ["cd", "pnpm", "cargo"])
+        #expect(GuideAutopilotCommandShape.programsEachLineWouldRun(
+            "sudo bun install; FOO=bar node index.js") == ["bun", "node"])
+        #expect(GuideAutopilotCommandShape.programsEachLineWouldRun(
+            "cd apps/mobile\nbun run build") == ["cd", "bun"])
+    }
+
     // MARK: The bug
 
     /// Test 9's install-deps, driven by the real controller and the real ladder

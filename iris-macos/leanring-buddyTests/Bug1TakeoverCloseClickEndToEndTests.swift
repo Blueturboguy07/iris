@@ -216,6 +216,24 @@ final class TheTakeoverWiringCompanionManagerInstalls {
     let takeoverController = GuideAutopilotTakeoverController()
     let shell = ShellThatHoldsTheStepOpenWithoutRunningAnything()
 
+    /// The terminal panel THIS wiring raised — captured across the single
+    /// synchronous statement that raises it, rather than found by scanning
+    /// `NSApplication.shared.windows` some `await` later.
+    ///
+    /// It has to be captured that way because Swift Testing runs SUITES in
+    /// parallel (`.serialized` orders the tests inside one suite, not the suites
+    /// against each other), and every takeover in the app is the same panel
+    /// class at the same centered frame. A scan that runs after a suspension
+    /// point can therefore hand back the window a test in ANOTHER suite raised
+    /// in between — and then this file clicks that window and reports that the
+    /// red light did nothing. Measured twice on the FIXED code: run alongside
+    /// `Bug1TakeoverCloseClickReproTests`, which raises takeovers of its own,
+    /// the red-light guard failed with "the terminal is STILL ON SCREEN". A
+    /// guard that cries regression at a working fix is a guard that gets
+    /// deleted, so it is not enough for this file to be right when it runs
+    /// alone.
+    private(set) var theTerminalItRaised: GuideAutopilotTakeoverTerminalPanel?
+
     init() throws {
         let stubbedConfiguration = URLSessionConfiguration.ephemeral
         stubbedConfiguration.protocolClasses = [Bug1EndToEndKneecapGuideURLProtocol.self]
@@ -300,12 +318,25 @@ final class TheTakeoverWiringCompanionManagerInstalls {
 
     /// Opens the guide and presses "Let Iris run it", which is the only entry
     /// point that begins execution.
+    ///
+    /// The three statements after the guide is open are deliberately one
+    /// unbroken run of main-actor code with no `await` between them:
+    /// `startAutopilot()` calls `onAutopilotDidStart` synchronously
+    /// (`GuideSessionController.swift:1454`), which presents the takeover
+    /// synchronously, and a panel is in `NSApplication.shared.windows` from the
+    /// moment it is created — so the window that is new across those lines is
+    /// this wiring's own, and no concurrently running test can slip a window of
+    /// its own in between.
     func theReaderOpensTheGuideAndLetsIrisRunIt() async {
         await guideSessionController.openGuide(
             slug: "kneecap", requestedVersion: 2,
             branchKeyFromDeepLink: "macos:android", stepIndexFromDeepLink: nil
         )
+        let windowsBefore = Set(NSApplication.shared.windows.map { ObjectIdentifier($0) })
         guideSessionController.startAutopilot()
+        theTerminalItRaised = NSApplication.shared.windows
+            .compactMap { $0 as? GuideAutopilotTakeoverTerminalPanel }
+            .first { !windowsBefore.contains(ObjectIdentifier($0)) }
     }
 
     /// Leaves nothing running behind a finished test: the held step is
@@ -409,17 +440,11 @@ final class TheTakeoverWiringCompanionManagerInstalls {
 
     // MARK: Finding the window and its two controls
 
-    private static func terminalPanelRaised(
-        after windowsBefore: Set<ObjectIdentifier>
-    ) async throws -> Panel {
-        _ = await pump(within: 5) {
-            NSApplication.shared.windows
-                .contains { $0 is Panel && !windowsBefore.contains(ObjectIdentifier($0)) }
-        }
-        return try #require(
-            NSApplication.shared.windows
-                .compactMap { $0 as? Panel }
-                .first { !windowsBefore.contains(ObjectIdentifier($0)) },
+    private static func terminalRaisedBy(
+        _ iris: TheTakeoverWiringCompanionManagerInstalls
+    ) throws -> Panel {
+        try #require(
+            iris.theTerminalItRaised,
             """
             "Let Iris run it" did not raise a takeover terminal at all, so there is no window \
             for the reader to be stuck under and nothing for this test to click
@@ -483,11 +508,10 @@ final class TheTakeoverWiringCompanionManagerInstalls {
     /// field reports start.
     private static func aTakeoverTheReaderIsStuckUnder() async throws
         -> (TheTakeoverWiringCompanionManagerInstalls, Panel) {
-        let windowsBefore = Set(NSApplication.shared.windows.map { ObjectIdentifier($0) })
         let iris = try TheTakeoverWiringCompanionManagerInstalls()
         await iris.theReaderOpensTheGuideAndLetsIrisRunIt()
 
-        let terminal = try await terminalPanelRaised(after: windowsBefore)
+        let terminal = try terminalRaisedBy(iris)
         try await waitForTheTakeoverToFinishOpening(terminal)
         try #require(
             terminal.isVisible,
@@ -568,6 +592,13 @@ final class TheTakeoverWiringCompanionManagerInstalls {
         defer { iris.tearDown() }
         let (_, helpPill) = try Self.titleStripControls(reportedBy: terminal)
 
+        // `theReaderAskedForHelp()` posts with `object: nil`
+        // (`GuideAutopilotTerminalView.swift:570`), so this cannot tell OUR
+        // Help click apart from a Help click in a suite running beside it. The
+        // window-identity problem above has no equivalent here — a concurrent
+        // suite can only ring this bell, never silence it — so the failure mode
+        // is a Help guard that passes on borrowed evidence, not one that cries
+        // regression. Worth knowing if this bell ever grows a payload.
         let askBarSummons = TheAskBarDoorbell()
         let observer = NotificationCenter.default.addObserver(
             forName: .clickySummonAskBar, object: nil, queue: .main

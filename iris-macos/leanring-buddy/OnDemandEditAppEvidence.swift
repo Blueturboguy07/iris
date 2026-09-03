@@ -47,6 +47,15 @@ import ScreenCaptureKit
 struct OnDemandEditRuntimeEvidence: Sendable {
     let runtimeLogText: String?
     let appWindowScreenshotPNG: Data?
+    /// True when the screenshot above is the READER'S screen rather than the
+    /// app's own window — the fallback for an app that has no window to
+    /// photograph. It travels WITH the image because the prompt has to say
+    /// which of the two it is: a picture of someone's desktop announced as
+    /// "the app's current window" is worse than no picture at all. Declared
+    /// `var` with a default so every existing construction keeps compiling and
+    /// keeps meaning what it meant (a `let` with a default value is dropped
+    /// from the memberwise initializer entirely).
+    var screenshotIsOfTheReadersWholeScreen: Bool = false
 }
 
 @MainActor
@@ -327,6 +336,29 @@ enum OnDemandEditAppEvidence {
         ) else { return nil }
 
         let bitmapRepresentation = NSBitmapImageRep(cgImage: capturedImage)
+        return bitmapRepresentation.representation(using: .png, properties: [:])
+    }
+
+    /// A PNG of the screen the reader is looking at, for the case
+    /// `captureFrontWindowPNG` structurally cannot cover: an app with no
+    /// capturable window at all. Every menu-bar app (LSUIElement) is one, and
+    /// for those the edit engine had NO image source whatsoever — a reader who
+    /// asked "can you do what the image says?" with the request on screen sent
+    /// a prompt naming a picture that was never taken, and the model correctly
+    /// answered that the referenced image was not in the request.
+    ///
+    /// This is the same capture the chat pipeline performs for every ordinary
+    /// question — the cursor's display, which `captureAllScreensAsJPEG` sorts
+    /// first, with Iris's own windows excluded — re-encoded to PNG because both
+    /// model providers declare the attached image as `image/png`. Only the
+    /// cursor's display is taken: one image is what a turn can carry, and it is
+    /// the display the reader is working on.
+    static func captureReadersScreenPNG() async -> Data? {
+        guard let capturedScreens = try? await CompanionScreenCaptureUtility
+                .captureAllScreensAsJPEG(),
+              let cursorScreen = capturedScreens.first,
+              let bitmapRepresentation = NSBitmapImageRep(data: cursorScreen.imageData)
+        else { return nil }
         return bitmapRepresentation.representation(using: .png, properties: [:])
     }
 }

@@ -435,6 +435,13 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// all-nil result simply runs the edit the old, blind way.
     var gatherRuntimeEvidenceForApp: ((_ appSlug: String) async -> OnDemandEditRuntimeEvidence)?
 
+    /// A PNG of the reader's own screen, used ONLY when the gatherer above
+    /// could photograph no window — which for a menu-bar app is always. Injected
+    /// for the same reason the gatherer is: a test binary holds no Screen
+    /// Recording grant, so this is the seam a test connects instead. nil leaves
+    /// a windowless app's run exactly as blind as it was.
+    var captureReadersScreenPNGForFallback: (() async -> Data?)?
+
     /// Asks a model whether the reader's own complaint survived the change,
     /// from the before/after window and log evidence. Injected; nil leaves the
     /// flow exactly as it was — waiting on a human tap and recording
@@ -687,6 +694,8 @@ final class OnDemandEditCoordinator: ObservableObject {
             cancellationCheck: cancellationCheck,
             runtimeLogContext: runtimeEvidence.runtimeLogText,
             appWindowScreenshotPNG: runtimeEvidence.appWindowScreenshotPNG,
+            attachedScreenshotIsOfTheReadersWholeScreen:
+                runtimeEvidence.screenshotIsOfTheReadersWholeScreen,
             additionalPromptSections: additionalPromptSections,
             manifestChangeApproval: manifestChangeApproval,
             // Read here rather than threaded through the performer's signature:
@@ -1202,8 +1211,21 @@ final class OnDemandEditCoordinator: ObservableObject {
         let appName = activeAppName ?? slug
         editRunner.note("Looking at \(appName)'s window and its recent logs…")
         statusLine = "Looking at \(appName)'s window and recent logs…"
-        let runtimeEvidence = await gatherRuntimeEvidenceForApp?(slug)
+        var runtimeEvidence = await gatherRuntimeEvidenceForApp?(slug)
             ?? OnDemandEditRuntimeEvidence(runtimeLogText: nil, appWindowScreenshotPNG: nil)
+        // An app with no capturable window — every menu-bar app — used to leave
+        // the run with no image at all, so a request like "can you do what the
+        // image says?" reached the model naming a picture nothing had taken, and
+        // it blocked asking for it. The reader's own screen is what "the image"
+        // meant; take that instead, carrying the label that says so.
+        if runtimeEvidence.appWindowScreenshotPNG == nil,
+           let readersScreenPNG = await captureReadersScreenPNGForFallback?() {
+            runtimeEvidence = OnDemandEditRuntimeEvidence(
+                runtimeLogText: runtimeEvidence.runtimeLogText,
+                appWindowScreenshotPNG: readersScreenPNG,
+                screenshotIsOfTheReadersWholeScreen: true
+            )
+        }
         runtimeEvidenceTextBeforeTheRun = runtimeEvidence.runtimeLogText
         runtimeEvidenceBeforeTheRun = runtimeEvidence
         filesTouchedThisRun = []
@@ -1257,7 +1279,11 @@ final class OnDemandEditCoordinator: ObservableObject {
         }
         var gatheredEvidenceParts: [String] = []
         if runtimeEvidence.appWindowScreenshotPNG != nil {
-            gatheredEvidenceParts.append("a screenshot of its window")
+            gatheredEvidenceParts.append(
+                runtimeEvidence.screenshotIsOfTheReadersWholeScreen
+                    ? "a screenshot of your screen (\(appName) has no window to photograph)"
+                    : "a screenshot of its window"
+            )
         }
         if runtimeEvidence.runtimeLogText != nil {
             gatheredEvidenceParts.append("its recent log output")

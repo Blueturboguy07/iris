@@ -738,13 +738,11 @@ final class Bug6CoordinatorRun {
         // ── wireTheReadersScreenSourceHereWhenTheFixLands ──────────────────
         // The reader HAD a document on screen (`Bug6ReadersScreen
         // .documentScreenshotPNG`, real bytes) and Iris never asked for it. A
-        // test binary holds no Screen Recording grant, so once the fix gives
-        // the coordinator an injectable source for the reader's screen, connect
-        // it here — one line — and this repro turns green:
-        //
-        //     coordinator.<theFixesReadersScreenSeam> = {
-        //         Bug6ReadersScreen.documentScreenshotPNG
-        //     }
+        // test binary holds no Screen Recording grant, so the fix's source for
+        // the reader's screen is injectable, and it is connected here.
+        coordinator.captureReadersScreenPNGForFallback = {
+            Bug6ReadersScreen.documentScreenshotPNG
+        }
     }
 
     /// The production performer, verbatim except for the provider and a
@@ -777,6 +775,8 @@ final class Bug6CoordinatorRun {
             cancellationCheck: cancellationCheck,
             runtimeLogContext: runtimeEvidence.runtimeLogText,
             appWindowScreenshotPNG: runtimeEvidence.appWindowScreenshotPNG,
+            attachedScreenshotIsOfTheReadersWholeScreen:
+                runtimeEvidence.screenshotIsOfTheReadersWholeScreen,
             additionalPromptSections: additionalPromptSections,
             manifestChangeApproval: manifestChangeApproval,
             // His run 2 blocked at step 2 and never reached a build, so the

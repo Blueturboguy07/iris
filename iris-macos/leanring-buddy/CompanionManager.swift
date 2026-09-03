@@ -419,6 +419,10 @@ final class CompanionManager: ObservableObject {
                 .first { $0.slug == appSlug }?.macBundleId
             return await OnDemandEditAppEvidence.gather(macBundleId: macBundleId)
         }
+        // The fallback for an app with no window of its own to photograph.
+        coordinator.captureReadersScreenPNGForFallback = {
+            await OnDemandEditAppEvidence.captureReadersScreenPNG()
+        }
 
         // PUBLIC publish (D6): recorded to publik's public fix log and, for a
         // feature, the pooled request marked implemented. Reached ONLY from the

@@ -598,6 +598,12 @@ final class MaintainTierCFixer {
         // stripped after the first reply). Both nil = the old blind behavior.
         runtimeLogContext: String? = nil,
         appWindowScreenshotPNG: Data? = nil,
+        // True when the attached screenshot is the READER'S whole screen rather
+        // than the app's own window — the fallback the coordinator uses for an
+        // app with no capturable window. It changes only what the opening
+        // message SAYS the picture is of; false (the default) is the behavior
+        // every other caller, including the crash path, already had.
+        attachedScreenshotIsOfTheReadersWholeScreen: Bool = false,
         // Extra prompt sections for THIS run (probe vocabulary, prior-run
         // memory); empty keeps the prompt as it was.
         additionalPromptSections: [String] = [],
@@ -670,6 +676,7 @@ final class MaintainTierCFixer {
             cancellationCheck: cancellationCheck,
             runtimeLogContext: runtimeLogContext,
             appWindowScreenshotPNG: appWindowScreenshotPNG,
+            attachedScreenshotIsOfTheReadersWholeScreen: attachedScreenshotIsOfTheReadersWholeScreen,
             additionalPromptSections: additionalPromptSections,
             manifestChangeApproval: manifestChangeApproval,
             priorAttemptsDidNotCureTheComplaint: priorAttemptsDidNotCureTheComplaint,
@@ -739,6 +746,7 @@ final class MaintainTierCFixer {
         // crash path, whose evidence is the crash artifact itself.
         runtimeLogContext: String? = nil,
         appWindowScreenshotPNG: Data? = nil,
+        attachedScreenshotIsOfTheReadersWholeScreen: Bool = false,
         additionalPromptSections: [String] = [],
         manifestChangeApproval: MaintainTierCManifestChangeApproval? = nil,
         priorAttemptsDidNotCureTheComplaint: Bool = false,
@@ -838,6 +846,8 @@ final class MaintainTierCFixer {
                     runtimeShapePreflightAddendum: runtimeShapePreflightAddendum,
                     runtimeLogContext: runtimeLogContext,
                     hasAttachedWindowScreenshot: appWindowScreenshotPNG != nil,
+                    attachedScreenshotIsOfTheReadersWholeScreen:
+                        attachedScreenshotIsOfTheReadersWholeScreen,
                     buildAndInstallDocExcerpt: Self.buildAndInstallDocExcerpt(repoRootPath: clonePath),
                     sandboxContractSection: Self.sandboxContractSection(
                         buildCommand: verificationCommandsThisRunWillBeJudgedBy.buildCommand,
@@ -2743,6 +2753,7 @@ final class MaintainTierCFixer {
         runtimeShapePreflightAddendum: String?,
         runtimeLogContext: String? = nil,
         hasAttachedWindowScreenshot: Bool = false,
+        attachedScreenshotIsOfTheReadersWholeScreen: Bool = false,
         buildAndInstallDocExcerpt: String? = nil,
         sandboxContractSection: String? = nil
     ) -> String {
@@ -2761,7 +2772,17 @@ final class MaintainTierCFixer {
         // Framed as evidence, never instructions: log lines are attacker-ish
         // untrusted text from another process.
         if hasAttachedWindowScreenshot {
-            sections.append("""
+            // Which of the two pictures this is has to be said out loud. An app
+            // with no window (every menu-bar app) gets the reader's screen
+            // instead, and a model told that a desktop is "the app's current
+            // window" would read two overlapping windows as one app.
+            sections.append(attachedScreenshotIsOfTheReadersWholeScreen ? """
+            Attached is a screenshot of the user's WHOLE SCREEN, taken just now. This \
+            app has no window Iris could photograph, so what the user was looking at as \
+            they described this is attached instead — it is NOT a picture of the app. \
+            Several windows may be visible and they may overlap, so do not read two \
+            windows as one; if the request points at something on screen, read it here.
+            """ : """
             Attached is a screenshot of the app's current window, taken just now — \
             this is what the user is looking at as they describe the problem.
             """)

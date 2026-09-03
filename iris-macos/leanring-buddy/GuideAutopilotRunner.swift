@@ -73,6 +73,12 @@ struct GuideAutopilotGuideContext {
     /// Hosts named across every command in this branch — the closed set a
     /// proposed fix may reach.
     let hostsReachedByTheGuide: Set<String>
+    /// For a tool this guide installs in a step of its own, that step's command
+    /// — what the failure ladder runs when a LATER step dies because the tool is
+    /// missing. Built by `GuideSessionController`. A `var` with a default so a
+    /// guide that installs no tool, and every caller written before this
+    /// existed, keep working unchanged.
+    var commandTheGuidePublishesToInstallEachTool: [String: String] = [:]
 }
 
 /// Who is paying for the model calls this install's fix ladder makes — and,
@@ -379,6 +385,33 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         shellSession.tailForTheModel()
     }
 
+    /// Re-loads the reader's own shell environment into the long-lived session,
+    /// so a tool they installed since the last attempt can be found without
+    /// restarting Iris. See
+    /// `GuideAutopilotShellSession.reloadTheReadersEnvironmentCommand` for what
+    /// that means and why the shell is refreshed rather than rebuilt.
+    ///
+    /// For a step that has ALREADY failed: the "Try again" button, and the
+    /// retry after `installTheMissingToolTheGuideInstallsItself` puts a tool on
+    /// the machine. A step that has not failed yet has no reason to pay for
+    /// this, and sourcing a heavy dotfile stack is not free.
+    ///
+    /// Sent straight to the session rather than through `runApproved`, for the
+    /// same reason `moveInto`'s `cd` is: this is machinery, not work the reader
+    /// is waiting to watch, so it must not spend the pacing floor. Its outcome
+    /// is deliberately unexamined — whether the tool is there now is answered
+    /// by the step that follows, not by this.
+    func reloadTheReadersEnvironmentIntoTheShell() async {
+        guard let approved = GuideAutopilotRiskAssessment.approve(
+            GuideAutopilotShellSession.reloadTheReadersEnvironmentCommand
+        ) else { return }
+        // A cold dotfile stack legitimately takes seconds (nvm, compinit), so
+        // it gets the same budget a fresh shell's startup gets.
+        _ = await shellSession.run(
+            approved, deadline: GuideAutopilotShellSession.readyDeadline
+        )
+    }
+
     // MARK: - Running one step
 
     func executeStepCommand(
@@ -546,6 +579,18 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         exitStatus: Int32,
         workingDirectory: String
     ) async -> GuideAutopilotStepResult {
+        // Ahead of the ladder, and ahead of spending anything: a step that died
+        // because a tool is missing, when the guide installs that tool itself,
+        // is repaired from the guide rather than from a model.
+        if let repairedFromTheGuide = await installTheMissingToolTheGuideInstallsItself(
+            step: step, command: command, exitStatus: exitStatus
+        ) {
+            if repairedFromTheGuide == .succeeded {
+                consecutiveStepsTheLadderSpentOnWithoutGettingThemRunning = 0
+            }
+            return repairedFromTheGuide
+        }
+
         let modelCallsBeforeThisStepsLadder = modelCallsUsedThisGuide
         let result = await climbTheFixLadder(
             step: step, command: command,
@@ -562,6 +607,92 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
             consecutiveStepsTheLadderSpentOnWithoutGettingThemRunning += 1
         }
         return result
+    }
+
+    /// The exit status every shell reports for a command whose program is not
+    /// on the PATH — "command not found".
+    private static let exitStatusForAProgramThatIsNotInstalled: Int32 = 127
+
+    /// Installs a missing tool using the guide's OWN command for installing it,
+    /// then runs the step again — before the ladder asks a model anything.
+    ///
+    /// The ladder had no deterministic exit for a missing tool. Its only two
+    /// were a MODEL-proposed command, which `GuideAutopilotFixProposer` refuses
+    /// when it reaches a host the guide's own commands never name — and a
+    /// tool's official installer nearly always does; bun's reaches bun.sh while
+    /// kneecap only ever reaches github.com and nodejs.org — and advice, which
+    /// hands the step straight back. So an install stopped dead on step 6 of 17
+    /// for a prerequisite the same guide installs in its own step 3, and the
+    /// reader was left to install bun by hand.
+    ///
+    /// Nothing here is proposed by a model, so the host guard that stops a model
+    /// reaching a new destination is untouched: the command run is one the guide
+    /// already publishes and the reader would have run themselves had the
+    /// session not resumed past the step that carries it.
+    ///
+    /// Returns nil whenever this is not that situation — a different exit
+    /// status, a tool Iris does not know, a guide with no command for it, or an
+    /// install that did not take — and the ladder then runs exactly as before.
+    private func installTheMissingToolTheGuideInstallsItself(
+        step: IrisGuideStep,
+        command: String,
+        exitStatus: Int32
+    ) async -> GuideAutopilotStepResult? {
+        guard exitStatus == Self.exitStatusForAProgramThatIsNotInstalled,
+              !theReaderAskedToStopThisStep,
+              let (missingTool, installCommand) =
+                theGuidesOwnInstallCommandForAToolThisCommandRuns(command)
+        else { return nil }
+
+        transcript.append(.explanation(
+            text: "\(missingTool) isn't installed yet, and this guide has its own step for "
+                + "installing it. Iris is running that step now."
+        ))
+        transcript.append(.commandFromTheGuide(text: installCommand))
+        switch await runGuideCommand(
+            installCommand, inWorkingDirectory: shellSession.currentWorkingDirectory
+        ) {
+        case .succeeded:
+            break
+        case .stopped:
+            return .stopped
+        case .failed, .skippedByReader:
+            return nil
+        }
+
+        // This session is one shell, started before the tool existed: it holds
+        // the PATH of that moment and a command hash table that has already
+        // looked this tool up and not found it. Without the reload the retry
+        // below fails exactly the way the step just did.
+        await reloadTheReadersEnvironmentIntoTheShell()
+
+        transcript.append(.commandFromTheGuide(text: command))
+        switch await runGuideCommand(
+            command,
+            inWorkingDirectory: step.workingDirectory ?? shellSession.currentWorkingDirectory
+        ) {
+        case .succeeded: return .succeeded
+        case .stopped: return .stopped
+        case .skippedByReader: return .skippedByReader
+        case .failed: return nil
+        }
+    }
+
+    /// The guide's own command for installing a tool this command runs, when the
+    /// guide publishes one and the tool is one `ToolVersionService` knows how to
+    /// check for — the closed allowlist that bounds what a `toolVersion` watch
+    /// arriving over the wire can name.
+    private func theGuidesOwnInstallCommandForAToolThisCommandRuns(
+        _ command: String
+    ) -> (missingTool: String, installCommand: String)? {
+        for programName in GuideAutopilotCommandShape.programsEachLineWouldRun(command) {
+            guard ToolVersionService.toolSpecification(for: programName) != nil,
+                  let installCommand =
+                    guideContext.commandTheGuidePublishesToInstallEachTool[programName]
+            else { continue }
+            return (missingTool: programName, installCommand: installCommand)
+        }
+        return nil
     }
 
     private func climbTheFixLadder(

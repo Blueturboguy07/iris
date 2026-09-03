@@ -82,6 +82,23 @@ nonisolated enum GuideAutopilotCommandShape {
         return false
     }
 
+    // MARK: - What each line of the command runs
+
+    /// The program name each line of this command begins with — what a shell
+    /// would look up on the PATH for that line.
+    ///
+    /// It answers "which tool did this step need?" from the command Iris itself
+    /// wrote, which is the one text whose shape Iris controls. The alternative —
+    /// reading the name out of the shell's own not-found message — is fragile
+    /// across shells and locales: zsh says "command not found: bun", bash says
+    /// "bun: command not found", and a script whose interpreter is missing says
+    /// "env: node: No such file or directory".
+    static func programsEachLineWouldRun(_ command: String) -> [String] {
+        command.split(separator: "\n").compactMap { line in
+            line.split(whereSeparator: { $0 == " " || $0 == "\t" }).first.map(String.init)
+        }
+    }
+
     // MARK: - What the command reaches for
 
     /// Hostnames named anywhere in the command — used to check a proposed

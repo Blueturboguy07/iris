@@ -1227,6 +1227,14 @@ struct Bug7MissingToolOnARealLoginShellTests {
             "THE CONSEQUENCE: the install is still on step \(controller.currentStepIndex)"
         )
         // The step after it is the one Test 9 also died on, for the same reason.
+        // The pump above returns the moment install-deps ADVANCES, and build-editor
+        // starts running in that same instant on a real pty, so its result has to
+        // be waited for rather than read off the disk microseconds later.
+        _ = await pump {
+            FileManager.default.fileExists(
+                atPath: Bug7ReaderMacFixture.builtEditorPage(inHome: readerHome)
+            )
+        }
         #expect(
             (try? String(
                 contentsOfFile: Bug7ReaderMacFixture.builtEditorPage(inHome: readerHome),

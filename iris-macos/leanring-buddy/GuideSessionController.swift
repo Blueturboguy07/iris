@@ -1439,7 +1439,9 @@ final class GuideSessionController: ObservableObject {
             version: guide.version,
             appName: guide.appName,
             platformLabel: branch.label,
-            hostsReachedByTheGuide: Self.hostsReachedBy(branch: branch)
+            hostsReachedByTheGuide: Self.hostsReachedBy(branch: branch),
+            commandTheGuidePublishesToInstallEachTool:
+                Self.commandsThisGuidePublishesToInstallEachToolItWatchesFor(branch: branch)
         )
         let runner = makeAutopilotRunner(context)
         autopilotRunner = runner
@@ -2113,6 +2115,36 @@ final class GuideSessionController: ObservableObject {
             }
         }
         return hosts
+    }
+
+    /// For each tool this branch installs, the command the guide itself
+    /// publishes for installing it — what the autopilot runs when a later step
+    /// dies because that tool is missing, instead of asking a model for a fix it
+    /// would then have to refuse (see
+    /// `GuideAutopilotRunner.installTheMissingToolTheGuideInstallsItself`).
+    ///
+    /// A `toolVersion` watch marks a step whose "done" is "this tool answers",
+    /// which is as true of the step that INSTALLS the tool as of one that merely
+    /// needs it: kneecap watches `git` on a `git --version` check and again on
+    /// its `git clone`. A command that begins by running the tool cannot be what
+    /// installs it — it would fail the same way the step just did — so those are
+    /// left out, and what remains is the shape of kneecap's own "Install Bun"
+    /// step, `npm install -g bun`.
+    private static func commandsThisGuidePublishesToInstallEachToolItWatchesFor(
+        branch: IrisGuideBranch
+    ) -> [String: String] {
+        var installCommandForEachTool: [String: String] = [:]
+        for step in branch.setupSteps + branch.steps {
+            guard let command = step.command, let watch = step.watch else { continue }
+            let programsThisCommandRuns = GuideAutopilotCommandShape.programsEachLineWouldRun(command)
+            for expectation in watch.expect {
+                guard case .toolVersion(let tool) = expectation,
+                      installCommandForEachTool[tool] == nil,
+                      !programsThisCommandRuns.contains(tool) else { continue }
+                installCommandForEachTool[tool] = command
+            }
+        }
+        return installCommandForEachTool
     }
 
     // MARK: - Copying and opening

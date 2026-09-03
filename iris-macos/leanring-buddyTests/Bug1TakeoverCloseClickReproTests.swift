@@ -570,11 +570,18 @@ private final class AskBarSummons: @unchecked Sendable {
     /// AppKit hands a `mouseDown` to is a view that has taken the click away
     /// from the button underneath.
     ///
-    /// The reference is "Try again" in the same window: the control the reader
-    /// really can click today, whose press AppKit resolves to SwiftUI's own
-    /// hosted document view. Anything the red light or Help resolves to that is
-    /// NOT that view is the thing eating their clicks.
-    @Test func aPressOverTheRedLightLandsOnAViewThatTryAgainDoesNotHave() async throws {
+    /// The reference is bare background in the SAME title strip: a point with
+    /// no control on it at all, whose press AppKit resolves to the hosted view
+    /// SwiftUI draws the whole card into — which is exactly what the panel's own
+    /// comment measured. Anything the red light or Help resolves to that is NOT
+    /// that view is the thing eating their clicks.
+    ///
+    /// It has to be bare background in that strip rather than "Try again" below
+    /// it: the transcript is a SwiftUI `ScrollView`, which AppKit really does
+    /// back with a scroll view and a document view, so a press down there lands
+    /// on a different AppKit view than a press in the strip does — for reasons
+    /// that have nothing to do with this bug.
+    @Test func aPressOverTheRedLightLandsOnAViewThatBareBackgroundDoesNotHave() async throws {
         let windowsBefore = Set(NSApplication.shared.windows.map { ObjectIdentifier($0) })
         let controller = GuideAutopilotTakeoverController()
         let runner = KneecapSurfacedAtInstallDeps()
@@ -591,23 +598,27 @@ private final class AskBarSummons: @unchecked Sendable {
         let contentView = try #require(terminal.contentView)
         let redLight = try Self.escapeHatchFrame(reportedBy: terminal)
         let helpPill = try Self.helpButtonFrame(reportedBy: terminal)
-        let surfacedRowButtons = terminal.interactiveControlFrames
-            .filter { $0.minY >= Self.heightOfTheTitleStrip }
-            .sorted { $0.minX < $1.minX }
-        let tryAgain = try #require(
-            surfacedRowButtons.last,
-            "the 'Your turn' row's buttons never reported their frames below the title strip"
+        // Bare background in the title strip: the centre of the strip, between
+        // the traffic lights on the left and the Help pill on the right, where
+        // only the title text is drawn and no control reports a frame.
+        let bareTitleStripBackground = CGPoint(
+            x: terminal.frame.width / 2, y: Self.heightOfTheTitleStrip / 2
+        )
+        try #require(
+            !terminal.interactiveControlFrames.contains { $0.contains(bareTitleStripBackground) },
+            """
+            \(bareTitleStripBackground) is inside a reported control frame, so it is not the \
+            bare title-strip background this test needs as its reference
+            """
         )
 
         /// `NSView.hitTest(_:)` takes a point in the view's SUPERVIEW space,
         /// which for a borderless window's content view is window coordinates
-        /// (bottom-left origin) — so the reported control frame's centre
-        /// (top-left origin) flips through the window height and goes in as-is.
-        func whatAPressResolvesTo(over controlFrame: CGRect) -> NSView? {
+        /// (bottom-left origin) — so a point in the card (top-left origin)
+        /// flips through the window height and goes in as-is.
+        func whatAPressResolvesTo(at pointInTheCard: CGPoint) -> NSView? {
             contentView.hitTest(
-                CGPoint(
-                    x: controlFrame.midX, y: terminal.frame.height - controlFrame.midY
-                )
+                CGPoint(x: pointInTheCard.x, y: terminal.frame.height - pointInTheCard.y)
             )
         }
         /// What a view is, and the tooltip it carries if it carries one — the
@@ -618,9 +629,13 @@ private final class AskBarSummons: @unchecked Sendable {
             return "\(type(of: view))\(tooltip)"
         }
 
-        let whatTryAgainResolvesTo = whatAPressResolvesTo(over: tryAgain)
-        let whatTheRedLightResolvesTo = whatAPressResolvesTo(over: redLight)
-        let whatHelpResolvesTo = whatAPressResolvesTo(over: helpPill)
+        let whatBareBackgroundResolvesTo = whatAPressResolvesTo(at: bareTitleStripBackground)
+        let whatTheRedLightResolvesTo = whatAPressResolvesTo(
+            at: CGPoint(x: redLight.midX, y: redLight.midY)
+        )
+        let whatHelpResolvesTo = whatAPressResolvesTo(
+            at: CGPoint(x: helpPill.midX, y: helpPill.midY)
+        )
 
         // The fingerprint first, because it names the culprit outright: the
         // view AppKit chose to hand the press to carries the escape hatch's own
@@ -645,11 +660,11 @@ private final class AskBarSummons: @unchecked Sendable {
         )
 
         #expect(
-            whatTheRedLightResolvesTo === whatTryAgainResolvesTo,
+            whatTheRedLightResolvesTo === whatBareBackgroundResolvesTo,
             """
             a press over the red traffic light resolves to \
-            \(describe(whatTheRedLightResolvesTo)), while a press over "Try again" — the button \
-            in this same window that DOES fire — resolves to \(describe(whatTryAgainResolvesTo)). \
+            \(describe(whatTheRedLightResolvesTo)), while a press on the bare title-strip \
+            background beside it resolves to \(describe(whatBareBackgroundResolvesTo)). \
             A SwiftUI Button contributes no AppKit view of its own, so both should land on the \
             same hosted view; a different one over the red light is an inert AppKit view stacked \
             on top of it, and AppKit hands that view the mouseDown instead of letting it reach \
@@ -657,11 +672,11 @@ private final class AskBarSummons: @unchecked Sendable {
             """
         )
         #expect(
-            whatHelpResolvesTo === whatTryAgainResolvesTo,
+            whatHelpResolvesTo === whatBareBackgroundResolvesTo,
             """
             a press over the Help pill resolves to \(describe(whatHelpResolvesTo)) rather than \
-            the \(describe(whatTryAgainResolvesTo)) that "Try again" resolves to — the same kind \
-            of inert overlay that swallows the red light's click
+            the \(describe(whatBareBackgroundResolvesTo)) the bare title-strip background beside \
+            it resolves to — the same kind of inert overlay that swallows the red light's click
             """
         )
     }

@@ -486,6 +486,24 @@ struct IBeamCursorView: NSViewRepresentable {
 
 // MARK: - Native Tooltip
 
+/// Carries the tooltip string and nothing else. `.nativeTooltip(…)` stacks it
+/// as an `.overlay` directly on top of whatever it decorates, and AppKit's
+/// default `hitTest(_:)` returns a view for any point inside its own bounds —
+/// so without this override the overlay claims the press, a plain `NSView`
+/// does nothing with a `mouseDown`, and the SwiftUI `Button` underneath never
+/// sees the click. That is why the takeover terminal's red escape hatch and
+/// Help pill did nothing (cofounder Test 9 / Test 10): they are the only two
+/// controls in that window carrying a tooltip, while the buttons beside them —
+/// same panel, same dispatch — worked. Passing the press through is what
+/// `PointerCursorNSView` and `IBeamCursorNSView` above do, for the same reason:
+/// tooltip rects, like cursor rects, are registered with the window and work
+/// independently of hit testing.
+private class NativeTooltipNSView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        return nil
+    }
+}
+
 /// Uses AppKit's `NSView.toolTip` to show a tooltip on hover.
 /// SwiftUI's `.help()` conflicts with `.onHover` tracking areas, so
 /// this bridges directly to AppKit's tooltip system which works independently.
@@ -493,7 +511,7 @@ private struct NativeTooltipView: NSViewRepresentable {
     let tooltip: String
 
     func makeNSView(context: Context) -> NSView {
-        let view = NSView()
+        let view = NativeTooltipNSView()
         view.toolTip = tooltip
         return view
     }

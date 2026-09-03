@@ -1853,6 +1853,29 @@ final class GuideSessionController: ObservableObject {
                     advanceFromWithinAutopilot()
                     continue
                 }
+                // The same rule again, for an app instead of a tool. The check
+                // above answers only for `.toolVersion` expectations, so an
+                // `open` step whose sole completion check is "<bundle id> is in
+                // front" — the published kneecap guide's `install-xcode` — can
+                // never satisfy it, and parked at a gate however much of Xcode
+                // was already on the disk: twenty-six seconds of a reader with
+                // Xcode 26.6 being asked to go and install Xcode, ending in them
+                // telling Iris so by hand (cofounder Test 9, "drive: step
+                // install-xcode → MANUAL branch, waiting at gate"). Bringing the
+                // installed app to the front IS that step's declared completion
+                // check, so Iris does that and moves on. With the app genuinely
+                // missing — or with no way to ask — the gate stands as it was.
+                if let bundleIdOfTheAppTheStepWaitsFor =
+                    theOnlyAppThisOpenStepIsWaitingToSeeInFront(step),
+                   installedDesktopAppCheck?(bundleIdOfTheAppTheStepWaitsFor) == true {
+                    irisTrace("drive: \(step.id) waits for \(bundleIdOfTheAppTheStepWaitsFor), already installed — opening it and advancing")
+                    await bringTheInstalledAppAStepWaitsForToTheFront?(bundleIdOfTheAppTheStepWaitsFor)
+                    await holdBetweenAutoAdvancedSteps()
+                    guard autopilotIsRunning else { return }
+                    guard theGuideIsStillOn(stepIndexBeingDriven, having: step) else { continue }
+                    advanceFromWithinAutopilot()
+                    continue
+                }
                 autoOpenIfTheStepPointsSomewhere(step)
                 if stepIsFinishedOnceIrisHasOpenedIt(step)
                     || stepIsAVestigialTerminalStepInAutopilot(step) {
@@ -2012,6 +2035,26 @@ final class GuideSessionController: ObservableObject {
             guard case .installedWithVersion = row.state else { return false }
         }
         return true
+    }
+
+    /// The app an `open` step is waiting to see in front, when that is the ONLY
+    /// thing it watches for.
+    ///
+    /// As narrow as the tool check above, and for the same reason: a step that
+    /// also wants a visual confirmation, a URL host or a tool is asking for
+    /// something bringing an app forward cannot settle, so it stays the
+    /// reader's. When this is the whole watch block, putting that app in front
+    /// is not a shortcut past the step — it is the step's own completion check,
+    /// evaluated the same way `WatchLoop` evaluates it.
+    private func theOnlyAppThisOpenStepIsWaitingToSeeInFront(
+        _ step: IrisGuideStep
+    ) -> String? {
+        guard step.kind == .open,
+              let expectations = step.watch?.expect,
+              expectations.count == 1,
+              case .foregroundApp(let bundleId) = expectations[0],
+              !bundleId.isEmpty else { return nil }
+        return bundleId
     }
 
     private func autoOpenIfTheStepPointsSomewhere(_ step: IrisGuideStep) {
@@ -2797,6 +2840,12 @@ final class GuideSessionController: ObservableObject {
 
     /// Injected by CompanionManager: is this bundle actually installed?
     var installedDesktopAppCheck: ((String) -> Bool)?
+
+    /// Injected by CompanionManager: bring this already-installed app to the
+    /// front. A seam rather than a direct `NSWorkspace` call so that a test
+    /// driving this loop cannot launch Xcode on the machine running it; nil (a
+    /// headless controller) still skips the gate, it just opens nothing.
+    var bringTheInstalledAppAStepWaitsForToTheFront: ((String) async -> Void)?
 
     /// Called with the branch's bundle id the moment the install step
     /// completes — after the bundle lands in /Applications, BEFORE the open

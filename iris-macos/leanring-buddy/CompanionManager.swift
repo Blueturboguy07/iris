@@ -959,6 +959,20 @@ final class CompanionManager: ObservableObject {
             self?.appInventoryService.installedApplicationURL(forBundleIdentifier: bundleId) != nil
         }
 
+        // And the other half of that answer: a step whose only completion check
+        // is "this app is in front" is satisfied by putting it in front, so the
+        // drive loop needs a way to do that instead of a gate. Not a new
+        // instance — an already-running Xcode is merely activated.
+        guideSessionController.bringTheInstalledAppAStepWaitsForToTheFront = { [weak self] bundleId in
+            guard let applicationURL = self?.appInventoryService
+                .installedApplicationURL(forBundleIdentifier: bundleId) else { return }
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            _ = try? await NSWorkspace.shared.openApplication(
+                at: applicationURL, configuration: configuration
+            )
+        }
+
         // A freshly installed guide build is ad-hoc signed, which identifies it
         // to TCC by the hash of that exact binary — so every rebuild loses the
         // reader's permission grants. Give it the stable identity before its
@@ -2080,6 +2094,13 @@ final class CompanionManager: ObservableObject {
                     return promptWithLiveAppStatus + "\n\n" + selfStateContext
                 }()
 
+                // The one machine fact that costs a process rather than a
+                // PATH walk, measured off the main actor so that composing a
+                // prompt never stalls the eye.
+                let iosSimulatorRuntimes = await Task.detached {
+                    AssistantMachineFacts.installedIosSimulatorRuntimes()
+                }.value
+
                 // What this Mac actually has on it: the OS, the shell, and
                 // which tools are on the PATH and which are NOT. A model told
                 // none of that answers from its priors, and the prior for a Mac
@@ -2093,7 +2114,8 @@ final class CompanionManager: ObservableObject {
                         .map(\.name)
                     guard let machineFacts = AssistantMachineFacts.summary(
                         publikBaseURL: publikBaseURL.absoluteString,
-                        installedCatalogApps: installedCatalogApps
+                        installedCatalogApps: installedCatalogApps,
+                        iosSimulatorRuntimes: iosSimulatorRuntimes
                     ) else {
                         return promptWithGuideOrEditContext
                     }

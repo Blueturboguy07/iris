@@ -678,9 +678,13 @@ struct Bug8InstalledAppGateReproTests {
         #expect(install.shell.commandsRun.contains { $0.contains("bun run build") },
                 "build-editor must have run, or the gate was reached the wrong way")
 
-        // The whole bug, in one line of the log.
+        // The whole bug, in one line of the log. Only THIS gate: once the
+        // install carries on it reaches `signing` and `run`, which are a reader
+        // adding an Apple ID and plugging in a phone - gates by nature, and
+        // nothing to do with the report.
         #expect(
-            install.gates.titlesOfEveryGateTheReaderWasParkedAt.isEmpty,
+            install.gates.titlesOfEveryGateTheReaderWasParkedAt
+                .contains("Install Xcode") == false,
             """
             Iris parked the reader at \
             \(install.gates.titlesOfEveryGateTheReaderWasParkedAt) with \
@@ -713,7 +717,7 @@ struct Bug8InstalledAppGateReproTests {
             \(install.shell.commandsRun).
             """
         )
-        #expect(install.controller.autopilotHandedTheCurrentStepToTheReader == false,
+        #expect(install.controller.currentStepIndex > Self.indexOfTheInstallXcodeStep,
                 "a step whose app is already installed is Iris's, not the reader's")
 
         // The published step's real href IS on the allowlist - the fixture's

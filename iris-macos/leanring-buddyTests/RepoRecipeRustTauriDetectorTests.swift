@@ -111,7 +111,7 @@ import Foundation
 
         let finding = try #require(detector.detect(repoRootPath: repoRootPath))
         #expect(finding.commandsByField[.build]?.commandLine
-            == "pnpm build && cargo build --release --manifest-path src-tauri/Cargo.toml")
+            == "pnpm install --config.dangerously-allow-all-builds=true && pnpm build && cargo build --release --manifest-path src-tauri/Cargo.toml")
         #expect(finding.confidenceByField[.build] == 0.95)
     }
 
@@ -146,7 +146,7 @@ import Foundation
 
         let finding = try #require(detector.detect(repoRootPath: repoRootPath))
         #expect(finding.commandsByField[.build]?.commandLine
-            == "(cd 'ui' && pnpm build) && cargo build --release --manifest-path src-tauri/Cargo.toml")
+            == "(cd 'ui' && pnpm install --config.dangerously-allow-all-builds=true && pnpm build) && cargo build --release --manifest-path src-tauri/Cargo.toml")
     }
 
     /// The object hook form's explicit `cwd` is the most explicit signal and
@@ -171,7 +171,7 @@ import Foundation
 
         let finding = try #require(detector.detect(repoRootPath: repoRootPath))
         #expect(finding.commandsByField[.build]?.commandLine
-            == "(cd 'web' && pnpm build) && cargo build --release --manifest-path src-tauri/Cargo.toml")
+            == "(cd 'web' && pnpm install --config.dangerously-allow-all-builds=true && pnpm build) && cargo build --release --manifest-path src-tauri/Cargo.toml")
     }
 
     @Test func aRootLevelTauriConfigBuildsWithoutAManifestPath() throws {

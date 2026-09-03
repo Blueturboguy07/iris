@@ -8,6 +8,8 @@
 //  `Iris_0.9.6_build_22_Test9_and_General_Logs_Credential_Redacted.log`,
 //  process 51799, the kneecap install):
 //
+//      07:04:03.633  drive: step[7] id=build-editor kind=terminal exec=true
+//      07:04:09.639  drive: build-editor result=succeeded
 //      07:04:09.640  drive: step[8] id=install-xcode kind=open exec=false
 //      07:04:09.861  drive: step install-xcode -> MANUAL branch, waiting at gate (return)
 //      07:04:09.861  takeover: PARKED + set readerMustManuallyContinue=true, showsTerminalFace=true, title=Install Xcode
@@ -24,38 +26,82 @@
 //  moves a window … The original Test 9 notes remain the evidence"): after the
 //  reader MOVES a window, the eye flies to where the control WAS.
 //
+//  Both halves are reproduced against the SAME sequence of events the log
+//  records, driven by the real machinery: the real `GuideSessionController`
+//  (with its real `NSWorkspace` activation observer and its real 400ms
+//  coalescer), the real `GuideAutopilotRunner` drive loop running the kneecap
+//  guide's three terminal steps and then hitting `install-xcode`'s manual gate,
+//  the real `GuidePointingLadder`, the real `GuideStepPointingCoordinator`, the
+//  real `GuideService` answering from a stubbed URL protocol that serves the
+//  guide the log was installing, and the real `GuideEyeFlightMemo` inside the
+//  controller. Stood in for: the pty shell (a recorder — what a command does is
+//  not what this bug is about), the pointing model (it costs money and needs a
+//  granted Mac), and the reader's own window, which is a REAL `NSPanel` on the
+//  REAL screen, really moved mid-ask.
+//
 //  WHAT THIS FILE ASSERTS, and why each assertion is the bug rather than a
 //  restatement of the code:
 //
-//  (a) TWO MODEL ASKS FOR ONE UNCHANGED STEP, 0.358s APART. One manual step is
-//      parked exactly once, and two separate triggers reach
-//      `GuideSessionController.refreshPointingForTheOpenStep()` inside that
-//      third of a second: the direct call the park itself makes
-//      (`handTheCurrentStepBackToTheReader`), and the 400ms-debounced
-//      app-activation refresh (`refreshPointingOnceAppActivationsHaveSettled`)
-//      that Iris's own takeover panel taking focus feeds —
-//      `NSWorkspace.didActivateApplicationNotification` is posted for the
-//      observing app's own activation too. Neither trigger knows about the
-//      other. Every call does `pointingTask?.cancel()` and then starts a
-//      brand-new task, and Swift task cancellation is cooperative: the only
-//      `Task.isCancelled` check on this path sits AFTER
-//      `await GuideStepPointingCoordinator.resolve(...)` has already run to
-//      completion, so the first ask's real capture and real HTTPS round trip are
-//      neither stopped nor merged. Both asks complete — that is what the log's
-//      two independent outcomes 2.4s apart show — and both spend the step's
-//      model budget, which is why `maximumModelPointingAsksPerStep` does not
-//      catch this either: two legitimate reservations, two real asks.
+//  (a) SEVERAL MODEL ASKS FOR ONE UNCHANGED STEP, INSIDE HALF A SECOND. One
+//      manual step is parked exactly once, and THREE separate triggers reach
+//      `GuideSessionController.refreshPointingForTheOpenStep()` in that window
+//      — none of which knows the other two exist:
+//
+//        1. the step-change refresh. The command before the gate succeeds, and
+//           `advanceFromWithinAutopilot` -> `advanceToTheNextStep()` carries a
+//           `defer { refreshPointingForTheOpenStep() }` (GuideSessionController
+//           line 2546). The reader has landed on `install-xcode`.
+//
+//        2. the park's own refresh. The same drive-loop iteration then takes the
+//           MANUAL branch for that step and calls
+//           `handTheCurrentStepBackToTheReader()`, whose last line is
+//           `refreshPointingForTheOpenStep()` (line 1969) — "fly the eye to
+//           whatever the step points at, so a non-technical reader is shown
+//           where to act". Same step, same target, one main-actor turn later.
+//
+//        3. the app-activation refresh. The very next statement in that branch
+//           is `onAutopilotWaitingForReaderAtGate?(...)`, which is what
+//           `CompanionManager` uses to raise and park the takeover terminal —
+//           a window coming forward. `NSWorkspace.didActivateApplicationNotification`
+//           is posted for the OBSERVING app's own activation too, so Iris's own
+//           panel feeds `refreshPointingOnceAppActivationsHaveSettled`, whose
+//           400ms quiet period then expires on the same unchanged step.
+//
+//      This test therefore posts that activation from inside the gate callback:
+//      the same statement of the same branch, in the same order the field ran
+//      it. (Posting is the honest simulation — the swiftc test runner has no
+//      `NSApplication` session for the window server to activate, so the
+//      notification AppKit would post is posted directly, on the same
+//      `NSWorkspace.shared.notificationCenter` the controller really observes.)
+//
+//      MEASURED HERE: asks at +0.000s, +0.000s and +0.427s from the park — the
+//      first two from the same main-actor turn (1 and 2), the third when the
+//      coalescer's quiet period expires (3). The cofounder's log records two
+//      asks 0.358s apart rather than three; which of these triggers reached the
+//      paid rung on his Mac depends on what `GuidePointingLadder.decide` said at
+//      each instant, and the log does not carry that. Two or three, it is one
+//      defect and one count: nothing coordinates callers that are asking about
+//      the same unchanged step.
+//
+//      Neither trigger knows about the others. Every call does
+//      `pointingTask?.cancel()` and then starts a brand-new task, and Swift task
+//      cancellation is cooperative: the only `Task.isCancelled` check on this
+//      path sits AFTER `await GuideStepPointingCoordinator.resolve(...)` has
+//      already run to completion, so the first ask's real capture and real HTTPS
+//      round trip are neither stopped nor merged. Both asks complete — that is
+//      what the log's two independent outcomes 2.4s apart show — and both spend
+//      the step's model budget, which is why `maximumModelPointingAsksPerStep`
+//      does not catch this either: two legitimate reservations, two real asks.
 //
 //      The fake model here therefore refuses to abort on cancellation (see
-//      `waitOutAnUncancellableRoundTrip`): a `try? await Task.sleep` would
-//      unwind the instant `cancel()` set the flag and would flatter the unfixed
-//      code into looking as though the cancel had worked. A JPEG that has been
+//      `waitOutAnUncancellableRoundTrip`): a `try? await Task.sleep` would unwind
+//      the instant `cancel()` set the flag and would flatter the unfixed code
+//      into looking as though the cancel had worked. A JPEG that has been
 //      captured and a request that is on the wire do not come back.
 //
-//  (b) A COORDINATE THAT DESCRIBES A WINDOW WHERE IT USED TO BE. For an
-//      inferred target the answer comes from
-//      `CompanionManager.locateGuideTargetWithModel`, which crops the capture to
-//      the focused window's frame *at capture time*
+//  (b) A COORDINATE THAT DESCRIBES A WINDOW WHERE IT USED TO BE. For an inferred
+//      target the answer comes from `CompanionManager.locateGuideTargetWithModel`,
+//      which crops the capture to the focused window's frame *at capture time*
 //      (`CompanionScreenCaptureUtility.focusedWindowWorthCroppingTo` ->
 //      `CompanionScreenCaptureWindowCrop.regionInFullScreenshotPixels`), keeps
 //      only that pixel crop region, and then — 2.6 seconds later, on the log's
@@ -66,23 +112,23 @@
 //      still there. Drag it while the model is thinking and the eye is off by
 //      exactly the drag delta.
 //
-//      That is reproduced here with a REAL `NSPanel` standing in for the window
-//      the reader is working in, really moved on the real screen mid-ask, and a
-//      locator that performs the production geometry exactly: snapshot the
-//      window's frame at capture time, answer late, map the answer back through
-//      the snapshot. The assertion is at the boundary the reader can see — the
-//      point handed to `GuideSessionController.sendTheEyeTo` — so the fix may
-//      correct the point anywhere between the model's answer and the flight, but
-//      it has to correct it against the window's LIVE frame.
+//      The fake model performs that production geometry step for step, against a
+//      REAL `NSPanel` really moved on the real screen mid-ask. The assertion is
+//      at the boundary the reader can see — the point handed to
+//      `GuideSessionController.sendTheEyeTo`.
 //
-//  Everything else in the path is the real thing: the real
-//  `GuideSessionController` (with its real `NSWorkspace` activation observer and
-//  its real 400ms coalescer), the real `GuidePointingLadder`, the real
-//  `GuideStepPointingCoordinator`, the real `GuideService` answering from a
-//  stubbed URL protocol that serves the guide the log was installing, and the
-//  real `GuideEyeFlightMemo` inside the controller. Only the model and the
-//  accessibility tree are stood in for, because one costs money and the other
-//  needs a granted Mac.
+//      NOTE FOR WHOEVER FIXES THIS. The correction has to be visible at that
+//      boundary, and this test deliberately leaves a seam for it that exists in
+//      the shipped protocol already: `GuideTargetLocating.locateWindow(ofApp:)`
+//      answers where a window is NOW, and here it is wired to the live panel
+//      frame, exactly as `SystemGuideTargetLocator` answers from the live
+//      accessibility tree. Nothing calls it for an inferred target today (see
+//      `GuideStepPointingCoordinator.resolve`: the window rung is gated on
+//      `target.isWindow`), which is why wiring it changes nothing about the
+//      failure below. A fix that corrects the point only INSIDE
+//      `locateGuideTargetWithModel` — behind the `askTheModel` closure this test,
+//      like every pointing test in the suite, necessarily stands in for — cannot
+//      be seen from here and will leave this red.
 //
 
 import AppKit
@@ -177,29 +223,42 @@ struct Bug9PointingDoubleFireReproTests {
         """
     }
 
-    /// A `GuideService` whose network is the stub above and whose progress
-    /// storage is a suite nothing else touches, so these tests cannot see the
-    /// developer's own saved steps or each other's.
-    private static func guideServiceServingTheGuideFromTheLog() throws -> GuideService {
-        let stubbedSessionConfiguration = URLSessionConfiguration.ephemeral
-        stubbedSessionConfiguration.protocolClasses = [Test9InstallGuideURLProtocol.self]
-        let isolatedUserDefaults = try #require(
-            UserDefaults(suiteName: "com.publik.iris.tests.bug9.\(UUID().uuidString)")
-        )
-        return GuideService(
-            apiBase: GuideService.defaultAPIBase,
-            urlSession: URLSession(configuration: stubbedSessionConfiguration),
-            userDefaults: isolatedUserDefaults
-        )
+    /// The step the log parked on, and the only step in this guide whose target
+    /// is `.inferred` and therefore allowed to reach the model at all (no
+    /// authored point, no command, `kind: open`).
+    private static let titleOfTheStepTheReaderWasParkedOn = "Install Xcode"
+    private static let indexOfTheStepTheReaderWasParkedOn = 3
+
+    // MARK: - The install, with everything but the shell for real
+
+    /// The pty-backed login shell, recorded rather than spawned. What
+    /// `bun install` does is not what this bug is about; that the drive loop
+    /// walks the three terminal steps and then hits the manual gate is.
+    final class TheShellTheInstallRunsIn: GuideAutopilotShellSessionDriving {
+        var onOutputLine: ((String) -> Void)?
+        var currentWorkingDirectory = "/Users/akrit/kneecap"
+        var resolvedSearchPath: String? = "/usr/bin:/bin"
+        private(set) var commandsRun: [String] = []
+
+        func start() async -> Bool { true }
+        func endSession() async {}
+        func cancelTheRunningCommand() async {}
+        func tailForTheModel() -> String { "" }
+
+        func run(
+            _ command: GuideAutopilotApprovedCommand, deadline: TimeInterval
+        ) async -> GuideAutopilotCommandOutcome {
+            commandsRun.append(command.text)
+            return .succeeded(workingDirectory: currentWorkingDirectory)
+        }
     }
 
-    /// The index of `install-xcode` in the branch above — the step the log
-    /// parked on, and the only step in this guide whose target is `.inferred`
-    /// and therefore allowed to reach the model at all (no authored point, no
-    /// command, `kind: open`, and `GuidePointingLadder.stepKindIsWorthInferring`
-    /// says yes).
-    private static let indexOfTheStepTheReaderWasParkedOn = 3
-    private static let titleOfTheStepTheReaderWasParkedOn = "Install Xcode"
+    /// Nothing failed in the log's run, so nothing needs proposing. Wired in so
+    /// the fix ladder can never reach a model and add asks of its own.
+    final class NothingProposesAFix: GuideAutopilotFixProposing {
+        func proposeFix(for context: GuideAutopilotFailureContext) async throws -> GuideAutopilotProposedFix? { nil }
+        func proposeFixWithWebSearch(for context: GuideAutopilotFailureContext) async throws -> GuideAutopilotProposedFix? { nil }
+    }
 
     // MARK: - The model the pointing ladder asks
 
@@ -221,11 +280,18 @@ struct Bug9PointingDoubleFireReproTests {
         private(set) var asksThatStarted: [AskTheModelWasGiven] = []
         private(set) var asksThatFinished: [(ordinal: Int, at: Date)] = []
         private(set) var timesTheAccessibilityTreeWasWalked = 0
+        private(set) var timesAWindowWasLookedUp = 0
 
         /// What the model does with one ask: how long its capture and round trip
         /// take, and what it answers. Takes the ask's ordinal so a test can give
         /// the first and second asks the two different fates the log shows.
         private let answerTheModelGives: @MainActor (String, Int) async -> CGRect?
+
+        /// Where the window the reader is working in is RIGHT NOW, if this
+        /// scenario has one. `SystemGuideTargetLocator.locateWindow(ofApp:)`
+        /// answers this from the live accessibility tree; here it is the live
+        /// frame of a real `NSPanel`. Nil when the scenario has no such window.
+        var whereTheReadersWindowIsNow: (@MainActor () -> CGRect?)?
 
         init(answerTheModelGives: @escaping @MainActor (String, Int) async -> CGRect?) {
             self.answerTheModelGives = answerTheModelGives
@@ -239,7 +305,10 @@ struct Bug9PointingDoubleFireReproTests {
             return nil
         }
 
-        func locateWindow(ofApp bundleIdentifier: String) -> CGRect? { nil }
+        func locateWindow(ofApp bundleIdentifier: String) -> CGRect? {
+            timesAWindowWasLookedUp += 1
+            return whereTheReadersWindowIsNow?()
+        }
 
         func locateByAskingTheModel(stepTitle: String, stepBody: String) async -> CGRect? {
             let ordinal = asksThatStarted.count + 1
@@ -278,23 +347,75 @@ struct Bug9PointingDoubleFireReproTests {
         }
     }
 
-    // MARK: - A controller parked where the log was parked
+    // MARK: - A reader driven to the gate the way the log was
 
-    /// Opens the guide from the log and walks the reader to `install-xcode` the
-    /// way the drive loop does — `advanceToTheNextStep()` per finished terminal
-    /// step — landing on the manual step with the same refresh the park itself
-    /// performs (`handTheCurrentStepBackToTheReader` -> `refreshPointingForTheOpenStep`).
+    /// What the takeover was told when the install parked, and when.
+    @MainActor
+    final class WhatTheTakeoverWasToldWhenItParked {
+        private(set) var titles: [String] = []
+        private(set) var parkedAt: [Date] = []
+        /// Run inside the park, in the place `CompanionManager` raises the
+        /// takeover window — the moment a window of Iris's own comes forward.
+        var whatHappensWhenTheTakeoverComesForward: (@MainActor () -> Void)?
+
+        func record(title: String) {
+            titles.append(title)
+            parkedAt.append(Date())
+            whatHappensWhenTheTakeoverComesForward?()
+        }
+    }
+
+    /// Opens the guide from the log, starts the real autopilot, and lets the
+    /// real drive loop run the three terminal steps and park on `install-xcode`
+    /// — the same eight-second stretch the log records at 07:04:03 → 07:04:09.
     ///
-    /// Returns once the guide is open and the reader is on the parked step; the
-    /// pointing task that arrival started is deliberately still in flight.
-    private static func aReaderParkedAtTheInstallXcodeGate(
+    /// Returns as soon as the park has happened, with the pointing that the park
+    /// itself started deliberately still in flight.
+    private static func aReaderDrivenToTheInstallXcodeGate(
         locator: ThePointingModelTheGuideAsks,
         eyeFlights: @escaping @MainActor (CGPoint, CGRect, String) -> Void,
-        theGuideCardIsOnScreen: (@MainActor () -> Bool)? = nil
-    ) async throws -> GuideSessionController {
-        let controller = GuideSessionController(
-            guideService: try guideServiceServingTheGuideFromTheLog()
+        theGuideCardIsOnScreen: (@MainActor () -> Bool)? = nil,
+        whenTheTakeoverComesForward: (@MainActor () -> Void)? = nil
+    ) async throws -> (
+        controller: GuideSessionController,
+        shell: TheShellTheInstallRunsIn,
+        park: WhatTheTakeoverWasToldWhenItParked
+    ) {
+        let stubbedSessionConfiguration = URLSessionConfiguration.ephemeral
+        stubbedSessionConfiguration.protocolClasses = [Test9InstallGuideURLProtocol.self]
+        let isolatedUserDefaults = try #require(
+            UserDefaults(suiteName: "com.publik.iris.tests.bug9.\(UUID().uuidString)")
         )
+        let guideService = GuideService(
+            apiBase: GuideService.defaultAPIBase,
+            urlSession: URLSession(configuration: stubbedSessionConfiguration),
+            userDefaults: isolatedUserDefaults
+        )
+
+        let shell = TheShellTheInstallRunsIn()
+        let controller = GuideSessionController(
+            guideService: guideService,
+            // The watch loop plays no part in pointing and its default frame
+            // source is ScreenCaptureKit: left to drive its own timer it would
+            // photograph the founder's screen for the length of this test.
+            watchLoop: WatchLoop(preferencesStore: isolatedUserDefaults, drivesItsOwnTickTimer: false),
+            checkToolVersion: { toolName in
+                ToolVersion(tool: toolName, available: true, version: "\(toolName) version 1.2.3")
+            },
+            makeAutopilotRunner: { context in
+                GuideAutopilotRunner(
+                    shellSession: shell,
+                    longRunningSession: TheShellTheInstallRunsIn(),
+                    fixProposer: NothingProposesAFix(),
+                    guideContext: context,
+                    pacing: .instant
+                )
+            }
+        )
+        // Over an isolated suite, so starting autopilot here never writes the
+        // founder's real "Let Iris take control of your Mac?" preference.
+        controller.autonomyGrant = AutopilotAutonomyGrant(userDefaults: isolatedUserDefaults)
+        controller.confirmAutonomousControl = { true }
         controller.targetLocator = locator
         controller.irisMayLookAtTheScreenForPointing = true
         controller.sendTheEyeTo = { location, displayFrame, label in
@@ -302,6 +423,12 @@ struct Bug9PointingDoubleFireReproTests {
         }
         if let theGuideCardIsOnScreen {
             controller.isTheGuideCardOnScreen = theGuideCardIsOnScreen
+        }
+
+        let park = WhatTheTakeoverWasToldWhenItParked()
+        park.whatHappensWhenTheTakeoverComesForward = whenTheTakeoverComesForward
+        controller.onAutopilotWaitingForReaderAtGate = { title, _ in
+            park.record(title: title)
         }
 
         await controller.openGuide(
@@ -313,26 +440,43 @@ struct Bug9PointingDoubleFireReproTests {
         #expect(controller.loadState == .guideIsOpen)
         #expect(controller.currentStepIndex == 0)
 
-        // The three terminal steps the log ran before the gate. Each of those is
-        // a `shellWindow` target in Terminal, so none of them can reach the
-        // model — the frontmost-app gate refuses them and the ladder stops there.
-        while controller.currentStepIndex < indexOfTheStepTheReaderWasParkedOn {
-            controller.advanceToTheNextStep()
-        }
+        controller.startAutopilot()
+        let parked = await pump(within: 12) { park.titles.isEmpty == false }
+        #expect(parked, "autopilot must reach the Install Xcode gate before either half of this test means anything")
+        #expect(park.titles.last == titleOfTheStepTheReaderWasParkedOn)
         #expect(controller.currentStepIndex == indexOfTheStepTheReaderWasParkedOn)
-        return controller
+        #expect(
+            shell.commandsRun.contains { $0.contains("bun run build") },
+            "the three terminal steps before the gate must really have run, or the gate was reached the wrong way"
+        )
+        return (controller, shell, park)
+    }
+
+    /// Polls a main-actor condition until it holds or the deadline passes. The
+    /// drive loop runs in its own Task, so its effects are observed rather than
+    /// awaited.
+    private static func pump(
+        within seconds: Double, until condition: @MainActor () -> Bool
+    ) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(seconds))
+        while clock.now < deadline {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return condition()
     }
 
     // MARK: - (a) two model asks for one unchanged step
 
-    @Test("parking one manual step asks the pointing model twice, a third of a second apart")
-    func theParkedStepIsPointedAtTwiceBecauseNothingCoordinatesTheTwoTriggers() async throws {
+    @Test("parking one manual step spends several pointing model asks on one unchanged target")
+    func theParkedStepIsPointedAtOverAndOverBecauseNothingCoordinatesItsTriggers() async throws {
         // The two fates the log records, in order. The first ask fails fast —
         // "no point — i couldn't reach the assistant", 07:04:10.341 -> 10.892,
-        // 551ms. The second runs the full round trip and comes back
-        // `model-said-none`, 07:04:10.699 -> 13.325, 2626ms. Both answer nil, so
-        // the eye never flies and this test is purely about how many times the
-        // paid rung was entered.
+        // 551ms. Every ask after it runs the full round trip and comes back
+        // `model-said-none`, 07:04:10.699 -> 13.325, 2626ms. All of them answer
+        // nil, so the eye never flies and this test is purely about how many
+        // times the paid rung was entered.
         let locator = ThePointingModelTheGuideAsks { _, ordinal in
             if ordinal == 1 {
                 await Self.waitOutAnUncancellableRoundTrip(milliseconds: 551)
@@ -342,23 +486,29 @@ struct Bug9PointingDoubleFireReproTests {
             return nil
         }
 
-        var eyeFlights: [(point: CGPoint, label: String)] = []
-        let controller = try await Self.aReaderParkedAtTheInstallXcodeGate(
+        let eyeFlights = FlightRecorder()
+        let (controller, _, park) = try await Self.aReaderDrivenToTheInstallXcodeGate(
             locator: locator,
-            eyeFlights: { point, _, label in eyeFlights.append((point: point, label: label)) }
+            eyeFlights: { point, displayFrame, label in
+                eyeFlights.record(point: point, displayFrame: displayFrame, label: label)
+            },
+            // 07:04:09.861 — "takeover: PARKED". `CompanionManager` raises and
+            // parks the takeover terminal from this very callback, one statement
+            // after the park's own `refreshPointingForTheOpenStep()`. A window of
+            // Iris's own coming forward posts
+            // `NSWorkspace.didActivateApplicationNotification` — AppKit posts it
+            // for the observing app's own activation as readily as for anybody
+            // else's — and the controller's observer starts its 400ms quiet
+            // period. Nothing tells it that the park it is reacting to has
+            // already refreshed pointing for this same step.
+            whenTheTakeoverComesForward: {
+                NSWorkspace.shared.notificationCenter.post(
+                    name: NSWorkspace.didActivateApplicationNotification,
+                    object: NSWorkspace.shared
+                )
+            }
         )
-        let whenTheStepWasParked = Date()
-
-        // 07:04:09.861 — "takeover: PARKED". The takeover terminal panel comes
-        // forward as the step is handed back, and AppKit posts
-        // `didActivateApplicationNotification` for the observing app's own
-        // activation just as it does for anybody else's. The controller's
-        // observer starts its 400ms quiet period; nothing tells it that the park
-        // it is reacting to has already refreshed pointing for this same step.
-        NSWorkspace.shared.notificationCenter.post(
-            name: NSWorkspace.didActivateApplicationNotification,
-            object: NSWorkspace.shared
-        )
+        let whenTheStepWasParked = try #require(park.parkedAt.last)
 
         // One second: comfortably past the 400ms coalescer, and still inside the
         // second ask's round trip, so nothing that happens on this Mac after the
@@ -377,13 +527,15 @@ struct Bug9PointingDoubleFireReproTests {
         [bug9-a] each ask finished at: \(locator.asksThatFinished.map { String(format: "#%d +%.3fs", $0.ordinal, $0.at.timeIntervalSince(whenTheStepWasParked)) })
         [bug9-a] gap between the first two asks: \(secondsBetweenTheFirstTwoAsks.map { String(format: "%.3fs", $0) } ?? "-") (the log's is 0.358s)
         [bug9-a] accessibility walks: \(locator.timesTheAccessibilityTreeWasWalked)
-        [bug9-a] eye flights: \(eyeFlights.count)
+        [bug9-a] eye flights: \(eyeFlights.flights.count)
         """)
 
         // The signature of the defect, checked before the count so a failure says
-        // WHICH shape it failed in: a second ask that lands a third of a second
-        // after the first, on a step that did not change, from a trigger that
-        // knew nothing about the first.
+        // WHICH shape it failed in: every ask lands inside one second of the one
+        // park, on a step that did not change, from triggers that knew nothing
+        // about each other. A burst spread wider than that would be some other
+        // story — a reader really switching apps minutes apart, say — and this
+        // test would no longer be about the reported bug.
         if let secondsBetweenTheFirstTwoAsks {
             #expect(
                 secondsBetweenTheFirstTwoAsks < 1.0,
@@ -393,6 +545,10 @@ struct Bug9PointingDoubleFireReproTests {
                 """
             )
         }
+        #expect(
+            asksForTheParkedStep.allSatisfy { $0.startedAt.timeIntervalSince(whenTheStepWasParked) < 1.0 },
+            "an ask landed more than a second after the park, so this run is not the field's one-park burst"
+        )
 
         // The log's own numbers say the first ask was still in flight when the
         // second started (10.699 < 10.892), so `pointingTask?.cancel()` did not
@@ -408,14 +564,30 @@ struct Bug9PointingDoubleFireReproTests {
             parking "\(Self.titleOfTheStepTheReaderWasParkedOn)" once spent \(asksForTheParkedStep.count) \
             screen-capture-plus-model pointing asks on it. One manual step, one park, one unchanged \
             target — and the reader's Mac captured the screen and called the assistant \
-            \(asksForTheParkedStep.count) times, because the park's own refresh and the app-activation \
-            refresh do not know about each other and cancelling the first task does not stop the \
-            capture or the request it has already made
+            \(asksForTheParkedStep.count) times, because the step-change refresh, the park's own refresh \
+            and the app-activation refresh know nothing about each other, and cancelling an earlier \
+            pointing task does not stop the capture or the request it has already made
             """
         )
     }
 
     // MARK: - (b) the eye flies to where the control was
+
+    /// Every flight the controller asked for, in order. A class because the two
+    /// tests hand this closure to a controller that outlives the statement that
+    /// built it.
+    @MainActor
+    final class FlightRecorder {
+        private(set) var flights: [(point: CGPoint, displayFrame: CGRect, label: String)] = []
+
+        func record(point: CGPoint, displayFrame: CGRect, label: String) {
+            flights.append((point: point, displayFrame: displayFrame, label: label))
+        }
+
+        func lastFlight(labelled label: String) -> (point: CGPoint, displayFrame: CGRect, label: String)? {
+            flights.last(where: { $0.label == label })
+        }
+    }
 
     /// A real window on the real screen, standing in for the one the reader
     /// drags while Iris is thinking.
@@ -458,6 +630,7 @@ struct Bug9PointingDoubleFireReproTests {
         panel.setFrameOrigin(
             CGPoint(x: panel.frame.minX + delta.x, y: panel.frame.minY + delta.y)
         )
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
     }
 
     @Test("a window moved while the model is thinking sends the eye to where the control was")
@@ -496,7 +669,7 @@ struct Bug9PointingDoubleFireReproTests {
             x: frameBeforeTheDrag.width / 2, y: frameBeforeTheDrag.height / 2
         )
 
-        var whereTheWindowWasWhenTheScreenWasCaptured: CGRect = .zero
+        let whereTheWindowWasWhenTheScreenWasCaptured = WindowFrameAtCaptureTime()
 
         // The production geometry, step for step:
         //   1. capture the screen and crop it to the focused window's frame NOW
@@ -509,9 +682,17 @@ struct Bug9PointingDoubleFireReproTests {
         //      `locateGuideTargetWithModel` builds around it.
         // The reader's drag is performed between 1 and 2 rather than on a timer
         // of its own, so the ordering is exact rather than raced.
+        //
+        // Every ask spans a drag, because half (a) has just established that one
+        // park produces more than one ask and only the last one's answer
+        // survives (the earlier pointing tasks are cancelled, and their
+        // `guard !Task.isCancelled` sits after `resolve` — so they resolve, then
+        // throw the answer away). Moving the window only once would let a later
+        // ask capture the already-moved window, answer correctly, and hide the
+        // defect behind the double-fire.
         let locator = ThePointingModelTheGuideAsks { _, _ in
             await Self.waitOutAnUncancellableRoundTrip(milliseconds: 300)
-            whereTheWindowWasWhenTheScreenWasCaptured = window.frame
+            whereTheWindowWasWhenTheScreenWasCaptured.frame = window.frame
             print("[bug9-b] captured the screen with the window at \(window.frame)")
 
             Self.theReaderMovesTheWindow(window, by: dragDelta)
@@ -520,31 +701,39 @@ struct Bug9PointingDoubleFireReproTests {
             await Self.waitOutAnUncancellableRoundTrip(milliseconds: 2326)
 
             let stalePoint = CGPoint(
-                x: whereTheWindowWasWhenTheScreenWasCaptured.minX + whereTheControlSitsInTheWindow.x,
-                y: whereTheWindowWasWhenTheScreenWasCaptured.minY + whereTheControlSitsInTheWindow.y
+                x: whereTheWindowWasWhenTheScreenWasCaptured.frame.minX + whereTheControlSitsInTheWindow.x,
+                y: whereTheWindowWasWhenTheScreenWasCaptured.frame.minY + whereTheControlSitsInTheWindow.y
             )
             let side: CGFloat = 44
             return CGRect(
                 x: stalePoint.x - side / 2, y: stalePoint.y - side / 2, width: side, height: side
             )
         }
+        // The live answer to "where is that window now", the same question
+        // `SystemGuideTargetLocator.locateWindow(ofApp:)` puts to the
+        // accessibility tree. See the note in this file's header: nothing on the
+        // inferred path asks it today, which is the seam a fix can use and the
+        // reason wiring it changes nothing about the failure below.
+        locator.whereTheReadersWindowIsNow = { window.frame }
 
-        var eyeFlights: [(point: CGPoint, displayFrame: CGRect, label: String)] = []
-        let controller = try await Self.aReaderParkedAtTheInstallXcodeGate(
+        let eyeFlights = FlightRecorder()
+        let (controller, _, _) = try await Self.aReaderDrivenToTheInstallXcodeGate(
             locator: locator,
             eyeFlights: { point, displayFrame, label in
-                eyeFlights.append((point: point, displayFrame: displayFrame, label: label))
+                eyeFlights.record(point: point, displayFrame: displayFrame, label: label)
             },
             // Half (b) is about WHERE the eye lands, not how often it is sent.
             // Telling the controller the guide card is not on screen leaves the
-            // direct refresh — the one the park makes — exactly as it is, while
-            // keeping any real app activation on this Mac from adding a second
-            // resolution in the middle of the measurement.
+            // park's own refresh — the one that produces the flight measured
+            // here — exactly as it is, while keeping app activations on this Mac
+            // from adding a second resolution in the middle of the measurement.
             theGuideCardIsOnScreen: { false }
         )
         print("[bug9-b] parked at step \(controller.currentStepIndex), waiting out the model")
 
-        try await Task.sleep(for: .milliseconds(3600))
+        let theEyeFlewForTheParkedStep = await Self.pump(within: 8) {
+            eyeFlights.lastFlight(labelled: Self.titleOfTheStepTheReaderWasParkedOn) != nil
+        }
 
         let frameAfterTheDrag = window.frame
         let whereTheControlIsNow = CGPoint(
@@ -552,18 +741,23 @@ struct Bug9PointingDoubleFireReproTests {
             y: frameAfterTheDrag.minY + whereTheControlSitsInTheWindow.y
         )
         let whereTheControlWasAtCaptureTime = CGPoint(
-            x: whereTheWindowWasWhenTheScreenWasCaptured.minX + whereTheControlSitsInTheWindow.x,
-            y: whereTheWindowWasWhenTheScreenWasCaptured.minY + whereTheControlSitsInTheWindow.y
+            x: whereTheWindowWasWhenTheScreenWasCaptured.frame.minX + whereTheControlSitsInTheWindow.x,
+            y: whereTheWindowWasWhenTheScreenWasCaptured.frame.minY + whereTheControlSitsInTheWindow.y
         )
 
         #expect(
-            frameAfterTheDrag.origin != frameBeforeTheDrag.origin,
-            "the window never moved, so there is no stale coordinate to catch"
+            frameAfterTheDrag.origin != whereTheWindowWasWhenTheScreenWasCaptured.frame.origin,
+            """
+            the window did not move between the capture the flown answer came from and the flight itself, \
+            so there is no stale coordinate to catch — it was at \(whereTheWindowWasWhenTheScreenWasCaptured.frame) \
+            for the capture and is at \(frameAfterTheDrag) now, having started at \(frameBeforeTheDrag)
+            """
         )
+        #expect(theEyeFlewForTheParkedStep, "the eye never flew for the parked step")
 
         let flight = try #require(
-            eyeFlights.last,
-            "the eye never flew, so this test is not looking at the thing it claims to"
+            eyeFlights.lastFlight(labelled: Self.titleOfTheStepTheReaderWasParkedOn),
+            "the eye never flew for \"\(Self.titleOfTheStepTheReaderWasParkedOn)\", so this test is not looking at the thing it claims to"
         )
         let howFarFromTheControl = hypot(
             flight.point.x - whereTheControlIsNow.x, flight.point.y - whereTheControlIsNow.y
@@ -571,12 +765,12 @@ struct Bug9PointingDoubleFireReproTests {
 
         print("""
         [bug9-b] step: \(controller.currentStepIndex) (\(flight.label))
-        [bug9-b] window frame when the screen was captured: \(whereTheWindowWasWhenTheScreenWasCaptured)
+        [bug9-b] window frame when the screen was captured: \(whereTheWindowWasWhenTheScreenWasCaptured.frame)
         [bug9-b] window frame when the eye flew:            \(frameAfterTheDrag)
         [bug9-b] the control was at \(whereTheControlWasAtCaptureTime) and is now at \(whereTheControlIsNow)
         [bug9-b] the eye was flown to \(flight.point) on display \(flight.displayFrame)
         [bug9-b] which is \(String(format: "%.1f", howFarFromTheControl))pt from the control
-        [bug9-b] eye flights in total: \(eyeFlights.count); model asks: \(locator.asksThatStarted.count)
+        [bug9-b] eye flights in total: \(eyeFlights.flights.count); model asks: \(locator.asksThatStarted.count)
         """)
 
         // Not a tolerance invented here: `GuideEyeFlightMemo` already treats two
@@ -588,8 +782,8 @@ struct Bug9PointingDoubleFireReproTests {
             the reader moved the "\(window.title)" window while Iris was working out where to point, \
             and the eye was flown to \(flight.point) — \(String(format: "%.0f", howFarFromTheControl))pt away from the \
             control, at \(whereTheControlWasAtCaptureTime), which is where it was when the screenshot was taken, \
-            \(String(format: "%.1f", frameAfterTheDrag.minX - whereTheWindowWasWhenTheScreenWasCaptured.minX))pt \
-            and \(String(format: "%.1f", frameAfterTheDrag.minY - whereTheWindowWasWhenTheScreenWasCaptured.minY))pt ago. \
+            \(String(format: "%.1f", frameAfterTheDrag.minX - whereTheWindowWasWhenTheScreenWasCaptured.frame.minX))pt \
+            and \(String(format: "%.1f", frameAfterTheDrag.minY - whereTheWindowWasWhenTheScreenWasCaptured.frame.minY))pt ago. \
             "after moving a window the eye flies to where the control WAS."
             """
         )
@@ -603,5 +797,13 @@ struct Bug9PointingDoubleFireReproTests {
             \(frameAfterTheDrag) entirely — it is pointing at bare desktop beside the window it was asked about
             """
         )
+    }
+
+    /// The one thing `locateGuideTargetWithModel` keeps about the window it
+    /// cropped to — where it was when the shutter went — held in a class so the
+    /// model closure can write it and the assertions can read it.
+    @MainActor
+    final class WindowFrameAtCaptureTime {
+        var frame: CGRect = .zero
     }
 }

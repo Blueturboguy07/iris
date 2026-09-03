@@ -59,6 +59,10 @@ final class MenuBarPanelManager: NSObject {
     private var togglePanelObserver: NSObjectProtocol?
     private var resizePanelToContentObserver: NSObjectProtocol?
     private var showPanelObserver: NSObjectProtocol?
+    /// Re-places an open panel when the displays change, so a panel left on a
+    /// monitor that was just unplugged comes back onto one that exists instead
+    /// of staying open where nobody can see it.
+    private var screenLayoutChangeObserver: NSObjectProtocol?
 
     private let companionManager: CompanionManager
     private let panelWidth: CGFloat = 320
@@ -105,11 +109,25 @@ final class MenuBarPanelManager: NSObject {
         ) { [weak self] _ in
             self?.showPanel()
         }
+
+        screenLayoutChangeObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            // Only a panel that is up needs moving; a hidden one is re-placed
+            // — and clamped to whatever screens exist then — on its next show.
+            guard let self, self.panel?.isVisible == true else { return }
+            self.positionPanelBelowStatusItem()
+        }
     }
 
     deinit {
         if let monitor = clickOutsideMonitor {
             NSEvent.removeMonitor(monitor)
+        }
+        if let observer = screenLayoutChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
         }
         if let observer = dismissPanelObserver {
             NotificationCenter.default.removeObserver(observer)

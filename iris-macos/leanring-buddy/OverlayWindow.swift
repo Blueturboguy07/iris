@@ -1344,6 +1344,13 @@ struct BlueCursorView: View {
 
 // Manager for overlay windows — creates one per screen so the cursor
 // buddy seamlessly follows the cursor across multiple monitors.
+//
+// It also KEEPS them on those screens. Each overlay is built for one display
+// and bakes that display's frame into its SwiftUI content, so when the set of
+// displays changes the overlays have to be rebuilt — and until Sep 2 2026
+// nothing did that. See `ScreenLayoutCompliance` for the incident: an overlay
+// built for an unplugged 3440x1440 monitor was left covering the built-in
+// display with its top edge 458pt above it, and the eye drawn off-screen.
 @MainActor
 class OverlayWindowManager {
     private var overlayWindows: [OverlayWindow] = []
@@ -1355,6 +1362,55 @@ class OverlayWindowManager {
 
     var hasShownOverlayBefore = false
 
+    /// The frames of the screens the overlays on screen were built for, in
+    /// `NSScreen.screens` order — one per overlay window. What the compliance
+    /// check compares the connected displays against.
+    private var screenFramesTheOverlaysWereBuiltFor: [CGRect] = []
+
+    /// Who the overlays are shown for, kept so they can be rebuilt for a new
+    /// display layout without anyone having to call `showOverlay` again. Weak:
+    /// the `CompanionManager` owns this manager, never the other way round.
+    private weak var companionManagerTheOverlayIsShownFor: CompanionManager?
+
+    /// True from `showOverlay` until `hideOverlay` or `fadeOutAndHideOverlay`.
+    /// The compliance check acts only while this is true — an overlay the app
+    /// hid on purpose must never be brought back by a display change.
+    private var theOverlayIsMeantToBeShowing = false
+
+    private var screenLayoutChangeObserver: NSObjectProtocol?
+    private var screenLayoutAuditTimer: Timer?
+
+    init() {
+        // The fast path: AppKit says the displays changed.
+        screenLayoutChangeObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.keepTheOverlaysOnTheConnectedScreens(because: "the display configuration changed")
+            }
+        }
+
+        // The safety net: re-check on a cadence whether or not anything said
+        // so. Idempotent and nearly free — see `ScreenLayoutCompliance`.
+        screenLayoutAuditTimer = Timer.scheduledTimer(
+            withTimeInterval: ScreenLayoutCompliance.auditInterval,
+            repeats: true
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.keepTheOverlaysOnTheConnectedScreens(because: "the periodic audit found a mismatch")
+            }
+        }
+    }
+
+    deinit {
+        if let screenLayoutChangeObserver {
+            NotificationCenter.default.removeObserver(screenLayoutChangeObserver)
+        }
+        screenLayoutAuditTimer?.invalidate()
+    }
+
     func showOverlay(onScreens screens: [NSScreen], companionManager: CompanionManager) {
         // Hide any existing overlays
         hideOverlay()
@@ -1362,6 +1418,10 @@ class OverlayWindowManager {
         // Track if this is the first time showing overlay (welcome message)
         let isFirstAppearance = !hasShownOverlayBefore
         hasShownOverlayBefore = true
+
+        companionManagerTheOverlayIsShownFor = companionManager
+        screenFramesTheOverlaysWereBuiltFor = screens.map(\.frame)
+        theOverlayIsMeantToBeShowing = true
 
         // Create one overlay window per screen
         for screen in screens {
@@ -1387,12 +1447,63 @@ class OverlayWindowManager {
     }
 
     func hideOverlay() {
+        theOverlayIsMeantToBeShowing = false
+        screenFramesTheOverlaysWereBuiltFor = []
         takeDownEveryInputBar()
         for window in overlayWindows {
             window.orderOut(nil)
             window.contentView = nil
         }
         overlayWindows.removeAll()
+    }
+
+    // MARK: - Keeping the overlays on the screens that exist
+
+    /// THE COMPLIANCE CHECK. Compares the displays connected right now against
+    /// the ones the overlays were built for and where the overlay windows
+    /// actually are, and does the least that makes them match again:
+    /// nothing, a `setFrame` for a window the window server moved, or a full
+    /// rebuild for a changed display set. Runs on every
+    /// `didChangeScreenParametersNotification` and on the audit timer, and is
+    /// safe to run as often as either likes — a layout that already complies
+    /// costs one array comparison.
+    ///
+    /// A rebuild goes through `showOverlay` with `hasShownOverlayBefore`
+    /// already true, so the welcome animation never replays, and the eye
+    /// re-seeds from `OverlayEyeRestingPlace` clamped to the NEW screen size —
+    /// which is what puts it back in view after a monitor is unplugged.
+    func keepTheOverlaysOnTheConnectedScreens(because reasonForTheCheck: String) {
+        guard theOverlayIsMeantToBeShowing else { return }
+
+        let screensConnectedNow = NSScreen.screens
+        let verdict = ScreenLayoutCompliance.verdict(
+            overlaysWereBuiltForScreenFrames: screenFramesTheOverlaysWereBuiltFor,
+            currentScreenFrames: screensConnectedNow.map(\.frame),
+            liveOverlayWindowFrames: overlayWindows.map(\.frame)
+        )
+
+        switch verdict {
+        case .everyOverlayFitsItsScreen, .noScreenToShowOn:
+            return
+
+        case .putTheseOverlaysBackOnTheirScreens(let framesByOverlayIndex):
+            for (overlayIndex, frameTheOverlayShouldHave) in framesByOverlayIndex {
+                guard overlayIndex < overlayWindows.count else { continue }
+                irisTrace(
+                    "screen-layout: overlay \(overlayIndex) was at \(overlayWindows[overlayIndex].frame), "
+                        + "moving it back to \(frameTheOverlayShouldHave) — \(reasonForTheCheck)"
+                )
+                overlayWindows[overlayIndex].setFrame(frameTheOverlayShouldHave, display: true)
+            }
+
+        case .rebuildTheOverlaysForTheCurrentScreens:
+            guard let companionManager = companionManagerTheOverlayIsShownFor else { return }
+            irisTrace(
+                "screen-layout: overlays were built for \(screenFramesTheOverlaysWereBuiltFor) but the "
+                    + "screens are now \(screensConnectedNow.map(\.frame)) — rebuilding, \(reasonForTheCheck)"
+            )
+            showOverlay(onScreens: screensConnectedNow, companionManager: companionManager)
+        }
     }
 
     /// The input bar belongs to the eye. When the eye goes, so does it —
@@ -1406,6 +1517,8 @@ class OverlayWindowManager {
 
     /// Fades out overlay windows over `duration` seconds, then removes them.
     func fadeOutAndHideOverlay(duration: TimeInterval = 0.4) {
+        theOverlayIsMeantToBeShowing = false
+        screenFramesTheOverlaysWereBuiltFor = []
         takeDownEveryInputBar()
 
         let windowsToFade = overlayWindows

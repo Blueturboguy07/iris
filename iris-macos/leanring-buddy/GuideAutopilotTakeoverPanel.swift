@@ -123,7 +123,28 @@ final class GuideAutopilotTakeoverController {
     /// the panels rather than outliving them.
     private var terminalDidMoveObserver: NSObjectProtocol?
 
+    /// Fires when a display is connected, disconnected or rearranged while the
+    /// takeover is up, so the terminal — and its red escape hatch — never stays
+    /// on a screen that has been unplugged. Lives as long as the controller.
+    private var screenLayoutChangeObserver: NSObjectProtocol?
+
     private var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
+    init() {
+        screenLayoutChangeObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.keepTheTakeoverOnAConnectedScreen() }
+        }
+    }
+
+    deinit {
+        if let screenLayoutChangeObserver {
+            NotificationCenter.default.removeObserver(screenLayoutChangeObserver)
+        }
+    }
 
     private static let morphDuration: TimeInterval = 0.5
     private static let morphTiming = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1)
@@ -411,6 +432,62 @@ final class GuideAutopilotTakeoverController {
         irisOwnFrameAnimationsInFlight += 1
         terminal.setFrame(frame, display: true)
         irisOwnFrameAnimationsInFlight = max(0, irisOwnFrameAnimationsInFlight - 1)
+    }
+
+    // MARK: - Keeping the takeover on a screen that exists
+
+    /// The displays changed while the takeover is up. Re-derive Iris's own
+    /// geometry for the screen that exists now, re-cover it with the dim, and
+    /// make sure the terminal is somewhere the reader can see and reach it.
+    ///
+    /// Two shapes of trouble, handled differently. A screen that SHRANK (a
+    /// resolution change, or the window straddling an edge that moved) leaves
+    /// the card partly off — the ordinary drag clamp pulls it back far enough
+    /// to grab. A screen that is GONE leaves the card on no display at all,
+    /// and clamping that to the nearest edge would leave a 72pt sliver; the
+    /// card is re-placed from scratch at Iris's own centre (or corner, if it
+    /// was parked) on the screen that remains, at the size the reader chose if
+    /// they chose one. Their dragged position is forgotten in that case only,
+    /// because it named a spot on a screen that no longer exists.
+    private func keepTheTakeoverOnAConnectedScreen() {
+        guard let terminal = terminalPanel, !isDismissing else { return }
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+
+        eyeSizedFrame = Self.eyeSizedFrame(on: screen)
+        terminalSizedFrame = Self.terminalSizedFrame(on: screen)
+        parkedFrame = Self.parkedFrame(on: screen)
+        backdropPanel?.setFrame(screen.frame, display: true)
+
+        // A morph still in flight owns the frame; it ends at a frame derived
+        // above, and a deferred park re-reads `parkedFrame`, so both land on
+        // the new screen without this racing them.
+        guard entryMorphHasSettled, irisOwnFrameAnimationsInFlight == 0 else { return }
+
+        let frameTheTerminalHasNow = terminal.frame
+        let allScreenFrames = NSScreen.screens.map(\.frame)
+        if ScreenLayoutCompliance.frameIsOnSomeScreen(frameTheTerminalHasNow, screenFrames: allScreenFrames) {
+            let reachableOrigin = GuideAutopilotTakeoverTerminalPanel.keepingTheTitleStripReachable(
+                frameTheTerminalHasNow.origin, forACardOfSize: frameTheTerminalHasNow.size
+            )
+            guard reachableOrigin != frameTheTerminalHasNow.origin else { return }
+            let reachableFrame = CGRect(origin: reachableOrigin, size: frameTheTerminalHasNow.size)
+            irisTrace("screen-layout: takeover terminal pulled back on screen to \(reachableFrame)")
+            setTerminalFrameOurselves(terminal, to: reachableFrame)
+            if readerPlacedTheTerminalTopLeft != nil {
+                readerPlacedTheTerminalTopLeft = CGPoint(x: reachableFrame.minX, y: reachableFrame.maxY)
+            }
+            return
+        }
+
+        readerPlacedTheTerminalTopLeft = nil
+        let frameOnTheScreenThatExists = frameHonoringWhereTheReaderPutTheTerminal(
+            isParked ? parkedFrame : terminalSizedFrame
+        )
+        irisTrace(
+            "screen-layout: takeover terminal was on a display that is gone (\(frameTheTerminalHasNow)), "
+                + "re-placed at \(frameOnTheScreenThatExists)"
+        )
+        setTerminalFrameOurselves(terminal, to: frameOnTheScreenThatExists)
     }
 
     /// Fold the terminal back into the eye and tear the panels down. `afterHold`

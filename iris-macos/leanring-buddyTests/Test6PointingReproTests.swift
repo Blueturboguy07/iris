@@ -118,6 +118,11 @@ struct Test6PointingReproTests {
             return rectangleTheTreeReports
         }
 
+        func locateFocusedWindow(ofApp bundleIdentifier: String) -> CGRect? {
+            timesTheTreeWasWalked += 1
+            return rectangleTheTreeReports
+        }
+
         func locateByAskingTheModel(stepTitle: String, stepBody: String) async -> CGRect? {
             timesTheModelWasAsked += 1
             return rectangleTheTreeReports

@@ -159,6 +159,11 @@ final class GuideAutopilotTakeoverController {
     /// guide-only callbacks (`onReaderFinishedManualStep`, the risky-command
     /// gate) are simply never triggered by the edit runner, which has no manual
     /// steps and no per-command confirm loop.
+    ///
+    /// `afterTheReaderMinimizesIt` is the caller's half of the yellow traffic
+    /// light: folding the window away happens here, and this runs once the
+    /// panels are gone, for the one thing only the caller knows — which of its
+    /// own surfaces takes the still-running work back over.
     func present<Runner: AutopilotTerminalPresenting>(
         runner: Runner,
         onApproveRiskyCommand: @escaping () -> Void,
@@ -166,7 +171,8 @@ final class GuideAutopilotTakeoverController {
         onRetrySurfacedStep: @escaping () -> Void,
         onContinuePastSurfacedStep: @escaping () -> Void,
         onReaderFinishedManualStep: @escaping () -> Void,
-        onEscapeHatch: @escaping () -> Void
+        onEscapeHatch: @escaping () -> Void,
+        afterTheReaderMinimizesIt: (() -> Void)? = nil
     ) {
         // Already up (e.g. a resumed run) — never stack a second takeover.
         guard terminalPanel == nil, !isDismissing else { return }
@@ -229,6 +235,17 @@ final class GuideAutopilotTakeoverController {
             onContinuePastSurfacedStep: onContinuePastSurfacedStep,
             onReaderFinishedManualStep: onReaderFinishedManualStep,
             onEscapeHatch: onEscapeHatch,
+            // The yellow light folds this window away and leaves the run alone.
+            // The fold-away is done HERE rather than handed to the caller
+            // because this controller owns the window: a caller that passed no
+            // closure would otherwise draw a live-looking light that did
+            // nothing, which is the bug this window has already earned three
+            // times. The caller's own closure runs after the panels are gone,
+            // so the surface that takes the run back over cannot draw a second
+            // terminal over the one still collapsing.
+            onMinimize: { [weak self] in
+                self?.dismiss(afterHold: false, thenRun: afterTheReaderMinimizesIt)
+            },
             // Let a press on a button reach the button instead of dragging the
             // window: the SwiftUI controls report their frames and the panel
             // excludes them from its drag loop.
@@ -1173,6 +1190,9 @@ private struct GuideAutopilotTakeoverView<Runner: AutopilotTerminalPresenting>: 
     let onReaderFinishedManualStep: () -> Void
     /// The red traffic light — closes the takeover, whatever Iris is doing.
     let onEscapeHatch: () -> Void
+    /// The yellow traffic light — folds the takeover away and leaves whatever
+    /// Iris is doing running.
+    let onMinimize: () -> Void
     /// The frames of every interactive control the terminal drew this pass, in
     /// `.global` space (the hosting view that IS the panel's content view), so
     /// the panel can deliver a press on one to the control instead of eating it
@@ -1193,6 +1213,7 @@ private struct GuideAutopilotTakeoverView<Runner: AutopilotTerminalPresenting>: 
                 onRetrySurfacedStep: onRetrySurfacedStep,
                 onContinuePastSurfacedStep: onContinuePastSurfacedStep,
                 onEscapeHatch: onEscapeHatch,
+                onMinimize: onMinimize,
                 // The takeover window is a fixed frame; the transcript fills it.
                 fixedTranscriptHeight: nil
             )

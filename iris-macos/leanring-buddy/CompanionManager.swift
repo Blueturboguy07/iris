@@ -1087,7 +1087,13 @@ final class CompanionManager: ObservableObject {
             onRetrySurfacedStep: { [weak self] in self?.guideSessionController.retryTheSurfacedStep() },
             onContinuePastSurfacedStep: { [weak self] in self?.guideSessionController.skipTheSurfacedStepAndContinue() },
             onReaderFinishedManualStep: { [weak self] in self?.guideSessionController.readerFinishedTheGatedStep() },
-            onEscapeHatch: { [weak self] in self?.guideSessionController.abortOrCloseAutopilotFromTheEscapeHatch() }
+            onEscapeHatch: { [weak self] in self?.guideSessionController.abortOrCloseAutopilotFromTheEscapeHatch() },
+            // The takeover has folded away with the install still running, so
+            // the pane under the guide card — suppressed only while the
+            // takeover is up — shows the rest of it.
+            afterTheReaderMinimizesIt: { [weak self] in
+                self?.guideSessionController.setAutopilotIsShownAsTakeover(false)
+            }
         )
     }
 
@@ -1530,7 +1536,12 @@ final class CompanionManager: ObservableObject {
                 self.onDemandEditCoordinator.stopRunningEdit()
                 self.autopilotTakeoverController.dismiss(afterHold: false)
                 self.onDemandEditTakeoverIsUp = false
-            }
+            },
+            // The flag comes down with the window: the eye bar's whole body is
+            // suppressed while this takeover covers the screen, so leaving it
+            // set would fold the terminal away and give the reader nothing in
+            // its place.
+            afterTheReaderMinimizesIt: { [weak self] in self?.onDemandEditTakeoverIsUp = false }
         )
         onDemandEditTakeoverIsUp = true
     }

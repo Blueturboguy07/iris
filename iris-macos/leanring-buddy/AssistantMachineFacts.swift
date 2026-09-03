@@ -46,13 +46,13 @@ enum AssistantMachineFacts {
     /// `installedCatalogApps` is passed in rather than looked up so this stays
     /// free of the app-inventory actor and testable on its own.
     /// `iosSimulatorRuntimes` is passed in for that reason and one more:
-    /// measuring it spawns a process, which belongs off the main actor. It
-    /// defaults to measuring so a caller with nothing in hand still gets the
-    /// fact.
+    /// measuring it spawns a process, which belongs off the main actor — so
+    /// there is deliberately no default that would measure it on whatever
+    /// thread happened to call this. Pass nil to say "unknown".
     static func summary(
         publikBaseURL: String?,
         installedCatalogApps: [String],
-        iosSimulatorRuntimes: [String]? = AssistantMachineFacts.installedIosSimulatorRuntimes()
+        iosSimulatorRuntimes: [String]?
     ) -> String? {
         var lines: [String] = []
 

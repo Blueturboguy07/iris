@@ -465,6 +465,27 @@ final class GuideSessionController: ObservableObject {
 
     private var pointingTask: Task<Void, Never>?
 
+    /// The question `pointingTask` is out asking right now — which step, and
+    /// what was decided about it — or nil when nothing is in flight.
+    ///
+    /// It is what lets a second trigger for the SAME question be left alone
+    /// instead of cancelling the first and asking it all over again. See
+    /// `refreshPointingForTheOpenStep`.
+    private var theQuestionThePointingTaskIsAnswering: (stepIdentity: String, decision: GuidePointingDecision)?
+
+    /// How many pointing tasks have been dispatched, so a task can tell its OWN
+    /// entry in `theQuestionThePointingTaskIsAnswering` apart from an
+    /// identical-looking entry that a later dispatch put there.
+    ///
+    /// Matching that entry by its (step, decision) VALUE is not enough, because
+    /// decisions repeat. A task that has been superseded but is still running —
+    /// cancelling stops neither a capture already taken nor a request already on
+    /// the wire — finishes late, sees the same question it was given, and clears
+    /// a LIVE newer task's entry. The next trigger then finds nothing in flight
+    /// and asks all over again, which is the double-fire the entry exists to
+    /// prevent.
+    private var howManyPointingTasksHaveBeenDispatched = 0
+
     /// The flight the eye is currently showing, so an app activation that
     /// resolves to the identical answer does not fly it all over again.
     ///
@@ -573,12 +594,12 @@ final class GuideSessionController: ObservableObject {
     /// Called whenever the step changes — including when the watch loop
     /// advances it, which is the case a manual refresh would miss.
     func refreshPointingForTheOpenStep() {
-        pointingTask?.cancel()
-
         guard
             let branch = selectedBranch,
             let step = stepTheReaderIsLookingAt
         else {
+            pointingTask?.cancel()
+            theQuestionThePointingTaskIsAnswering = nil
             pointingDecisionForTheOpenStep = .doNotPoint(.stepHasNothingToPointAt)
             explanationForIrisHavingStoppedPointingAtThisStep = nil
             theFlightTheEyeIsShowing.theEyeStoppedPointing()
@@ -599,6 +620,39 @@ final class GuideSessionController: ObservableObject {
             frontmostAppName: frontmost?.localizedName
         )
 
+        // Which step this refresh is about. Also the key the model budget is
+        // kept under, below.
+        let stepIdentityForBudget = "\(currentStepIndex):\(step.id)"
+
+        // A question already being asked is left to finish rather than cancelled
+        // and asked again. Three triggers reach this method for one parked
+        // manual step and none of them knows the other two exist: the
+        // step-change refresh, `handTheCurrentStepBackToTheReader`'s own
+        // refresh, and the 400ms-debounced activation refresh behind them —
+        // which Iris's own takeover window coming forward is enough to fire.
+        // Cancelling does not undo an ask: nothing below checks
+        // `Task.isCancelled` until after `resolve` has already returned, so a
+        // screenshot that has been taken and a request that is on the wire both
+        // run to completion. The second trigger therefore did not replace the
+        // first ask, it ADDED one — two captures and two model calls for a step
+        // nobody touched, out of the same small per-step budget. From the field
+        // log, 0.358s apart on an unchanged step:
+        //     07:04:10.341  pointing/model: asked for step=Install Xcode
+        //     07:04:10.699  pointing/model: asked for step=Install Xcode
+        // Only an IDENTICAL question is dropped. Anything that would ask
+        // something different — the reader moved on, the target app finally came
+        // forward and turned a refusal into a point — is a different decision,
+        // and still cancels the ask in flight and runs, so the self-healing
+        // activation refresh keeps working.
+        if let questionAlreadyBeingAnswered = theQuestionThePointingTaskIsAnswering,
+           questionAlreadyBeingAnswered.stepIdentity == stepIdentityForBudget,
+           questionAlreadyBeingAnswered.decision == decision {
+            return
+        }
+
+        pointingTask?.cancel()
+        theQuestionThePointingTaskIsAnswering = nil
+
         guard let targetLocator else {
             // Nothing can look for anything in this configuration, so there is
             // no budget to spend and nothing about a budget to explain.
@@ -611,7 +665,6 @@ final class GuideSessionController: ObservableObject {
         // the paid model rung has to be budgeted per step or a single parked
         // step can spend a screenshot-sized model call on every window switch.
         // The free rungs (window frame, accessibility tree) re-run every time.
-        let stepIdentityForBudget = "\(currentStepIndex):\(step.id)"
         if stepIdentityForBudget != stepIdentityTheModelBudgetBelongsTo {
             stepIdentityTheModelBudgetBelongsTo = stepIdentityForBudget
             modelPointingAsksSpentOnThisStep = 0
@@ -632,7 +685,19 @@ final class GuideSessionController: ObservableObject {
             modelPointingAsksSpentOnThisStep += 1
         }
 
+        theQuestionThePointingTaskIsAnswering = (stepIdentity: stepIdentityForBudget, decision: decision)
+        howManyPointingTasksHaveBeenDispatched += 1
+        let whichDispatchThisTaskIs = howManyPointingTasksHaveBeenDispatched
         pointingTask = Task { [weak self] in
+            defer {
+                // Only the dispatch that is still the latest one clears the
+                // question: a refresh that asked something different has already
+                // replaced it, and a task finishing late must not report that
+                // newer ask as finished too.
+                if let self, self.howManyPointingTasksHaveBeenDispatched == whichDispatchThisTaskIs {
+                    self.theQuestionThePointingTaskIsAnswering = nil
+                }
+            }
             let outcome = await GuideStepPointingCoordinator.resolve(
                 decision: decision,
                 stepTitle: step.title,
@@ -1008,6 +1073,7 @@ final class GuideSessionController: ObservableObject {
         // one, arriving long after they walked away from it.
         pointingTask?.cancel()
         pointingTask = nil
+        theQuestionThePointingTaskIsAnswering = nil
         // A debounced refresh waiting out its quiet period has to die with the
         // guide too, for the same reason: it would re-point at a step nobody is
         // looking at any more.

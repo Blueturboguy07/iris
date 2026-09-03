@@ -310,6 +310,14 @@ struct Bug9PointingDoubleFireReproTests {
             return whereTheReadersWindowIsNow?()
         }
 
+        /// The same answer, because this scenario has exactly one window up:
+        /// the app's window list and its focused window are the same window,
+        /// which is why the test below cannot tell the two questions apart.
+        func locateFocusedWindow(ofApp bundleIdentifier: String) -> CGRect? {
+            timesAWindowWasLookedUp += 1
+            return whereTheReadersWindowIsNow?()
+        }
+
         func locateByAskingTheModel(stepTitle: String, stepBody: String) async -> CGRect? {
             let ordinal = asksThatStarted.count + 1
             asksThatStarted.append(
@@ -571,6 +579,154 @@ struct Bug9PointingDoubleFireReproTests {
         )
     }
 
+    // MARK: - (a, continued) an ask that was superseded, and came back anyway
+
+    /// One model round trip whose ending this test places by hand.
+    ///
+    /// Same premise as `waitOutAnUncancellableRoundTrip` — a capture that has
+    /// been taken and a request that is on the wire do not come back because
+    /// somebody called `cancel()` — but the finishing moment is chosen rather
+    /// than timed, because this scenario is entirely about WHICH ask is still in
+    /// flight at the moment another one finishes.
+    @MainActor
+    final class AModelRoundTripTheTestEndsByHand {
+        private var whateverIsWaitingOnThisRoundTrip: CheckedContinuation<Void, Never>?
+        private var theRoundTripHasAlreadyEnded = false
+
+        func waitUntilTheTestEndsThisRoundTrip() async {
+            if theRoundTripHasAlreadyEnded { return }
+            await withCheckedContinuation { continuation in
+                whateverIsWaitingOnThisRoundTrip = continuation
+            }
+        }
+
+        func endThisRoundTripNow() {
+            theRoundTripHasAlreadyEnded = true
+            whateverIsWaitingOnThisRoundTrip?.resume()
+            whateverIsWaitingOnThisRoundTrip = nil
+        }
+    }
+
+    /// The other half of half (a), and the one the three-trigger burst above
+    /// cannot see.
+    ///
+    /// Coalescing works by writing down the question the pointing task is out
+    /// asking, so a second trigger for the SAME question is left alone. Whoever
+    /// finishes has to rub that note out again — and the question is not enough
+    /// to identify WHOSE note it is, because the same step keeps producing the
+    /// same decision. An ask that was superseded minutes-of-model-time ago is
+    /// still running (cancelling stops neither a capture already taken nor a
+    /// request already on the wire — the premise of half (a)); when it finally
+    /// comes back it reads a note that a LIVE, newer ask wrote, recognises the
+    /// question as the one it was given, and rubs it out. The next trigger for
+    /// that step then sees nothing in flight and asks all over again — a second
+    /// screen capture and a second paid call for a step nobody touched, which is
+    /// the reported bug, arriving through the mechanism meant to prevent it.
+    ///
+    /// The sequence below is the shortest real one that gets there. It needs a
+    /// question that differs and then changes back, and screen access is the
+    /// reader's own switch for exactly that: with it off, an inferred step's
+    /// decision becomes `.doNotPoint(.irisMayNotLookAtTheScreen)`.
+    ///
+    /// WHAT THIS TEST DOES NOT CLAIM. The two asks it settles for are not one
+    /// ask. Turning screen access off and straight back on while the park's ask
+    /// is still out genuinely costs a second ask, in the broken code and the
+    /// fixed code alike: the only ask the third trigger could have been
+    /// coalesced with had already been superseded, and a superseded ask's answer
+    /// is thrown away at `guard !Task.isCancelled` — deliberately, because that
+    /// is what stops a stale answer flying the eye somewhere the reader has
+    /// moved on from. Two is the baseline here. Three is the defect.
+    @Test("an ask that was superseded and came back late lets one unchanged step be asked all over again")
+    func aSupersededAskComingBackLateUnbooksTheAskThatReplacedIt() async throws {
+        let theParksOwnAsk = AModelRoundTripTheTestEndsByHand()
+        let theAskThatReplacedIt = AModelRoundTripTheTestEndsByHand()
+        defer {
+            // Nothing is left hanging on a continuation after the assertions,
+            // whichever way they went.
+            theParksOwnAsk.endThisRoundTripNow()
+            theAskThatReplacedIt.endThisRoundTripNow()
+        }
+
+        let locator = ThePointingModelTheGuideAsks { _, ordinal in
+            switch ordinal {
+            case 1: await theParksOwnAsk.waitUntilTheTestEndsThisRoundTrip()
+            case 2: await theAskThatReplacedIt.waitUntilTheTestEndsThisRoundTrip()
+            // A third ask IS the defect. It answers at once so the failure is
+            // read from the count below rather than from a hung test.
+            default: break
+            }
+            return nil
+        }
+
+        let (controller, _, _) = try await Self.aReaderDrivenToTheInstallXcodeGate(
+            locator: locator,
+            // Every ask here answers nil, so the eye never flies; this test is
+            // only about how many times the paid rung was entered.
+            eyeFlights: { _, _, _ in },
+            // Every trigger in this scenario is issued by hand below, so the
+            // activation coalescer is kept out of the measurement the same way
+            // half (b) keeps it out of its own.
+            theGuideCardIsOnScreen: { false }
+        )
+
+        let theParkAsked = await Self.pump(within: 8) {
+            locator.asks(forStepTitled: Self.titleOfTheStepTheReaderWasParkedOn).count >= 1
+        }
+        #expect(theParkAsked, "the park never reached the model, so there is no in-flight ask to supersede")
+
+        // The reader turns screen access off. The ladder now answers
+        // `.doNotPoint(.irisMayNotLookAtTheScreen)` for this inferred step — a
+        // DIFFERENT question, so it rightly supersedes the park's ask instead of
+        // being coalesced with it. It never reaches the model (`resolve` returns
+        // at its `guard case .pointAt`), so it comes back almost at once while
+        // the park's ask is still out, and rubs out the note on its way.
+        controller.irisMayLookAtTheScreenForPointing = false
+        controller.refreshPointingForTheOpenStep()
+        let theRefusalSettled = await Self.pump(within: 4) {
+            controller.pointingDecisionForTheOpenStep == .doNotPoint(.irisMayNotLookAtTheScreen)
+        }
+        #expect(theRefusalSettled, "the screen-access refusal never resolved, so nothing superseded the park's ask")
+
+        // And turns it straight back on. This is the second ask described above:
+        // real, expected, and made by the broken and the fixed code alike.
+        controller.irisMayLookAtTheScreenForPointing = true
+        controller.refreshPointingForTheOpenStep()
+        let theReplacementAsked = await Self.pump(within: 4) {
+            locator.asks(forStepTitled: Self.titleOfTheStepTheReaderWasParkedOn).count >= 2
+        }
+        #expect(theReplacementAsked, "turning screen access back on did not re-ask, so there is no live ask to protect")
+
+        // Now the park's ask — superseded, forgotten, and on the wire this whole
+        // time — comes back.
+        theParksOwnAsk.endThisRoundTripNow()
+        try await Task.sleep(for: .milliseconds(250))
+
+        // ...and one more trigger arrives for the very same unchanged step, the
+        // way the park's own refresh and the activation refresh arrive behind
+        // the step-change refresh in the field log. The ask made a moment ago is
+        // still out, so there is nothing here left to ask.
+        controller.refreshPointingForTheOpenStep()
+        try await Task.sleep(for: .milliseconds(250))
+
+        let asksForTheParkedStep = locator.asks(forStepTitled: Self.titleOfTheStepTheReaderWasParkedOn)
+        print("""
+        [bug9-a2] model asks for this one step: \(asksForTheParkedStep.count)
+        [bug9-a2] asks that have come back: \(locator.asksThatFinished.map { $0.ordinal }) \
+        (the ask that replaced the park's is deliberately still out)
+        """)
+
+        #expect(
+            asksForTheParkedStep.count == 2,
+            """
+            the park's own pointing ask was superseded, came back after an ask that replaced it was already \
+            out, and reported that LIVE ask as finished because it recognised the question as its own. The \
+            next trigger for "\(Self.titleOfTheStepTheReaderWasParkedOn)" therefore found nothing in flight, \
+            and this one unchanged step cost \(asksForTheParkedStep.count) screen captures and \
+            \(asksForTheParkedStep.count) assistant calls — through the very note-keeping that exists to stop it
+            """
+        )
+    }
+
     // MARK: - (b) the eye flies to where the control was
 
     /// Every flight the controller asked for, in order. A class because the two
@@ -805,5 +961,153 @@ struct Bug9PointingDoubleFireReproTests {
     @MainActor
     final class WindowFrameAtCaptureTime {
         var frame: CGRect = .zero
+    }
+
+    // MARK: - (b) with a second window open
+
+    /// An app showing two windows, one of them focused, whose focused window the
+    /// reader drags while the model is thinking.
+    ///
+    /// The test above stands up a single real `NSPanel`, so "the first window in
+    /// the app's list" and "the window the app has focused" are the same
+    /// rectangle by construction and it cannot tell which of them a fix reads.
+    /// Real guide targets — a second Xcode window, a browser with two windows,
+    /// any multi-document editor — are not single-window, and there the two
+    /// answers are different rectangles that move independently.
+    @MainActor
+    final class AnAppWithASecondWindowOpen: GuideTargetLocating {
+        /// Where the app's focused window is now. The capture cropped to this
+        /// one, so the model's answer is expressed relative to it, and this is
+        /// the only window whose movement means anything to that answer.
+        private(set) var whereTheFocusedWindowIs: CGRect
+        /// Another window of the same app, sitting perfectly still. This is what
+        /// `kAXWindowsAttribute` may hand back first: the order of that array is
+        /// not documented, so which window it is cannot be predicted.
+        let whereTheOtherWindowOfTheSameAppIs: CGRect
+        /// The drag the reader performs mid-ask, applied inside the ask itself
+        /// so the ordering is exact rather than raced.
+        let howFarTheReaderDragsTheFocusedWindow: CGPoint
+
+        private(set) var whereTheControlWasWhenTheScreenWasCaptured: CGPoint?
+
+        init(
+            focusedWindow: CGRect,
+            otherWindowOfTheSameApp: CGRect,
+            draggedMidAskBy howFarTheReaderDragsTheFocusedWindow: CGPoint
+        ) {
+            self.whereTheFocusedWindowIs = focusedWindow
+            self.whereTheOtherWindowOfTheSameAppIs = otherWindowOfTheSameApp
+            self.howFarTheReaderDragsTheFocusedWindow = howFarTheReaderDragsTheFocusedWindow
+        }
+
+        /// Nil, which is what puts the ladder on the model rung.
+        func locateInAccessibilityTree(descriptor: String, inApp bundleIdentifier: String?) -> CGRect? { nil }
+
+        func locateWindow(ofApp bundleIdentifier: String) -> CGRect? {
+            whereTheOtherWindowOfTheSameAppIs
+        }
+
+        func locateFocusedWindow(ofApp bundleIdentifier: String) -> CGRect? {
+            whereTheFocusedWindowIs
+        }
+
+        /// Capture, then the reader's drag, then the answer — the production
+        /// order, and the same 44pt square around the control's capture-time
+        /// position that `locateGuideTargetWithModel` builds.
+        func locateByAskingTheModel(stepTitle: String, stepBody: String) async -> CGRect? {
+            let windowWhenTheShutterWent = whereTheFocusedWindowIs
+            let control = CGPoint(x: windowWhenTheShutterWent.midX, y: windowWhenTheShutterWent.midY)
+            whereTheControlWasWhenTheScreenWasCaptured = control
+            whereTheFocusedWindowIs = windowWhenTheShutterWent.offsetBy(
+                dx: howFarTheReaderDragsTheFocusedWindow.x,
+                dy: howFarTheReaderDragsTheFocusedWindow.y
+            )
+            let side: CGFloat = 44
+            return CGRect(
+                x: control.x - side / 2, y: control.y - side / 2, width: side, height: side
+            )
+        }
+    }
+
+    @Test("a second window open sends the correction chasing the wrong window")
+    func theCorrectionFollowsTheWindowTheCaptureWasCroppedToNotTheAppsFirstListedWindow() async throws {
+        let usable = try #require(NSScreen.main).visibleFrame
+
+        // Everything deep inside the usable area, so no clamp in
+        // `placeTheEyeMayComeToRest` has any say in where the eye ends up and
+        // the only geometry this test measures is the correction's.
+        let windowSize = CGSize(
+            width: min(420, usable.width * 0.25), height: min(284, usable.height * 0.25)
+        )
+        let dragDelta = CGPoint(x: windowSize.width * 0.5, y: -min(76, usable.height * 0.07))
+        let focusedWindow = CGRect(
+            x: usable.midX - windowSize.width / 2 - dragDelta.x / 2,
+            y: usable.midY - windowSize.height / 2 - dragDelta.y / 2,
+            width: windowSize.width, height: windowSize.height
+        )
+        // The app's other window is somewhere else entirely and never moves, so
+        // a correction that reads it computes a delta of zero and leaves the
+        // stale answer exactly where it was.
+        let stillWindow = CGRect(
+            x: usable.minX + 20, y: usable.minY + 20,
+            width: windowSize.width, height: windowSize.height
+        )
+
+        let locator = AnAppWithASecondWindowOpen(
+            focusedWindow: focusedWindow,
+            otherWindowOfTheSameApp: stillWindow,
+            draggedMidAskBy: dragDelta
+        )
+        let outcome = await GuideStepPointingCoordinator.resolve(
+            decision: .pointAt(
+                GuidePointTarget(
+                    descriptor: Self.titleOfTheStepTheReaderWasParkedOn,
+                    inApp: nil,
+                    isWindow: false,
+                    // Inferred is the one provenance allowed to reach the model,
+                    // and the model rung is the only one this bug is about.
+                    provenance: .inferred
+                )
+            ),
+            stepTitle: Self.titleOfTheStepTheReaderWasParkedOn,
+            stepBody: "",
+            mayAskTheModel: true,
+            using: locator
+        )
+
+        let whereTheControlWas = try #require(
+            locator.whereTheControlWasWhenTheScreenWasCaptured,
+            "the model was never asked, so no answer was ever corrected"
+        )
+        let whereTheControlIsNow = CGPoint(
+            x: whereTheControlWas.x + dragDelta.x, y: whereTheControlWas.y + dragDelta.y
+        )
+        let flownTo = try #require(
+            outcome.screenLocation,
+            "the coordinator refused to point at all, so there is nothing to measure"
+        )
+        let howFarFromTheControl = hypot(
+            flownTo.x - whereTheControlIsNow.x, flownTo.y - whereTheControlIsNow.y
+        )
+
+        print(
+            """
+            [bug9-b2] focused window at capture: \(focusedWindow), now: \(locator.whereTheFocusedWindowIs)
+            [bug9-b2] the app's other window, which never moved: \(stillWindow)
+            [bug9-b2] the control was at \(whereTheControlWas) and is now at \(whereTheControlIsNow)
+            [bug9-b2] the eye was flown to \(flownTo), \(String(format: "%.1f", howFarFromTheControl))pt from the control
+            """
+        )
+
+        #expect(
+            howFarFromTheControl <= GuideEyeFlightMemo.distanceAtWhichTwoAnswersAreTheSameAnswer,
+            """
+            the reader dragged the window the screenshot was cropped to, but the correction asked the app for \
+            its window LIST and got the app's other, still window — so it measured a move of zero and left the \
+            answer where it was. The eye flew to \(flownTo), \
+            \(String(format: "%.0f", howFarFromTheControl))pt from the control at \(whereTheControlIsNow). The \
+            capture crops to `kAXFocusedWindowAttribute`; only that window's movement describes the answer's.
+            """
+        )
     }
 }

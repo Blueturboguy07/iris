@@ -29,6 +29,17 @@ protocol GuideTargetLocating {
     /// Terminal rather than at a control.
     func locateWindow(ofApp bundleIdentifier: String) -> CGRect?
 
+    /// The frame of the window an app currently has FOCUSED.
+    ///
+    /// A different question from `locateWindow(ofApp:)`, which answers out of
+    /// the app's whole window LIST and takes the first entry that is up. For an
+    /// app showing more than one window those are two different windows, and
+    /// only this one is the window the pointing capture crops its screenshot to
+    /// — `CompanionScreenCaptureUtility.focusedWindowWorthCroppingTo` reads
+    /// `kAXFocusedWindowAttribute` through `SystemWatchLoopLocalSignalSource`.
+    /// So only this one can say where a model answer's coordinates came from.
+    func locateFocusedWindow(ofApp bundleIdentifier: String) -> CGRect?
+
     /// The paid path, used only when the two above come back empty and the
     /// step's target was never authored.
     func locateByAskingTheModel(stepTitle: String, stepBody: String) async -> CGRect?
@@ -272,6 +283,87 @@ enum GuideStepPointingCoordinator {
         )
     }
 
+    // MARK: - The window moving while the model is thinking
+
+    /// The window the pointing capture will be cropped to, and where it is right
+    /// now: the focused window of the frontmost app, unless that app is Iris.
+    ///
+    /// The same two gates `CompanionScreenCaptureUtility.focusedWindowWorthCroppingTo`
+    /// applies — the frontmost app, and never Iris itself, so that Iris's own
+    /// takeover terminal, which parks itself to a corner at exactly the moment a
+    /// manual step starts pointing, is never mistaken for the window the answer
+    /// came out of. Those two gates only agree on the APP. The window is the
+    /// same window because both sides now ask for the focused one:
+    /// `locateFocusedWindow(ofApp:)` here, `kAXFocusedWindowAttribute` there.
+    /// `locateWindow(ofApp:)` would not do — it answers out of the app's window
+    /// list, and for an app with a second window open that is routinely some
+    /// other window than the one the screenshot was cropped to, which would
+    /// translate an answer by a distance nothing in the picture ever moved.
+    private static func windowThePointingCaptureWillBeCroppedTo(
+        using locator: any GuideTargetLocating
+    ) -> (bundleIdentifier: String, frame: CGRect)? {
+        guard
+            let bundleIdentifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+            bundleIdentifier != Bundle.main.bundleIdentifier,
+            let frame = locator.locateFocusedWindow(ofApp: bundleIdentifier)
+        else { return nil }
+        return (bundleIdentifier, frame)
+    }
+
+    /// The model's answer, moved by however far the window it was found in has
+    /// moved since the screen was captured for it.
+    ///
+    /// The model rung is the only one slow enough for the screen to change
+    /// underneath it — a real capture and a real round trip, 2.6s of it in the
+    /// field log (asked 07:04:10.699, answered 07:04:13.325) — and what comes
+    /// back is a coordinate in a picture of a screen that no longer exists.
+    /// `CompanionManager.globalScreenLocation` maps it back through the crop
+    /// that capture took of the focused window, and nothing between the capture
+    /// and the flight ever asked whether that window was still there. Drag it
+    /// while the model is thinking and the eye is off by exactly the drag:
+    /// "after moving a window the eye flies to where the control WAS."
+    ///
+    /// Only a pure MOVE is corrected, and only for an answer that was inside
+    /// that window to begin with. A window that was also resized has re-laid-out
+    /// its contents, and no translation of the old coordinate says where the
+    /// control ended up; an answer from elsewhere on screen never belonged to
+    /// this window and must not be dragged along with it. In both cases the
+    /// uncorrected answer is returned, which is what shipped.
+    static func rectangleMovedWithTheWindowItWasFoundIn(
+        _ rectangleTheModelAnsweredWith: CGRect,
+        whereThatWindowWasWhenTheScreenWasCaptured: CGRect?,
+        whereThatWindowIsNow: CGRect?
+    ) -> CGRect {
+        // The app's own smallest meaningful distance, borrowed rather than
+        // invented: below it two answers are already the same answer, and a
+        // window reported a fraction of a point away has not moved.
+        let farEnoughToMatter = GuideEyeFlightMemo.distanceAtWhichTwoAnswersAreTheSameAnswer
+        guard
+            let windowWhenCaptured = whereThatWindowWasWhenTheScreenWasCaptured,
+            let windowNow = whereThatWindowIsNow,
+            windowWhenCaptured.contains(
+                CGPoint(x: rectangleTheModelAnsweredWith.midX, y: rectangleTheModelAnsweredWith.midY)
+            ),
+            abs(windowNow.width - windowWhenCaptured.width) <= farEnoughToMatter,
+            abs(windowNow.height - windowWhenCaptured.height) <= farEnoughToMatter
+        else {
+            return rectangleTheModelAnsweredWith
+        }
+
+        let howFarTheWindowMoved = CGPoint(
+            x: windowNow.minX - windowWhenCaptured.minX,
+            y: windowNow.minY - windowWhenCaptured.minY
+        )
+        guard abs(howFarTheWindowMoved.x) > farEnoughToMatter
+            || abs(howFarTheWindowMoved.y) > farEnoughToMatter
+        else {
+            return rectangleTheModelAnsweredWith
+        }
+        return rectangleTheModelAnsweredWith.offsetBy(
+            dx: howFarTheWindowMoved.x, dy: howFarTheWindowMoved.y
+        )
+    }
+
     /// Resolve a decision into a place, or explain why there is not one.
     ///
     /// `mayAskTheModel` is the caller's per-step budget: the free rungs (a
@@ -304,7 +396,22 @@ enum GuideStepPointingCoordinator {
         // over the top of it hides that rather than fixing it.
         if found == nil, target.provenance == .inferred, mayAskTheModel {
             theModelWasAsked = true
-            found = await locator.locateByAskingTheModel(stepTitle: stepTitle, stepBody: stepBody)
+            // Read BEFORE the ask, because this is the one rung slow enough for
+            // the screen to change underneath it and afterwards there is no way
+            // to learn where a window that has since moved used to be.
+            let windowTheAnswerWillDescribe = windowThePointingCaptureWillBeCroppedTo(using: locator)
+            let rectangleTheModelAnsweredWith = await locator.locateByAskingTheModel(
+                stepTitle: stepTitle, stepBody: stepBody
+            )
+            found = rectangleTheModelAnsweredWith.map {
+                rectangleMovedWithTheWindowItWasFoundIn(
+                    $0,
+                    whereThatWindowWasWhenTheScreenWasCaptured: windowTheAnswerWillDescribe?.frame,
+                    whereThatWindowIsNow: windowTheAnswerWillDescribe.flatMap {
+                        locator.locateFocusedWindow(ofApp: $0.bundleIdentifier)
+                    }
+                )
+            }
         }
 
         guard let rectangle = found else {
@@ -423,6 +530,31 @@ struct SystemGuideTargetLocator: GuideTargetLocating {
             return nil
         }
         return frame(of: windowThatIsActuallyUp)
+    }
+
+    func locateFocusedWindow(ofApp bundleIdentifier: String) -> CGRect? {
+        guard
+            AXIsProcessTrusted(),
+            let application = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first
+        else {
+            return nil
+        }
+        let element = AXUIElementCreateApplication(application.processIdentifier)
+        var focusedWindowValue: AnyObject?
+        guard
+            AXUIElementCopyAttributeValue(
+                element, kAXFocusedWindowAttribute as CFString, &focusedWindowValue
+            ) == .success,
+            let focusedWindowValue,
+            CFGetTypeID(focusedWindowValue) == AXUIElementGetTypeID()
+        else {
+            return nil
+        }
+        // No minimised check, unlike `locateWindow(ofApp:)` above: a window in
+        // the Dock is not the one the app has focused, and the reference read of
+        // this attribute — `SystemWatchLoopLocalSignalSource`, which is what the
+        // capture crop actually goes through — makes no such check either.
+        return frame(of: (focusedWindowValue as! AXUIElement))
     }
 
     private func isMinimised(_ window: AXUIElement) -> Bool {

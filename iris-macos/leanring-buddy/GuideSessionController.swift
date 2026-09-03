@@ -1519,6 +1519,13 @@ final class GuideSessionController: ObservableObject {
     /// The reader tapped "Try again" on a step Iris surfaced. Re-run the step's
     /// command through the runner from the top; if it works this time, Iris
     /// carries on with the rest of the install on its own.
+    ///
+    /// The reader has usually just gone and done something in their own
+    /// Terminal — installing the tool the step could not find is the commonest
+    /// reason this button gets tapped — so the shell's environment is reloaded
+    /// first. Without that, the retry re-asks a shell whose PATH was fixed when
+    /// it spawned, and the same command fails the same way however many times
+    /// it is tapped.
     func retryTheSurfacedStep() {
         guard autopilotIsRunning, !autopilotIsDriving,
               let runner = autopilotRunner,
@@ -1532,6 +1539,7 @@ final class GuideSessionController: ObservableObject {
         let stepIndex = currentStepIndex
         let totalSteps = branch.steps.count
         Task {
+            await runner.reloadTheReadersEnvironmentIntoTheShell()
             let result = await runner.executeStepCommand(
                 step: step, stepIndex: stepIndex, totalSteps: totalSteps
             )

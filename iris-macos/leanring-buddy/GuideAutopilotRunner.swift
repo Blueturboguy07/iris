@@ -379,6 +379,31 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         shellSession.tailForTheModel()
     }
 
+    /// Re-loads the reader's own shell environment into the long-lived session,
+    /// so a tool they installed since the last attempt can be found without
+    /// restarting Iris. See
+    /// `GuideAutopilotShellSession.reloadTheReadersEnvironmentCommand` for what
+    /// that means and why the shell is refreshed rather than rebuilt.
+    ///
+    /// For the "Try again" path only. A step that has not failed yet has no
+    /// reason to pay for this, and sourcing a heavy dotfile stack is not free.
+    ///
+    /// Sent straight to the session rather than through `runApproved`, for the
+    /// same reason `moveInto`'s `cd` is: this is machinery, not work the reader
+    /// is waiting to watch, so it must not spend the pacing floor. Its outcome
+    /// is deliberately unexamined — whether the tool is there now is answered
+    /// by the step that follows, not by this.
+    func reloadTheReadersEnvironmentIntoTheShell() async {
+        guard let approved = GuideAutopilotRiskAssessment.approve(
+            GuideAutopilotShellSession.reloadTheReadersEnvironmentCommand
+        ) else { return }
+        // A cold dotfile stack legitimately takes seconds (nvm, compinit), so
+        // it gets the same budget a fresh shell's startup gets.
+        _ = await shellSession.run(
+            approved, deadline: GuideAutopilotShellSession.readyDeadline
+        )
+    }
+
     // MARK: - Running one step
 
     func executeStepCommand(

@@ -846,6 +846,34 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
         return base
     }()
 
+    /// Re-does, inside an ALREADY-RUNNING shell, what a fresh spawn does to that
+    /// shell's environment: sources the generated rc above (which loads the
+    /// reader's real .zshenv/.zprofile/.zshrc and then re-applies the no-ZLE,
+    /// no-prompt settings the driver depends on), re-applies the preamble's
+    /// pager exports — in a fresh shell those land AFTER the rc, so without
+    /// them a reader's own PAGER would win here and a driven `git log` would
+    /// wait forever on a pager nobody can see — and empties zsh's command hash
+    /// so a newly installed tool is looked up again instead of being answered
+    /// from the table built at startup.
+    ///
+    /// It exists because this shell's environment is otherwise built exactly
+    /// once, at spawn. A reader whose step failed for a missing tool goes and
+    /// installs it — bun's official installer drops a binary in ~/.bun/bin and
+    /// appends an `export PATH=…` to ~/.zshrc — and a shell that has been
+    /// running since before that happened cannot see either. Quitting and
+    /// relaunching Iris was the only thing that ever picked it up.
+    ///
+    /// Re-sourcing rather than rebuilding is the point: the session is one
+    /// long-lived shell precisely because steps inherit their predecessors'
+    /// `cd` and exports, and a rebuild drops all of it. Only the escape hatch,
+    /// which has already handed the step back to the reader, rebuilds.
+    ///
+    /// A non-zsh login shell has no ZDOTDIR, so the `[ -r … ]` test simply
+    /// fails and the line degrades to the pager exports and `hash -r`.
+    nonisolated static let reloadTheReadersEnvironmentCommand =
+        #"[ -r "$ZDOTDIR/.zshrc" ] && source "$ZDOTDIR/.zshrc"; "#
+        + "export PAGER=cat GIT_PAGER=cat LESS=-FRX GIT_TERMINAL_PROMPT=0; hash -r"
+
     /// Built from scratch. PATH is deliberately absent — the login shell
     /// rebuilds it — and nothing of Iris's own environment leaks through.
     nonisolated static func childEnvironment() -> [String: String] {

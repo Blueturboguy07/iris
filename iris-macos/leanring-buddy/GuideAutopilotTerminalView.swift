@@ -102,6 +102,15 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
     /// of shutting the Mac down; made unconditional after a reader reported
     /// that it closed nothing at a manual gate ("you can't close out of it").
     let onEscapeHatch: () -> Void
+    /// The yellow traffic light — fold the window this terminal is hosted in
+    /// away and leave the run alone. Supplied by whoever owns that window
+    /// (`GuideAutopilotTakeoverController`), because folding it away is its job.
+    ///
+    /// nil where there is no window to fold: the under-the-card pane in the eye
+    /// bar is the surface a minimize folds BACK to, so its yellow dot stays the
+    /// decoration it has always been rather than becoming one more light that
+    /// looks live and does nothing.
+    var onMinimize: (() -> Void)?
     /// nil = the transcript area fills whatever its container gives it (the
     /// takeover window, a fixed frame). A value = that fixed height, for the
     /// under-the-card pane whose container grows to fit and would otherwise
@@ -109,6 +118,7 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
     let fixedTranscriptHeight: CGFloat?
 
     @State private var escapeHatchIsHovered = false
+    @State private var minimizeIsHovered = false
     @State private var helpIsHovered = false
 
     var body: some View {
@@ -134,7 +144,7 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
         ZStack {
             HStack(spacing: 7) {
                 escapeHatchTrafficLight
-                Circle().fill(GuideAutopilotTerminalTheme.trafficYellow).frame(width: 11, height: 11)
+                minimizeTrafficLight
                 Circle().fill(GuideAutopilotTerminalTheme.trafficGreen).frame(width: 11, height: 11)
                 Spacer(minLength: 0)
                 helpButton
@@ -189,7 +199,7 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
     }
 
     /// The red traffic light is a real button, and shows the × on hover the
-    /// way the genuine article does. The yellow and green stay decoration.
+    /// way the genuine article does. Green stays decoration.
     private var escapeHatchTrafficLight: some View {
         Button(action: onEscapeHatch) {
             ZStack {
@@ -213,6 +223,45 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
         .pointerCursor()
         .nativeTooltip("Close — stops the install, keeps your place in the guide")
         .reportsFrameAsATakeoverControl()
+    }
+
+    /// The yellow traffic light: a real button wherever there is a window to
+    /// fold away — showing the − on hover the way the genuine article does —
+    /// and the paint it has always been where there is not (see `onMinimize`).
+    ///
+    /// "No minimize on the takeover terminal (yellow light)", reported on 0.9.6
+    /// and again on 0.9.7. Parked on a manual step ("Plug in your iPhone and
+    /// press play"), the reader spent thirteen minutes with this window sitting
+    /// over the Xcode they had just been told to work in, because the only
+    /// light that did anything was the red one — and that ENDS the install they
+    /// were waiting on. Nothing in the run needed to stop; the window just
+    /// needed to get out of the way, which is what every Mac user already knows
+    /// yellow is for.
+    @ViewBuilder private var minimizeTrafficLight: some View {
+        if let onMinimize {
+            Button(action: onMinimize) {
+                ZStack {
+                    Circle().fill(GuideAutopilotTerminalTheme.trafficYellow)
+                        .frame(width: 11, height: 11)
+                    Image(systemName: "minus")
+                        .font(.system(size: 6, weight: .heavy))
+                        .foregroundColor(Color.black.opacity(0.55))
+                        .opacity(minimizeIsHovered ? 1 : 0)
+                }
+                // The same 22pt hit target the red light carries, for the reason
+                // its own comment gives: an 11pt dot in the title strip is hard
+                // to land on.
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { hovering in minimizeIsHovered = hovering }
+            .pointerCursor()
+            .nativeTooltip("Minimize — the install keeps running")
+            .reportsFrameAsATakeoverControl()
+        } else {
+            Circle().fill(GuideAutopilotTerminalTheme.trafficYellow).frame(width: 11, height: 11)
+        }
     }
 
     /// The transcript scrolls and follows its own tail. It used to be a plain

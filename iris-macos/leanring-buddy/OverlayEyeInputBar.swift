@@ -598,9 +598,9 @@ struct OverlayEyeInputBarView: View {
         VStack(alignment: .leading, spacing: 8) {
             if theCenteredTakeoverIsCoveringTheScreen {
                 // While the centered takeover runs the install, the corner guide
-                // card, the edit card and the under-the-card terminal would each
-                // be a cluttered second copy of what the takeover is already
-                // showing. Those stay hidden.
+                // card and the under-the-card terminal would each be a cluttered
+                // second copy of what the takeover is already showing. Those stay
+                // hidden.
                 //
                 // The ASK FIELD does not, and hiding it was a real bug: "if I
                 // have a question during setup, like how to set up the api key
@@ -609,8 +609,19 @@ struct OverlayEyeInputBarView: View {
                 // not be asked one. The bar sits at `.screenSaver` and the
                 // takeover panel at `.floating`, so the field draws above it.
                 //
-                // Nothing else is drawn, so the outer VStack still collapses to
-                // just this rather than leaving an empty glass square.
+                // NEITHER DOES AN EDIT THE READER ASKED FOR, and hiding that was
+                // the same bug again: "Edit this app click shows nothing." A
+                // guide parked at a manual step ("Plug in your iPhone and press
+                // play") keeps this flag true for as long as the reader takes,
+                // and it was swallowing the whole surface of an edit on a
+                // COMPLETELY DIFFERENT app — the pick landed and had nowhere to
+                // appear. The card belongs to the edit, so only the edit's own
+                // takeover suppresses it (see the card's own definition).
+                //
+                // With no edit on screen that card is an `EmptyView`, so nothing
+                // else is drawn and the outer VStack still collapses to just the
+                // field rather than leaving an empty glass square.
+                onDemandEditCardWhenARunOwnsTheSurface
                 textFieldRow
                 whateverTheExchangeIsUpTo
             } else {
@@ -621,51 +632,7 @@ struct OverlayEyeInputBarView: View {
                 // and clears without the bar being rebuilt.
                 MaintainAskCard(coordinator: companionManager.maintainIncidentCoordinator)
 
-                // The user-initiated on-demand edit card: describe → consent →
-                // review-and-keep → result. It observes its own coordinator, so
-                // it appears the moment an app is picked (from here or the
-                // settings panel) and clears itself when the flow ends. Driven
-                // by a pending-edit coordinator, NOT the maintain ask.
-                // The describe step is drawn by the bar itself, as one composer
-                // with the ask field (see `appComposer`). Every other phase is a
-                // run in flight and the card owns the whole surface.
-                if onDemandEditCoordinator.phase != .describe {
-                    OnDemandEditCard(
-                        coordinator: onDemandEditCoordinator,
-                        preselectedKind: companionManager.onDemandEditPreselectedKind
-                    )
-                    // WHY A PLATE UNDER A TERMINAL CARD. The card's text is
-                    // `.textSelection(.enabled)`, but a selection the reader
-                    // cannot copy is not much of a gift: this panel's
-                    // `canBecomeKey` is false for every phase except "a question
-                    // is being composed", and a window that cannot become key is
-                    // never sent a key event, so ⌘C has nowhere to go. (Measured:
-                    // SwiftUI does install an Edit menu with Copy for an
-                    // accessory app, so the key window is the only thing
-                    // missing.) Clicking a finished card asks for the keyboard
-                    // back, which is what makes ⌘C reach the selection.
-                    //
-                    // It is a `.background`, not an `.overlay`, so the card's own
-                    // buttons — Copy, "Set aside and continue", Undo — take their
-                    // clicks first and only the inert areas fall through here.
-                    //
-                    // GATED HARD, on purpose. Only the three terminal phases,
-                    // and only while the bar is not already holding the keyboard.
-                    // A bar that takes the keyboard whenever it feels like it is
-                    // the "randomly wouldn't let me type in it" bug, which is why
-                    // `releaseTheKeyboardSoTheReadersOwnAppGetsItBack` exists at
-                    // all. Nothing here moves the caret into the text field
-                    // either: the reader asked to copy, not to write.
-                    .background {
-                        if theEditCardHasAFinishedResultToRead {
-                            Color.clear
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    onTheBarShouldTakeTheKeyboardBack()
-                                }
-                        }
-                    }
-                }
+                onDemandEditCardWhenARunOwnsTheSurface
 
                 // What Iris already did to an app this session. Without it the
                 // reader who got a real result — Iris wrote and committed a
@@ -791,6 +758,61 @@ struct OverlayEyeInputBarView: View {
             onDemandEditCoordinator.consumeDescribePrefill()
         }
         .animation(DS.Motion.contentIn, value: exchange.phase)
+    }
+
+    /// The user-initiated on-demand edit card: describe → consent →
+    /// review-and-keep → result. It observes its own coordinator, so it appears
+    /// the moment an app is picked (from here or the settings panel) and clears
+    /// itself when the flow ends. Driven by a pending-edit coordinator, NOT the
+    /// maintain ask.
+    /// The describe step is drawn by the bar itself, as one composer with the
+    /// ask field (see `appComposer`). Every other phase is a run in flight and
+    /// the card owns the whole surface.
+    ///
+    /// Drawn from BOTH branches of the body, which is why it lives here rather
+    /// than inline: the only takeover that makes this card a second copy of
+    /// itself is the EDIT RUN'S OWN, and that is the one this checks. A guide's
+    /// takeover is about a different install and must not hide it.
+    @ViewBuilder
+    private var onDemandEditCardWhenARunOwnsTheSurface: some View {
+        if onDemandEditCoordinator.phase != .describe,
+           !companionManager.onDemandEditTakeoverIsUp {
+            OnDemandEditCard(
+                coordinator: onDemandEditCoordinator,
+                preselectedKind: companionManager.onDemandEditPreselectedKind
+            )
+            // WHY A PLATE UNDER A TERMINAL CARD. The card's text is
+            // `.textSelection(.enabled)`, but a selection the reader
+            // cannot copy is not much of a gift: this panel's
+            // `canBecomeKey` is false for every phase except "a question
+            // is being composed", and a window that cannot become key is
+            // never sent a key event, so ⌘C has nowhere to go. (Measured:
+            // SwiftUI does install an Edit menu with Copy for an
+            // accessory app, so the key window is the only thing
+            // missing.) Clicking a finished card asks for the keyboard
+            // back, which is what makes ⌘C reach the selection.
+            //
+            // It is a `.background`, not an `.overlay`, so the card's own
+            // buttons — Copy, "Set aside and continue", Undo — take their
+            // clicks first and only the inert areas fall through here.
+            //
+            // GATED HARD, on purpose. Only the three terminal phases,
+            // and only while the bar is not already holding the keyboard.
+            // A bar that takes the keyboard whenever it feels like it is
+            // the "randomly wouldn't let me type in it" bug, which is why
+            // `releaseTheKeyboardSoTheReadersOwnAppGetsItBack` exists at
+            // all. Nothing here moves the caret into the text field
+            // either: the reader asked to copy, not to write.
+            .background {
+                if theEditCardHasAFinishedResultToRead {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            onTheBarShouldTakeTheKeyboardBack()
+                        }
+                }
+            }
+        }
     }
 
     /// What the guide card should show, or nil when no guide is open.
@@ -950,11 +972,6 @@ struct OverlayEyeInputBarView: View {
     /// anyone asked a single question. On a bar that had already answered
     /// something, the app's headline feature had no entry point at all.
     private var anAppIsOpenForEditing: Bool {
-        // Not while a takeover is running. The field is kept alive there so a
-        // reader can ask a question mid-install, and the app being installed is
-        // frequently the frontmost one — without this, the composer would offer
-        // to start an EDIT run on it in the middle of its own install.
-        guard !theCenteredTakeoverIsCoveringTheScreen else { return false }
         // Not while an edit is actually in flight. The composer's only move for
         // a request typed at that moment is to START one, which goes through
         // `pickApp` and resets the flow the reader is looking at — so typing a
@@ -965,8 +982,20 @@ struct OverlayEyeInputBarView: View {
         // them nothing. (Refining a plan in place is a feature this does not
         // build; it only stops the destruction.)
         guard !anEditIsInFlight else { return false }
-        return onDemandEditCoordinator.phase == .describe
-            || companionManager.frontmostEditableAppForTheComposer != nil
+        // An app the reader PICKED is theirs, whatever else is on screen. This
+        // used to sit behind the takeover guard below, so a guide parked at a
+        // manual step hid the composer for an edit on a different app that had
+        // just been asked for by name: the click "showed nothing" because the
+        // one surface the `.describe` phase draws was gated on somebody else's
+        // install.
+        if onDemandEditCoordinator.phase == .describe { return true }
+        // The INFERRED half is still not offered while a takeover is running.
+        // The field is kept alive there so a reader can ask a question
+        // mid-install, and the app being installed is frequently the frontmost
+        // one — without this, the composer would offer to start an EDIT run on
+        // it in the middle of its own install.
+        guard !theCenteredTakeoverIsCoveringTheScreen else { return false }
+        return companionManager.frontmostEditableAppForTheComposer != nil
     }
 
     /// True between the reader approving a plan and the exchange being closed —

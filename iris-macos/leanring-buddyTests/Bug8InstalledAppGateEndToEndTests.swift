@@ -754,9 +754,13 @@ struct Bug8InstalledAppGateEndToEndTests {
             "this Mac needs at least one installed iOS runtime for this leg to mean anything"
         )
 
+        // Passed in exactly the way CompanionManager passes it — measured
+        // first, off the main actor, then handed over — because summary has
+        // no default that would measure on the caller's thread.
         let facts = try #require(AssistantMachineFacts.summary(
             publikBaseURL: "https://publikhq.com",
-            installedCatalogApps: ["kneecap"]
+            installedCatalogApps: ["kneecap"],
+            iosSimulatorRuntimes: runtimesThisMacReallyHas
         ))
 
         #expect(facts.contains("xcodebuild"),

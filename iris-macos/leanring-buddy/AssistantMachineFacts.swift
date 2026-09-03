@@ -45,9 +45,14 @@ enum AssistantMachineFacts {
     ///
     /// `installedCatalogApps` is passed in rather than looked up so this stays
     /// free of the app-inventory actor and testable on its own.
+    /// `iosSimulatorRuntimes` is passed in for that reason and one more:
+    /// measuring it spawns a process, which belongs off the main actor. It
+    /// defaults to measuring so a caller with nothing in hand still gets the
+    /// fact.
     static func summary(
         publikBaseURL: String?,
-        installedCatalogApps: [String]
+        installedCatalogApps: [String],
+        iosSimulatorRuntimes: [String]? = AssistantMachineFacts.installedIosSimulatorRuntimes()
     ) -> String? {
         var lines: [String] = []
 
@@ -75,6 +80,19 @@ enum AssistantMachineFacts {
             lines.append("NOT installed: \(absent.joined(separator: ", ")).")
         }
 
+        // Xcode being installed says nothing about whether anything can be RUN
+        // on it, and the two are reported together here because the model reads
+        // them together. Asked about getting a build onto a phone on a Mac that
+        // had Xcode and no runtime at all, the assistant spent thirteen turns
+        // inventing a device dropdown, until a screenshot happened to show
+        // "Downloading iOS 26.5… 632.9 MB of 8.52 GB" (cofounder Test 9). It was
+        // told `xcodebuild` was here and had no way to learn the rest.
+        if let iosSimulatorRuntimes {
+            lines.append(iosSimulatorRuntimes.isEmpty
+                ? "iOS Simulator runtimes: NONE installed — nothing can run in the Simulator until one is downloaded, which is several GB."
+                : "iOS Simulator runtimes: \(iosSimulatorRuntimes.joined(separator: ", ")).")
+        }
+
         if let publikBaseURL, !publikBaseURL.isEmpty {
             lines.append("Publik is at \(publikBaseURL) — use that, never guess a publik url.")
         }
@@ -88,6 +106,32 @@ enum AssistantMachineFacts {
             Prefer them over anything you assume about a typical Mac.
             \(lines.joined(separator: "\n"))]
             """
+    }
+
+    /// The iOS Simulator runtimes this Mac can actually run a build on: `[]`
+    /// when Xcode is here but none is installed, and nil when the question does
+    /// not apply (no Xcode) or `simctl` could not answer it — an empty list and
+    /// "I don't know" are the two answers the model must not confuse.
+    ///
+    /// The one fact in this file that is not a PATH walk, so it is deliberately
+    /// separate from `summary` and blocking: callers run it off the main actor.
+    static func installedIosSimulatorRuntimes() -> [String]? {
+        guard isOnThePath("xcodebuild") else { return nil }
+        guard let listing = try? ToolVersionService.runCommand(
+            executablePath: "/usr/bin/xcrun",
+            arguments: ["simctl", "list", "runtimes", "-j"],
+            environment: nil,
+            workingDirectory: nil
+        ), listing.terminationStatus == 0 else { return nil }
+        let decoded = try? JSONSerialization.jsonObject(with: listing.standardOutput)
+        guard let root = decoded as? [String: Any],
+              let runtimes = root["runtimes"] as? [[String: Any]] else { return nil }
+        return runtimes.compactMap { runtime in
+            guard runtime["isAvailable"] as? Bool == true,
+                  let name = runtime["name"] as? String,
+                  name.hasPrefix("iOS") else { return nil }
+            return name
+        }
     }
 
     /// Whether an executable of this name is on the current PATH.

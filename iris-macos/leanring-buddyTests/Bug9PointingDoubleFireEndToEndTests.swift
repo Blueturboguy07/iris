@@ -514,11 +514,12 @@ struct Bug9PointingDoubleFireEndToEndTests {
         // The correction reads the focused window of the FRONTMOST app, and
         // skips itself when there is no frontmost app to name — so a runner with
         // nothing frontmost would pass this test for the wrong reason.
+        let frontmostBundleIdentifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         try #require(
-            NSWorkspace.shared.frontmostApplication?.bundleIdentifier != nil,
+            frontmostBundleIdentifier != nil && frontmostBundleIdentifier != Bundle.main.bundleIdentifier,
             """
-            no app is frontmost on this Mac, so the pointing capture has no window to crop to and nothing here \
-            is being measured
+            no app other than this test runner is frontmost on this Mac, so the pointing capture has no \
+            window to crop to and nothing here is being measured
             """
         )
 

@@ -738,6 +738,23 @@ struct Bug8InstalledAppGateEndToEndTests {
         }
     }
 
+    /// The app's own probe — the one `CompanionManager` measures off the main
+    /// actor — against an independent reading of the same tool: it names every
+    /// installed iOS runtime, and ONLY iOS ones, because a watchOS or tvOS
+    /// runtime would let the assistant promise an iPhone build it cannot run.
+    @Test("the app's own runtime probe agrees with simctl and names only iOS runtimes")
+    func theAppsOwnRuntimeProbeAgreesWithSimctl() throws {
+        try #require(AssistantMachineFacts.isOnThePath("xcodebuild"),
+                     "this test is about a Mac with the Xcode toolchain on it")
+        let runtimesThisMacReallyHas = try Self.iosSimulatorRuntimesThisMacReallyHas()
+        let runtimesTheProbeReports = try #require(
+            AssistantMachineFacts.installedIosSimulatorRuntimes(),
+            "with Xcode installed the probe must answer, never say 'unknown'"
+        )
+        #expect(Set(runtimesTheProbeReports) == Set(runtimesThisMacReallyHas))
+        #expect(runtimesTheProbeReports.allSatisfy { $0.hasPrefix("iOS") })
+    }
+
     /// THE SECOND HALF, on the real path: the fact block chat is handed before
     /// it answers must say what this Mac can actually RUN an iOS build on, not
     /// only that a toolchain is installed. Called exactly the way

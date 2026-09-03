@@ -817,6 +817,14 @@ struct Bug3StaleShellPathReproTests {
             shell.exitStatuses(of: "bun install").count >= 2,
             "Try again must actually re-run the step's command"
         )
+        // The invariant the fix must keep: one shell for the whole install, so
+        // later steps still see earlier steps' `cd` and env. Finding the tool
+        // by quietly spawning a second shell would pass the assertion below
+        // for the wrong reason.
+        #expect(
+            shell.numberOfShellProcessesSpawned == 1,
+            "Try again must reuse the guide's one persistent shell, not spawn another"
+        )
         #expect(
             shell.exitStatuses(of: "bun install")[1] == 0,
             """

@@ -307,6 +307,9 @@ struct Bug6EditScreenshotDeliveryEndToEndTests {
     /// and ask the real coordinator whether it has the source at all.
     @Test func theProductionWiringGivesTheCoordinatorTheReadersScreenToFallBackOn() {
         let companionManager = CompanionManager()
+        // A real manager starts real hotkey and overlay machinery; stop it so
+        // the test process does not keep it alive for every later suite.
+        defer { companionManager.stop() }
         #expect(
             companionManager.onDemandEditCoordinator.captureReadersScreenPNGForFallback != nil,
             """

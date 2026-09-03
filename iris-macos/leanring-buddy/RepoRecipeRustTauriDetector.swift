@@ -135,8 +135,9 @@ nonisolated struct RepoRecipeRustTauriDetector: EcosystemDetector {
         let buildCommandLine: String
         let buildConfidence: Double
         if let beforeBuildCommand {
+            let runnableHook = hookPrecededByAnInstallAllowedToRunBuildScripts(beforeBuildCommand)
             let hookInvocation = hookWorkingSubdirectory
-                .map { "(cd '\($0)' && \(beforeBuildCommand))" } ?? beforeBuildCommand
+                .map { "(cd '\($0)' && \(runnableHook))" } ?? runnableHook
             buildCommandLine = "\(hookInvocation) && \(cargoReleaseBuildCommandLine)"
             buildConfidence = 0.95
         } else {
@@ -179,6 +180,35 @@ nonisolated struct RepoRecipeRustTauriDetector: EcosystemDetector {
             runtimeShapeContribution: .pureLocalApp,
             matched: true
         )
+    }
+
+    /// The frontend hook, preceded by the install it needs when — and only
+    /// when — the project drives it with pnpm.
+    ///
+    /// pnpm refuses to install a dependency whose build script it has not been
+    /// told to trust (ERR_PNPM_IGNORED_BUILDS), and a recent pnpm runs its own
+    /// dependency-status install before `pnpm <script>`. So on a FRESH clone —
+    /// which is exactly what a verification build compiles — the project's own
+    /// hook dies inside an install pnpm started for itself, before one line of
+    /// the change is compiled, and the reader is told their change does not
+    /// build. (whimprflow, Test 10, Sep 2 2026: `(cd 'ui' && pnpm build) && …`
+    /// failed on an unapproved esbuild postinstall.)
+    ///
+    /// That approval lives in the reader's own tree (`pnpm-workspace.yaml`) or
+    /// their global store, and a verification build must not depend on either
+    /// being pre-arranged. `pnpm approve-builds` cannot supply it: it renders a
+    /// picker and approves nothing in the non-TTY child Iris spawns. An
+    /// explicit install carrying the approval as a FLAG does — it writes
+    /// nothing to the reader's tree, and a pnpm too old to know the flag
+    /// ignores it (that pnpm only warns about ignored builds anyway).
+    ///
+    /// npm, yarn and bun have no such gate, so their hooks are left exactly as
+    /// the project wrote them.
+    private static func hookPrecededByAnInstallAllowedToRunBuildScripts(
+        _ hookCommandLine: String
+    ) -> String {
+        guard hookCommandLine.split(separator: " ").first == "pnpm" else { return hookCommandLine }
+        return "pnpm install --config.dangerously-allow-all-builds=true && \(hookCommandLine)"
     }
 
     /// Where the beforeBuildCommand hook runs, as a repo-relative subdirectory —

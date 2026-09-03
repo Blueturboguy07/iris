@@ -1165,15 +1165,16 @@ final class OnDemandEditCoordinator: ObservableObject {
         // often a space (` M path`), so trimming the block before parsing it
         // eats the first character of the first path — which is not
         // hypothetical: the first cut of this did exactly that and told a test
-        // reader their dirty file was "cripts/dev.sh". Only the emptiness test
-        // gets a trimmed copy.
-        let porcelainOutput = status?.outputTail ?? ""
-        let theCloneIsDirty = !porcelainOutput
-            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        if theCloneIsDirty {
-            let dirtyTree = OnDemandEditDirtyTreeReport.read(
-                porcelainOutput: porcelainOutput, repoRootPath: resolvedClonePath
-            )
+        // reader their dirty file was "cripts/dev.sh".
+        //
+        // The report also decides whether the tree counts as dirty AT ALL,
+        // because it is the piece that knows which paths are a package
+        // manager's own bookkeeping rather than the reader's work — see
+        // `isDependencyManagerBookkeeping`.
+        let dirtyTree = OnDemandEditDirtyTreeReport.read(
+            porcelainOutput: status?.outputTail ?? "", repoRootPath: resolvedClonePath
+        )
+        if dirtyTree.isDirty {
             let refusal = dirtyTree.refusalSentence(appName: activeAppName ?? slug)
             editRunner.note(refusal)
             editRunner.finishStopped()
@@ -3328,8 +3329,11 @@ struct OnDemandEditDirtyTreeReport: Equatable, Sendable {
         entries.map(\.path).joined(separator: ", ")
     }
 
-    /// Reads what git already answered. Pure apart from one `stat` per named
-    /// path: nothing here can change a byte of the reader's repository.
+    /// Reads what git already answered, and keeps only the paths that are the
+    /// reader's own work — see `isDependencyManagerBookkeeping`. Read-only: one
+    /// `stat` per named path, plus one `git show` for a workspace file whose
+    /// authorship has to be settled. Nothing here can change a byte of the
+    /// reader's repository.
     static func read(
         porcelainOutput: String,
         repoRootPath: String,
@@ -3371,6 +3375,11 @@ struct OnDemandEditDirtyTreeReport: Equatable, Sendable {
                 path = String(path.dropFirst().dropLast())
             }
             guard !path.isEmpty else { continue }
+            // What a package manager wrote for ITSELF is not the reader's work
+            // and is never a reason to refuse to start.
+            guard !isDependencyManagerBookkeeping(
+                repoRelativePath: path, repoRootPath: repoRootPath
+            ) else { continue }
             let absolutePath = (repoRootPath as NSString).appendingPathComponent(path)
             let lastModified = (try? fileManager.attributesOfItem(atPath: absolutePath))?[.modificationDate] as? Date
             entries.append(
@@ -3378,6 +3387,121 @@ struct OnDemandEditDirtyTreeReport: Equatable, Sendable {
             )
         }
         return OnDemandEditDirtyTreeReport(entries: entries)
+    }
+
+    /// Files a package manager writes and rewrites for itself. Every one is
+    /// generated output the tool remakes on demand, so none is worth stopping a
+    /// run over — Test 9's kneecap checkout was refused for a `bun.lock` written
+    /// the second `bun install` succeeded.
+    private static let generatedDependencyLockFileNames: Set<String> = [
+        "pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lock", "bun.lockb", "Cargo.lock",
+    ]
+
+    /// pnpm's workspace file is NOT generated output — the reader's own package
+    /// globs and catalogs live in it — but pnpm writes its build-APPROVAL
+    /// bookkeeping into that same file, unasked, which is how Test 10's reader
+    /// came to be refused over two lines he had never typed:
+    ///
+    ///     allowBuilds:
+    ///       esbuild: set this to true or false
+    ///
+    /// So this one file is bookkeeping only while the change is confined to
+    /// those keys; a hand edit anywhere else in it is real work and still stops
+    /// the run.
+    private static let pnpmWorkspaceFileName = "pnpm-workspace.yaml"
+    private static let pnpmBuildApprovalKeys: Set<String> = [
+        "allowBuilds", "onlyBuiltDependencies", "ignoredBuiltDependencies",
+    ]
+
+    /// Whether one dirty path is a package manager's own bookkeeping rather
+    /// than something the reader wrote. The dirty-tree refusal exists because
+    /// the engine reverts with `git clean -fd`, which would destroy a reader's
+    /// work — and it destroys nothing by cleaning a lockfile the next install
+    /// writes again.
+    private static func isDependencyManagerBookkeeping(
+        repoRelativePath: String, repoRootPath: String
+    ) -> Bool {
+        let fileName = (repoRelativePath as NSString).lastPathComponent
+        if generatedDependencyLockFileNames.contains(fileName) { return true }
+        guard fileName == pnpmWorkspaceFileName else { return false }
+        return pnpmWorkspaceChangeIsOnlyBuildApproval(
+            repoRelativePath: repoRelativePath, repoRootPath: repoRootPath
+        )
+    }
+
+    /// True when nothing but pnpm's build-approval keys differs between the
+    /// committed workspace file and the one on disk. Asked of git rather than
+    /// guessed from the file's current contents: a reader whose committed file
+    /// ALREADY carries an `allowBuilds:` block and who then edits their package
+    /// globs has done real work, and a "does it mention allowBuilds" test would
+    /// wave that away.
+    private static func pnpmWorkspaceChangeIsOnlyBuildApproval(
+        repoRelativePath: String, repoRootPath: String
+    ) -> Bool {
+        let absolutePath = (repoRootPath as NSString).appendingPathComponent(repoRelativePath)
+        let blocksOnDisk = topLevelBlocks(
+            inWorkspaceYAML: (try? String(contentsOfFile: absolutePath, encoding: .utf8)) ?? ""
+        )
+        let blocksAsCommitted = topLevelBlocks(
+            inWorkspaceYAML: committedText(
+                ofRepoRelativePath: repoRelativePath, repoRootPath: repoRootPath
+            )
+        )
+        for key in Set(blocksAsCommitted.keys).union(blocksOnDisk.keys)
+        where blocksAsCommitted[key] != blocksOnDisk[key] {
+            guard pnpmBuildApprovalKeys.contains(key) else { return false }
+        }
+        return true
+    }
+
+    /// The committed text of one path, or "" when HEAD has no such file — or
+    /// when git cannot answer at all, which reads as "everything on disk is
+    /// new". That direction is the safe one: it can only make a change look
+    /// like the reader's work, never the reverse.
+    private static func committedText(
+        ofRepoRelativePath repoRelativePath: String, repoRootPath: String
+    ) -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["show", "HEAD:" + repoRelativePath]
+        process.currentDirectoryURL = URL(fileURLWithPath: repoRootPath)
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = Pipe()
+        guard (try? process.run()) != nil else { return "" }
+        // Drained before waiting: a file bigger than the pipe buffer would
+        // otherwise block git forever on a write nobody is reading.
+        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return "" }
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    /// A YAML document's top-level keys, each mapped to the block of text that
+    /// belongs to it — indentation is what nests YAML, so a line starting in
+    /// column zero opens a key and every indented line after it is part of it.
+    /// Blank lines are trimmed off a block because they say nothing, and text
+    /// before the first key is kept under the empty name, which is not an
+    /// approval key and therefore reads as the reader's own.
+    ///
+    /// Enough to answer "which top-level settings changed", which is the only
+    /// question asked of it, and it evaluates nothing.
+    private static func topLevelBlocks(inWorkspaceYAML text: String) -> [String: String] {
+        var blocksByKey: [String: String] = [:]
+        var currentKey = ""
+        for line in text.components(separatedBy: "\n") {
+            let opensATopLevelKey = !(line.first?.isWhitespace ?? true)
+            if opensATopLevelKey, let colonIndex = line.firstIndex(of: ":") {
+                currentKey = String(line[..<colonIndex]).trimmingCharacters(in: .whitespaces)
+            }
+            blocksByKey[currentKey, default: ""] += line + "\n"
+        }
+        return blocksByKey
+            .mapValues { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            // A document that opens straight into a key has no leading block,
+            // and an empty one must not read as a difference from a file that
+            // has none.
+            .filter { !($0.key.isEmpty && $0.value.isEmpty) }
     }
 
     /// The refusal the reader actually reads. It names the files and dates

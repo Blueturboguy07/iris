@@ -340,8 +340,12 @@ struct Bug5DirtyCloneRefusalEndToEndTests {
         let run = Bug5CoordinatorRun(clone: clone)
         await run.driveToTheStartOfTheRun()
 
+        // Not "the run ended well" — it cannot: the engine seam is stubbed and
+        // its `.couldNotComplete` is a terminal failure by definition. What is
+        // asserted is that the run was not turned away AT THE GATE, which is
+        // the only thing this test can honestly speak to.
         #expect(
-            run.terminalFailureReason == nil,
+            run.terminalFailureReason?.contains("stopped before touching anything") != true,
             "Iris refused to start over a file pnpm wrote: \(run.terminalFailureReason ?? "")"
         )
         #expect(

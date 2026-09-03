@@ -911,9 +911,12 @@ struct Bug8InstalledAppGateReproTests {
                      "this test is about a Mac with Xcode on it")
         let runtimesThisMacActuallyHas = try Self.iosSimulatorRuntimesOnThisMac()
 
+        // Passed in the way CompanionManager passes it — measured first, off
+        // the main actor — because summary has no default that measures.
         let facts = try #require(AssistantMachineFacts.summary(
             publikBaseURL: "https://publikhq.com",
-            installedCatalogApps: ["kneecap"]
+            installedCatalogApps: ["kneecap"],
+            iosSimulatorRuntimes: runtimesThisMacActuallyHas
         ))
 
         // Iris does tell the model Xcode is here...

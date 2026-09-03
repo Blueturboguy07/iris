@@ -3461,20 +3461,19 @@ struct OnDemandEditDirtyTreeReport: Equatable, Sendable {
     private static func committedText(
         ofRepoRelativePath repoRelativePath: String, repoRootPath: String
     ) -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["show", "HEAD:" + repoRelativePath]
-        process.currentDirectoryURL = URL(fileURLWithPath: repoRootPath)
-        let outputPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = Pipe()
-        guard (try? process.run()) != nil else { return "" }
-        // Drained before waiting: a file bigger than the pipe buffer would
-        // otherwise block git forever on a write nobody is reading.
-        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return "" }
-        return String(data: data, encoding: .utf8) ?? ""
+        // Through the module's own subprocess helper rather than a second copy
+        // of the mechanics: it drains both pipes concurrently (a file larger
+        // than a pipe buffer would otherwise block git on a write nobody is
+        // reading) and gives git a null stdin, so a git that decides to prompt
+        // cannot wait forever on a terminal this app does not have.
+        let gitResult = try? ToolVersionService.runCommand(
+            executablePath: "/usr/bin/git",
+            arguments: ["show", "HEAD:" + repoRelativePath],
+            environment: nil,
+            workingDirectory: URL(fileURLWithPath: repoRootPath)
+        )
+        guard let gitResult, gitResult.terminationStatus == 0 else { return "" }
+        return String(decoding: gitResult.standardOutput, as: UTF8.self)
     }
 
     /// A YAML document's top-level keys, each mapped to the block of text that

@@ -41,10 +41,18 @@
 //
 //  WHAT AN INTERCEPTED IMAGE DOES. It is attached to the NEXT message rather
 //  than typed into the field, because there is no way to put a picture inside a
-//  `String`. `OverlayEyePastedImageAttachment` holds exactly one, the bar draws
-//  it as a thumbnail with a remove control, and the message that follows
-//  carries it INSTEAD of the automatic screen capture — see
-//  `CompanionScreenCaptureUtility.imageryForOneChatMessage`.
+//  `String`. `OverlayEyePastedImageAttachment` holds up to a few of them, the
+//  bar draws each as a thumbnail with a remove control, and the message that
+//  follows carries them ALONGSIDE the automatic screen capture — see
+//  `CompanionScreenCaptureUtility.imageryForOneChatMessage`. (It used to carry
+//  the picture INSTEAD of the screen. Founder ruling, Sep 3 2026: "i dont want
+//  iris to read just the image attachment, it should read both my screen and
+//  the image.")
+//
+//  SINCE SEP 3 2026 THE SAME ATTACHMENT ARRIVES THREE WAYS: pasted here,
+//  dropped onto the bar (`OverlayEyeBarDropDelegate`), or picked with
+//  the bar's attach button. The type names still say "pasted" because that is
+//  where they were born; the reader helpers below serve all three.
 //
 //  WHERE THE BYTES ARE ALLOWED TO GO. Onto the model route this message uses,
 //  and nowhere else. They are never written to disk: the transcript store
@@ -57,6 +65,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - The image itself
 
@@ -128,6 +137,75 @@ enum OverlayEyePastedImageReader {
     static func imageOnThePasteboard(_ pasteboard: NSPasteboard) -> OverlayEyePastedImage? {
         guard let bitmap = bitmapOnThePasteboard(pasteboard) else { return nil }
         return sendableImage(from: bitmap)
+    }
+
+    // MARK: Dropped and picked images
+
+    /// The image file types a drop or the picker accepts: anything
+    /// `NSBitmapImageRep` decodes that the model route can carry as PNG/JPEG.
+    /// Read through the file's UTType so a `.txt` dragged by mistake is never
+    /// opened, and a `.heic` from Photos is (it decodes, and re-encodes to PNG).
+    static let imageFileTypesWorthReading: [UTType] = [.png, .jpeg, .tiff, .gif, .bmp, .heic, .heif, .webP]
+
+    /// The most images one drop, one pick, or one message carries. Four is
+    /// enough for "here are the before and after" twice over and small enough
+    /// that a 320pt bar still reads as a bar.
+    static let mostImagesOneMessageMayCarry = 4
+
+    /// Whether a drag pasteboard holds anything the bar could turn into an
+    /// attachment — asked at `draggingEntered`, before any bytes are read, so
+    /// the pointer can say "copy" or "no" honestly. A promise is counted:
+    /// its file exists only once accepted.
+    static func pasteboardCarriesSomethingAttachable(_ pasteboard: NSPasteboard) -> Bool {
+        if !imageFileURLs(onPasteboard: pasteboard).isEmpty { return true }
+        if pasteboard.availableType(from: imageTypesWorthReading) != nil { return true }
+        let promiseTypes = NSFilePromiseReceiver.readableDraggedTypes.map { NSPasteboard.PasteboardType($0) }
+        return pasteboard.availableType(from: promiseTypes) != nil
+    }
+
+    /// Everything attachable that is ALREADY on a drag pasteboard: image files
+    /// first (a Finder drag), then raw image data (a browser or Preview drag).
+    /// Promised files are not here — they arrive later, through
+    /// `OverlayEyeBarDropDelegate`.
+    static func imagesOnADragPasteboard(_ pasteboard: NSPasteboard) -> [OverlayEyePastedImage] {
+        let imagesInDroppedFiles = imagesInFiles(imageFileURLs(onPasteboard: pasteboard))
+        if !imagesInDroppedFiles.isEmpty { return imagesInDroppedFiles }
+        if let imageData = imageOnThePasteboard(pasteboard) { return [imageData] }
+        return []
+    }
+
+    /// Reads each file that decodes as an image, in the order given, stopping
+    /// at `mostImagesOneMessageMayCarry`. A file that is not an image, or that
+    /// cannot be read, is skipped rather than failing the whole drop.
+    static func imagesInFiles(_ fileURLs: [URL]) -> [OverlayEyePastedImage] {
+        var images: [OverlayEyePastedImage] = []
+        for fileURL in fileURLs {
+            guard images.count < mostImagesOneMessageMayCarry else { break }
+            guard fileURLIsAnImage(fileURL),
+                  let fileData = try? Data(contentsOf: fileURL),
+                  let bitmap = NSBitmapImageRep(data: fileData),
+                  let image = sendableImage(from: bitmap) else { continue }
+            images.append(image)
+        }
+        return images
+    }
+
+    /// The file URLs on a pasteboard whose type says they are images. `NSURL`
+    /// reading with `urlReadingContentsConformToTypes` does the type check the
+    /// same way Finder does, from the file's declared type rather than its
+    /// extension alone.
+    private static func imageFileURLs(onPasteboard pasteboard: NSPasteboard) -> [URL] {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [
+            .urlReadingFileURLsOnly: true,
+            .urlReadingContentsConformToTypes: imageFileTypesWorthReading.map(\.identifier),
+        ]
+        return (pasteboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL]) ?? []
+    }
+
+    private static func fileURLIsAnImage(_ fileURL: URL) -> Bool {
+        guard let contentType = (try? fileURL.resourceValues(forKeys: [.contentTypeKey]))?.contentType
+                ?? UTType(filenameExtension: fileURL.pathExtension) else { return false }
+        return imageFileTypesWorthReading.contains { contentType.conforms(to: $0) }
     }
 
     private static func bitmapOnThePasteboard(_ pasteboard: NSPasteboard) -> NSBitmapImageRep? {
@@ -214,42 +292,69 @@ enum OverlayEyePastedImageReader {
 
 // MARK: - What the reader has attached
 
-/// The one image waiting to ride the next message.
+/// The images waiting to ride the next message.
 ///
-/// One, not a list: the reader pastes a picture to ask about that picture, and
-/// a second paste is them changing their mind rather than adding to a set.
+/// A short list, not one image: since drag-and-drop, "here are the two
+/// screenshots" is an ordinary thing to hand Iris. It is bounded at
+/// `OverlayEyePastedImageReader.mostImagesOneMessageMayCarry`; past that the
+/// OLDEST is let go, so the reader's latest action always shows up on the bar
+/// instead of silently doing nothing.
 ///
-/// It is TAKEN by the send path rather than read, so an image can only ever be
-/// sent once. An attachment that survived its own message would silently ride
-/// the next question too, which is the same class of surprise as the bar
+/// They are TAKEN by the send path rather than read, so an image can only ever
+/// be sent once. An attachment that survived its own message would silently
+/// ride the next question too, which is the same class of surprise as the bar
 /// keeping the keyboard after a question was sent.
 @MainActor
 final class OverlayEyePastedImageAttachment: ObservableObject {
 
-    /// One bar is open at a time, and the thing that puts an image on it (a
-    /// keystroke in that bar's window) and the thing that spends it (the next
-    /// message) are two files apart with no object in common. A shared instance
-    /// is the seam; it is an ordinary class, so a test makes its own.
+    /// One bar is open at a time, and the things that put an image on it (a
+    /// keystroke in that bar's window, a drop on it, the picker) and the thing
+    /// that spends them (the next message) are files apart with no object in
+    /// common. A shared instance is the seam; it is an ordinary class, so a
+    /// test makes its own.
     static let shared = OverlayEyePastedImageAttachment()
 
-    @Published private(set) var theImageTheReaderPasted: OverlayEyePastedImage?
+    @Published private(set) var theImagesTheReaderAttached: [OverlayEyePastedImage] = []
+
+    /// True while a drag is over the bar, so the bar can say "drop to attach"
+    /// before the reader lets go. Set and cleared by the drop target.
+    @Published var aDragIsHoveringOverTheBar = false
 
     init() {}
 
-    func attach(_ pastedImage: OverlayEyePastedImage) {
-        theImageTheReaderPasted = pastedImage
+    var thereIsSomethingAttached: Bool { !theImagesTheReaderAttached.isEmpty }
+
+    func attach(_ image: OverlayEyePastedImage) {
+        attach(contentsOf: [image])
     }
 
-    /// The × on the thumbnail, and the bar going away.
-    func removeTheAttachment() {
-        theImageTheReaderPasted = nil
+    /// Appends, keeping only the newest `mostImagesOneMessageMayCarry`.
+    func attach(contentsOf images: [OverlayEyePastedImage]) {
+        guard !images.isEmpty else { return }
+        var combined = theImagesTheReaderAttached + images
+        let overflow = combined.count - OverlayEyePastedImageReader.mostImagesOneMessageMayCarry
+        if overflow > 0 {
+            combined.removeFirst(overflow)
+        }
+        theImagesTheReaderAttached = combined
     }
 
-    /// Hands the image to the message being sent and forgets it in the same
-    /// move.
-    func takeTheImageForThisMessage() -> OverlayEyePastedImage? {
-        defer { theImageTheReaderPasted = nil }
-        return theImageTheReaderPasted
+    /// The × on one thumbnail.
+    func remove(_ image: OverlayEyePastedImage) {
+        theImagesTheReaderAttached.removeAll { $0 == image }
+    }
+
+    /// The bar going away.
+    func removeAllAttachments() {
+        theImagesTheReaderAttached = []
+        aDragIsHoveringOverTheBar = false
+    }
+
+    /// Hands the images to the message being sent and forgets them in the
+    /// same move.
+    func takeTheImagesForThisMessage() -> [OverlayEyePastedImage] {
+        defer { theImagesTheReaderAttached = [] }
+        return theImagesTheReaderAttached
     }
 }
 
@@ -325,7 +430,7 @@ struct SelectionTextFieldImagePasteCatcher: NSViewRepresentable {
             attachment.attach(pastedImage)
         }
         catcher.forgetWhatWasAttached = { [attachment] in
-            attachment.removeTheAttachment()
+            attachment.removeAllAttachments()
         }
         return catcher
     }

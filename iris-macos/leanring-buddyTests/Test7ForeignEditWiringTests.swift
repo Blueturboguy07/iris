@@ -157,7 +157,7 @@ struct Test7ForeignEditWiringTests {
         // Measured against the SAME bar with nothing attached rather than a
         // constant: the bar's natural height moves with unrelated work, and a
         // hardcoded number would rot into a false failure within a week.
-        attachment.removeTheAttachment()
+        attachment.removeAllAttachments()
         let heightWithNothingAttached = heightOfTheRealBar(companionManager: companionManager)
 
         attachment.attach(
@@ -167,7 +167,7 @@ struct Test7ForeignEditWiringTests {
                 pixelHeight: 64
             )
         )
-        defer { attachment.removeTheAttachment() }
+        defer { attachment.removeAllAttachments() }
 
         let heightWithAnImageAttached = heightOfTheRealBar(companionManager: companionManager)
 
@@ -192,14 +192,14 @@ struct Test7ForeignEditWiringTests {
         let companionManager = CompanionManager()
         let attachment = OverlayEyePastedImageAttachment.shared
 
-        attachment.removeTheAttachment()
+        attachment.removeAllAttachments()
         let firstMeasurement = heightOfTheRealBar(companionManager: companionManager)
 
         attachment.attach(
             OverlayEyePastedImage(imageData: onePNGWorthOfBytes(), pixelWidth: 64, pixelHeight: 64)
         )
         _ = heightOfTheRealBar(companionManager: companionManager)
-        attachment.removeTheAttachment()
+        attachment.removeAllAttachments()
 
         let heightAfterTheImageWentAway = heightOfTheRealBar(companionManager: companionManager)
 
@@ -222,26 +222,26 @@ struct Test7ForeignEditWiringTests {
     /// `CompanionScreenCaptureUtility.imageryForOneChatMessage` directly — the
     /// machinery. Nothing exercised the CALL SITE, so putting
     /// `captureAllScreensAsJPEG()` back in `CompanionManager` (a pasted image
-    /// ignored, the screen photographed instead — the reader's exact symptom)
+    /// ignored, only the screen photographed — the reader's exact symptom)
     /// left 72 tests green. This is the same class of hole the other two
     /// hookups in this file cover, at the one place it was left standing.
     ///
     /// It asserts by consumption rather than by inspecting a request: the send
-    /// path takes the attachment with `takeTheImageForThisMessage()`, which
+    /// path takes the attachment with `takeTheImagesForThisMessage()`, which
     /// hands it over and forgets it in one move. An attachment still sitting
     /// there after a message was sent was never asked for.
     @Test func sendingAMessageSpendsThePastedImageInsteadOfIgnoringIt() async throws {
         let companionManager = CompanionManager()
         let attachment = OverlayEyePastedImageAttachment.shared
-        attachment.removeTheAttachment()
+        attachment.removeAllAttachments()
         attachment.attach(
             OverlayEyePastedImage(
                 imageData: onePNGWorthOfBytes(), pixelWidth: 64, pixelHeight: 64
             )
         )
-        defer { attachment.removeTheAttachment() }
+        defer { attachment.removeAllAttachments() }
         try #require(
-            attachment.theImageTheReaderPasted != nil,
+            attachment.thereIsSomethingAttached,
             "nothing was attached, so this test would prove nothing"
         )
 
@@ -250,12 +250,12 @@ struct Test7ForeignEditWiringTests {
         companionManager.sendUserMessage("what is in this picture")
 
         let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline, attachment.theImageTheReaderPasted != nil {
+        while Date() < deadline, attachment.thereIsSomethingAttached {
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
 
         #expect(
-            attachment.theImageTheReaderPasted == nil,
+            attachment.thereIsSomethingAttached == false,
             """
             the message went out without ever asking for the image the reader pasted — so \
             Iris photographed their screen and answered about that instead, which is "I cannot \

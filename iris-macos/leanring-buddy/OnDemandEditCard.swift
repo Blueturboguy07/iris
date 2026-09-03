@@ -1022,6 +1022,8 @@ struct OnDemandEditCard: View {
                 .foregroundColor(DS.Colors.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            pullRequestRow
+
             // The PUBLIC publish confirm (D6): a separate, every-time consent,
             // never bundled with the fork backup. It only appears once the
             // reader taps "Share to publik", and it says plainly that this posts
@@ -1034,9 +1036,59 @@ struct OnDemandEditCard: View {
         }
     }
 
-    /// The normal done actions: back up to the reader's own fork (fork-only,
-    /// low-stakes), optionally share to publik's public listing (which opens the
-    /// separate consent above), and finish.
+    /// Where the pull request stands. Founder ruling, Sep 3 2026: once the edit
+    /// works, Iris opens one on its own; this row is how the reader finds it —
+    /// and how they learn what to set up when Iris could not.
+    @ViewBuilder
+    private var pullRequestRow: some View {
+        switch coordinator.pullRequestState {
+        case .notAttempted:
+            EmptyView()
+        case .opening:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Opening a pull request…")
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.textSecondary)
+            }
+        case .opened(let url):
+            pullRequestLink(caption: "Pull request opened", url: url)
+        case .alreadyOpen(let url):
+            pullRequestLink(caption: "A pull request for this branch is already open", url: url)
+        case .pushedButNoPullRequest(let detail):
+            Text("Pushed the branch, but no pull request: \(detail)")
+                .font(.system(size: 11))
+                .foregroundColor(DS.Colors.amber)
+                .fixedSize(horizontal: false, vertical: true)
+        case .notSetUp(let reason), .failed(let reason):
+            Text("Couldn't open a pull request: \(reason)")
+                .font(.system(size: 11))
+                .foregroundColor(DS.Colors.amber)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func pullRequestLink(caption: String, url: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "arrow.triangle.pull")
+                .font(.system(size: 10, weight: .semibold))
+            if let destination = URL(string: url) {
+                Link("\(caption) ↗", destination: destination)
+                    .font(.system(size: 11, weight: .medium))
+                    .pointerCursor()
+                    .help(url)
+            } else {
+                Text("\(caption): \(url)")
+                    .font(.system(size: 11))
+            }
+        }
+        .foregroundColor(DS.Colors.green)
+    }
+
+    /// The normal done actions: open the pull request when Iris did not on its
+    /// own, back up to the reader's own fork (fork-only, low-stakes), optionally
+    /// share to publik's public listing (which opens the separate consent
+    /// above), and finish.
     private var doneActionsRow: some View {
         HStack(spacing: 8) {
             // Only offered when a change was actually kept (a discarded edit
@@ -1044,6 +1096,13 @@ struct OnDemandEditCard: View {
             // discard, kept on keep). Fork-only by construction in the
             // coordinator: never a push to a third party's main.
             if coordinator.proposedDiffText != nil {
+                if coordinator.pullRequestState.allowsAnAttempt {
+                    Button("Open a pull request") {
+                        coordinator.openPullRequestForTheKeptEdit(because: .readerTappedTheButton)
+                    }
+                    .irisTinyButton()
+                    .help("Pushes the branch and opens a pull request on the app's repo — never a merge.")
+                }
                 Button("Back up to my fork") { coordinator.requestForkBackup() }
                     .irisTinyButton()
                     .help("Pushes the branch to your own fork on GitHub. Never to anyone else's repo.")

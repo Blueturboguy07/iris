@@ -79,6 +79,16 @@ final class OverlayEyeInputBarPanelManager {
     private var inputBarPanel: OverlayEyeInputBarPanel?
     private var clickOutsideMonitor: Any?
 
+    /// The drag-aware "click outside dismisses the bar" rule. A left press in
+    /// another app no longer closes the bar by itself, because that press is
+    /// also how every drag onto the bar begins — see
+    /// `OverlayEyeInputBarDropTarget.swift` for the measurement behind it.
+    private var clickOutsideDismissal = OverlayEyeInputBarClickOutsideDismissal()
+
+    /// True while the attach button's open panel is up, so a second tap cannot
+    /// open a second picker on top of the first.
+    private var theImagePickerIsOpen = false
+
     /// Kept from the moment the bar is shown so the panel can be re-placed when
     /// its height changes: the bar hangs from the eye, so growing it downward
     /// means recomputing its origin against the same eye and the same screen it
@@ -170,10 +180,19 @@ final class OverlayEyeInputBarPanelManager {
             onTheBarsMeasuredHeightChanged: { [weak self] measuredHeight in
                 self?.resizeTheBarToFit(measuredContentHeight: measuredHeight)
             },
+            onTheReaderWantsToAttachImages: { [weak self] in
+                self?.pickImagesToAttachFromTheReadersFiles()
+            },
             showingTheExchange: exchangeToReopenWith
         )
         .frame(width: OverlayEyeInteractionGeometry.inputBarWidth)
 
+        // A plain hosting view: it stays the panel's content view (that is what
+        // makes the window follow the bar's SwiftUI size), and the DROP is
+        // handled by a SwiftUI `.onDrop` inside the bar rather than an AppKit
+        // view, because `NSHostingView` runs its own dragging destination on
+        // internal subviews that swallow the drag before any subclass method
+        // could see it (`OverlayEyeInputBarDropTarget.swift`).
         let hostingView = NSHostingView(rootView: inputBarView)
         hostingView.frame = NSRect(
             x: 0,
@@ -192,9 +211,21 @@ final class OverlayEyeInputBarPanelManager {
             defer: false
         )
         panel.isFloatingPanel = true
-        // The same level as the overlay it hangs from, so the bar and the eye
-        // stay together above everything else on the desktop.
-        panel.level = .screenSaver
+        // BELOW `.screenSaver`, deliberately. The bar was at `.screenSaver`
+        // (1000) like the eye overlay, and the window server does NOT route
+        // drag-and-drop to a window that high — a picture dragged onto the bar
+        // fell straight through it to whatever app sat behind (a Terminal even
+        // accepted the file, so the drag reported "copied" while the bar never
+        // saw it). Measured live and bisected in a standalone harness: drops
+        // reach a window at `.popUpMenu` and stop somewhere above ~550, so the
+        // bar drops to `.popUpMenu`. It still sits above every ordinary window,
+        // the menu bar, and the guide takeover (`.floating`); it now renders
+        // just under the full-screen eye overlay, which is transparent
+        // everywhere but the eye itself, so nothing about how the bar looks
+        // changes — and drops finally land on it. Clicks and keystrokes were
+        // never the problem (a global monitor and a key panel, both
+        // level-independent), only drags.
+        panel.level = .popUpMenu
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
@@ -268,6 +299,8 @@ final class OverlayEyeInputBarPanelManager {
     /// Takes the bar down and hands keyboard focus back to whatever had it.
     func hideInputBar() {
         removeClickOutsideMonitor()
+        clickOutsideDismissal.theBarWentAwayOrTheGestureEnded()
+        theImagePickerIsOpen = false
         interactionGeometryTheBarHangsFrom = nil
         frameOfTheScreenTheBarIsOn = nil
 
@@ -374,32 +407,122 @@ final class OverlayEyeInputBarPanelManager {
     /// itself are not seen here — a global monitor only reports events headed
     /// for *other* apps — which is exactly right, because clicking the gear
     /// must open settings without closing the bar behind it.
+    ///
+    /// A LEFT press decides nothing on its own any more. It is also how a drag
+    /// onto the bar begins, and dismissing on the press is exactly why "i cant
+    /// drag and drop screenshots into it because when i click off it closes".
+    /// The press is remembered, and the RELEASE dismisses — unless a drag
+    /// entered the bar or a drag session began in the meantime, in which case
+    /// the release is a drop and the bar stays to receive it. The rule lives in
+    /// `OverlayEyeInputBarClickOutsideDismissal`, with the measurement behind
+    /// it in that file's header.
     private func installClickOutsideMonitor() {
         removeClickOutsideMonitor()
         clickOutsideMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown]
-        ) { [weak self] _ in
+            matching: [.leftMouseDown, .leftMouseUp, .rightMouseDown]
+        ) { [weak self] event in
             guard let self else { return }
 
-            // A click *inside* the bar is not a click outside it. This guard
-            // exists because the bar deliberately gives up active status while
-            // the reader reads an answer, and a global monitor can see a click
-            // land on a window belonging to an app that is not active. Without
-            // it, clicking into the field to ask a follow-up would dismiss the
-            // very bar the reader was trying to type into.
-            if let frameOfTheBarOnScreen = self.frameOfTheBarOnScreen,
-               frameOfTheBarOnScreen.contains(NSEvent.mouseLocation) {
+            switch event.type {
+            case .leftMouseDown, .rightMouseDown:
+                // A click *inside* the bar is not a click outside it. This guard
+                // exists because the bar deliberately gives up active status
+                // while the reader reads an answer, and a global monitor can see
+                // a click land on a window belonging to an app that is not
+                // active. Without it, clicking into the field to ask a follow-up
+                // would dismiss the very bar the reader was trying to type into.
+                if let frameOfTheBarOnScreen = self.frameOfTheBarOnScreen,
+                   frameOfTheBarOnScreen.contains(NSEvent.mouseLocation) {
+                    return
+                }
+
+                // While a guide is being followed, a click anywhere else must
+                // not tear the bar down — the reader is mid-install and needs
+                // the steps to stay put. They dismiss it with the × or End guide.
+                if self.theBarShouldStayPinned() {
+                    return
+                }
+
+                if event.type == .rightMouseDown {
+                    // Never the start of a drag: dismiss at once, as every
+                    // press used to.
+                    self.hideInputBar()
+                    return
+                }
+
+                self.clickOutsideDismissal.readerPressedTheLeftButtonOutsideTheBar(
+                    dragPasteboardChangeCount: NSPasteboard(name: .drag).changeCount
+                )
+
+            case .leftMouseUp:
+                let decision = self.clickOutsideDismissal.readerReleasedTheLeftButton(
+                    dragPasteboardChangeCount: NSPasteboard(name: .drag).changeCount
+                )
+                if decision == .dismissTheBar {
+                    self.hideInputBar()
+                }
+
+            default:
+                break
+            }
+        }
+    }
+
+    // MARK: Attaching from the reader's files
+
+    /// The attach button: the standard open panel, limited to image files,
+    /// allowing several at once. Picked files go through the same reader a
+    /// drop does, so a picked image and a dropped one are the same attachment.
+    func pickImagesToAttachFromTheReadersFiles() {
+        guard inputBarPanel != nil, !theImagePickerIsOpen else { return }
+        theImagePickerIsOpen = true
+
+        // The picker is a window of Iris's own, so clicks inside it never reach
+        // the global monitor — but a click on the desktop beside it would, and
+        // would take the bar down under a picker that is still open. Off while
+        // the picker is up, back on when it closes.
+        removeClickOutsideMonitor()
+        clickOutsideDismissal.theBarWentAwayOrTheGestureEnded()
+
+        let openPanel = NSOpenPanel()
+        openPanel.title = "Attach images for Iris to look at"
+        openPanel.message = "Iris reads these together with your screen."
+        openPanel.prompt = "Attach"
+        openPanel.allowedContentTypes = OverlayEyePastedImageReader.imageFileTypesWorthReading
+        openPanel.allowsMultipleSelection = true
+        openPanel.canChooseDirectories = false
+        openPanel.canChooseFiles = true
+        // The bar floats at screen-saver level; a picker any lower would open
+        // underneath the very bar that asked for it.
+        openPanel.level = .screenSaver
+
+        // Iris is a menu-bar app that is never the active application. An
+        // open panel needs it to be, or the panel appears behind whatever the
+        // reader is working in and takes no clicks. Activation is handed back
+        // the moment the picker closes.
+        NSApp.activate(ignoringOtherApps: true)
+        openPanel.begin { [weak self] response in
+            guard let self else { return }
+            self.theImagePickerIsOpen = false
+            let pickedImages = response == .OK
+                ? OverlayEyePastedImageReader.imagesInFiles(openPanel.urls)
+                : []
+
+            // The bar may have gone (Escape, the ×) while the picker was up. An
+            // image attached to a bar that is no longer there would ride the
+            // next question the reader asks, so it is let go instead.
+            guard self.inputBarPanel != nil else {
+                NSApp.deactivate()
                 return
             }
+            OverlayEyePastedImageAttachment.shared.attach(contentsOf: pickedImages)
+            self.installClickOutsideMonitor()
 
-            // While a guide is being followed, a click anywhere else must not
-            // tear the bar down — the reader is mid-install and needs the
-            // steps to stay put. They dismiss it with the × or End guide.
-            if self.theBarShouldStayPinned() {
-                return
-            }
-
-            self.hideInputBar()
+            // Activation goes back to the reader's own app, and the bar takes
+            // the keyboard for the question that goes with the picture — the
+            // same hand-back a click into the field does.
+            NSApp.deactivate()
+            self.takeTheKeyboardBackForTheTextField()
         }
     }
 
@@ -476,6 +599,15 @@ struct OverlayEyeInputBarView: View {
     /// in can grow and shrink with it.
     let onTheBarsMeasuredHeightChanged: (CGFloat) -> Void
 
+    /// Called by the attach button. The panel manager owns the picker, because
+    /// the picker needs the click-outside monitor paused and the keyboard
+    /// handed back afterwards, and both of those are the window's business.
+    let onTheReaderWantsToAttachImages: () -> Void
+
+    /// What is attached to the next message, observed so the attach button can
+    /// light up and the shell can say "drop to attach" while a drag is over it.
+    @ObservedObject private var attachments: OverlayEyePastedImageAttachment = .shared
+
     /// Which of the two things the one field does. Only meaningful while an app
     /// is open for editing; the bar is an ask field and nothing else otherwise.
     enum ComposerMode: Equatable { case edit, ask }
@@ -521,6 +653,7 @@ struct OverlayEyeInputBarView: View {
         onTheBarShouldReleaseTheKeyboard: @escaping () -> Void,
         onTheBarShouldTakeTheKeyboardBack: @escaping () -> Void,
         onTheBarsMeasuredHeightChanged: @escaping (CGFloat) -> Void,
+        onTheReaderWantsToAttachImages: @escaping () -> Void = {},
         showingTheExchange exchange: OverlayEyeExchange = OverlayEyeExchange()
     ) {
         self.companionManager = companionManager
@@ -536,6 +669,7 @@ struct OverlayEyeInputBarView: View {
         self.onTheBarShouldReleaseTheKeyboard = onTheBarShouldReleaseTheKeyboard
         self.onTheBarShouldTakeTheKeyboardBack = onTheBarShouldTakeTheKeyboardBack
         self.onTheBarsMeasuredHeightChanged = onTheBarsMeasuredHeightChanged
+        self.onTheReaderWantsToAttachImages = onTheReaderWantsToAttachImages
         _exchange = State(initialValue: exchange)
     }
 
@@ -902,6 +1036,28 @@ struct OverlayEyeInputBarView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
         .background(IrisShellBackground(cornerRadius: DS.CornerRadius.extraLarge))
+        // A picture dropped anywhere on the bar becomes an attachment. SwiftUI's
+        // own drop, because the bar is an `NSHostingView` and its drag
+        // machinery is the one actually listening (`OverlayEyeInputBarDropTarget.swift`).
+        .acceptsImagesDroppedOnTheBar()
+        // Said before the reader lets go, so they know the bar will take it.
+        // Hit-testing is off: this is a label over a drop target, not a
+        // control, and it must never sit between the drag and the window.
+        .overlay {
+            if attachments.aDragIsHoveringOverTheBar {
+                RoundedRectangle(cornerRadius: DS.CornerRadius.extraLarge, style: .continuous)
+                    .strokeBorder(DS.Colors.accent, lineWidth: 1.5)
+                    .overlay(
+                        Text("drop to attach")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(DS.Colors.ink)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Capsule().fill(DS.Colors.accent.opacity(0.92)))
+                    )
+                    .allowsHitTesting(false)
+            }
+        }
     }
 
     /// Whether a request the reader just sent is still being sized up, and the
@@ -1213,6 +1369,8 @@ struct OverlayEyeInputBarView: View {
 
     private var fieldAndSendRow: some View {
         HStack(spacing: 8) {
+            attachButton
+
             TextField(fieldPlaceholder, text: $typedMessage)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
@@ -1274,6 +1432,27 @@ struct OverlayEyeInputBarView: View {
             .pointerCursor(isEnabled: theSendButtonIsLive)
             .disabled(!theSendButtonIsLive)
         }
+    }
+
+    /// The attach button. At the leading edge because that is where every chat
+    /// surface the reader already uses puts its paperclip, and because the send
+    /// button owns the trailing edge. Lit in the accent colour once something
+    /// is attached, so the state is visible even when the thumbnail row has
+    /// scrolled out of mind.
+    private var attachButton: some View {
+        Button {
+            onTheReaderWantsToAttachImages()
+        } label: {
+            Image(systemName: "paperclip")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(attachments.thereIsSomethingAttached ? DS.Colors.accent : DS.Colors.quiet)
+                .frame(width: 18, height: 18)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+        .help("Attach images — or drop them anywhere on this bar")
+        .accessibilityLabel("attach images")
     }
 
     /// "Ask Iris…" the first time and "Ask something else…" afterwards, because

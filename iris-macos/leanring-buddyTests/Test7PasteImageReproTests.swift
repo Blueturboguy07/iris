@@ -27,7 +27,9 @@
 //  which is nothing. Silently.
 //
 //  These tests are the fix, at the two places it has to be true: the keystroke
-//  has to TAKE the image, and the message has to CARRY it instead of the screen.
+//  has to TAKE the image, and the message has to CARRY it. (It carried it
+//  INSTEAD of the screen until Sep 3 2026; it now carries it WITH the screen —
+//  founder ruling, see `CompanionScreenCaptureUtility.imageryForOneChatMessage`.)
 //
 //  Revert-checked. With `SelectionTextFieldImagePasteCatchingView.performKeyEquivalent`
 //  returning false unconditionally, and with `imageryForOneChatMessage` ignoring
@@ -151,13 +153,13 @@ struct Test7PasteImageReproTests {
         pasteboard.clearContents()
         pasteboard.setString("just some words", forType: .string)
         #expect(catcher.performKeyEquivalent(with: aCommandVKeystroke()) == false)
-        #expect(attachment.theImageTheReaderPasted == nil)
+        #expect(attachment.thereIsSomethingAttached == false)
 
         // An image: claimed, and attached.
         pasteboard.clearContents()
         pasteboard.setData(aPNG(width: 64, height: 48), forType: .png)
         #expect(catcher.performKeyEquivalent(with: aCommandVKeystroke()) == true)
-        let attached = try #require(attachment.theImageTheReaderPasted)
+        let attached = try #require(attachment.theImagesTheReaderAttached.last)
         #expect(attached.pixelWidth == 64)
     }
 
@@ -179,7 +181,7 @@ struct Test7PasteImageReproTests {
         window.contentView?.addSubview(catcher)
 
         #expect(window.performKeyEquivalent(with: aCommandVKeystroke()) == true)
-        #expect(attachment.theImageTheReaderPasted != nil)
+        #expect(attachment.thereIsSomethingAttached)
     }
 
     /// shift-cmd-V is "paste and match style" — a text operation the reader is
@@ -225,55 +227,88 @@ struct Test7PasteImageReproTests {
         let catcher = SelectionTextFieldImagePasteCatchingView(frame: .zero)
         catcher.pasteboardToRead = { pasteboard }
         catcher.attachTheImage = { attachment.attach($0) }
-        catcher.forgetWhatWasAttached = { attachment.removeTheAttachment() }
+        catcher.forgetWhatWasAttached = { attachment.removeAllAttachments() }
         window.contentView?.addSubview(catcher)
 
         #expect(window.performKeyEquivalent(with: aCommandVKeystroke()) == true)
-        #expect(attachment.theImageTheReaderPasted != nil)
+        #expect(attachment.thereIsSomethingAttached)
 
         // What `hideInputBar` does to the whole content view.
         catcher.removeFromSuperview()
-        #expect(attachment.theImageTheReaderPasted == nil)
+        #expect(attachment.thereIsSomethingAttached == false)
     }
 
-    // MARK: - 3. The message carries the image INSTEAD of the screen
+    // MARK: - 3. The message carries the image WITH the screen
 
     /// The reader's symptom, stated as the thing that has to be true of the
-    /// message they send: the picture they pasted is the picture Iris looks at.
-    @Test func aPastedImageIsWhatTheMessageCarries() async throws {
+    /// message they send: the picture they pasted is a picture Iris looks at —
+    /// after the screen, which stays in the message (founder ruling, Sep 3
+    /// 2026: "it should read both my screen and the image").
+    @Test func aPastedImageRidesAfterTheScreenInTheMessage() throws {
         let pngData = aPNG(width: 300, height: 200)
         let pastedImage = try #require(
             OverlayEyePastedImageReader.sendableImage(from: NSBitmapImageRep(data: pngData)!)
         )
+        let screen = aFabricatedScreenCapture(
+            label: "user's screen (cursor is here) — 1280x832 pixels", width: 1280, height: 832
+        )
 
+        let labeled = CompanionScreenCaptureUtility.labeledImages(
+            forScreenCaptures: [screen], andImagesTheReaderAttached: [pastedImage]
+        )
+
+        #expect(labeled.count == 2)
+        // Screen first, exactly as chat has always labeled it…
+        #expect(labeled[0].data == screen.imageData)
+        #expect(labeled[0].label.hasPrefix("user's screen (cursor is here)"))
+        // …then the picture the reader handed over, introduced as such.
+        #expect(labeled[1].data == pastedImage.imageData)
+        #expect(labeled[1].label.contains("ATTACHED"))
+    }
+
+    /// Losing the screen (no permission, no display) must not lose the question:
+    /// the reader attached a picture, and that picture still goes.
+    @Test func whenTheScreenCannotBeCapturedTheAttachmentStillGoes() async throws {
+        let pastedImage = OverlayEyePastedImage(
+            imageData: aPNG(width: 120, height: 80), pixelWidth: 120, pixelHeight: 80
+        )
         let imagery = try await CompanionScreenCaptureUtility
-            .imageryForOneChatMessage(theReaderPasted: pastedImage)
+            .imageryForOneChatMessage(theReaderAttached: [pastedImage])
 
-        #expect(imagery.labeledImages.count == 1)
-        #expect(imagery.labeledImages.first?.data == pastedImage.imageData)
-
-        // And NOT the screen as well. They pasted a specific picture; sending
-        // their desktop alongside it gives the model two images and no way to
-        // know which the question means, and photographs a screen nobody asked
-        // Iris to look at.
-        #expect(imagery.screenCaptures.isEmpty)
+        // The runner may or may not be allowed to capture a screen; either way
+        // the attachment is the last image, and the labels agree with the
+        // captures about whether a screen is in the message.
+        #expect(imagery.labeledImages.last?.data == pastedImage.imageData)
+        #expect(imagery.labeledImages.count == imagery.screenCaptures.count + 1)
     }
 
     /// The label has to say what the picture is, because every other label in
     /// that file describes a screen and the system prompt is written for a model
-    /// looking at one.
-    @Test func theLabelSaysItIsNotAScreenshotAndNotToPoint() throws {
+    /// looking at one — and it has to say that the picture is not a coordinate
+    /// space, or the eye flies to a spot on the desktop that is inside a photo.
+    @Test func theLabelSaysItIsNotAScreenshotAndNotToPointInsideIt() throws {
         let pastedImage = OverlayEyePastedImage(
             imageData: aPNG(width: 800, height: 600), pixelWidth: 800, pixelHeight: 600
         )
-        let label = CompanionScreenCaptureUtility.labelForTheImageTheReaderPasted(pastedImage)
+        let labelWithAScreen = CompanionScreenCaptureUtility.labelForTheImageTheReaderAttached(
+            pastedImage, position: 2, count: 3, theScreenIsAlsoInThisMessage: true
+        )
+        #expect(labelWithAScreen.contains("image 2 of 3"))
+        #expect(labelWithAScreen.contains("ATTACHED"))
+        #expect(labelWithAScreen.contains("NOT a screenshot"))
+        #expect(labelWithAScreen.contains("800x600 pixels"))
+        #expect(labelWithAScreen.contains("Never point inside it"))
+        // A screen IS in the message, so pointing is still allowed — at it.
+        #expect(labelWithAScreen.contains("[POINT:none]") == false)
 
-        #expect(label.contains("PASTED"))
-        #expect(label.contains("not a screenshot"))
-        #expect(label.contains("800x600 pixels"))
+        let labelWithoutAScreen = CompanionScreenCaptureUtility.labelForTheImageTheReaderAttached(
+            pastedImage, position: 1, count: 1, theScreenIsAlsoInThisMessage: false
+        )
+        #expect(labelWithoutAScreen.contains("the image the user ATTACHED"))
+        #expect(labelWithoutAScreen.contains("no screen in this message"))
         // With no screen in the message there is nothing to point at, and the
         // eye must not fly at a coordinate invented for a screen never seen.
-        #expect(label.contains("[POINT:none]"))
+        #expect(labelWithoutAScreen.contains("[POINT:none]"))
     }
 
     /// With nothing pasted, the labels are the ones chat has always sent — byte
@@ -299,19 +334,20 @@ struct Test7PasteImageReproTests {
         )
 
         attachment.attach(pastedImage)
-        #expect(attachment.takeTheImageForThisMessage() == pastedImage)
+        #expect(attachment.takeTheImagesForThisMessage() == [pastedImage])
         // Taken, not read: a second message must not silently carry it again.
-        #expect(attachment.takeTheImageForThisMessage() == nil)
-        #expect(attachment.theImageTheReaderPasted == nil)
+        #expect(attachment.takeTheImagesForThisMessage() == [])
+        #expect(attachment.thereIsSomethingAttached == false)
     }
 
     @Test func theRemoveControlTakesItBackOff() {
         let attachment = OverlayEyePastedImageAttachment()
-        attachment.attach(OverlayEyePastedImage(
+        let pastedImage = OverlayEyePastedImage(
             imageData: aPNG(width: 10, height: 10), pixelWidth: 10, pixelHeight: 10
-        ))
-        attachment.removeTheAttachment()
-        #expect(attachment.theImageTheReaderPasted == nil)
+        )
+        attachment.attach(pastedImage)
+        attachment.remove(pastedImage)
+        #expect(attachment.thereIsSomethingAttached == false)
     }
 
     // MARK: - 5. What is sent stays sendable, and stays the reader's

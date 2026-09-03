@@ -292,6 +292,33 @@ final class CompanionManager: ObservableObject {
             }
         }
 
+        // The pull request, once the edit works (founder ruling, Sep 3 2026).
+        // Never a merge: `OnDemandEditPullRequestOpener` opens a PR through the
+        // connected GitHub App when there is one, else through the reader's
+        // own signed-in `gh`, and says plainly when neither is set up.
+        coordinator.openPullRequestForTheKeptEdit = { [weak self] facts, appSlug in
+            guard let self,
+                  let record = self.installProvenanceStore.provenance(forAppSlug: appSlug),
+                  let clonePath = record.clonePath,
+                  let runner = try? MaintainShellRunner(repoRootPath: clonePath) else {
+                return .notSetUp(reason: "Iris doesn't know where this app's source clone is")
+            }
+            var factsWithTheRepo = facts
+            factsWithTheRepo.canonicalRepo = record.canonicalRepo
+            let opener = OnDemandEditPullRequestOpener(
+                gitHubForkService: self.gitHubForkService,
+                shell: runner,
+                cloneRunnerForTheService: runner
+            )
+            return await opener.openPullRequest(factsWithTheRepo)
+        }
+        coordinator.readerCanPushToTheAppsRepo = { [weak self] appSlug in
+            guard let self,
+                  let clonePath = self.installProvenanceStore.provenance(forAppSlug: appSlug)?.clonePath,
+                  let runner = try? MaintainShellRunner(repoRootPath: clonePath) else { return false }
+            return await OnDemandEditPullRequestOpener.readerCanPushToTheRepo(behind: runner)
+        }
+
         // Rebuild → relaunch (Option A). Relaunch is offered only when the
         // catalog supplies a REAL macBundleId (tri-state — never guessed) AND the
         // stack produces a relaunchable macOS artifact. The two closures below
@@ -820,6 +847,12 @@ final class CompanionManager: ObservableObject {
     func start() {
         refreshAllPermissions()
 
+        // An on-demand edit Iris was in the middle of when it last went away
+        // (a quit on a consent card, a crash, a relaunch) has left its edits in
+        // the reader's clone. Put them back before anything can refuse to
+        // touch that clone on the reader's behalf.
+        recoverAnyOnDemandEditIrisLeftUncommitted(at: "launch")
+
         // The reader's chat survives a quit. Warming the window here — before
         // anything can ask a question — means the model and the bar under the
         // eye both open on the same conversation instead of the model quietly
@@ -1130,6 +1163,24 @@ final class CompanionManager: ObservableObject {
         NSWorkspace.shared.openApplication(
             at: applicationURL, configuration: configuration, completionHandler: nil
         )
+    }
+
+    /// `OnDemandEditInterruptedRunRecovery`, with the outcome traced. Called at
+    /// launch and again at quit; both are cheap when there is nothing to do.
+    func recoverAnyOnDemandEditIrisLeftUncommitted(at moment: String) {
+        let outcome = OnDemandEditInterruptedRunRecovery.recoverNow()
+        switch outcome {
+        case .nothingToRecover:
+            break
+        case .theRunHadAlreadyCommitted(let clonePath):
+            irisTrace("on-demand edit recovery at \(moment): the interrupted run had already committed (\(clonePath)); record cleared")
+        case .theTreeWasAlreadyClean(let clonePath):
+            irisTrace("on-demand edit recovery at \(moment): the clone was already clean (\(clonePath)); record cleared")
+        case .revertedIrisOwnEdits(let clonePath, let paths):
+            irisTrace("on-demand edit recovery at \(moment): reverted Iris's unfinished edits to \(paths.joined(separator: ", ")) in \(clonePath)")
+        case .leftAlone(let clonePath, let reason, let pathsIrisEdited):
+            irisTrace("on-demand edit recovery at \(moment): left \(clonePath) alone (\(reason)); Iris's own paths were \(pathsIrisEdited.joined(separator: ", "))")
+        }
     }
 
     func stop() {
@@ -1783,6 +1834,7 @@ final class CompanionManager: ObservableObject {
     - if a bracketed note says what's installed on this machine, TRUST IT over your instincts: don't suggest a tool it says is missing, or a package manager to get something already available another way.
     - if a bracketed note says they're following an install guide, ground your answer in that step and its terminal output. never invent a command, hostname, url or path that isn't in the note or visible on screen — if you can't tell what went wrong, ask them to paste the error.
     - reference what's actually on screen when it's relevant; if the screenshot has nothing to do with the question, just answer the question. with several images, the one labeled "primary focus" is where the cursor is.
+    - an image whose label says the user ATTACHED it is not their screen — it's a picture they handed you (a screenshot from elsewhere, a photo, a mockup). when the question is about that picture, answer from it and use the screen only as context. never put a [POINT] inside an attached image; coordinates only ever refer to a screen image.
 
     POINTING. you have a small blue triangle cursor that flies to things on screen. point whenever it would genuinely help — finding a button, a menu, a control they're hunting for, and especially at iris's own buttons when you're handing off to one. don't point at general-knowledge answers, at nothing to do with the screen, or at something obvious they're already looking at.
 
@@ -2061,13 +2113,13 @@ final class CompanionManager: ObservableObject {
             assistantState = .capturing
 
             do {
-                // What this message looks at: the image the reader pasted, or
-                // — when they pasted nothing — every connected screen, exactly
-                // as before. `takeTheImageForThisMessage` spends the
-                // attachment, so it rides one message and one only.
+                // What this message looks at: every connected screen, exactly
+                // as before, plus whatever the reader attached to the bar
+                // (pasted, dropped, or picked). `takeTheImagesForThisMessage`
+                // spends the attachments, so they ride one message and one only.
                 let (labeledImages, screenCaptures) = try await CompanionScreenCaptureUtility
                     .imageryForOneChatMessage(
-                        theReaderPasted: OverlayEyePastedImageAttachment.shared.takeTheImageForThisMessage()
+                        theReaderAttached: OverlayEyePastedImageAttachment.shared.takeTheImagesForThisMessage()
                     )
 
                 guard !Task.isCancelled else { return }

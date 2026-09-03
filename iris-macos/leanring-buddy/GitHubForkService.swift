@@ -360,6 +360,96 @@ final class GitHubForkService: ObservableObject {
         return .backedUpOnly(forkURL: forkURL, branch: branch)
     }
 
+    /// The ON-DEMAND variant: push the branch as far as the reader's rights
+    /// allow and open a pull request — NEVER a merge. `propagateFix` above
+    /// merges straight into the default branch when the reader owns the repo,
+    /// which is right for a crash fix that passed the three-leg repro gate and
+    /// wrong for an edit that is only "applied and rebuilt". Founder ruling,
+    /// Sep 3 2026: once an on-demand edit works, Iris opens a pull request on
+    /// its own, so a human reads the diff before it lands on main — even on
+    /// the reader's own repo.
+    func openPullRequest(
+        branch: String,
+        canonicalRepo: String,
+        title: String,
+        body: String,
+        cloneRunner: MaintainShellRunner
+    ) async -> FixPropagation {
+        guard let accessToken = await currentAccessToken(),
+              let login = await authenticatedLogin(token: accessToken) else {
+            return .notConnected
+        }
+        let owner = String(canonicalRepo.split(separator: "/").first ?? "")
+        let repoName = String(canonicalRepo.split(separator: "/").last ?? "")
+        guard !owner.isEmpty, !repoName.isEmpty else { return .failed(reason: "bad canonical repo") }
+
+        let head: String
+        let whereTheBranchLives: String
+        if await authenticatedUserCanPush(toRepo: canonicalRepo, token: accessToken) {
+            // Their repo: the branch goes straight onto it, and the PR is from
+            // that branch. Still a PR, never a merge.
+            let pushURL = "https://x-access-token:\(accessToken)@github.com/\(canonicalRepo).git"
+            let push = try? await cloneRunner.run(
+                "git push '\(pushURL)' 'HEAD:refs/heads/\(branch)' --force-with-lease 2>&1 | grep -v x-access-token; exit ${pipestatus[1]}",
+                deadline: 300
+            )
+            guard push?.succeeded == true else {
+                return .failed(reason: "push to \(canonicalRepo) failed")
+            }
+            head = branch
+            whereTheBranchLives = "https://github.com/\(canonicalRepo)"
+        } else {
+            // Someone else's app: the fork backup (fork creation + push), then
+            // a PR from the fork.
+            let backup = await backUp(branch: branch, canonicalRepo: canonicalRepo, cloneRunner: cloneRunner)
+            guard case .backedUp(let forkURL, _) = backup else {
+                if case .nameCollisionNeedsTheUser = backup { return .failed(reason: "repo name collision") }
+                if case .notConnected = backup { return .notConnected }
+                return .failed(reason: "fork backup failed")
+            }
+            head = "\(login):\(branch)"
+            whereTheBranchLives = forkURL
+        }
+
+        let base = await defaultBranch(owner: owner, name: repoName, token: accessToken) ?? "main"
+        guard let (status, json) = await apiRequest(
+            method: "POST",
+            path: "/repos/\(canonicalRepo)/pulls",
+            token: accessToken,
+            jsonBody: [
+                "title": title,
+                "head": head,
+                "base": base,
+                "body": body,
+                "maintainer_can_modify": true,
+            ]
+        ) else {
+            return .backedUpOnly(forkURL: whereTheBranchLives, branch: branch)
+        }
+        if status == 201, let url = json?["html_url"] as? String, let number = json?["number"] as? Int {
+            irisTrace("github: opened on-demand PR #\(number) on \(canonicalRepo)")
+            lastBackupSummary = "Opened a pull request on \(canonicalRepo)"
+            return .pullRequestOpened(url: url, number: number)
+        }
+        // 422 = a PR from this head already exists; the branch is there either way.
+        return .backedUpOnly(forkURL: whereTheBranchLives, branch: branch)
+    }
+
+    /// Title and body for a PR, with one sentence appended saying what
+    /// established that the change works — the reader's verdict or Iris's
+    /// re-check. Internal so the `gh` route (`OnDemandEditPullRequestOpener`)
+    /// writes exactly the same PR the API route does.
+    static func pullRequestText(
+        forNarrative narrative: IrisPullRequestNarrative,
+        diagnosisTitle: String,
+        howItWasVerified: String
+    ) -> (title: String, body: String) {
+        let title = pullRequestTitle(forNarrative: narrative, diagnosisTitle: diagnosisTitle)
+        let body = pullRequestBody(forNarrative: narrative, diagnosisTitle: diagnosisTitle)
+            + "\n\nWhat opened this pull request: \(howItWasVerified)"
+        return (title: title, body: body)
+    }
+
     /// Whether the connected user has push (or admin) permission on a repo —
     /// the signal that decides push-direct vs. open-a-PR. GitHub returns the
     /// authenticated user's permissions inline on the repo object.

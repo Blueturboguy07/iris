@@ -460,6 +460,21 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// ONLY from `requestForkBackup()`, never automatically.
     var backUpEditBranchToMyForkOnly: ((_ branchName: String, _ appSlug: String) async -> String?)?
 
+    /// Pushes the kept branch and opens a pull request on the app's repo —
+    /// never a merge (`OnDemandEditPullRequestOpener`). Wired by
+    /// CompanionManager, which fills in the repo from provenance. Nil means
+    /// the whole feature is unavailable, which the card says plainly.
+    var openPullRequestForTheKeptEdit: ((_ facts: OnDemandEditPullRequestFacts, _ appSlug: String) async -> OnDemandEditPullRequestOutcome)?
+
+    /// Whether the reader can push to the app's repo. Decides if Iris's OWN
+    /// re-check is allowed to open the pull request: on the reader's repo it
+    /// is; on somebody else's, a machine's opinion is not grounds for a PR and
+    /// the reader's "Fixed" tap opens it instead.
+    var readerCanPushToTheAppsRepo: ((_ appSlug: String) async -> Bool)?
+
+    /// Where the pull request for this edit stands, for the card.
+    @Published private(set) var pullRequestState: OnDemandEditPullRequestState = .notAttempted
+
     /// Whether a kept change on this app can be rebuilt and relaunched at all
     /// (Option A). Wired by CompanionManager to `true` only when the catalog
     /// supplies a real `macBundleId` (tri-state — never guessed) AND the stack
@@ -1180,8 +1195,10 @@ final class OnDemandEditCoordinator: ObservableObject {
         // because it is the piece that knows which paths are a package
         // manager's own bookkeeping rather than the reader's work — see
         // `isDependencyManagerBookkeeping`.
+        let interruptedRun = OnDemandEditInterruptedRunRecovery.recordOnDisk()
         let dirtyTree = OnDemandEditDirtyTreeReport.read(
-            porcelainOutput: status?.outputTail ?? "", repoRootPath: resolvedClonePath
+            porcelainOutput: status?.outputTail ?? "", repoRootPath: resolvedClonePath,
+            leftByAnInterruptedIrisEdit: interruptedRun?.clonePath == resolvedClonePath ? interruptedRun : nil
         )
         if dirtyTree.isDirty {
             let refusal = dirtyTree.refusalSentence(appName: activeAppName ?? slug)
@@ -1333,6 +1350,7 @@ final class OnDemandEditCoordinator: ObservableObject {
             editRunner.finishStopped()
             runLog?.finish(outcome: "stopped by the reader — everything reverted")
             recordMemory(outcome: "stopped by the reader — everything reverted", kind: kind)
+            OnDemandEditInterruptedRunRecovery.forget()
             runLog = nil
             readerAskedToStopTheRun = false
             clonePathLock.release(clonePath: resolvedClonePath)
@@ -1345,6 +1363,7 @@ final class OnDemandEditCoordinator: ObservableObject {
         switch result {
         case .appliedAndRebuilt(let branchName, _, _, let suitePassed, let symptomVerifiedByRepro):
             committedBranchName = branchName
+            OnDemandEditInterruptedRunRecovery.forget()
             editRunner.recordVerificationResult(passed: true, over: elapsed)
             editRunner.note(verificationNote(
                 suitePassed: suitePassed, kind: kind, symptomVerifiedByRepro: symptomVerifiedByRepro
@@ -1550,6 +1569,10 @@ final class OnDemandEditCoordinator: ObservableObject {
             for path in paths where !filesTouchedThisRun.contains(path) {
                 filesTouchedThisRun.append(path)
             }
+            // Written down the moment the tree carries Iris's edits, so a quit
+            // before the commit can be undone at the next launch — see
+            // `OnDemandEditInterruptedRunRecovery`.
+            rememberTheUncommittedEditsInCaseIrisGoesAway()
             let shownPaths = paths.prefix(5).joined(separator: ", ")
             let overflowCount = paths.count - min(paths.count, 5)
             let line = overflowCount > 0
@@ -1617,6 +1640,7 @@ final class OnDemandEditCoordinator: ObservableObject {
             runLog?.record("repro check: \(command)")
             showStatus(line)
         case .awaitingManifestChangeApproval(let summary):
+            rememberTheUncommittedEditsInCaseIrisGoesAway(waitingOn: "your answer to \"\(summary)\"")
             let line = "Iris needs permission: \(summary)"
             editRunner.note(line)
             runLog?.record("manifest consent requested: \(summary)")
@@ -1900,6 +1924,14 @@ final class OnDemandEditCoordinator: ObservableObject {
             switch recheck.verdict {
             case .looksFixed:
                 self.persistSymptomVerdict(.machineCheckedFixed)
+                // Founder ruling (Sep 3 2026): once the edit works, the pull
+                // request opens on its own. Iris's own re-check counts as
+                // "works" only on a repo the reader can push to — a machine's
+                // opinion is not grounds for a pull request on somebody else's
+                // project; there, the reader's "Fixed" tap opens it.
+                if await self.readerCanPushToTheAppsRepo?(slug) == true {
+                    self.openPullRequestForTheKeptEdit(because: .machineCheckLookedFixed)
+                }
             case .looksStillBroken:
                 self.persistSymptomVerdict(.machineCheckedStillBroken)
             case .cannotTell:
@@ -1942,6 +1974,87 @@ final class OnDemandEditCoordinator: ObservableObject {
             return
         }
         phase = .done
+        // Founder ruling (Sep 3 2026): "after edits if it works, auto submit a
+        // pr to git repo". The reader saying it works is the strongest form of
+        // "it works" there is, on anyone's repo.
+        if verdict == .fixed {
+            openPullRequestForTheKeptEdit(because: .readerSaidFixed)
+        }
+    }
+
+    // MARK: - The pull request
+
+    enum OnDemandEditPullRequestTrigger: Equatable {
+        case readerSaidFixed
+        case machineCheckLookedFixed
+        case readerTappedTheButton
+
+        /// The sentence the PR body carries about how the change was verified.
+        var howItWasVerified: String {
+            switch self {
+            case .readerSaidFixed:
+                return "the user confirmed the symptom is fixed after Iris rebuilt and relaunched the app with this change."
+            case .machineCheckLookedFixed:
+                return "Iris's own automatic re-check of the relaunched app looked fixed; the user has not confirmed it themselves."
+            case .readerTappedTheButton:
+                return "the user asked Iris to open it after the change was applied and the app rebuilt; the symptom was not separately confirmed."
+            }
+        }
+    }
+
+    /// Push the committed branch and open a pull request, at most once per
+    /// edit. Automatic on the reader's "Fixed", automatic on Iris's re-check
+    /// when the repo is the reader's, and one tap away otherwise.
+    func openPullRequestForTheKeptEdit(because trigger: OnDemandEditPullRequestTrigger) {
+        guard let branchName = committedBranchName, let slug = activeAppSlug else { return }
+        guard pullRequestState.allowsAnAttempt else { return }
+        guard let openPullRequest = openPullRequestForTheKeptEdit else {
+            pullRequestState = .notSetUp(reason: OnDemandEditPullRequestOpener.notSetUpReason)
+            return
+        }
+        pullRequestState = .opening
+        editRunner.note("Opening a pull request for branch \(branchName)…")
+
+        let facts = OnDemandEditPullRequestFacts(
+            branchName: branchName,
+            canonicalRepo: nil,
+            narrative: classifiedKind == .feature ? .onDemandFeature : .onDemandBugFix,
+            requestTitle: Self.pullRequestTitle(fromRequest: scrubbedRequest ?? activeRequestText ?? "an edit made with Iris"),
+            howItWasVerified: trigger.howItWasVerified
+        )
+        Task { [weak self] in
+            let outcome = await openPullRequest(facts, slug)
+            guard let self, self.committedBranchName == branchName else { return }
+            switch outcome {
+            case .opened(let url):
+                self.pullRequestState = .opened(url: url)
+                self.editRunner.note("Opened a pull request: \(url)")
+                self.statusLine = (self.statusLine ?? "") + " Pull request opened: \(url)"
+            case .alreadyOpen(let url):
+                self.pullRequestState = .alreadyOpen(url: url)
+                self.editRunner.note("A pull request for this branch is already open: \(url)")
+            case .pushedButNoPullRequest(let detail):
+                self.pullRequestState = .pushedButNoPullRequest(detail: detail)
+                self.editRunner.note("Pushed the branch, but no pull request: \(detail)")
+            case .notSetUp(let reason):
+                self.pullRequestState = .notSetUp(reason: reason)
+                self.editRunner.note("Couldn't open a pull request: \(reason)")
+            case .failed(let reason):
+                self.pullRequestState = .failed(reason: reason)
+                self.editRunner.note("Couldn't open a pull request: \(reason)")
+            }
+            irisTrace("on-demand edit: pull request for \(slug) — \(self.pullRequestState.oneLineForTheRecord)")
+        }
+    }
+
+    /// The reader's request, first line, trimmed to a title's length.
+    static func pullRequestTitle(fromRequest request: String) -> String {
+        let firstLine = request
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .first.map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? request
+        guard firstLine.count > 72 else { return firstLine }
+        return String(firstLine.prefix(69)).trimmingCharacters(in: .whitespaces) + "…"
     }
 
     /// Stamp the verdict on the commit (a trailer a human sees) and in the
@@ -3164,10 +3277,42 @@ final class OnDemandEditCoordinator: ObservableObject {
     }
 
     private func failRun(reason: String, resolvedClonePath: String) {
+        OnDemandEditInterruptedRunRecovery.forget()
         clonePathLock.release(clonePath: resolvedClonePath)
         self.resolvedClonePath = nil
         phase = .failed(reason: reason)
         statusLine = reason
+    }
+
+    /// The on-disk footprint of this run's uncommitted edits, refreshed each
+    /// time the engine reports more of them and each time the run parks on a
+    /// card. `OnDemandEditInterruptedRunRecovery` reads it at the next launch
+    /// (and at quit) and reverts exactly these paths if Iris went away before
+    /// the run could commit or revert them itself — the Sep 3 2026 WhimprFlow
+    /// orphan, where a quit on the manifest-consent card left two of Iris's
+    /// own edits for the reader to be blamed for.
+    private func rememberTheUncommittedEditsInCaseIrisGoesAway(waitingOn: String? = nil) {
+        guard let resolved = resolvedClonePath,
+              let baseCommit = originalHeadCommit,
+              let slug = activeAppSlug else { return }
+        var record = OnDemandEditInterruptedRunRecovery.recordOnDisk()
+        if record == nil || record?.clonePath != resolved || record?.baseCommit != baseCommit {
+            record = OnDemandEditInFlightRecord(
+                appSlug: slug,
+                clonePath: resolved,
+                baseCommit: baseCommit,
+                pathsIrisEdited: [],
+                startedAt: Date(),
+                runLogPath: runLog?.filePath,
+                whatIrisWasWaitingFor: nil
+            )
+        }
+        guard var recordToWrite = record else { return }
+        recordToWrite.pathsIrisEdited = filesTouchedThisRun
+        if let waitingOn {
+            recordToWrite.whatIrisWasWaitingFor = waitingOn
+        }
+        OnDemandEditInterruptedRunRecovery.remember(recordToWrite)
     }
 
     private func releaseLockIfHeld() {
@@ -3187,6 +3332,8 @@ final class OnDemandEditCoordinator: ObservableObject {
     }
 
     private func resetInFlightState() {
+        OnDemandEditInterruptedRunRecovery.forget()
+        pullRequestState = .notAttempted
         committedBranchName = nil
         changeId = nil
         scrubbedRequest = nil
@@ -3336,6 +3483,18 @@ struct OnDemandEditDirtyTreeReport: Equatable, Sendable {
 
     let entries: [DirtyEntry]
 
+    /// Paths an Iris edit wrote and never got to commit or revert, because Iris
+    /// went away mid-run (`OnDemandEditInterruptedRunRecovery`). Named in the
+    /// refusal so the reader is not told these were theirs.
+    var pathsLeftByAnInterruptedIrisEdit: Set<String> = []
+    var whatTheInterruptedIrisEditWasWaitingFor: String?
+
+    /// The dirty paths that are Iris's own orphaned edits, in the order git
+    /// listed them.
+    var pathsThatWereIriss: [String] {
+        entries.map(\.path).filter { pathsLeftByAnInterruptedIrisEdit.contains($0) }
+    }
+
     /// At most this many paths are named in one sentence; the rest are counted.
     /// A clone with forty dirty files does not need forty filenames to make the
     /// point, and this sentence renders in a 320pt bar over someone's desktop.
@@ -3363,7 +3522,8 @@ struct OnDemandEditDirtyTreeReport: Equatable, Sendable {
     static func read(
         porcelainOutput: String,
         repoRootPath: String,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        leftByAnInterruptedIrisEdit interruptedRun: OnDemandEditInFlightRecord? = nil
     ) -> OnDemandEditDirtyTreeReport {
         var entries: [DirtyEntry] = []
         for rawLine in porcelainOutput.split(separator: "\n", omittingEmptySubsequences: true) {
@@ -3412,7 +3572,10 @@ struct OnDemandEditDirtyTreeReport: Equatable, Sendable {
                 DirtyEntry(path: path, statusCode: statusCode, lastModified: lastModified)
             )
         }
-        return OnDemandEditDirtyTreeReport(entries: entries)
+        var report = OnDemandEditDirtyTreeReport(entries: entries)
+        report.pathsLeftByAnInterruptedIrisEdit = Set(interruptedRun?.pathsIrisEdited ?? [])
+        report.whatTheInterruptedIrisEditWasWaitingFor = interruptedRun?.whatIrisWasWaitingFor
+        return report
     }
 
     /// Files a package manager writes and rewrites for itself. Every one is
@@ -3557,8 +3720,28 @@ struct OnDemandEditDirtyTreeReport: Equatable, Sendable {
         if let ageNote = probablyNotTheReadersNote(now: now) {
             sentence += " " + ageNote
         }
+        if let orphanNote = leftByIrisNote() {
+            sentence += " " + orphanNote
+        }
         sentence += " Iris only edits a clean clone: if a run fails it reverts, and a revert would take whatever is sitting there with it."
         return sentence
+    }
+
+    /// The other answer to "i made no changes": these were Iris's. Said only
+    /// for paths the in-flight record actually names, so a reader's own file
+    /// is never waved away as Iris's.
+    func leftByIrisNote() -> String? {
+        let irisPaths = pathsThatWereIriss
+        guard !irisPaths.isEmpty else { return nil }
+        let which = irisPaths.count == entries.count
+            ? (irisPaths.count == 1 ? "That change was" : "Those changes were")
+            : "\(irisPaths.count) of these (\(irisPaths.prefix(Self.mostPathsNamed).joined(separator: ", "))) were"
+        var note = "\(which) written by an Iris edit that never finished — Iris went away"
+        if let waitingFor = whatTheInterruptedIrisEditWasWaitingFor {
+            note += " while waiting on \(waitingFor)"
+        }
+        note += ", so they were never committed or reverted. They are not your work; setting them aside is safe."
+        return note
     }
 
     /// The half of the sentence that answers "i made no changes". Said only
@@ -3589,3 +3772,43 @@ struct OnDemandEditDirtyTreeReport: Equatable, Sendable {
     }()
 }
 
+// MARK: - Pull request state
+
+/// Where the pull request for the kept edit stands. One attempt per edit:
+/// `allowsAnAttempt` is false once one is in flight or has produced a PR.
+enum OnDemandEditPullRequestState: Equatable {
+    case notAttempted
+    case opening
+    case opened(url: String)
+    case alreadyOpen(url: String)
+    case pushedButNoPullRequest(detail: String)
+    case notSetUp(reason: String)
+    case failed(reason: String)
+
+    var allowsAnAttempt: Bool {
+        switch self {
+        case .notAttempted, .notSetUp, .failed, .pushedButNoPullRequest: return true
+        case .opening, .opened, .alreadyOpen: return false
+        }
+    }
+
+    /// The URL, when there is one to open.
+    var url: String? {
+        switch self {
+        case .opened(let url), .alreadyOpen(let url): return url
+        default: return nil
+        }
+    }
+
+    var oneLineForTheRecord: String {
+        switch self {
+        case .notAttempted: return "not attempted"
+        case .opening: return "opening"
+        case .opened(let url): return "opened \(url)"
+        case .alreadyOpen(let url): return "already open \(url)"
+        case .pushedButNoPullRequest(let detail): return "pushed, no PR: \(detail)"
+        case .notSetUp(let reason): return "not set up: \(reason)"
+        case .failed(let reason): return "failed: \(reason)"
+        }
+    }
+}

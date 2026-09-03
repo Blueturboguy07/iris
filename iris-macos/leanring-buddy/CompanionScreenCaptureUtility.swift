@@ -77,35 +77,64 @@ enum CompanionScreenCaptureUtility {
     /// The images one chat message carries, and the captures the pointing maths
     /// needs to undo them.
     ///
-    /// Ordinarily that is every connected display, exactly as it has always
-    /// been. But when the reader has PASTED an image into the bar, the message
-    /// carries THAT and nothing else — no screenshot at all.
+    /// Every connected display, exactly as it has always been — AND, after
+    /// them, every image the reader attached to the bar (pasted, dropped, or
+    /// picked). The screen used to be dropped when something was pasted, on the
+    /// reasoning that a paste is the reader choosing what Iris sees. The
+    /// founder overruled that on Sep 3 2026: "i dont want iris to read just the
+    /// image attachment, it should read both my screen and the image." The
+    /// two-images-and-no-way-to-tell-them-apart worry that motivated the old
+    /// rule is answered by the labels instead: each attached image is
+    /// introduced as one the reader ATTACHED, numbered, and marked as not
+    /// pointable, and the system prompt says the same.
     ///
-    /// WHY THE SCREEN IS DROPPED RATHER THAN ADDED TO. The reader who reported
-    /// "I CANNOT PASTE IMAGES INTO THE CHAT BOX" pasted a *specific* picture
-    /// because that picture is what the question is about. Sending their
-    /// desktop alongside it would be wrong twice over: the model gets two
-    /// images and no way to know which one the question means — the same
-    /// confusion that made a browser behind a terminal read as part of it —
-    /// and Iris would be photographing a screen nobody asked it to look at. A
-    /// paste is the reader choosing what Iris sees.
+    /// Screens first, attachments after, so an attachment's label can refer to
+    /// "the screen images above" and be right. The captures are still returned
+    /// on their own so `sendUserMessageToClaudeWithScreenshot` can resolve a
+    /// `[POINT]` tag against exactly the images that are screens.
     ///
-    /// The empty capture list is load-bearing too: `sendUserMessageToClaudeWithScreenshot`
-    /// resolves a `[POINT]` tag against these captures, so with none of them
-    /// there is nothing to point at, and the eye stays where it is instead of
-    /// flying at a coordinate the model invented for a screen it never saw.
+    /// If the screen cannot be captured at all (permission gone, no display)
+    /// and the reader attached something, the message goes out with the
+    /// attachments alone rather than failing — they asked about a picture they
+    /// handed over, and that question is still answerable. With nothing
+    /// attached the capture error is the caller's, as before.
     static func imageryForOneChatMessage(
-        theReaderPasted pastedImage: OverlayEyePastedImage?
+        theReaderAttached attachedImages: [OverlayEyePastedImage]
     ) async throws -> (labeledImages: [(data: Data, label: String)], screenCaptures: [CompanionScreenCapture]) {
-        if let pastedImage {
-            return (
-                labeledImages: [(data: pastedImage.imageData, label: labelForTheImageTheReaderPasted(pastedImage))],
-                screenCaptures: []
+        var screenCaptures: [CompanionScreenCapture] = []
+        do {
+            screenCaptures = try await captureAllScreensAsJPEG()
+        } catch {
+            guard !attachedImages.isEmpty else { throw error }
+            irisTrace("chat: screen capture failed (\(error.localizedDescription)); sending the reader's \(attachedImages.count) attached image(s) without it")
+        }
+        return (
+            labeledImages: labeledImages(forScreenCaptures: screenCaptures, andImagesTheReaderAttached: attachedImages),
+            screenCaptures: screenCaptures
+        )
+    }
+
+    /// The whole image list for one message, in the order the model sees it:
+    /// the screens with their usual labels, then each attachment with a label
+    /// that says what it is and what it is not. Pure, so the shape of a message
+    /// can be asserted without a display to capture.
+    static func labeledImages(
+        forScreenCaptures screenCaptures: [CompanionScreenCapture],
+        andImagesTheReaderAttached attachedImages: [OverlayEyePastedImage]
+    ) -> [(data: Data, label: String)] {
+        let screens = labeledImages(forScreenCaptures: screenCaptures)
+        let attachments = attachedImages.enumerated().map { (position, attachedImage) -> (data: Data, label: String) in
+            (
+                data: attachedImage.imageData,
+                label: labelForTheImageTheReaderAttached(
+                    attachedImage,
+                    position: position + 1,
+                    count: attachedImages.count,
+                    theScreenIsAlsoInThisMessage: !screenCaptures.isEmpty
+                )
             )
         }
-
-        let screenCaptures = try await captureAllScreensAsJPEG()
-        return (labeledImages: labeledImages(forScreenCaptures: screenCaptures), screenCaptures: screenCaptures)
+        return screens + attachments
     }
 
     /// The screen labels chat has always sent — the capture's own label with the
@@ -126,14 +155,25 @@ enum CompanionScreenCaptureUtility {
     /// Every other label in this file describes a screen, and the system prompt
     /// is written for a model that is looking at one — so an unannounced
     /// picture would be read as the reader's desktop and answered about as
-    /// though it were. It has to say what it is, say that there is no screen in
-    /// this message, and say what to do instead of pointing.
-    static func labelForTheImageTheReaderPasted(_ pastedImage: OverlayEyePastedImage) -> String {
-        """
-        an image the user PASTED into the input bar — this is not a screenshot of their screen, \
-        and it is the only image in this message. It is \(pastedImage.pixelWidth)x\(pastedImage.pixelHeight) pixels. \
-        Answer about this image. Iris did not look at their screen for this question, so there is \
-        nothing on screen to point at: end your reply with [POINT:none].
+    /// though it were. It has to say what it is, which of several it is, that
+    /// the screens (when present) are the images before it, and that it is not
+    /// a coordinate space: a `[POINT]` inside an attachment would send the eye
+    /// to a spot on the desktop that has nothing to do with the picture.
+    static func labelForTheImageTheReaderAttached(
+        _ attachedImage: OverlayEyePastedImage,
+        position: Int,
+        count: Int,
+        theScreenIsAlsoInThisMessage: Bool
+    ) -> String {
+        let whichOne = count == 1 ? "the image" : "image \(position) of \(count)"
+        let howItRelatesToTheScreen = theScreenIsAlsoInThisMessage
+            ? "The images before it are their screen; this one is not."
+            : "Iris could not capture their screen for this question, so this is not their screen and there is no screen in this message."
+        return """
+        \(whichOne) the user ATTACHED to their message (pasted, dropped, or picked) — this is NOT a screenshot of their screen. \
+        \(howItRelatesToTheScreen) It is \(attachedImage.pixelWidth)x\(attachedImage.pixelHeight) pixels. \
+        When the question is about this image, answer from it; the screen is there for context. \
+        Never point inside it — [POINT] coordinates only ever refer to a screen image\(theScreenIsAlsoInThisMessage ? "" : ", so end your reply with [POINT:none]").
         """
     }
 

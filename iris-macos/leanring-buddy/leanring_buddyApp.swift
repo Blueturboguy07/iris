@@ -62,6 +62,10 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // A quit in the middle of an on-demand edit — parked on a consent card,
+        // say — must not leave Iris's half-written edits in the reader's clone
+        // for the next run to refuse over. Synchronous and sub-second.
+        companionManager.recoverAnyOnDemandEditIrisLeftUncommitted(at: "quit")
         companionManager.stop()
     }
 

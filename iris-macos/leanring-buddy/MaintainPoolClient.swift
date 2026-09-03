@@ -141,6 +141,27 @@ final class MaintainPoolClient {
         _ = try? await urlSession.data(for: request)
     }
 
+    /// Records a CHANGELOG entry for an app — what it gained, from a working
+    /// on-demand edit. Founder ruling (Sep 3 2026): a bug fix opens a PR, but a
+    /// FEATURE is changelogged and pushed to publik instead. Same anonymous,
+    /// fire-and-forget shape as `recordFixLog`; `kind` is "feature" or "fix"
+    /// so publik can render the two differently. Returns whether the row was
+    /// accepted, so the card can say it landed.
+    func recordChangelog(appSlug: String, summary: String, repo: String?, kind: String) async -> Bool {
+        let url = publikBaseURL.appendingPathComponent("api/iris/changelog")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var body: [String: Any] = ["appSlug": appSlug, "summary": summary, "kind": kind]
+        if let repo { body["repo"] = repo }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard let (_, response) = try? await urlSession.data(for: request),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            return false
+        }
+        return true
+    }
+
     /// Files a confirmed break. Returns the created break id, or nil when the
     /// intake refused or the network failed — the caller stages locally and
     /// retries on the next incident rather than looping here.

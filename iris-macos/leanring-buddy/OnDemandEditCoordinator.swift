@@ -472,8 +472,21 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// the reader's "Fixed" tap opens it instead.
     var readerCanPushToTheAppsRepo: ((_ appSlug: String) async -> Bool)?
 
-    /// Where the pull request for this edit stands, for the card.
+    /// Where the pull request for this edit stands, for the card. Only ever
+    /// leaves `.notAttempted` for a BUG FIX — a feature is changelogged to
+    /// publik instead of opening a PR (founder ruling, Sep 3 2026).
     @Published private(set) var pullRequestState: OnDemandEditPullRequestState = .notAttempted
+
+    /// Records a working FEATURE to publik — a changelog entry plus the pooled
+    /// request marked implemented. Founder ruling (Sep 3 2026): "not auto pr
+    /// for edit, only for bug fixes; if there's an edit it should just
+    /// changelog and push to publik db." Returns a one-line confirmation, or
+    /// nil when it could not be recorded.
+    var pushFeatureChangelogToPublik: ((_ appSlug: String, _ summary: String) async -> String?)?
+
+    /// Where the feature changelog push stands, for the card. Only ever leaves
+    /// `.notAttempted` for a FEATURE.
+    @Published private(set) var changelogState: OnDemandEditChangelogState = .notAttempted
 
     /// Whether a kept change on this app can be rebuilt and relaunched at all
     /// (Option A). Wired by CompanionManager to `true` only when the catalog
@@ -1924,12 +1937,15 @@ final class OnDemandEditCoordinator: ObservableObject {
             switch recheck.verdict {
             case .looksFixed:
                 self.persistSymptomVerdict(.machineCheckedFixed)
-                // Founder ruling (Sep 3 2026): once the edit works, the pull
-                // request opens on its own. Iris's own re-check counts as
-                // "works" only on a repo the reader can push to — a machine's
-                // opinion is not grounds for a pull request on somebody else's
-                // project; there, the reader's "Fixed" tap opens it.
-                if await self.readerCanPushToTheAppsRepo?(slug) == true {
+                // Founder ruling (Sep 3 2026): once the edit works, Iris acts on
+                // its own. A FEATURE is changelogged to publik (a db record, so
+                // no repo-push rights are involved). A BUG FIX opens a PR only
+                // where the reader can push — a machine's opinion is not grounds
+                // for a pull request on somebody else's project; there, the
+                // reader's own "Fixed" tap opens it.
+                if !OnDemandEditCoordinator.aWorkingEditOpensAPullRequest(forKind: self.classifiedKind) {
+                    self.recordFeatureChangelogToPublik()
+                } else if await self.readerCanPushToTheAppsRepo?(slug) == true {
                     self.openPullRequestForTheKeptEdit(because: .machineCheckLookedFixed)
                 }
             case .looksStillBroken:
@@ -1974,11 +1990,31 @@ final class OnDemandEditCoordinator: ObservableObject {
             return
         }
         phase = .done
-        // Founder ruling (Sep 3 2026): "after edits if it works, auto submit a
-        // pr to git repo". The reader saying it works is the strongest form of
-        // "it works" there is, on anyone's repo.
+        // Founder ruling (Sep 3 2026): once the edit works, act on its own — a
+        // PR for a BUG FIX, a publik changelog for a FEATURE ("not auto pr for
+        // edit, only for bug fixes; if there's an edit it should just changelog
+        // and push to publik db"). The reader saying it works is the strongest
+        // form of "it works" there is.
         if verdict == .fixed {
-            openPullRequestForTheKeptEdit(because: .readerSaidFixed)
+            actOnAWorkingEdit(because: .readerSaidFixed)
+        }
+    }
+
+    /// The founder's fix/feature split, in one pure function: a BUG FIX opens a
+    /// pull request; a FEATURE is changelogged to publik and never PR'd ("not
+    /// auto pr for edit, only for bug fixes"). A nil kind is treated as a fix,
+    /// matching the commit-trailer fallback.
+    static func aWorkingEditOpensAPullRequest(forKind kind: OnDemandEditKind?) -> Bool {
+        kind != .feature
+    }
+
+    /// The one place that decides what a confirmed-working edit does, so the
+    /// fix/feature split lives in exactly one spot.
+    private func actOnAWorkingEdit(because trigger: OnDemandEditPullRequestTrigger) {
+        if Self.aWorkingEditOpensAPullRequest(forKind: classifiedKind) {
+            openPullRequestForTheKeptEdit(because: trigger)
+        } else {
+            recordFeatureChangelogToPublik()
         }
     }
 
@@ -2044,6 +2080,37 @@ final class OnDemandEditCoordinator: ObservableObject {
                 self.editRunner.note("Couldn't open a pull request: \(reason)")
             }
             irisTrace("on-demand edit: pull request for \(slug) — \(self.pullRequestState.oneLineForTheRecord)")
+        }
+    }
+
+    /// Record a working FEATURE to publik: a changelog entry (what the app
+    /// gained) plus the pooled request marked implemented. Automatic when a
+    /// feature is confirmed working, and one tap away from the done card
+    /// otherwise. At most once per edit. A feature is NEVER PR'd — a
+    /// model-authored feature has no correctness oracle to review against, and
+    /// the founder's rule is that features are changelogged, not proposed.
+    func recordFeatureChangelogToPublik() {
+        guard classifiedKind == .feature, let slug = activeAppSlug else { return }
+        guard changelogState.allowsAnAttempt else { return }
+        guard let pushChangelog = pushFeatureChangelogToPublik else {
+            changelogState = .notSetUp(reason: "Iris couldn't reach publik to record this change")
+            return
+        }
+        let summary = Self.pullRequestTitle(fromRequest: scrubbedRequest ?? activeRequestText ?? "a change made with Iris")
+        changelogState = .pushing
+        editRunner.note("Recording this change to publik's changelog…")
+        Task { [weak self] in
+            let confirmation = await pushChangelog(slug, summary)
+            guard let self, self.activeAppSlug == slug else { return }
+            if let confirmation {
+                self.changelogState = .pushed
+                self.editRunner.note(confirmation)
+                self.statusLine = (self.statusLine ?? "") + " \(confirmation)"
+            } else {
+                self.changelogState = .failed(reason: "publik didn't accept it")
+                self.editRunner.note("Couldn't record this change to publik's changelog.")
+            }
+            irisTrace("on-demand edit: feature changelog for \(slug) — \(self.changelogState.oneLineForTheRecord)")
         }
     }
 
@@ -3334,6 +3401,7 @@ final class OnDemandEditCoordinator: ObservableObject {
     private func resetInFlightState() {
         OnDemandEditInterruptedRunRecovery.forget()
         pullRequestState = .notAttempted
+        changelogState = .notAttempted
         committedBranchName = nil
         changeId = nil
         scrubbedRequest = nil
@@ -3807,6 +3875,35 @@ enum OnDemandEditPullRequestState: Equatable {
         case .opened(let url): return "opened \(url)"
         case .alreadyOpen(let url): return "already open \(url)"
         case .pushedButNoPullRequest(let detail): return "pushed, no PR: \(detail)"
+        case .notSetUp(let reason): return "not set up: \(reason)"
+        case .failed(let reason): return "failed: \(reason)"
+        }
+    }
+}
+
+// MARK: - Feature changelog state
+
+/// Where the publik changelog push for a working FEATURE stands. One attempt
+/// per edit: `allowsAnAttempt` is false once one is in flight or has landed.
+enum OnDemandEditChangelogState: Equatable {
+    case notAttempted
+    case pushing
+    case pushed
+    case notSetUp(reason: String)
+    case failed(reason: String)
+
+    var allowsAnAttempt: Bool {
+        switch self {
+        case .notAttempted, .notSetUp, .failed: return true
+        case .pushing, .pushed: return false
+        }
+    }
+
+    var oneLineForTheRecord: String {
+        switch self {
+        case .notAttempted: return "not attempted"
+        case .pushing: return "pushing"
+        case .pushed: return "pushed"
         case .notSetUp(let reason): return "not set up: \(reason)"
         case .failed(let reason): return "failed: \(reason)"
         }

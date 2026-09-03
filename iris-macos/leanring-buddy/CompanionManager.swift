@@ -471,6 +471,21 @@ final class CompanionManager: ObservableObject {
             return "Posted to publik's public listing for \(canonicalRepo)"
         }
 
+        // A working FEATURE is changelogged to publik, not PR'd (founder ruling,
+        // Sep 3 2026). Automatic once the feature is confirmed working. This is a
+        // db record of what the app gained, plus the pooled request marked
+        // implemented — NOT the D6 public-listing post, which stays the separate,
+        // consented "Share to publik" button.
+        coordinator.pushFeatureChangelogToPublik = { [weak self] appSlug, summary in
+            guard let self else { return nil }
+            let canonicalRepo = self.installProvenanceStore.provenance(forAppSlug: appSlug)?.canonicalRepo
+            let recorded = await self.maintainPoolClient.recordChangelog(
+                appSlug: appSlug, summary: summary, repo: canonicalRepo, kind: "feature"
+            )
+            await self.maintainFeatureRequests.markPooledRequestImplemented(summary, forAppSlug: appSlug)
+            return recorded ? "Added to publik's changelog for this app." : nil
+        }
+
         // THE WIRE TO THE EYE, INSTALLED WHERE THE COORDINATOR IS BORN.
         //
         // Not in `startMaintainMode()`, where the takeover's own phase

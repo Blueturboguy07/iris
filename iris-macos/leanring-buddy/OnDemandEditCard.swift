@@ -1023,6 +1023,7 @@ struct OnDemandEditCard: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             pullRequestRow
+            changelogRow
 
             // The PUBLIC publish confirm (D6): a separate, every-time consent,
             // never bundled with the fork backup. It only appears once the
@@ -1085,6 +1086,36 @@ struct OnDemandEditCard: View {
         .foregroundColor(DS.Colors.green)
     }
 
+    /// Where the feature changelog stands. Founder ruling (Sep 3 2026): a
+    /// working feature is changelogged to publik rather than PR'd.
+    @ViewBuilder
+    private var changelogRow: some View {
+        switch coordinator.changelogState {
+        case .notAttempted:
+            EmptyView()
+        case .pushing:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Recording this change to publik's changelog…")
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.textSecondary)
+            }
+        case .pushed:
+            HStack(spacing: 4) {
+                Image(systemName: "text.badge.checkmark")
+                    .font(.system(size: 10, weight: .semibold))
+                Text("Added to publik's changelog")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .foregroundColor(DS.Colors.green)
+        case .notSetUp(let reason), .failed(let reason):
+            Text("Couldn't record this change to publik: \(reason)")
+                .font(.system(size: 11))
+                .foregroundColor(DS.Colors.amber)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     /// The normal done actions: open the pull request when Iris did not on its
     /// own, back up to the reader's own fork (fork-only, low-stakes), optionally
     /// share to publik's public listing (which opens the separate consent
@@ -1096,7 +1127,18 @@ struct OnDemandEditCard: View {
             // discard, kept on keep). Fork-only by construction in the
             // coordinator: never a push to a third party's main.
             if coordinator.proposedDiffText != nil {
-                if coordinator.pullRequestState.allowsAnAttempt {
+                // A bug fix opens a PR; a feature is changelogged to publik. The
+                // two are mutually exclusive per the founder ruling, so at most
+                // one of these buttons ever shows.
+                if coordinator.classifiedKind == .feature {
+                    if coordinator.changelogState.allowsAnAttempt {
+                        Button("Add to publik changelog") {
+                            coordinator.recordFeatureChangelogToPublik()
+                        }
+                        .irisTinyButton()
+                        .help("Records this change to publik's changelog and marks the request implemented. Never opens a pull request.")
+                    }
+                } else if coordinator.pullRequestState.allowsAnAttempt {
                     Button("Open a pull request") {
                         coordinator.openPullRequestForTheKeptEdit(because: .readerTappedTheButton)
                     }

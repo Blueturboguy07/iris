@@ -282,29 +282,81 @@ final class AppRelaunchService {
         // exists").
         let buildStartedAt = Date()
         let build = try? await runner.run(packageCommand, deadline: packagingDeadline)
-        guard build?.succeeded == true else {
-            let tail = build?.outputTail.suffix(400).trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return .packagingFailed(
-                reason: tail.isEmpty ? "the packaging build failed" : "the packaging build failed: \(tail)"
-            )
-        }
 
-        guard let artifactPath = Self.newestLaunchableAppBundle(
-            forStack: appStack, clonePath: clonePath, producedAtOrAfter: buildStartedAt
-        ) else {
-            // The build reported success but no fresh `.app` appeared where this
-            // stack puts one — treat as a packaging failure, never as "ready".
-            return .packagingFailed(
+        // THE ARTIFACT IRIS NEEDS IS THE `.app`, NEVER THE `.dmg` — so the fresh
+        // `.app` is checked BEFORE the build's exit code, not after.
+        //
+        // A Tauri build makes the `.app` first and only THEN tries to wrap it in
+        // a `.dmg`, and that DMG step (`bundle_dmg.sh`, which drives Finder over
+        // AppleScript) routinely fails in an automated, headless context even
+        // though the `.app` compiled and bundled cleanly. The old code guarded on
+        // `build.succeeded` first, so a build that failed ONLY at the DMG step —
+        // with a perfectly launchable `.app` already sitting in bundle/macos —
+        // was reported as a packaging failure and the whole edit delivery
+        // aborted. Reported (Publik Test 2, 2026-09-03, and again the same
+        // session): "Iris couldn't build a runnable copy of WhimprFlow (the
+        // packaging build failed: … bundle_dmg.sh)". Iris installs the `.app`
+        // over the reader's copy and never touches the `.dmg`, so a DMG failure
+        // must not block a delivery whose real artifact was produced.
+        //
+        // This is safe against delivering broken code: a genuine compile failure
+        // stops the build BEFORE the `.app` is bundled, so no FRESH `.app`
+        // (mtime ≥ buildStartedAt) appears and the verdict falls through to the
+        // honest failure. The only way a fresh `.app` exists is that compilation
+        // AND `.app` bundling both succeeded and only a later packaging step
+        // (the `.dmg`) failed. The rule lives in a pure function so it is tested
+        // without spawning `cargo tauri build`.
+        switch Self.packagingVerdict(
+            freshLaunchableAppBundlePath: Self.newestLaunchableAppBundle(
+                forStack: appStack, clonePath: clonePath, producedAtOrAfter: buildStartedAt
+            ),
+            buildSucceeded: build?.succeeded == true,
+            buildOutputTail: build?.outputTail ?? ""
+        ) {
+        case .deliverTheFreshApp(let artifactPath):
+            let signingSummary = await signFreshArtifactWithAStableIdentityIfAvailable(
+                artifactPath: artifactPath
+            )
+            return .artifactReady(artifactPath: artifactPath, signingSummary: signingSummary)
+        case .noLaunchableApp(let reason):
+            return .packagingFailed(reason: reason)
+        }
+    }
+
+    /// What a packaging build's result means, decided by the ARTIFACT and not by
+    /// the build's exit code. Pure, so the "a `.dmg` failure with a good `.app`
+    /// still delivers" rule can be tested without a real `cargo tauri build`.
+    enum PackagingVerdict: Equatable {
+        /// A fresh, launchable `.app` exists — deliver it, whatever the build's
+        /// overall exit code was.
+        case deliverTheFreshApp(artifactPath: String)
+        /// No launchable `.app` was produced. Carries the honest reason.
+        case noLaunchableApp(reason: String)
+    }
+
+    /// The `.app` wins over the exit code. A Tauri build bundles the `.app`
+    /// before it tries the `.dmg`, and the `.dmg` step fails on its own in an
+    /// automated context — so a fresh `.app` means success even when the build as
+    /// a whole reported failure (Publik Test 2's "packaging build failed:
+    /// bundle_dmg.sh"). Only when NO fresh `.app` was produced does the exit code
+    /// matter, and then its output tail is the useful diagnostic.
+    static func packagingVerdict(
+        freshLaunchableAppBundlePath: String?,
+        buildSucceeded: Bool,
+        buildOutputTail: String
+    ) -> PackagingVerdict {
+        if let artifactPath = freshLaunchableAppBundlePath {
+            return .deliverTheFreshApp(artifactPath: artifactPath)
+        }
+        if buildSucceeded {
+            return .noLaunchableApp(
                 reason: "the build finished but Iris couldn't find a launchable app it produced"
             )
         }
-
-        // Give the fresh bundle a signature that will be the same next rebuild,
-        // if an identity is available. This can only IMPROVE the artifact — a
-        // signing failure leaves the ad-hoc bundle exactly as the build produced
-        // it, so it never turns a successful package into a failed one.
-        let signingSummary = await signFreshArtifactWithAStableIdentityIfAvailable(artifactPath: artifactPath)
-        return .artifactReady(artifactPath: artifactPath, signingSummary: signingSummary)
+        let tail = buildOutputTail.suffix(400).trimmingCharacters(in: .whitespacesAndNewlines)
+        return .noLaunchableApp(
+            reason: tail.isEmpty ? "the packaging build failed" : "the packaging build failed: \(tail)"
+        )
     }
 
     // MARK: - Stable signing (so a rebuild is not a new app to macOS)

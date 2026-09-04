@@ -72,6 +72,12 @@ struct OnDemandEditCard: View {
     /// pick in the picker always wins. Defaulted so a preview still builds.
     var preselectedKind: OnDemandEditKind? = nil
 
+    /// Brings the centered terminal back after the reader minimized a running
+    /// edit. Defaulted to a no-op so previews and the settings-panel path (which
+    /// has no takeover to reopen) build without wiring it. See
+    /// `CompanionManager.reopenOnDemandEditTakeoverTerminal`.
+    var onReopenTerminal: () -> Void = {}
+
     /// What the reader is typing into the describe field. Local because it is
     /// UI-only until they tap Continue, at which point the coordinator scrubs it
     /// and takes ownership.
@@ -538,6 +544,21 @@ struct OnDemandEditCard: View {
                 .irisTextButton(isDanger: true)
                 .disabled(coordinator.readerAskedToStopTheRun)
                 .help("Stops the edit at the next safe point and puts the app's source back exactly as it was.")
+
+                // Whenever this compact card is on screen during a run, the
+                // centered terminal is NOT up — the reader minimized it (or it is
+                // in the instant before/after). "Show terminal" brings it back;
+                // before this, minimizing an edit was a one-way trip with no
+                // terminal to return to (Publik Test 2: "I can't get the terminal
+                // back up after I minimize it"). Hidden once a stop is under way,
+                // because the run is ending and there is nothing left to watch.
+                if !coordinator.readerAskedToStopTheRun {
+                    Button("Show terminal") {
+                        onReopenTerminal()
+                    }
+                    .irisTextButton()
+                    .help("Reopens the terminal you minimized so you can watch the rest of the edit.")
+                }
                 Spacer(minLength: 0)
             }
         }

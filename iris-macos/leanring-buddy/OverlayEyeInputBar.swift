@@ -671,6 +671,16 @@ struct OverlayEyeInputBarView: View {
         self.onTheBarsMeasuredHeightChanged = onTheBarsMeasuredHeightChanged
         self.onTheReaderWantsToAttachImages = onTheReaderWantsToAttachImages
         _exchange = State(initialValue: exchange)
+
+        // Seed the composer from any UNSENT draft the reader left when they last
+        // dismissed the bar mid-typing. The bar view is destroyed on every
+        // dismissal, so without this the half-written request was gone (Publik
+        // Test 2: "it doesn't save my prompt if I click off while mid-prompting").
+        // The store is empty after a send — the send clears the field, and the
+        // field is mirrored into the store — so a sent request is never restored.
+        let draftToRestore = companionManager.inputBarDraftStore.draftToRestoreIntoAFreshBar
+        _typedMessage = State(initialValue: draftToRestore.text)
+        _editKind = State(initialValue: draftToRestore.editKind)
     }
 
     private var suggestionsToOffer: [String] {
@@ -891,6 +901,21 @@ struct OverlayEyeInputBarView: View {
             composerMode = .edit
             onDemandEditCoordinator.consumeDescribePrefill()
         }
+        // Mirror the composer into the draft store on every change, so a
+        // dismissal preserves an unsent request and — because sending clears the
+        // field — a sent one leaves nothing behind. This is what makes "click
+        // off while mid-prompting keeps my prompt" true without the destroyed
+        // view having to remember anything (Publik Test 2, 2026-09-03).
+        .onChange(of: typedMessage) { _, newText in
+            companionManager.inputBarDraftStore.remember(
+                OverlayEyeInputBarDraft(text: newText, editKind: editKind)
+            )
+        }
+        .onChange(of: editKind) { _, newKind in
+            companionManager.inputBarDraftStore.remember(
+                OverlayEyeInputBarDraft(text: typedMessage, editKind: newKind)
+            )
+        }
         .animation(DS.Motion.contentIn, value: exchange.phase)
     }
 
@@ -913,7 +938,10 @@ struct OverlayEyeInputBarView: View {
            !companionManager.onDemandEditTakeoverIsUp {
             OnDemandEditCard(
                 coordinator: onDemandEditCoordinator,
-                preselectedKind: companionManager.onDemandEditPreselectedKind
+                preselectedKind: companionManager.onDemandEditPreselectedKind,
+                onReopenTerminal: { [companionManager] in
+                    companionManager.reopenOnDemandEditTakeoverTerminal()
+                }
             )
             // WHY A PLATE UNDER A TERMINAL CARD. The card's text is
             // `.textSelection(.enabled)`, but a selection the reader

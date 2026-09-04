@@ -53,7 +53,7 @@ enum MaintainEditTask: Sendable {
 /// prompt wording, the `Change-Kind` trailer, and — critically — the status
 /// language downstream: a feature is NEVER labeled "verified" (see
 /// `attemptOnDemandEdit`).
-enum OnDemandEditKind: Sendable {
+enum OnDemandEditKind: Sendable, Equatable {
     case bugFix
     case feature
 }

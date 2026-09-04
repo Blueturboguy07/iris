@@ -354,6 +354,18 @@ final class CompanionManager: ObservableObject {
                     """
                     alert.addButton(withTitle: "Create certificate")
                     alert.addButton(withTitle: "Not now")
+                    // Lift it above Iris's full-screen `.screenSaver`-level eye
+                    // overlay. WITHOUT THIS the alert opens BEHIND the overlay,
+                    // the nested `runModal()` loop runs against a window the
+                    // reader cannot see or reach, every click beeps, and the whole
+                    // Mac reads as frozen (Publik Test 2, 2026-09-03: "certifying
+                    // the fix … the beeping sound every time I tried to interact,
+                    // so I restarted"). It fires on the FIRST edit-delivery on a
+                    // Mac with no Developer ID — precisely the "certifying the fix"
+                    // moment, because the stable-identity signing happens during
+                    // the rebuild that certifies it. The two sibling consent
+                    // alerts always did this; this one forgot.
+                    IrisOverlayModalAlert.liftAboveTheEyeOverlay(alert)
                     return alert.runModal() == .alertFirstButtonReturn
                 }
             )
@@ -656,9 +668,7 @@ final class CompanionManager: ObservableObject {
             alert.informativeText = informativeText
             alert.addButton(withTitle: "Run it")
             alert.addButton(withTitle: "Don't run")
-            alert.window.level = .modalPanel
-            alert.window.collectionBehavior.insert(.moveToActiveSpace)
-            alert.window.makeKeyAndOrderFront(nil)
+            IrisOverlayModalAlert.liftAboveTheEyeOverlay(alert)
             return alert.runModal() == .alertFirstButtonReturn
         }
         return runner
@@ -735,6 +745,13 @@ final class CompanionManager: ObservableObject {
     /// It holds only what the reader typed and what Iris said back — see the
     /// privacy note at the top of `ChatTranscriptStore.swift`.
     let chatTranscriptStore = ChatTranscriptStore()
+
+    /// The reader's UNSENT draft in the bar's composer, kept across a dismissal
+    /// so clicking off no longer throws away a half-typed request (Publik Test
+    /// 2, 2026-09-03: "mid-prompt … it doesn't save my prompt if I click off").
+    /// In memory only — an unsent draft is deliberately never written to disk;
+    /// see the file header.
+    let inputBarDraftStore = OverlayEyeInputBarDraftStore()
 
     /// How many exchanges of history ride along with a request. The cap exists
     /// so context (and therefore cost and latency) cannot grow without bound;
@@ -1092,9 +1109,7 @@ final class CompanionManager: ObservableObject {
             alert.addButton(withTitle: "Not now")
             // Lift it above the floating panels, and make it the key window so
             // Return and Escape reach it.
-            alert.window.level = .modalPanel
-            alert.window.collectionBehavior.insert(.moveToActiveSpace)
-            alert.window.makeKeyAndOrderFront(nil)
+            IrisOverlayModalAlert.liftAboveTheEyeOverlay(alert)
             return alert.runModal() == .alertFirstButtonReturn
         }
 
@@ -1628,6 +1643,38 @@ final class CompanionManager: ObservableObject {
             afterTheReaderMinimizesIt: { [weak self] in self?.onDemandEditTakeoverIsUp = false }
         )
         onDemandEditTakeoverIsUp = true
+    }
+
+    /// Brings the centered edit terminal back after the reader minimized it.
+    ///
+    /// Minimizing folds the takeover into the eye and tears its panels down
+    /// (`afterTheReaderMinimizesIt` drops `onDemandEditTakeoverIsUp`), which for
+    /// an on-demand edit leaves ONLY the compact running card — no terminal and,
+    /// until now, no way back to one. Reported (Publik Test 2, 2026-09-03):
+    /// "Minimize button works, but I can't get the terminal back up after I
+    /// minimize it." (The guide autopilot keeps a terminal inline after a
+    /// minimize; the on-demand edit had no inline terminal at all, so the
+    /// minimize was one-way.) Re-presenting is safe: the controller was fully
+    /// dismissed by the minimize, so its "no second present" guard now passes,
+    /// and the run itself never stopped — the same live `editRunner` streams
+    /// straight back into the reopened terminal.
+    func reopenOnDemandEditTakeoverTerminal() {
+        guard Self.aMinimizedOnDemandEditTerminalMayBeReopened(
+            whileEditPhaseIs: onDemandEditCoordinator.phase
+        ) else { return }
+        presentOnDemandEditTakeover()
+    }
+
+    /// Whether a minimized on-demand-edit terminal may be reopened right now.
+    ///
+    /// Only while an edit is actually running: every other phase draws its own
+    /// surface in the bar (a consent, the committed-diff preview, the result),
+    /// and there is no live run for a terminal to show. Pure and static so the
+    /// rule can be checked without standing up a whole `CompanionManager`.
+    static func aMinimizedOnDemandEditTerminalMayBeReopened(
+        whileEditPhaseIs phase: OnDemandEditPhase
+    ) -> Bool {
+        phase == .running
     }
 
     func refreshAllPermissions() {

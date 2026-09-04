@@ -47,6 +47,7 @@ struct CompanionPanelView: View {
     /// when the panel appears; the row's button is the revoke the consent alert
     /// promises exists.
     @State private var autopilotAutonomyGranted = AutopilotAutonomyGrant.shared.isGranted
+    @State private var editTerminalStartsMinimized = EditTerminalStartMinimizedPreference.shared.startsMinimized
 
     /// The BYO key while the user is typing it. Cleared the moment it is saved
     /// and never repopulated — a saved key is never echoed back into the UI.
@@ -238,6 +239,12 @@ struct CompanionPanelView: View {
                     .frame(height: 10)
 
                 autopilotAutonomyRow
+                    .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 10)
+
+                editTerminalMinimizeRow
                     .padding(.horizontal, 16)
 
                 Spacer()
@@ -699,6 +706,47 @@ struct CompanionPanelView: View {
                     action: {
                         AutopilotAutonomyGrant.shared.grant()
                         autopilotAutonomyGranted = true
+                    }
+                )
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    /// "Start edits with the terminal minimized" — the settings toggle Publik
+    /// Test 2 asked for. Same two-named-buttons shape as the autonomy row, for
+    /// the same reason: what is true and what tapping would do are separate
+    /// things on screen. Scoped to on-demand edits (see
+    /// `EditTerminalStartMinimizedPreference`).
+    private var editTerminalMinimizeRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Edit terminal")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(DS.Colors.muted)
+                Text(editTerminalStartsMinimized
+                     ? "Edits run without the terminal taking over your screen. Open it anytime with “Show terminal”."
+                     : "Editing an app opens the terminal so you can watch it work.")
+                    .font(.system(size: 9))
+                    .foregroundColor(DS.Colors.muted.opacity(0.7))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 6) {
+                autonomyModeButton(
+                    title: "Show the terminal",
+                    isSelected: !editTerminalStartsMinimized,
+                    action: {
+                        EditTerminalStartMinimizedPreference.shared.setStartsMinimized(false)
+                        editTerminalStartsMinimized = false
+                    }
+                )
+                autonomyModeButton(
+                    title: "Start minimized",
+                    isSelected: editTerminalStartsMinimized,
+                    action: {
+                        EditTerminalStartMinimizedPreference.shared.setStartsMinimized(true)
+                        editTerminalStartsMinimized = true
                     }
                 )
             }

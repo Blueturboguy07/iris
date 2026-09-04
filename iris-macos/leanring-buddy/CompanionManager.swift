@@ -1531,7 +1531,15 @@ final class CompanionManager: ObservableObject {
     private func reactToOnDemandEditPhase(_ phase: OnDemandEditPhase) {
         switch phase {
         case .running:
-            presentOnDemandEditTakeover()
+            // "Start edits with the terminal minimized" (settings): skip the
+            // centered takeover and let the eye bar's compact running card — with
+            // its "Show terminal" button (`reopenOnDemandEditTakeoverTerminal`) —
+            // be the surface. `onDemandEditTakeoverIsUp` is already false here, so
+            // not presenting IS starting minimized. The edit runs exactly the
+            // same; it just does not take over the screen.
+            if !EditTerminalStartMinimizedPreference.shared.startsMinimized {
+                presentOnDemandEditTakeover()
+            }
         default:
             if onDemandEditTakeoverIsUp {
                 autopilotTakeoverController.dismiss(afterHold: false)

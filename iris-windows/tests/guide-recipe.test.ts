@@ -10,7 +10,9 @@ import {
 } from "../src/services/autopilot/guide-model";
 import {
   commandHoldsTheShellOpen,
+  commandNeedsPosixTranslation,
   recipeFromGuide,
+  translatePosixShellToPowerShell,
   type RecipeDerivationTarget,
 } from "../src/services/autopilot/guide-recipe";
 import {
@@ -55,17 +57,31 @@ function fixtureJsonText(slug: string): string {
 }
 
 /** The guide commands, in order, that Iris itself runs — a `terminal`/`check`
- *  step with a non-blank command. Everything else (opens, reader steps, prose,
- *  verify) carries no command. */
+ *  step with a non-blank command that the guide did NOT mark sensitive. A
+ *  sensitive command (a secret entered while it is open) is handed to the reader
+ *  as a `manual` step, so it is deliberately NOT a `command` Iris runs; everything
+ *  else (opens, reader steps, prose, verify) carries no command either. */
 function branchCommandsInOrder(branch: IrisGuideBranch): string[] {
   return branch.steps
     .filter(
       (step) =>
         (step.kind === "terminal" || step.kind === "check") &&
         step.command !== undefined &&
-        step.command.trim() !== "",
+        step.command.trim() !== "" &&
+        step.watch?.sensitive !== true,
     )
     .map((step) => step.command as string);
+}
+
+/** Removes winget's non-interactive agreement flags, so the "commands preserved
+ *  in order" check can compare a derived command against the raw guide command
+ *  without the derivation's deliberate winget normalization (finding: a bare
+ *  `winget install` would stall on the interactive Y/N prompt) reading as a
+ *  mismatch. The flags themselves are asserted separately. */
+function withoutWingetAgreementFlags(command: string): string {
+  return command
+    .replace(/\s--accept-source-agreements/g, "")
+    .replace(/\s--accept-package-agreements/g, "");
 }
 
 function targetForBranch(branch: IrisGuideBranch): RecipeDerivationTarget {
@@ -113,11 +129,20 @@ describe("deriving a recipe from every guide with a Windows branch", () => {
         // Every guide step maps to exactly one recipe step.
         expect(recipe.steps.length).toBe(branch.steps.length);
 
-        // The command steps equal the branch's commands, in order.
+        // The command steps equal the branch's non-sensitive commands, in order
+        // (a sensitive command becomes a reader-run `manual` step, not a
+        // `command`). Compared against the AUTHORED command (`posixCommand`, which
+        // the derivation keeps whenever it rewrites the Windows command — the
+        // POSIX clone-step idiom → PowerShell), falling back to `command` for the
+        // untouched steps. Winget's agreement flags are stripped from both sides,
+        // since the derivation deliberately adds them; the flags are asserted on
+        // their own below.
         const derivedCommands = recipe.steps
           .filter((step) => step.kind === "command")
-          .map((step) => step.command as string);
-        expect(derivedCommands).toEqual(branchCommandsInOrder(branch));
+          .map((step) => withoutWingetAgreementFlags((step.posixCommand ?? step.command) as string));
+        expect(derivedCommands).toEqual(
+          branchCommandsInOrder(branch).map(withoutWingetAgreementFlags),
+        );
 
         // Ids and titles are preserved position-for-position.
         expect(recipe.steps.map((step) => step.id)).toEqual(branch.steps.map((step) => step.id));
@@ -514,5 +539,138 @@ describe("the guide-backed resolver", () => {
     });
     const recipe = await resolveDesktop("openascii");
     expect(recipe?.slug).toBe("openascii");
+  });
+});
+
+describe("sensitive commands and winget normalization", () => {
+  /** Derives the desktop Windows recipe for a slug, or throws when it is not a
+   *  recipe — the fixtures used here all have a supported desktop branch. */
+  function desktopRecipe(slug: string): InstallRecipe {
+    const resolution = recipeFromGuide(loadGuideFixture(slug), { platform: "windows" });
+    if (resolution.kind !== "recipe") throw new Error(`${slug} did not derive to a recipe`);
+    return resolution.recipe;
+  }
+
+  it("hands a sensitive command step to the reader instead of running it (chatmany-mann)", () => {
+    const recipe = desktopRecipe("chatmany-mann");
+    // Both sensitive steps in the live guide pipe a secret into `wrangler secret put`.
+    for (const stepId of ["owner-token", "app-secrets"]) {
+      const step = recipe.steps.find((candidate) => candidate.id === stepId);
+      expect(step, `step ${stepId} present`).toBeDefined();
+      if (step === undefined) continue;
+      // It is a reader-handled manual step — Iris never runs it, so there is NO
+      // runnable command field for any code path to execute.
+      expect(step.kind).toBe("manual");
+      expect(step.command).toBeUndefined();
+      expect(step.longRunning).toBeUndefined();
+      // The reader is told what to type (the command rides in the instruction),
+      // and told it is theirs to run because it is sensitive.
+      expect(step.instruction).toBeDefined();
+      expect(step.instruction).toContain("wrangler secret put");
+      expect(step.instruction).toMatch(/secret|yourself/i);
+    }
+  });
+
+  it("never derives a sensitive step into a `command` step for any guide", () => {
+    for (const slug of fixtureSlugs()) {
+      const guide = loadGuideFixture(slug);
+      for (const branch of guide.branches.filter((candidate) => candidate.platform === "windows")) {
+        if (branch.unsupported !== undefined) continue;
+        const resolution = recipeFromGuide(guide, targetForBranch(branch));
+        if (resolution.kind !== "recipe") continue;
+        const sensitiveGuideStepIds = new Set(
+          branch.steps.filter((step) => step.watch?.sensitive === true).map((step) => step.id),
+        );
+        for (const step of resolution.recipe.steps) {
+          if (sensitiveGuideStepIds.has(step.id)) {
+            expect(step.kind, `${slug}:${step.id} must not be a command`).not.toBe("command");
+            expect(step.command).toBeUndefined();
+          }
+        }
+      }
+    }
+  });
+
+  it("adds winget's non-interactive agreement flags to a bare `winget install` (plantgpt install-rust)", () => {
+    const recipe = desktopRecipe("plantgpt");
+    const installRust = recipe.steps.find((step) => step.id === "install-rust");
+    expect(installRust).toBeDefined();
+    expect(installRust?.command).toContain("winget install");
+    expect(installRust?.command).toContain("--accept-source-agreements");
+    expect(installRust?.command).toContain("--accept-package-agreements");
+  });
+
+  it("does not double up the agreement flags on a winget command that already has them", () => {
+    // publikclip's guide installs uv with the flags already present; derivation
+    // must not append a second copy.
+    const recipe = desktopRecipe("publikclip");
+    for (const step of recipe.steps) {
+      const command = step.command;
+      if (command === undefined || !/winget\s+install/i.test(command)) continue;
+      expect(command.match(/--accept-source-agreements/g)?.length ?? 0).toBeLessThanOrEqual(1);
+      expect(command.match(/--accept-package-agreements/g)?.length ?? 0).toBeLessThanOrEqual(1);
+    }
+  });
+});
+
+/**
+ * The POSIX clone-step idiom → PowerShell (finding: the Windows branch's `clone`
+ * step is left as macOS bash — `cd ~ / if [ ! -d App/.git ]; then / git clone … /
+ * fi` — which is a hard PowerShell ParserError, so nothing in the step runs, not
+ * even the clone, and the "command not found" self-heal never fires). The
+ * derivation rewrites it to PowerShell for the Windows command and keeps the
+ * authored bash as `posixCommand` for the Mac test host.
+ */
+describe("POSIX clone-step translation", () => {
+  it("translates the bash idempotent-clone idiom to runnable PowerShell", () => {
+    const bash = "cd ~\nif [ ! -d WhimprFlow/.git ]; then\ngit clone https://github.com/Blueturboguy07/WhimprFlow.git\nfi";
+    expect(commandNeedsPosixTranslation(bash)).toBe(true);
+    const powershell = translatePosixShellToPowerShell(bash);
+    // The bash-only syntax is gone…
+    expect(powershell).not.toMatch(/\[\s*!?\s*-[a-z]\s/);
+    expect(powershell.split("\n").some((line) => line.trim() === "fi")).toBe(false);
+    // …replaced by the PowerShell existence guard, with the clone body intact.
+    expect(powershell).toContain("if (-not (Test-Path WhimprFlow/.git)) {");
+    expect(powershell).toContain("git clone https://github.com/Blueturboguy07/WhimprFlow.git");
+    expect(powershell.trimEnd().endsWith("}")).toBe(true);
+    // `cd ~` is valid in both shells and is left untouched.
+    expect(powershell).toContain("cd ~");
+  });
+
+  it("leaves an already-PowerShell command untouched", () => {
+    const powershell = 'if (!(Test-Path "$env:APPDATA\\App\\models\\x.bin")) { curl.exe -f -L -o "x" https://example.com/x }';
+    expect(commandNeedsPosixTranslation(powershell)).toBe(false);
+    expect(translatePosixShellToPowerShell(powershell)).toBe(powershell);
+    // And an ordinary chained command with `cd`/`;` is not mistaken for bash.
+    const chained = "cd ui; pnpm.cmd install; cd ..; pnpm.cmd --dir ui approve-builds --all";
+    expect(commandNeedsPosixTranslation(chained)).toBe(false);
+  });
+
+  it("derives every fixture's Windows commands free of bash-only syntax", () => {
+    // Every derived Windows `command` step must be PowerShell-parseable: no `[ -x
+    // ]` test, no bare `then`/`fi` line. The authored bash survives on
+    // `posixCommand` for the clone steps the derivation rewrote.
+    let clonesTranslated = 0;
+    for (const slug of fixtureSlugs()) {
+      const guide = loadGuideFixture(slug);
+      for (const branch of guide.branches.filter((each) => each.platform === "windows")) {
+        const resolution = recipeFromGuide(guide, targetForBranch(branch));
+        if (resolution.kind !== "recipe") continue;
+        for (const step of resolution.recipe.steps) {
+          if (step.kind !== "command") continue;
+          expect(commandNeedsPosixTranslation(step.command as string), `${slug}:${step.id}`).toBe(false);
+          if (step.posixCommand !== undefined) {
+            // A translated step keeps the authored bash, and the win32 command is
+            // the PowerShell rewrite of it.
+            expect(commandNeedsPosixTranslation(step.posixCommand)).toBe(true);
+            expect(step.command).toBe(translatePosixShellToPowerShell(step.posixCommand));
+            clonesTranslated += 1;
+          }
+        }
+      }
+    }
+    // The catalog's source-build guides (~14 of 18) carry the bug; prove we hit
+    // more than a couple so a regression that quietly stops translating is caught.
+    expect(clonesTranslated).toBeGreaterThanOrEqual(10);
   });
 });

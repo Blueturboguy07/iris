@@ -82,11 +82,125 @@ export function commandHoldsTheShellOpen(command: string): boolean {
   return COMMANDS_THAT_HOLD_THE_SHELL_OPEN.some((pattern) => pattern.test(command));
 }
 
+// ── POSIX → PowerShell (the clone-step idiom) ──────────────────────────────────
+//
+// A guide's Windows branch is authored in PowerShell, but the idempotent-clone
+// step is routinely left in the macOS branch's POSIX form —
+//
+//   cd ~
+//   if [ ! -d App/.git ]; then
+//   git clone https://…/App.git
+//   fi
+//
+// — which is a hard PowerShell ParserError (`[ … ]`, `then`, `fi` are all
+// invalid syntax, not missing commands), so NOTHING in the step runs, not even
+// the `git clone`, and the deterministic "command not found" self-heal never
+// fires (a ParserError matches none of its signatures). That strands the reader
+// at the very step that copies the source onto the machine, across most of the
+// source-build catalog. Rather than trust every guide author to hand-translate
+// this one construct, the derivation rewrites it to PowerShell for the Windows
+// command and keeps the ORIGINAL as the `posixCommand`, so Iris-on-a-Mac (the
+// test host) still drives the shape zsh understands. A command with no POSIX test
+// construct is left untouched, so the many already-cross-platform steps — and a
+// guide later fixed to native PowerShell — pay nothing and are never corrupted.
+
+/// Whether a command carries a POSIX shell construct PowerShell cannot parse (a
+/// `[ -x … ]` file test, or a line that is a bare `then`/`fi`), so the Windows
+/// branch would choke on it. Deliberately narrow: it does not fire on an ordinary
+/// `pnpm.cmd install` or a PowerShell `if (!(Test-Path …)) { … }`.
+export function commandNeedsPosixTranslation(command: string): boolean {
+  if (/\[\s*!?\s*-[defsxLrwe]\s+\S/.test(command)) return true;
+  return command.split("\n").some((line) => {
+    const trimmed = line.trim();
+    return trimmed === "fi" || trimmed === "then";
+  });
+}
+
+/// Rewrites the POSIX file-test / if-construct idiom to PowerShell. Handles the
+/// exact shape the guides' clone step uses — `if [ ! -d X ]; then … fi`, with or
+/// without a leading `cd ~` (valid in both shells) — mapping the `-d`/`-f`/`-e`/`-s`
+/// existence tests to `Test-Path`. It leaves anything it does not recognise
+/// alone; the caller only swaps the result in for a command that needs it, so an
+/// unrecognised remnant is never worse than the untranslated original.
+export function translatePosixShellToPowerShell(command: string): string {
+  return command
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trim();
+      if (trimmed === "fi") return "}";
+      if (trimmed === "then") return "{";
+      return line
+        // `if [ ! -d X ]; then`  →  `if (-not (Test-Path X)) {`
+        .replace(/\bif\s*\[\s*!\s*-[defsxLrwe]\s+([^\]\s]+)\s*\]\s*;?\s*(then\b)?/gi, "if (-not (Test-Path $1)) {")
+        // `if [ -d X ]; then`    →  `if (Test-Path X) {`
+        .replace(/\bif\s*\[\s*-[defsxLrwe]\s+([^\]\s]+)\s*\]\s*;?\s*(then\b)?/gi, "if (Test-Path $1) {");
+    })
+    .join("\n");
+}
+
 /// A guide command is "runnable" only when it is a non-blank string. A `terminal`
 /// or `check` step with no command is prose (a guide's "open your shell"), which
 /// maps to a self-completing `noop` step — matching macOS's nil-command → succeeded.
 function hasRunnableCommand(step: IrisGuideStep): boolean {
   return step.command !== undefined && step.command.trim() !== "";
+}
+
+/// Whether the guide marked this step sensitive — a secret is entered or shown
+/// while the step is open (a password piped into `wrangler secret put`, an API
+/// key on screen). macOS refuses to autopilot-execute any such step
+/// (`stepIsAutopilotExecutable` requires `watch.sensitive != true`) and drops it
+/// to the reader's own terminal, so its stdout/stderr capture, its
+/// `commandFinished` event, and the fix ladder's model never touch the secret.
+/// The Windows derivation makes the same call: a sensitive command becomes a
+/// reader-handled `manual` step, never a `command` Iris runs itself.
+function stepIsSensitive(step: IrisGuideStep): boolean {
+  return step.watch?.sensitive === true;
+}
+
+/// Appends winget's non-interactive agreement flags to any `winget install` line
+/// that is missing them, so a fresh machine's first winget use cannot stall on
+/// the interactive source/package Y/N prompt — a prompt the autopilot's hidden,
+/// `-NonInteractive`, stdin-less PowerShell has no way to answer. This mirrors
+/// `setup-detour.ts`'s `wingetInstallCommand`, which always carries the flags, and
+/// closes the gap where a guide author wrote a bare `winget install` (e.g.
+/// plantgpt's `install-rust`). Per line, so a multi-line command keeps its shape.
+function normalizeWingetAgreements(command: string): string {
+  return command
+    .split("\n")
+    .map((line) => {
+      if (!/\bwinget\s+install\b/i.test(line)) return line;
+      let normalized = line;
+      if (!/--accept-source-agreements/i.test(normalized)) {
+        normalized += " --accept-source-agreements";
+      }
+      if (!/--accept-package-agreements/i.test(normalized)) {
+        normalized += " --accept-package-agreements";
+      }
+      return normalized;
+    })
+    .join("\n");
+}
+
+/// The reader-facing instruction for a sensitive command step Iris will NOT run
+/// itself. It names what to do (the guide's own body) and shows the exact command
+/// to type — including the folder to run it in, since Iris's shell never moved
+/// there for this step — so the reader can run it in their own terminal where the
+/// secret stays with them.
+function sensitiveStepInstruction(step: IrisGuideStep, command: string): string {
+  const parts: string[] = [];
+  const body = step.body.trim();
+  if (body.length > 0) parts.push(body);
+  parts.push(
+    "This step handles a secret, so run it yourself in your own terminal — " +
+      "Iris won't type it or watch the screen. Then it will carry on.",
+  );
+  const folder = step.workingDirectory;
+  if (folder !== undefined && folder !== "") {
+    parts.push(`In ${folder}, run:\n${command}`);
+  } else {
+    parts.push(command);
+  }
+  return parts.join("\n\n");
 }
 
 // ── Step mapping ───────────────────────────────────────────────────────────────
@@ -106,8 +220,10 @@ function recipeStepFromGuideStep(step: IrisGuideStep): RecipeStep {
     ...(step.verifierLabel !== undefined ? { verifierLabel: step.verifierLabel } : {}),
     // Carry the guide's watch block through verbatim so the watch-loop port can
     // confirm the step from the reader's machine. The runner consults it for a
-    // `verify` step and for a reader step (sign_in/permission/web/paste); a
-    // `command` step advances on its own exit, so its watch is simply unused.
+    // `verify` step, for an `open` step (a manual installer whose completion Iris
+    // watches for — cargo on PATH, the page's visual state), and for a reader
+    // step (sign_in/permission/web/paste/manual); a `command` step advances on
+    // its own exit, so its watch is simply unused.
     ...(step.watch !== undefined && step.watch.expect.length > 0
       ? { watch: watchForRecipe(step.watch) }
       : {}),
@@ -119,13 +235,37 @@ function recipeStepFromGuideStep(step: IrisGuideStep): RecipeStep {
       if (!hasRunnableCommand(step)) {
         return { ...shared, kind: "noop" };
       }
-      const command = step.command as string;
+      // The Windows command, with the POSIX clone-step idiom rewritten to
+      // PowerShell so it does not ParserError on the shell Iris actually drives.
+      // The original bash is kept as `posixCommand` for the Mac test host.
+      const authoredCommand = normalizeWingetAgreements(step.command as string);
+      const needsPosixTranslation = commandNeedsPosixTranslation(authoredCommand);
+      const command = needsPosixTranslation
+        ? translatePosixShellToPowerShell(authoredCommand)
+        : authoredCommand;
+      // A sensitive step is never run by Iris — it is handed to the reader, who
+      // runs it in their own terminal so the secret never reaches Iris's shell,
+      // its output capture, or the fix ladder's model. Faithful to macOS dropping
+      // a `watch.sensitive` step to the manual branch. The command is embedded in
+      // the instruction (never as a runnable `command` field, so no code path can
+      // execute it), and any non-empty watch rides on `shared` so a pixel-free
+      // side signal can still auto-advance it.
+      if (stepIsSensitive(step)) {
+        return {
+          ...shared,
+          kind: "manual",
+          instruction: sensitiveStepInstruction(step, command),
+        };
+      }
       const check: StepCheck | undefined =
         step.tool !== undefined ? { type: "tool_version", tool: step.tool } : undefined;
       return {
         ...shared,
         kind: "command",
         command,
+        // Only when the Windows command was translated: keep the authored bash so
+        // Iris-on-a-Mac (the test host) still runs the shape zsh understands.
+        ...(needsPosixTranslation ? { posixCommand: authoredCommand } : {}),
         ...(step.workingDirectory !== undefined && step.workingDirectory !== ""
           ? { workingDirectory: step.workingDirectory }
           : {}),
@@ -192,7 +332,9 @@ function prerequisitesFromBranch(branch: IrisGuideBranch): RecipePrerequisite[] 
     title: setupStep.title,
     ...(setupStep.tool !== undefined ? { tool: setupStep.tool } : {}),
     ...(setupStep.href !== undefined ? { href: setupStep.href } : {}),
-    ...(hasRunnableCommand(setupStep) ? { command: setupStep.command as string } : {}),
+    ...(hasRunnableCommand(setupStep)
+      ? { command: normalizeWingetAgreements(setupStep.command as string) }
+      : {}),
     ...(setupStep.body !== "" ? { body: setupStep.body } : {}),
   }));
 }

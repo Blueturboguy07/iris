@@ -214,3 +214,54 @@ describe("the working-directory-aware gate", () => {
     expect(assess("format c:", { provenance: "vetted_recipe", autonomyGranted: true }).tier).toBe("refused_outright");
   });
 });
+
+/**
+ * The resolved-rendering gate (finding #2). A single PowerShell line can move
+ * the shell itself with an embedded `Set-Location`/`cd`, so a relative path
+ * after one resolves against a folder the STEP never declared. The gate rewrites
+ * the command as the shell will run it — tracking the embedded move — and judges
+ * that rendering too, so `Set-Location C:\Windows; Remove-Item -Recurse -Force .`
+ * is caught even though its declared folder is ordinary and it names no `..`.
+ */
+describe("the resolved-rendering gate (embedded directory changes)", () => {
+  const ordinaryFolder = "C:\\Users\\me\\app";
+
+  it.each([
+    // The textbook worst case: cd into a system folder, then destroy `.`.
+    "Set-Location C:\\Windows; Remove-Item -Recurse -Force .",
+    // A short alias and a subfolder of the system tree.
+    "sl C:\\Windows\\System32; Remove-Item -Recurse -Force .",
+    // cd via the -Path flag, then a relative token that lands in the system folder.
+    "Set-Location -Path C:\\Windows; del config",
+  ])("refuses %s even under the grant, declared folder ordinary", (command) => {
+    const options = { provenance: "vetted_recipe" as const, autonomyGranted: true, workingDirectory: ordinaryFolder };
+    expect(assess(command, options).tier).toBe("refused_outright");
+    expect(approve(command, options)).toBeUndefined();
+    expect(approveAfterAReaderTap(command, options)).toBeUndefined();
+  });
+
+  it("catches an embedded absolute cd even when the step declares no folder", () => {
+    // With no declared workingDirectory the embedded absolute `Set-Location`
+    // still establishes the base the rest of the line resolves against.
+    const command = "Set-Location C:\\Windows; Remove-Item -Recurse -Force .";
+    expect(assess(command, { provenance: "vetted_recipe", autonomyGranted: true }).tier).toBe("refused_outright");
+    // And the same shape from a model-proposed fix, granted.
+    expect(assess(command, { provenance: "model_proposed_fix", autonomyGranted: true }).tier).toBe("refused_outright");
+    expect(escapesIntoAForbiddenPlace(command, undefined)).toBeDefined();
+  });
+
+  it("still runs a compound command that stays inside the tree", () => {
+    // cd into an ordinary subfolder, then an ordinary command — nothing here
+    // reaches a system folder, so it must not be refused by mistake.
+    const options = { provenance: "vetted_recipe" as const, autonomyGranted: true, workingDirectory: ordinaryFolder };
+    expect(assess("Set-Location .\\packages\\core; npm ci", options).tier).toBe("runs_without_asking");
+    expect(assess("cd build; Copy-Item .\\a .\\b", options).tier).toBe("runs_without_asking");
+  });
+
+  it("does not guess where a shell-expanded cd lands, so it never over-refuses one", () => {
+    // `$env:TEMP` is not resolvable from the text; the gate leaves the following
+    // relative token unresolved rather than inventing a forbidden folder for it.
+    const options = { provenance: "vetted_recipe" as const, autonomyGranted: true, workingDirectory: ordinaryFolder };
+    expect(assess("Set-Location $env:TEMP; Remove-Item -Recurse -Force .", options).tier).toBe("runs_without_asking");
+  });
+});

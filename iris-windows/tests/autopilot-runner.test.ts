@@ -220,4 +220,24 @@ describe("the autopilot runner", () => {
       expect(isAPlainFolder(folder), folder).toBe(true);
     }
   });
+
+  it("judges an undeclared-folder step against the shell's real current directory", async () => {
+    // A destructive command with NO declared folder, run while the shell is
+    // sitting in a system folder (an earlier step or a fix left it there). Without
+    // the cwd fallback the gate would see no folder and, under the grant, run it;
+    // with the fallback the working-directory floor stays live for every command,
+    // not only the steps that name a folder, so this is refused. (Finding: the
+    // per-step gate only saw a folder when the STEP declared one.)
+    const runner = new AutopilotRunner(
+      recipe([commandStep("tidy", "Remove-Item -Recurse -Force .")]),
+      "win32",
+      true, // granted, as production always is
+    );
+    const shell = new MockShell([], "C:\\Windows");
+
+    const status = await runner.runUntilBlocked(shell);
+    expect(status.type).toBe("surfaced");
+    // The destructive command was never run — the floor caught it on the folder.
+    expect(shell.commandsRun).toEqual([]);
+  });
 });

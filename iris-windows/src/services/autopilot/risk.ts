@@ -321,27 +321,201 @@ function looksLikeARelativePathToken(token: string): boolean {
   return /^[A-Za-z0-9._\\/@+-]+$/.test(token);
 }
 
-/// The reason a relative path in the command climbs out of the guide's folder
-/// into a place nothing should be written — a drive root or a system folder —
-/// or undefined when nothing in it does. Only tokens that actually contain a
-/// `..` are considered, so an ordinary `npm ci` in an ordinary folder pays
-/// nothing and can never be refused by mistake. Absolute: honored even under
-/// the grant, because a `..`-walk into `C:\Windows\System32` is the declared-
-/// folder version of the catastrophe floor.
-export function escapesIntoAForbiddenPlace(
-  command: string,
-  workingDirectory: string,
-): string | undefined {
-  if (!isAResolvableFolder(workingDirectory)) return undefined;
-  for (const token of command.split(/\s+/)) {
-    if (!token.includes("..")) continue;
-    if (!looksLikeARelativePathToken(token)) continue;
-    const { resolved, escaped } = resolveRelativePath(token, workingDirectory);
-    if (escaped || looksLikeADriveRoot(resolved) || looksLikeASystemFolder(resolved)) {
-      return "This reaches out of the install folder into a system location.";
+// ── Resolving the command against the folder(s) it will really run in ────────
+//
+// Every rule above is a pattern over command TEXT, and the text alone does not
+// say where a relative path lands. The declared working directory closes half
+// of that (`forbiddenWorkingDirectory`), but a single PowerShell line can also
+// move the shell itself: `Set-Location C:\Windows; Remove-Item -Recurse -Force .`
+// declares an ordinary folder, embeds a `Set-Location` into a system one, and
+// then destroys `.` — which resolves to `C:\Windows`, not the declared folder.
+// Neither the declared-folder check nor a raw-text rule sees it.
+//
+// So, like macOS `commandAsItWillRun`/`renderingsToAssess`, the gate rewrites
+// each relative path token as the shell will actually resolve it — and, because
+// a `;`-chained PowerShell line is a Windows idiom the macOS zsh port never had
+// to handle, it also TRACKS an embedded `Set-Location`/`cd` so tokens after one
+// resolve against the folder that command moved into. FOR JUDGING ONLY: the
+// approved command always carries the text as written, so a rendering this gets
+// wrong can only ever cost an extra confirm tap, never change what runs.
+
+/// The location cmdlets whose first path argument moves where later relative
+/// paths in the same line resolve. `cd`/`chdir` are the aliases, `sl` the short
+/// form, `pushd` the stack-push that also changes the current directory.
+const DIRECTORY_CHANGE_PROGRAMS: ReadonlySet<string> = new Set([
+  "set-location",
+  "sl",
+  "cd",
+  "chdir",
+  "pushd",
+]);
+
+type CommandPiece =
+  | { readonly kind: "whitespace"; readonly text: string }
+  | { readonly kind: "separator"; readonly text: string }
+  | { readonly kind: "word"; readonly text: string };
+
+/// Splits a command into runs of whitespace, command separators, and words —
+/// keeping every character so a rebuilt rendering is byte-identical wherever no
+/// token was resolved (which is what lets the caller dedupe raw vs. resolved).
+/// Separators (`;`, `|`, `&`, `&&`, `||`, and the grouping braces/parens) are
+/// split out even when they touch a word (`a;b`), because they end one command
+/// and begin another — the next word is a program name, not an argument.
+function tokenizeCommand(command: string): CommandPiece[] {
+  const pieces: CommandPiece[] = [];
+  const isSpace = (character: string): boolean => character === " " || character === "\t" || character === "\n" || character === "\r";
+  const isSingleSeparator = (character: string): boolean =>
+    character === ";" || character === "|" || character === "&" || character === "(" || character === ")" || character === "{" || character === "}";
+  let index = 0;
+  while (index < command.length) {
+    const character = command[index]!;
+    if (isSpace(character)) {
+      let end = index + 1;
+      while (end < command.length && isSpace(command[end]!)) end += 1;
+      pieces.push({ kind: "whitespace", text: command.slice(index, end) });
+      index = end;
+      continue;
     }
+    const twoCharacters = command.slice(index, index + 2);
+    if (twoCharacters === "&&" || twoCharacters === "||") {
+      pieces.push({ kind: "separator", text: twoCharacters });
+      index += 2;
+      continue;
+    }
+    if (isSingleSeparator(character)) {
+      pieces.push({ kind: "separator", text: character });
+      index += 1;
+      continue;
+    }
+    let end = index;
+    while (end < command.length && !isSpace(command[end]!) && !isSingleSeparator(command[end]!)) {
+      if (command.slice(end, end + 2) === "&&" || command.slice(end, end + 2) === "||") break;
+      end += 1;
+    }
+    pieces.push({ kind: "word", text: command.slice(index, end) });
+    index = end;
+  }
+  return pieces;
+}
+
+/// The bare program name of a word (path prefix and a `.exe`/`.cmd`/… suffix
+/// stripped, lower-cased), so `Set-Location`, `sl`, and `C:\Windows\System32\cd.exe`
+/// are all recognised as directory-change programs.
+function bareProgramName(word: string): string {
+  const unquoted = word.replace(/^["']|["']$/g, "");
+  const bare = unquoted.split(/[\\/]/).pop() ?? unquoted;
+  return bare.replace(/\.(cmd|exe|bat|ps1|com)$/i, "").toLowerCase();
+}
+
+/// A flag, not a path argument — the token after a `Set-Location` that is a flag
+/// (`-Path`) is skipped when looking for the folder it moves into.
+function isFlagToken(token: string): boolean {
+  return token.startsWith("-");
+}
+
+/// The folder a directory-change command moves into, given the folder it ran in.
+/// Absolute (drive-rooted or `~`-rooted) targets replace the folder; a plain
+/// relative target resolves against it; anything the shell would expand
+/// (`$env:…`, `%…%`, a quoted or computed value) makes the new folder UNKNOWN
+/// (undefined), so later relative tokens are left unresolved rather than guessed.
+function nextFolderAfterDirectoryChange(token: string, folder: string | undefined): string | undefined {
+  if (/^[A-Za-z]:[\\/]/.test(token) || token.startsWith("~")) return token;
+  if (folder !== undefined && looksLikeARelativePathToken(token)) {
+    return resolveRelativePath(token, folder).resolved;
   }
   return undefined;
+}
+
+/// Walks a command left to right, rewriting each relative path argument to how
+/// the shell will resolve it (tracking embedded directory changes), and flagging
+/// the first argument that lands somewhere nothing should be written — a drive
+/// root, a Windows system folder, or off the tree entirely. Returns both the
+/// resolved rendering (for the rule tables) and that forbidden reason (the
+/// declared-folder floor's command-side twin).
+function resolveCommandAgainstFolder(
+  command: string,
+  workingDirectory: string | undefined,
+): { readonly rendering: string; readonly forbiddenReason: string | undefined } {
+  let folder: string | undefined =
+    workingDirectory !== undefined && isAResolvableFolder(workingDirectory) ? workingDirectory : undefined;
+  let rendering = "";
+  let forbiddenReason: string | undefined;
+  let tokenIsProgramName = true;
+  let currentProgramChangesDirectory = false;
+  let directoryChangeTargetConsumed = false;
+
+  for (const piece of tokenizeCommand(command)) {
+    if (piece.kind === "whitespace") {
+      rendering += piece.text;
+      continue;
+    }
+    if (piece.kind === "separator") {
+      rendering += piece.text;
+      tokenIsProgramName = true;
+      currentProgramChangesDirectory = false;
+      directoryChangeTargetConsumed = false;
+      continue;
+    }
+    const token = piece.text;
+    if (tokenIsProgramName) {
+      rendering += token;
+      tokenIsProgramName = false;
+      currentProgramChangesDirectory = DIRECTORY_CHANGE_PROGRAMS.has(bareProgramName(token));
+      directoryChangeTargetConsumed = false;
+      continue;
+    }
+    // An argument. Resolve it against the folder the shell is in AS THIS TOKEN
+    // RUNS (which an earlier embedded `cd` in the same line may have moved).
+    if (folder !== undefined && looksLikeARelativePathToken(token)) {
+      const { resolved, escaped } = resolveRelativePath(token, folder);
+      rendering += resolved;
+      if (
+        forbiddenReason === undefined &&
+        (escaped || looksLikeADriveRoot(resolved) || looksLikeASystemFolder(resolved))
+      ) {
+        forbiddenReason = "This reaches out of the install folder into a system location.";
+      }
+    } else {
+      rendering += token;
+    }
+    // The first non-flag argument after a directory-change program is the folder
+    // it moves into; update `folder` so the rest of the line resolves there.
+    if (currentProgramChangesDirectory && !directoryChangeTargetConsumed && !isFlagToken(token)) {
+      directoryChangeTargetConsumed = true;
+      folder = nextFolderAfterDirectoryChange(token, folder);
+    }
+  }
+  return { rendering, forbiddenReason };
+}
+
+/// The first rendering (raw or resolved) any rule in the table matches. Checking
+/// both is how a command whose danger is only visible once its relative paths are
+/// resolved (`Remove-Item -Recurse -Force .` after `Set-Location C:\Windows`) is
+/// caught by the same tables as the plainly-written form.
+function firstMatchOverRenderings(rules: readonly Rule[], renderings: readonly string[]): string | undefined {
+  for (const rendering of renderings) {
+    const reason = firstMatch(rules, rendering);
+    if (reason !== undefined) return reason;
+  }
+  return undefined;
+}
+
+/// The reason a relative path in the command climbs out of the guide's folder
+/// into a place nothing should be written — a drive root or a system folder —
+/// or undefined when nothing in it does. An ordinary `npm ci` in an ordinary
+/// folder pays nothing and can never be refused by mistake, because a token is
+/// only refused when it actually RESOLVES to a forbidden place; the only tokens
+/// that can, from a folder the declared-folder check already vetted, are a `..`
+/// walk out of it or a token after an embedded `Set-Location`/`cd` into a system
+/// one. Absolute: honored even under the grant, because a `..`-walk (or a
+/// `cd`-walk) into `C:\Windows\System32` is the declared-folder version of the
+/// catastrophe floor. `workingDirectory` may be undefined: an embedded absolute
+/// `Set-Location` still establishes a base the rest of the line resolves against.
+export function escapesIntoAForbiddenPlace(
+  command: string,
+  workingDirectory: string | undefined,
+): string | undefined {
+  return resolveCommandAgainstFolder(command, workingDirectory).forbiddenReason;
 }
 
 /// The inputs to the gate, when a caller has more than a provenance to give —
@@ -401,24 +575,36 @@ export function assess(
     autonomyGranted,
   );
 
+  // The command as written AND, when a folder resolves its relative paths to
+  // something different, the command as the shell will really run it. Every
+  // absolute rule below is checked against both, so danger that only shows once
+  // `.`/`..` are resolved (a `Set-Location C:\Windows; Remove-Item …` line) is
+  // caught by the same tables as the plainly-written form. The forbidden-folder
+  // reason falls out of the same walk.
+  const { rendering, forbiddenReason } = resolveCommandAgainstFolder(command, workingDirectory);
+  const renderings = rendering === command ? [command] : [command, rendering];
+
   // The catastrophe floor is absolute — refused even under the grant.
-  const catastrophe = firstMatch(CATASTROPHE_RULES, command);
+  const catastrophe = firstMatchOverRenderings(CATASTROPHE_RULES, renderings);
   if (catastrophe !== undefined) {
     return { tier: "refused_outright", reason: catastrophe };
   }
 
   // The folder the command will run in — also absolute, for the same reason the
-  // floor is: no consent makes running in `C:\Windows`, or a `..`-walk into it,
-  // safe. Judged before the grant can wave anything through.
+  // floor is: no consent makes running in `C:\Windows`, or a `..`-walk (or an
+  // embedded `cd`-walk) into it, safe. Judged before the grant can wave anything
+  // through. `forbiddenReason` covers the command's own relative paths even when
+  // the step declared no folder (an embedded absolute `Set-Location` gives the
+  // rest of the line a base); `forbiddenWorkingDirectory` covers the declared
+  // folder itself.
   if (workingDirectory !== undefined) {
     const forbiddenFolder = forbiddenWorkingDirectory(workingDirectory);
     if (forbiddenFolder !== undefined) {
       return { tier: "refused_outright", reason: forbiddenFolder };
     }
-    const escape = escapesIntoAForbiddenPlace(command, workingDirectory);
-    if (escape !== undefined) {
-      return { tier: "refused_outright", reason: escape };
-    }
+  }
+  if (forbiddenReason !== undefined) {
+    return { tier: "refused_outright", reason: forbiddenReason };
   }
 
   // A model-proposed fix is judged for opacity BEFORE the grant short-circuit,
@@ -427,11 +613,11 @@ export function assess(
   // encoded blobs are refused outright even under the grant; the softer opacity
   // shapes (`$(…)`, backticks) pause for a tap.
   if (provenance === "model_proposed_fix") {
-    const hardRefusal = firstMatch(MODEL_HARD_REFUSAL_RULES, command);
+    const hardRefusal = firstMatchOverRenderings(MODEL_HARD_REFUSAL_RULES, renderings);
     if (hardRefusal !== undefined) {
       return { tier: "refused_outright", reason: hardRefusal };
     }
-    const opaque = firstMatch(OPACITY_RULES, command);
+    const opaque = firstMatchOverRenderings(OPACITY_RULES, renderings);
     if (opaque !== undefined) {
       return { tier: "needs_a_confirm_tap", reason: opaque };
     }
@@ -441,11 +627,11 @@ export function assess(
     return { tier: "runs_without_asking" };
   }
 
-  const downloadAndRun = firstMatch(DOWNLOAD_AND_RUN_RULES, command);
+  const downloadAndRun = firstMatchOverRenderings(DOWNLOAD_AND_RUN_RULES, renderings);
   if (downloadAndRun !== undefined) {
     return { tier: "refused_outright", reason: downloadAndRun };
   }
-  const confirm = firstMatch(CONFIRM_RULES, command);
+  const confirm = firstMatchOverRenderings(CONFIRM_RULES, renderings);
   if (confirm !== undefined) {
     return { tier: "needs_a_confirm_tap", reason: confirm };
   }

@@ -142,6 +142,43 @@ describe("the runner's missing-tool self-heal", () => {
     // Set-Location ~/app appears both for the ordinary steps and the repair.
     expect(shell.commandsRun.filter((c) => c === "Set-Location ~/app").length).toBeGreaterThanOrEqual(4);
   });
+
+  it("refuses to re-run a self-heal install step that declares a system folder", async () => {
+    // The install step's declared folder is a Windows system folder. In the drive
+    // loop the WD gate refuses it, and the reader 'Continue past it's — so it never
+    // ran. When a later command then fails "not recognized", the self-heal finds
+    // this earlier install step but must NOT launder it back in: re-running it is
+    // gated with its own folder, so a system-folder install never executes and no
+    // `Set-Location C:\Windows` is ever issued. (Finding: the self-heal path used
+    // to take a weaker folder check than the per-step gate.)
+    const recipe: InstallRecipe = {
+      slug: "demo",
+      appName: "Demo",
+      output: { type: "none" },
+      steps: [
+        { id: "install-foo", title: "Install foo", kind: "command", command: "winget install --id Some.Foo -e", check: { type: "tool_version", tool: "foo" }, workingDirectory: "C:\\Windows" },
+        { id: "build", title: "Build", kind: "command", command: "foo build" },
+      ],
+    };
+    const shell = new MockShell([
+      { kind: "failed", exitCode: 1, output: "'foo' is not recognized as the name of a cmdlet" }, // step 1
+    ]);
+    const runner = grantedRunner(recipe);
+
+    // Step 0 is refused outright (system folder), even under the grant.
+    let status = await runner.runUntilBlocked(shell);
+    expect(status.type).toBe("surfaced");
+    // The reader continues past it; step 1 then fails, the self-heal finds step 0
+    // but refuses to re-run it in C:\Windows, so it surfaces the failure instead.
+    status = await runner.continuePastCurrentStep(shell);
+    expect(status.type).toBe("surfaced");
+    // Only the failing command ever ran — never the install, never a move into the
+    // system folder.
+    expect(shell.commandsRun).toEqual(["foo build"]);
+    expect(
+      shell.commandsRun.some((c) => c.includes("winget install") || c.includes("Set-Location C:\\Windows")),
+    ).toBe(false);
+  });
 });
 
 // Keep the outcome shape imported so a future edit that drops it is caught.

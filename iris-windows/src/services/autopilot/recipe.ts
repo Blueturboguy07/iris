@@ -36,7 +36,23 @@ export type StepKind =
   /// The reader grants a Windows permission or clears a UAC prompt.
   | "permission"
   /// Any other action only the reader can take.
-  | "manual";
+  | "manual"
+  /// The reader does something on a web page — click a button, copy a value.
+  /// The Windows answer to a guide's `web` kind: a reader-handled gate that
+  /// opens the page (`href`) and floats the eye to it.
+  | "web"
+  /// The reader moves a secret from where it was created into where it is used
+  /// (a guide's `paste` kind). Reader-handled, and Iris never types the secret.
+  | "paste"
+  /// A step that confirms the install worked (a guide's `verify` kind). It
+  /// carries the expectations the watch loop checks, but the autopilot runner
+  /// treats it as self-completing — mirroring macOS, where a guide step with no
+  /// command "succeeds" in the drive loop and the watch loop does the looking.
+  | "verify"
+  /// A step with nothing for Iris to run, open, or hand over — a guide's
+  /// "open your shell" prose step. It succeeds the moment it is reached, so the
+  /// install moves straight past it, mirroring macOS's nil-command → succeeded.
+  | "noop";
 
 /// How Iris can confirm a reader step finished, so the install resumes on its
 /// own instead of waiting for a tap.
@@ -44,6 +60,41 @@ export type StepCheck =
   | { readonly type: "tool_version"; readonly tool: string }
   | { readonly type: "process_running"; readonly executable: string }
   | { readonly type: "path_exists"; readonly path: string };
+
+/// What a `verify` step tells the watch loop to look for to decide the install
+/// worked. This mirrors `IrisStepExpectation` on the wire (and the macOS
+/// `IrisStepExpectation` enum) so a derived recipe carries the guide's own
+/// completion signals through untouched for the watch-loop port to evaluate.
+/// The autopilot runner does not read these — a `verify` step self-completes —
+/// so an expectation this build cannot make sense of is simply carried, never
+/// fatal.
+export type StepExpectation =
+  | { readonly type: "foregroundApp"; readonly bundleId: string }
+  | { readonly type: "urlHost"; readonly host: string }
+  | { readonly type: "toolVersion"; readonly tool: string }
+  | { readonly type: "axElement"; readonly roleLabel: string }
+  | { readonly type: "visual"; readonly prompt: string };
+
+/// A tool an install needs before it can start, carried from a guide branch's
+/// `setupSteps` so the setup-detour port can divert a reader into installing a
+/// missing prerequisite instead of dropping them on step one of an install they
+/// cannot begin. Mirrors the macOS Setup Recovery Detour's use of
+/// `branch.setupSteps`. `tool` is the thing `ToolVersionService`/`tool-versions`
+/// checks for; `href` is where the reader downloads it.
+export interface RecipePrerequisite {
+  readonly id: string;
+  readonly title: string;
+  /// The tool this prerequisite installs (`git`, `node`), when the setup step
+  /// names one — the value the detour re-checks to know the tool arrived.
+  readonly tool?: string;
+  /// The download page the setup step points at, when it is a manual download.
+  readonly href?: string;
+  /// A command the setup step runs itself (`npm.cmd install -g pnpm`), when the
+  /// prerequisite installs by command rather than by a manual download.
+  readonly command?: string;
+  /// The prose from the guide's setup step, so the detour can explain the tool.
+  readonly body?: string;
+}
 
 /// One step in a recipe.
 export interface RecipeStep {
@@ -67,6 +118,17 @@ export interface RecipeStep {
   /// What to tell the reader when Iris hands them the step — the sentence the
   /// eye floats next to.
   readonly instruction?: string;
+  /// The guide step's prose body, carried verbatim so a derived recipe can show
+  /// the same explanation the web guide does. Preserved for every step kind (the
+  /// task requires ids/titles/bodies survive derivation); reader-handled steps
+  /// also copy it into `instruction`.
+  readonly body?: string;
+  /// The guide step's verifier button label (a `verify` step's "Check it"),
+  /// carried through so the watch-loop/UI ports can render the same control.
+  readonly verifierLabel?: string;
+  /// The completion signals a `verify` step declares, carried faithfully for the
+  /// watch-loop port. Absent for every other kind. The runner never reads these.
+  readonly verifyExpectations?: readonly StepExpectation[];
   /// How Iris can tell the step is done without being told. Absent means the
   /// step is finished the moment Iris performs it.
   readonly check?: StepCheck;
@@ -102,6 +164,11 @@ export interface InstallRecipe {
   /// macOS guide's `sourceOwner`/`sourceRepo`, folded into one field because a
   /// recipe (unlike a guide) never shows the two apart.
   readonly canonicalRepo?: string;
+  /// The tools this install needs before it can start, derived from a guide
+  /// branch's `setupSteps`. The setup-detour port reads these to divert a reader
+  /// into installing a missing prerequisite. Absent for the hand-authored
+  /// built-in recipes, whose tool checks are ordinary `command` steps instead.
+  readonly prerequisites?: readonly RecipePrerequisite[];
   /// The exact source commit this recipe pins to — the base a maintain-mode
   /// patch diffs against until the patch queue advances it, the `pinnedCommit`
   /// half of an install-provenance record. Mirrors the macOS guide's
@@ -121,9 +188,27 @@ export function isDoneOnceOpened(kind: StepKind): boolean {
 }
 
 /// Only the reader can finish it: float to it, instruct, and wait — never skip
-/// it, because skipping is skipping the sign-in or the permission.
+/// it, because skipping is skipping the sign-in, the permission, the web action,
+/// or the paste of a secret Iris deliberately never types.
 export function needsTheReader(kind: StepKind): boolean {
-  return kind === "sign_in" || kind === "permission" || kind === "manual";
+  return (
+    kind === "sign_in" ||
+    kind === "permission" ||
+    kind === "manual" ||
+    kind === "web" ||
+    kind === "paste"
+  );
+}
+
+/// Iris neither runs a command, opens something, nor waits for the reader — the
+/// step is finished the instant it is reached, so the install advances straight
+/// past it. This is the Windows answer to macOS's "a guide step with no command
+/// succeeds in the drive loop": a prose `noop` step, and a `verify` step whose
+/// looking is the watch loop's job, not the command runner's. Kept a predicate
+/// (not inlined in the runner) so the watch-loop port can change how a `verify`
+/// step completes in one place without touching the runner's control flow.
+export function advancesWithoutRunningAnything(kind: StepKind): boolean {
+  return kind === "noop" || kind === "verify";
 }
 
 /// The step count the UI shows as the denominator ("3 of 8").

@@ -16,7 +16,7 @@
 //
 
 import type { InstallRecipe, RecipeOutput, RecipeStep, StepCheck, StepKind } from "./recipe";
-import { commandForPlatform, workingDirectoryForPlatform } from "./recipe";
+import { advancesWithoutRunningAnything, commandForPlatform, workingDirectoryForPlatform } from "./recipe";
 import type { ApprovedCommand, Provenance } from "./risk";
 import { approve, approveAfterAReaderTap, assess } from "./risk";
 import { friendlyLabel } from "./friendly-label";
@@ -217,7 +217,15 @@ export class AutopilotRunner {
         continue;
       }
 
-      // sign_in / permission / manual: only the reader can finish it.
+      if (advancesWithoutRunningAnything(step.kind)) {
+        // A prose `noop` step, or a `verify` step whose looking is the watch
+        // loop's job: nothing for the command runner to do, so it succeeds the
+        // instant it is reached — the same as macOS's nil-command → succeeded.
+        this.advance();
+        continue;
+      }
+
+      // sign_in / permission / manual / web / paste: only the reader can finish it.
       const instruction = this.instructionFor(step);
       this.emit({ type: "handedToReader", instruction, href: step.href });
       return {

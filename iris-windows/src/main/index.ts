@@ -14,6 +14,9 @@ import { classifyExternalLink, refusalMessage } from "../services/external-links
 import { boundedCommandOutput, toolSpecFor } from "../services/tool-versions";
 import { secretStorageIsAvailable } from "./secrets";
 import { AutopilotController, type FinishedInstall } from "./autopilot-controller";
+import { guideBackedRecipeResolver } from "../services/autopilot/guide-recipe-resolver";
+import type { InstallRecipe } from "../services/autopilot/recipe";
+import type { FetchLike } from "../services/guide-service";
 import { MaintainController, type MaintainHost } from "./maintain/controller";
 import type { MaintainAskAnswer, MaintainIncidentSnapshot } from "../services/maintain/incident-coordinator";
 
@@ -612,6 +615,27 @@ function maintainHost(): MaintainHost {
 /** The one autopilot controller, built lazily. Its host turns runner events into
  *  the app-only side effects: streaming to the terminal, opening links, floating
  *  to a gate, and opening the finished app. */
+/** The network the guide resolver reaches publik through — Electron's global
+ *  `fetch`, narrowed to the injectable `FetchLike` shape so the resolver stays a
+ *  pure, unit-tested module. Only the guides route is fetched, and only from the
+ *  allowlisted publik/localhost origins `guide-service` enforces. */
+const guideFetchImplementation: FetchLike = (url, init) =>
+  globalThis.fetch(url, init as RequestInit);
+
+/** The primary recipe resolver: fetch the app's publik guide, derive a recipe
+ *  from its Windows branch, and fall back to the built-in `recipes.ts` table only
+ *  when the fetch fails. This is what makes every guide with a Windows branch
+ *  auto-installable without a code change. */
+function productionRecipeResolver(slug: string): Promise<InstallRecipe | undefined> {
+  return guideBackedRecipeResolver({
+    apiBase: settings.get("publikBaseUrl"),
+    fetchImplementation: guideFetchImplementation,
+    // Desktop/local-web install for this computer; a mobile guide's branch is a
+    // later concern threaded from the deep link's `branch=windows:android`.
+    target: { platform: "windows" },
+  })(slug);
+}
+
 function autopilotController(): AutopilotController {
   if (autopilot) return autopilot;
   autopilot = new AutopilotController({
@@ -680,7 +704,12 @@ function autopilotController(): AutopilotController {
       if (output.type === "local_web") openExternalSafely(output.url);
       broadcast("autopilot:finished", output);
     },
-  });
+  },
+  // Keep the default shell factory (PowerShell on Windows), and inject the
+  // guide-backed resolver as the primary path so `canInstall`/`start` answer
+  // from the fetched guide, with the built-in table as the offline fallback.
+  undefined,
+  productionRecipeResolver);
   return autopilot;
 }
 

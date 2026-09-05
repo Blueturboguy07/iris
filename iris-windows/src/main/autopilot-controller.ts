@@ -78,20 +78,27 @@ export class AutopilotController {
   constructor(
     private readonly host: AutopilotHost,
     private readonly makeShell: () => ShellSession = defaultShell,
-    // Injected so tests can drive recipes the built-in set does not carry; in
-    // production it is the reviewed, version-pinned recipe registry.
-    private readonly resolveRecipe: (slug: string) => InstallRecipe | undefined = recipeForSlug,
+    // Injected so tests can drive recipes the built-in set does not carry. In
+    // production it is the guide-backed resolver (fetch the publik guide, derive
+    // a recipe, fall back to the built-in table only when the fetch fails), so it
+    // may answer asynchronously; a synchronous resolver (the built-in table, the
+    // test doubles) is still accepted unchanged because `await` passes a plain
+    // value straight through.
+    private readonly resolveRecipe: (
+      slug: string,
+    ) => InstallRecipe | undefined | Promise<InstallRecipe | undefined> = recipeForSlug,
   ) {}
 
-  /// Whether Iris knows how to install this app on Windows.
-  canInstall(slug: string): boolean {
-    return this.resolveRecipe(slug) !== undefined;
+  /// Whether Iris knows how to install this app on Windows. Async because the
+  /// production resolver answers from the fetched guide.
+  async canInstall(slug: string): Promise<boolean> {
+    return (await this.resolveRecipe(slug)) !== undefined;
   }
 
   /// Begins an install and pumps it to the first thing that needs a human (or to
   /// the end). Throws only if the slug has no recipe.
   async start(slug: string): Promise<RunnerStatus> {
-    const recipe = this.resolveRecipe(slug);
+    const recipe = await this.resolveRecipe(slug);
     if (recipe === undefined) {
       throw new Error(`Iris has no Windows recipe for '${slug}'.`);
     }

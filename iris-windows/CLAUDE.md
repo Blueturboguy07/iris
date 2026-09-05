@@ -144,14 +144,36 @@ the working directory forward, so it lives in `main/`; its pure parsing helpers
 are unit-tested and the whole thing is exercised end to end by
 `tests/autopilot.e2e.test.ts` on the windows-latest runner (guarded to `win32`).
 
+**Recipes are now derived from guides, not just the built-in table.** The primary
+resolver is `guide-recipe-resolver.ts`: it fetches the app's publik guide
+(`guide-service.fetchGuide`), decodes it strictly and leniently
+(`guide-model.ts`, mirroring `IrisGuideModels.swift` — unknown kind → terminal,
+unknown expectation dropped, TOTAL so a malformed payload never throws), and
+derives an `InstallRecipe` from its Windows branch (`guide-recipe.ts`). The
+`recipes.ts` table is now the OFFLINE fallback, used only when the fetch fails.
+`AutopilotController` takes an injected `resolveRecipe` (now awaitable; `canInstall`
+is async) and `main/index.ts` wires the guide-backed resolver in; the guide is
+cached by `slug:version` for the session. The derivation maps a `terminal`/`check`
+step with a command → `command` (long-running via the ported
+`GuideAutopilotCommandShape.holdsTheShellOpen` heuristics), a command-less step →
+`noop`, `open` → `open`, `permission`/`web`/`paste` → reader-handled kinds, and
+`verify` → a new `verify` kind that carries the guide's watch expectations for the
+watch-loop port (the runner self-completes `noop`/`verify`, mirroring macOS's
+nil-command → succeeded). A branch the guide marks `unsupported` (Windows + iPhone)
+resolves to a typed unsupported result, never a recipe. Setup steps become
+`recipe.prerequisites` for the setup-detour port.
+
 **Trust boundary — this relaxes the allowlist invariant.** `tool-versions.ts` says
 no command is ever built from guide text. The autopilot deliberately runs commands
-that *do* come from a recipe, so `risk.ts` is the compensating control and the
-relaxation is bounded three ways: provenance (recipes are reviewed, version-pinned
-data in this repo, not fetched-as-text guides), a three-tier gate (refuse / one
-tap / run) that mirrors the macOS `GuideAutopilotRiskAssessment.swift`, and an
-un-forgeable `ApprovedCommand` the shell is the only thing that will run. If you
-add a recipe or loosen the gate, keep those three intact and update the tests.
+that *do* come from a recipe — a built-in one, or one derived from a fetched guide
+— so `risk.ts` is the compensating control and the relaxation is bounded three
+ways: provenance (the HTTPS-fetched, version-pinned guide JSON that publik serves —
+the same provenance the macOS side runs on — decoded, never executed as text; the
+built-in `recipes.ts` entries are the same shape reviewed in-repo), a three-tier
+gate (refuse / one tap / run) that mirrors the macOS
+`GuideAutopilotRiskAssessment.swift`, and an un-forgeable `ApprovedCommand` the
+shell is the only thing that will run. If you add a recipe, change the derivation,
+or loosen the gate, keep those three intact and update the tests.
 
 **Autonomy grant (mirrors the macOS side).** For a vetted, pinned recipe the
 per-command taps are friction, so the reader grants "Let Iris take control of

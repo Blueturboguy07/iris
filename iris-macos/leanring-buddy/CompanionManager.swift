@@ -1181,6 +1181,38 @@ final class CompanionManager: ObservableObject {
         NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
     }
 
+    /// The reason the most recent `iris://` link was turned away, shown as a
+    /// small transient banner at the top of the eye bar, or nil when there is
+    /// nothing to say.
+    ///
+    /// Before this, `handleIncomingDeepLink`'s `.failure` case only printed
+    /// `rejection.rejectionMessage` to the console — real for a hand-typed or
+    /// stale link (a bookmark missing `?version=`, a copy-paste that dropped a
+    /// query parameter) and invisible to anyone not tailing logs: the tap
+    /// landed, nothing moved, and the reader was told nothing, which is the
+    /// exact silent-failure shape this codebase's own comments call out
+    /// elsewhere (`autopilotBlockedExplanation`). This mirrors that precedent
+    /// rather than the guide card's inline text, because a rejected link never
+    /// gets far enough to have a guide card to show it in.
+    @Published private(set) var deepLinkRejectionExplanation: String?
+    private var deepLinkRejectionDismissalTask: Task<Void, Never>?
+    private static let deepLinkRejectionVisibleDuration: Duration = .seconds(6)
+
+    /// Called for every `iris://` link `IrisDeepLinkParser.parse` refuses.
+    /// Brings the eye forward — a rejected link is otherwise invisible even to
+    /// a reader staring at their screen, since nothing else about to happen —
+    /// and shows the parser's own sentence for a few seconds.
+    func presentDeepLinkRejection(_ explanation: String) {
+        bringTheEyeBarForwardToShowTheOpenGuide()
+        deepLinkRejectionDismissalTask?.cancel()
+        deepLinkRejectionExplanation = explanation
+        deepLinkRejectionDismissalTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.deepLinkRejectionVisibleDuration)
+            guard !Task.isCancelled else { return }
+            self?.deepLinkRejectionExplanation = nil
+        }
+    }
+
     /// Raises the centered terminal takeover for the run autopilot just started.
     private func presentAutopilotTakeover() {
         guard let runner = guideSessionController.autopilotRunner else { return }

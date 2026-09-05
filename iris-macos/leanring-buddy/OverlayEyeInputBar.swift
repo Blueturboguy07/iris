@@ -740,6 +740,17 @@ struct OverlayEyeInputBarView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            // Shown above everything else, whichever mode the bar is in right
+            // now — a rejected `iris://` link has nothing else on screen to
+            // attach an explanation to. See `CompanionManager.
+            // presentDeepLinkRejection`.
+            if let deepLinkRejectionExplanation = companionManager.deepLinkRejectionExplanation {
+                Text(deepLinkRejectionExplanation)
+                    .font(.system(size: 10.5))
+                    .foregroundColor(DS.Colors.amber)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             if theCenteredTakeoverIsCoveringTheScreen {
                 // While the centered takeover runs the install, the corner guide
                 // card and the under-the-card terminal would each be a cluttered
@@ -982,9 +993,29 @@ struct OverlayEyeInputBarView: View {
     /// Read off the controller rather than mirrored into local state: the watch
     /// loop advances steps without anybody pressing anything, and a copy here
     /// would go stale exactly when the feature is working.
+    ///
+    /// `readerHasFinishedTheGuide` is checked here on purpose, not just inside
+    /// the controller. `currentStep`/`stepTheReaderIsLookingAt` stay pinned to
+    /// the branch's LAST step once the reader finishes it (advancing past it
+    /// would be an out-of-range index, so `advanceToTheNextStep` clamps rather
+    /// than nils it out) — so without this guard the card kept showing that
+    /// step forever. For a guide whose final step has neither a command nor a
+    /// link (a plain GUI/permission step — Astro's own last step, "Choose
+    /// where answers come from"), `primaryActionForTheCurrentStep` correctly
+    /// goes nil once finished, but `OverlayEyeGuideStepPresentation`'s OWN
+    /// fallback label-guess (`primaryActionLabel`) doesn't know that and drew a
+    /// live-looking "Done" pill anyway — one press advanced the guide (silently
+    /// completing it, including firing `onGuideCompleted`) and relabeled the
+    /// button from "Finish" to that fallback "Done", but the card itself never
+    /// went away to say so, so a second press had nothing left to advance and
+    /// the reader watched a dead button forever. `GuideSessionController`
+    /// itself already reaches a real completed state in one press — see
+    /// `AstroGuideFinishButtonReproTests` — this was purely this card
+    /// outliving the state that was supposed to hide it.
     private var guidePresentation: OverlayEyeGuideStepPresentation? {
         guard
             guideSessionController.loadState.isShowingSomethingAboutAGuide,
+            !guideSessionController.readerHasFinishedTheGuide,
             let guide = guideSessionController.guideBeingFollowed,
             let step = guideSessionController.stepTheReaderIsLookingAt,
             let branch = guideSessionController.selectedBranch

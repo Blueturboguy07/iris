@@ -103,6 +103,12 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
         case .failure(let rejection):
             print("⚠️ Iris: rejected deep link — \(rejection.rejectionMessage)")
+            // The console line above is invisible to a reader who just clicked
+            // a link and watched nothing happen — a stale bookmark, a
+            // hand-typed `iris://guide/<slug>` with no `?version=`, a copy
+            // that dropped a query parameter. This is the only user-visible
+            // side of the rejection.
+            companionManager.presentDeepLinkRejection(rejection.rejectionMessage)
         }
     }
 

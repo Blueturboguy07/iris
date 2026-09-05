@@ -483,6 +483,27 @@ export const DEFAULT_LADDER_CAPS: LadderCaps = {
   maximumConsecutiveStepsWithoutGettingOneRunning: 5,
 };
 
+/// Who pays for the model calls this ladder makes — the Windows port of macOS
+/// `GuideAutopilotFixLadderFunding`. It decides whether the per-install spend
+/// caps (`maximumFixesPerGuide` / `maximumModelCallsPerGuide`) apply at all:
+///
+///   - `publik_funded_tier`: publik is paying, so the caps bound its spend.
+///     macOS runs this while publik funds a reader's early installs.
+///   - `readers_own_credential`: every model call is billed to the reader's OWN
+///     key from the first one. publik's spend cap has nothing to protect here,
+///     so it does not apply at all — mirroring
+///     `GuideAutopilotFixLadderFunding.theReadersOwnCredential`, whose fix macOS
+///     shipped after a reader on his own subscription was told "I've used up
+///     what I can spend on this install" at step 7 of 17 for money nobody was
+///     spending.
+///
+/// On Windows the fix ladder is ALWAYS `readers_own_credential`: the proposer
+/// runs on the reader's own Anthropic/OpenAI key (`model-provider.ts`, ratified
+/// D4/D5), never a funded proxy — there is no funded route for it, ever. So the
+/// default is the reader's own credential, and the funded profile exists only so
+/// the cap arithmetic stays a faithful, tested port of the macOS one.
+export type LadderFunding = "publik_funded_tier" | "readers_own_credential";
+
 /// The environment strings the failure report carries, injected so the ladder
 /// stays pure (no `os`/`process` reads) and the suite pins them.
 export interface LadderEnvironment {
@@ -507,7 +528,13 @@ export type LadderResult =
   | { readonly kind: "hand_to_reader"; readonly instruction: string; readonly diagnosis: string }
   /// The ladder is out of rungs, budget, or ideas; the runner surfaces this to
   /// the reader with the "Try again / Continue past it" choice.
-  | { readonly kind: "surface"; readonly diagnosis: string };
+  | { readonly kind: "surface"; readonly diagnosis: string }
+  /// The reader hit the red 'Stop' while the ladder was climbing. It stopped the
+  /// instant it noticed — before the next model call or fix command — rather than
+  /// finishing the climb; the runner discards this the same way it discards an
+  /// in-flight command's outcome. Mirrors the `theReaderAskedToStopThisStep`
+  /// checks in macOS `climbTheFixLadder`.
+  | { readonly kind: "stopped" };
 
 /// Everything one `repair` needs from the runner, injected so the ladder never
 /// learns how the runner approves or re-runs the original command.
@@ -525,6 +552,14 @@ export interface RepairRequest {
   /// Emits a runner event (the ladder's fix commands and diagnoses stream to the
   /// terminal through this).
   readonly emit: (event: AutopilotEvent) => void;
+  /// Whether the reader has hit the red 'Stop'. The ladder cannot cancel a model
+  /// call or a fix command already in flight (the shell's own `abort` kills a
+  /// running command's process tree), but it checks this before it STARTS the
+  /// next model call or fix command — and again right after each returns — so a
+  /// Stop is honored the instant it is noticed rather than after the climb
+  /// happens to finish. Optional (default: never stop) so a ladder wired without
+  /// it behaves exactly as before. Mirrors macOS `theReaderAskedToStopThisStep`.
+  readonly shouldStop?: () => boolean;
 }
 
 const NO_PROVIDER_DIAGNOSIS =
@@ -560,6 +595,12 @@ export class FixLadder {
     private readonly autonomyGranted: boolean,
     private readonly confirmFix: ConfirmFix = async () => false,
     private readonly caps: LadderCaps = DEFAULT_LADDER_CAPS,
+    /// Who pays for the model calls — the default is the reader's own key, which
+    /// is the ONLY funding a Windows fix ladder ever runs on (see
+    /// `LadderFunding`). On the reader's own credential the spend caps do not
+    /// apply, so `mayAskTheModelAgain` never surfaces "used up what I can spend"
+    /// for money nobody was spending. The progress guard still bounds a runaway.
+    private readonly funding: LadderFunding = "readers_own_credential",
   ) {}
 
   /// Attempts to self-repair a failed command, and reports what the runner
@@ -579,6 +620,9 @@ export class FixLadder {
     const spentSomething = this.modelCallsUsedThisGuide > callsBefore;
     if (result.kind === "repaired") {
       this.consecutiveStepsWithoutGettingOneRunning = 0;
+    } else if (result.kind === "stopped") {
+      // The reader stopped the run mid-climb. The run is terminal; this is not
+      // the ladder failing to make progress, so it does not count as spinning.
     } else if (result.kind === "surface" && spentSomething) {
       // Iris asked the model, tried what it said, and the step still is not
       // running. Only this counts as spinning: a step the budget never let Iris
@@ -593,6 +637,12 @@ export class FixLadder {
     let lastDiagnosis: string | undefined;
 
     for (let rung = 0; rung < this.caps.maximumRungsPerStep; rung += 1) {
+      // The reader may have hit 'Stop' between rungs; do not start another model
+      // call or fix command if they have. Checked at the top of every rung, the
+      // first of the three `shouldStop` checkpoints (matching macOS).
+      if (request.shouldStop?.()) {
+        return { kind: "stopped" };
+      }
       // The runaway guard, before the spend gate: a ladder that has spent calls
       // on N steps in a row without getting one running is going in circles.
       if (
@@ -617,6 +667,11 @@ export class FixLadder {
         priorAttempts.push("a repair attempt could not reach the model");
         continue;
       }
+      // The model call just returned — the second checkpoint. If the reader
+      // stopped while it was in flight, do not act on what it said.
+      if (request.shouldStop?.()) {
+        return { kind: "stopped" };
+      }
       if (fix === undefined) {
         priorAttempts.push("the model had no fix to offer");
         continue;
@@ -633,6 +688,12 @@ export class FixLadder {
       }
 
       const applied = await this.applyFixCommand(fix.action.command, fix.action.whatItDoes, request);
+      // The fix command just ran — the third checkpoint. A Stop clicked while it
+      // was executing killed its process tree; do not retry the original or climb
+      // to another rung.
+      if (request.shouldStop?.()) {
+        return { kind: "stopped" };
+      }
       if (applied === "declined") {
         priorAttempts.push(`the fix was not run: ${fix.action.command}`);
         continue;
@@ -659,8 +720,21 @@ export class FixLadder {
   }
 
   /// Whether the ladder may make one more model call under the per-install caps.
-  /// Both counters increment together, so the fix cap (the lower) binds first.
+  ///
+  /// The caps bound publik's SPEND, so they only apply when publik is paying. On
+  /// the reader's own credential — the only funding a Windows fix ladder ever
+  /// runs on — every call is billed to the reader from the first one, publik's
+  /// cap has nothing to protect, and it does not apply at all: this returns true
+  /// unconditionally, exactly as macOS `theLadderMayAskTheModelAgain` does when
+  /// `publikIsPayingForTheCallAboutToBeMade()` is false. The per-step rung cap
+  /// and the going-in-circles progress guard still bound a runaway; what is
+  /// removed is only the "used up what I can spend" ceiling on money the reader,
+  /// not publik, is spending. Under the funded tier both counters increment
+  /// together, so the fix cap (the lower) binds first.
   private mayAskTheModelAgain(): boolean {
+    if (this.funding === "readers_own_credential") {
+      return true;
+    }
     return (
       this.fixAttemptsUsedThisGuide < this.caps.maximumFixesPerGuide &&
       this.modelCallsUsedThisGuide < this.caps.maximumModelCallsPerGuide
@@ -675,10 +749,24 @@ export class FixLadder {
     whatItDoes: string,
     request: RepairRequest,
   ): Promise<"ran" | "also_failed" | "declined"> {
-    const verdict = assess(fixCommand, MODEL_PROPOSED_FIX, this.autonomyGranted);
+    // Judge the fix in the folder it will actually run in, not on its text
+    // alone. `Remove-Item -Recurse -Force .` is a tidy-up in the app folder and
+    // a catastrophe in `C:\Windows`, and the two are spelled identically — so a
+    // system folder, a drive root, or a `..`-escape out of the install folder is
+    // refused outright, even under the grant (see `risk.ts`). This is the SAME
+    // folder-aware gate the runner's own per-step path uses (`runCommandStep`);
+    // an untrusted model's fix is the last input that should skip it. Mirrors
+    // macOS `applyFixCommand` calling `assess(_:inWorkingDirectory:)` with the
+    // shell's current working directory every time.
+    const gateOptions = {
+      provenance: MODEL_PROPOSED_FIX,
+      autonomyGranted: this.autonomyGranted,
+      workingDirectory: request.workingDirectory,
+    };
+    const verdict = assess(fixCommand, gateOptions);
     let approved: ApprovedCommand | undefined;
     if (verdict.tier === "runs_without_asking") {
-      approved = approve(fixCommand, MODEL_PROPOSED_FIX, this.autonomyGranted);
+      approved = approve(fixCommand, gateOptions);
     } else if (verdict.tier === "needs_a_confirm_tap") {
       const ok = await this.confirmFix(fixCommand, verdict.reason);
       if (!ok) {
@@ -688,7 +776,7 @@ export class FixLadder {
         });
         return "declined";
       }
-      approved = approveAfterAReaderTap(fixCommand, MODEL_PROPOSED_FIX, this.autonomyGranted);
+      approved = approveAfterAReaderTap(fixCommand, gateOptions);
     } else {
       // refused_outright — a catastrophe-floor or download-and-run shape from a
       // model. Never run, even under the grant (the floor is absolute).

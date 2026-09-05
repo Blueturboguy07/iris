@@ -748,7 +748,11 @@ function autopilotController(): AutopilotController {
  *  is configured the proposer is undefined and the ladder degrades to "surface
  *  the failure at once with a clear reason" rather than hanging. Autonomy is
  *  granted here because an autopilot run is only ever constructed after the
- *  reader consented (see `start`). */
+ *  reader consented (see `start`). The funding is left at its default — the
+ *  reader's own credential, the only funding a Windows fix ladder ever runs on
+ *  (there is no funded proxy route for it) — so the per-install spend caps,
+ *  which exist to bound publik's spend, never stop the ladder for money the
+ *  reader alone is paying. */
 function buildFixLadderForRecipe(recipe: InstallRecipe): FixLadder {
   const provider = firstAvailableMaintainProvider({
     readAnthropicApiKey: () => settings.getAnthropicApiKey(),
@@ -767,7 +771,36 @@ function buildFixLadderForRecipe(recipe: InstallRecipe): FixLadder {
     },
     process.platform,
     true,
+    confirmFixCommandWithReader,
   );
+}
+
+/** Asks the reader to approve one model-proposed repair the risk gate could not
+ *  read from its text — an opaque `$(...)`/backtick shape, which trips a confirm
+ *  tap at `model_proposed_fix` provenance even under the autonomy grant (opacity
+ *  is judged before the grant short-circuits; see `risk.ts`). Without this
+ *  wired, `FixLadder`'s `confirmFix` defaults to "always refuse", so a benign,
+ *  mechanically-correct opaque fix could never run and the ladder would burn
+ *  rungs declining fixes nobody was asked about. This is a real blocking prompt,
+ *  the analog of macOS `askTheReaderToConfirm(isFromAFix: true)` — the same
+ *  modal shape `ensureAutonomyGranted` uses above. */
+async function confirmFixCommandWithReader(command: string, reason: string): Promise<boolean> {
+  // The headless e2e has no one to answer a modal; decline rather than hang.
+  // Declining is the safe direction — it just means an opaque fix is not run.
+  if (process.env.IRIS_E2E === "1") return false;
+  const options = {
+    type: "question" as const,
+    buttons: ["Run this repair", "Skip it"],
+    defaultId: 1,
+    cancelId: 1,
+    message: "Iris found a repair it couldn't fully read. Run it?",
+    detail: `${reason}\n\nThe repair Iris wants to run:\n${command}`,
+  };
+  const parent = autopilotWindow && !autopilotWindow.isDestroyed() ? autopilotWindow : null;
+  const result = parent
+    ? await dialog.showMessageBox(parent, options)
+    : await dialog.showMessageBox(options);
+  return result.response === 0;
 }
 
 function handleGuideCommand(command: string, args: Record<string, unknown>): unknown {

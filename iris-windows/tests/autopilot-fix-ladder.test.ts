@@ -15,6 +15,7 @@ import {
   type FixProposing,
   type LadderCaps,
   type LadderEnvironment,
+  type LadderFunding,
   type ProposedFix,
   type RepairRequest,
 } from "../src/services/autopilot/fix-ladder";
@@ -98,6 +99,8 @@ function repairRequest(options: {
   shell?: ShellSession;
   retryOutcomes?: CommandOutcome[];
   step?: RecipeStep;
+  workingDirectory?: string;
+  shouldStop?: () => boolean;
 }): { request: RepairRequest; events: AutopilotEvent[]; retryCalls: () => number } {
   const events: AutopilotEvent[] = [];
   const retryOutcomes = options.retryOutcomes ?? [];
@@ -110,7 +113,7 @@ function repairRequest(options: {
       command: options.command,
       exitCode: 1,
       output: "npm ERR! it failed",
-      workingDirectory: "C:\\Users\\test\\demo",
+      workingDirectory: options.workingDirectory ?? "C:\\Users\\test\\demo",
       shell: options.shell ?? MockShell.alwaysSucceeds(),
       retryOriginal: async () => {
         const outcome = retryOutcomes[retryIndex] ?? { kind: "succeeded", output: "" };
@@ -118,6 +121,7 @@ function repairRequest(options: {
         return outcome;
       },
       emit: (event) => events.push(event),
+      shouldStop: options.shouldStop,
     },
   };
 }
@@ -129,6 +133,7 @@ function ladder(options: {
   autonomyGranted?: boolean;
   confirmFix?: (command: string, reason: string) => Promise<boolean>;
   caps?: LadderCaps;
+  funding?: LadderFunding;
 }): FixLadder {
   const recipe = options.recipe ?? demoRecipe([commandStep("build", "npm ci")]);
   return new FixLadder(
@@ -140,6 +145,11 @@ function ladder(options: {
     options.autonomyGranted ?? true,
     options.confirmFix,
     options.caps,
+    // The spend caps only bind under the funded tier; the reader's own
+    // credential (the Windows default) is uncapped. The cap-arithmetic tests
+    // opt into the funded tier explicitly, so they prove the ceiling still
+    // works where it is meant to apply.
+    options.funding,
   );
 }
 
@@ -270,9 +280,9 @@ describe("the fix ladder — rung and cap arithmetic", () => {
     expect(proposer.calls).toBe(2);
   });
 
-  it("stops asking at the 6-fixes-per-guide cap (3 steps of 2 rungs)", async () => {
+  it("stops asking at the 6-fixes-per-guide cap (3 steps of 2 rungs) under the funded tier", async () => {
     const proposer = new AlwaysProposer(runACommandFix("git checkout main", true));
-    const l = ladder({ proposer });
+    const l = ladder({ proposer, funding: "publik_funded_tier" });
     const alwaysFails: CommandOutcome[] = [
       { kind: "failed", exitCode: 1, output: "x" },
       { kind: "failed", exitCode: 1, output: "x" },
@@ -293,10 +303,10 @@ describe("the fix ladder — rung and cap arithmetic", () => {
     expect(proposer.calls).toBe(6);
   });
 
-  it("stops at the 8-model-calls-per-guide belt when the fix cap is raised", async () => {
+  it("stops at the 8-model-calls-per-guide belt when the fix cap is raised (funded tier)", async () => {
     const proposer = new AlwaysProposer(runACommandFix("git checkout main", true));
     const caps: LadderCaps = { ...DEFAULT_LADDER_CAPS, maximumFixesPerGuide: 100, maximumConsecutiveStepsWithoutGettingOneRunning: 100 };
-    const l = ladder({ proposer, caps });
+    const l = ladder({ proposer, caps, funding: "publik_funded_tier" });
     const alwaysFails: CommandOutcome[] = [
       { kind: "failed", exitCode: 1, output: "x" },
       { kind: "failed", exitCode: 1, output: "x" },
@@ -310,6 +320,32 @@ describe("the fix ladder — rung and cap arithmetic", () => {
     const { request } = repairRequest({ command: "cmd4", retryOutcomes: alwaysFails });
     expect((await l.repair(request)).kind).toBe("surface");
     expect(proposer.calls).toBe(8);
+  });
+
+  it("never spends-out on the reader's own credential — the spend cap does not apply", async () => {
+    // The Windows default funding: the ladder runs on the reader's OWN key, so
+    // there is nothing for publik's spend cap to protect and it must not fire.
+    // Raise only the progress guard, so the run is bounded solely by it, and
+    // prove the ladder makes far more than the 6-fix / 8-call ceiling would
+    // allow without ever surfacing "used them up". This is the exact bug macOS
+    // shipped a fix for (a reader billed to his own key told he was out of spend).
+    const proposer = new AlwaysProposer(runACommandFix("git checkout main", true));
+    const caps: LadderCaps = { ...DEFAULT_LADDER_CAPS, maximumConsecutiveStepsWithoutGettingOneRunning: 100 };
+    const l = ladder({ proposer, caps, funding: "readers_own_credential" });
+    const alwaysFails: CommandOutcome[] = [
+      { kind: "failed", exitCode: 1, output: "x" },
+      { kind: "failed", exitCode: 1, output: "x" },
+    ];
+    // Ten steps — far past the 6-fix and 8-call funded ceilings — every one
+    // spending both rungs and never repairing.
+    for (let step = 0; step < 10; step += 1) {
+      const { request } = repairRequest({ command: `cmd${step}`, retryOutcomes: alwaysFails });
+      const result = await l.repair(request);
+      expect(result.kind).toBe("surface");
+      if (result.kind === "surface") expect(result.diagnosis).not.toContain("used them up");
+    }
+    // 10 steps × 2 rungs = 20 model calls, none refused for spend.
+    expect(proposer.calls).toBe(20);
   });
 
   it("surfaces 'going in circles' when the progress guard trips before the spend cap", async () => {
@@ -503,6 +539,148 @@ describe("the fix ladder — the model's fix goes through the stricter gate", ()
   });
 });
 
+// ── the model's fix is judged in the folder it will run in ───────────────────
+
+describe("the fix ladder — a model fix is judged in the folder it will run in", () => {
+  it("refuses a model fix that climbs out of the install folder into a system location", async () => {
+    // The fix's `..`-walk resolves out of C:\Users\test\demo into
+    // C:\Windows\System32 — refused outright by the WD-aware gate even under the
+    // grant. Without `RepairRequest.workingDirectory` threaded into the ladder's
+    // gate this would be judged on its text alone and could run under the grant.
+    const escape = "Remove-Item -Recurse ..\\..\\..\\Windows\\System32\\drivers";
+    const proposer = new ScriptedProposer([runACommandFix(escape, true), runACommandFix(escape, true)]);
+    const shell = MockShell.alwaysSucceeds();
+    const l = ladder({ proposer, autonomyGranted: true });
+    const { request, retryCalls } = repairRequest({
+      command: "npm ci",
+      shell,
+      workingDirectory: "C:\\Users\\test\\demo",
+    });
+    const result = await l.repair(request);
+    expect(result.kind).toBe("surface");
+    // The escaping command never reached the shell; the original was never retried.
+    expect(shell.commandsRun).toEqual([]);
+    expect(retryCalls()).toBe(0);
+  });
+
+  it("runs the SAME fix when the folder is deep enough that the walk stays inside it", async () => {
+    // Identical command, but from a folder the `..`-walk does NOT escape — proof
+    // the refusal above is the folder's doing, threaded through the gate, not the
+    // command text alone.
+    const walk = "Remove-Item -Recurse ..\\..\\..\\build\\cache";
+    const proposer = new ScriptedProposer([runACommandFix(walk, true)]);
+    const shell = MockShell.alwaysSucceeds();
+    const l = ladder({ proposer, autonomyGranted: true });
+    const { request } = repairRequest({
+      command: "npm ci",
+      shell,
+      workingDirectory: "C:\\Users\\test\\a\\b\\c\\d\\e",
+      retryOutcomes: [{ kind: "succeeded", output: "ok" }],
+    });
+    expect((await l.repair(request)).kind).toBe("repaired");
+    expect(shell.commandsRun).toEqual([walk]);
+  });
+});
+
+// ── the red 'Stop' halts the ladder mid-climb ────────────────────────────────
+
+/// A proposer that fires a side effect the moment it is asked — used to flip a
+/// Stop flag "while the model call is in flight".
+class OnProposeProposer implements FixProposing {
+  calls = 0;
+  constructor(private readonly onPropose: () => void, private readonly fix: ProposedFix) {}
+  isAvailable(): boolean {
+    return true;
+  }
+  async proposeFix(): Promise<ProposedFix | undefined> {
+    this.calls += 1;
+    this.onPropose();
+    return this.fix;
+  }
+}
+
+/// A shell that fires a side effect the moment it runs a command — used to flip
+/// a Stop flag "while the fix command is executing".
+class OnRunShell implements ShellSession {
+  private readonly inner = MockShell.alwaysSucceeds();
+  constructor(private readonly onRun: () => void) {}
+  get commandsRun(): string[] {
+    return this.inner.commandsRun;
+  }
+  async run(command: Parameters<ShellSession["run"]>[0], deadlineMs: number): Promise<CommandOutcome> {
+    this.onRun();
+    return this.inner.run(command, deadlineMs);
+  }
+  async runLongRunning(
+    command: Parameters<ShellSession["runLongRunning"]>[0],
+    readyMarker: string | undefined,
+    graceMs: number,
+  ): Promise<CommandOutcome> {
+    this.onRun();
+    return this.inner.runLongRunning(command, readyMarker, graceMs);
+  }
+  currentDirectory(): string {
+    return this.inner.currentDirectory();
+  }
+  abort(): void {
+    this.inner.abort();
+  }
+  dispose(): void {
+    this.inner.dispose();
+  }
+}
+
+describe("the fix ladder — the red 'Stop' halts it the instant it is noticed", () => {
+  it("stops before the first model call when Stop is already set", async () => {
+    const proposer = new AlwaysProposer(runACommandFix("git checkout main", true));
+    const shell = MockShell.alwaysSucceeds();
+    const l = ladder({ proposer });
+    const { request } = repairRequest({ command: "npm ci", shell, shouldStop: () => true });
+    const result = await l.repair(request);
+    expect(result.kind).toBe("stopped");
+    // Nothing was asked of the model and nothing ran.
+    expect(proposer.calls).toBe(0);
+    expect(shell.commandsRun).toEqual([]);
+  });
+
+  it("stops after the model call returns, before running the proposed fix", async () => {
+    let stopRequested = false;
+    const proposer = new OnProposeProposer(() => {
+      stopRequested = true;
+    }, runACommandFix("git checkout main", true));
+    const shell = MockShell.alwaysSucceeds();
+    const l = ladder({ proposer });
+    const { request, retryCalls } = repairRequest({ command: "npm ci", shell, shouldStop: () => stopRequested });
+    const result = await l.repair(request);
+    expect(result.kind).toBe("stopped");
+    // The model was asked once (that call could not be cancelled), but its
+    // proposed fix never reached the shell and the original was never retried.
+    expect(proposer.calls).toBe(1);
+    expect(shell.commandsRun).toEqual([]);
+    expect(retryCalls()).toBe(0);
+  });
+
+  it("stops after a fix command runs, before retrying the original", async () => {
+    let stopRequested = false;
+    const shell = new OnRunShell(() => {
+      stopRequested = true;
+    });
+    const proposer = new AlwaysProposer(runACommandFix("git checkout main", true));
+    const l = ladder({ proposer });
+    const { request, retryCalls } = repairRequest({
+      command: "npm ci",
+      shell,
+      shouldStop: () => stopRequested,
+      retryOutcomes: [{ kind: "succeeded", output: "ok" }],
+    });
+    const result = await l.repair(request);
+    expect(result.kind).toBe("stopped");
+    // The fix ran (that is when Stop was flipped), but the original was never retried.
+    expect(shell.commandsRun).toEqual(["git checkout main"]);
+    expect(retryCalls()).toBe(0);
+  });
+});
+
 // ── no-provider degradation ──────────────────────────────────────────────────
 
 describe("the fix ladder — degrades, never hangs, when no key is configured", () => {
@@ -660,5 +838,59 @@ describe("the runner drives the ladder on a failed command", () => {
     const runner = new AutopilotRunner(recipe, "win32", true); // no ladder
     const shell = new MockShell([{ kind: "failed", exitCode: 1, output: "npm ERR!" }]);
     expect((await runner.runUntilBlocked(shell)).type).toBe("surfaced");
+  });
+
+  it("routes a TIMED-OUT command into the fix ladder and self-repairs it", async () => {
+    // A hung command (a timeout) must get the same self-repair chance a non-zero
+    // exit does — otherwise a command that wedges is structurally denied every
+    // repair. Mirrors macOS converting `.timedOut` to `.failed(exitStatus: 124)`.
+    const recipe = runnerRecipe([commandStep("build", "npm ci"), commandStep("done", "npm run setup")]);
+    const proposer = new ScriptedProposer([runACommandFix("git clean -fdx", true)]);
+    const l = new FixLadder(proposer, recipe, hostsReachedByRecipe(recipe), ENV, "win32", true);
+    const runner = new AutopilotRunner(recipe, "win32", true, l);
+    // npm ci times out → git clean → retry npm ci ok → npm run setup ok.
+    const shell = new MockShell([
+      { kind: "timed_out" },
+      { kind: "succeeded", output: "" },
+      { kind: "succeeded", output: "" },
+      { kind: "succeeded", output: "" },
+    ]);
+    const status = await runner.runUntilBlocked(shell);
+    expect(status.type).toBe("finished");
+    expect(shell.commandsRun).toEqual(["npm ci", "git clean -fdx", "npm ci", "npm run setup"]);
+  });
+
+  it("without a ladder, a timed-out command still surfaces with the timeout message", async () => {
+    const recipe = runnerRecipe([commandStep("build", "npm ci")]);
+    const runner = new AutopilotRunner(recipe, "win32", true); // no ladder
+    const shell = new MockShell([{ kind: "timed_out" }]);
+    const status = await runner.runUntilBlocked(shell);
+    expect(status.type).toBe("surfaced");
+    if (status.type === "surfaced") expect(status.reason).toContain("took too long");
+  });
+
+  it("honors the red Stop clicked while the ladder is climbing", async () => {
+    // The reader hits Stop while the model call is in flight: the runner's
+    // `abort()` sets the aborted flag, the ladder notices it right after the call
+    // returns, and the proposed fix never runs.
+    const recipe = runnerRecipe([commandStep("build", "npm ci"), commandStep("done", "npm run setup")]);
+    // A holder so the proposer closure can reach the runner that is built after
+    // it (the proposer needs to call `abort` mid-climb).
+    const runnerHolder: { current: AutopilotRunner | undefined } = { current: undefined };
+    const proposer: FixProposing = {
+      isAvailable: () => true,
+      proposeFix: async () => {
+        runnerHolder.current!.abort();
+        return runACommandFix("git checkout main", true);
+      },
+    };
+    const l = new FixLadder(proposer, recipe, hostsReachedByRecipe(recipe), ENV, "win32", true);
+    const runner = new AutopilotRunner(recipe, "win32", true, l);
+    runnerHolder.current = runner;
+    const shell = new MockShell([{ kind: "failed", exitCode: 1, output: "npm ERR!" }]);
+    const status = await runner.runUntilBlocked(shell);
+    expect(status.type).toBe("aborted");
+    // The proposed fix never reached the shell — the ladder stopped after the call.
+    expect(shell.commandsRun).toEqual(["npm ci"]);
   });
 });

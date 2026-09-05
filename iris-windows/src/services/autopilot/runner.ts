@@ -185,6 +185,17 @@ export class AutopilotRunner {
     // so the whole runner stays testable with a fake; undefined means "no
     // watching wired", and a watched step then falls back to the reader handoff.
     private readonly watchExecutor: WatchStepExecutor | undefined = undefined,
+    // A live sink for events, so the host can render them AS they happen rather
+    // than only after `runUntilBlocked` resolves. When undefined (every existing
+    // caller and the whole pure suite), the runner buffers events in `this.events`
+    // for `drainEvents` exactly as before. When present (the production controller
+    // wires it), each event is forwarded the instant it is emitted instead of
+    // buffered — so a `handedToReader` ("your turn") surfaced before a
+    // multi-minute watch reaches the reader immediately, and a long watched or
+    // chained stretch is not invisible until it ends. Mirrors the macOS drive loop
+    // mutating observable state step by step as it runs, and matches the setup
+    // detour, which already forwards its events live.
+    private readonly eventSink: ((event: AutopilotEvent) => void) | undefined = undefined,
   ) {}
 
   private commandFor(step: RecipeStep): string | undefined {
@@ -218,7 +229,14 @@ export class AutopilotRunner {
   }
 
   private emit(event: AutopilotEvent): void {
-    this.events.push(event);
+    // Live-forward when a sink is wired (production), else buffer for the caller
+    // to drain (every runner-level test). Exclusive so a wired host never sees the
+    // same event twice — a live event and then a drained copy of it.
+    if (this.eventSink !== undefined) {
+      this.eventSink(event);
+    } else {
+      this.events.push(event);
+    }
   }
 
   private advance(): void {
@@ -284,12 +302,26 @@ export class AutopilotRunner {
       }
 
       if (step.kind === "open") {
-        // Opening it is the entire step — no tap, no wait.
+        // Opening the link is always the first thing Iris does for this step.
         if (step.href !== undefined) {
           this.emit({ type: "openRequested", href: step.href });
         }
-        this.advance();
-        continue;
+        // With NO watch block, opening it IS the whole step — advance with no
+        // tap, exactly as before. With a non-empty watch (a manual GUI installer
+        // whose completion Iris can confirm: cargo on PATH, a URL host, the page's
+        // visual state — the `install-rust`/`open-store` shape live in 7 of the 18
+        // guides), opening the page is NOT the finish: the reader still has to run
+        // the installer, so the step falls through to the shared watch block below,
+        // which surfaces "your turn" up front and advances the moment the watch
+        // verifies. Mirrors macOS `stepIsFinishedOnceIrisHasOpenedIt`, which
+        // auto-advances an opened step only when its watch is empty.
+        const hasWatchToConfirm = step.watch !== undefined && step.watch.expect.length > 0;
+        if (!hasWatchToConfirm) {
+          this.advance();
+          continue;
+        }
+        // else: fall through to the shared `verify`/watch block below — reached
+        // because the block's condition includes `step.watch !== undefined`.
       }
 
       if (advancesWithoutRunningAnything(step.kind)) {
@@ -480,35 +512,58 @@ export class AutopilotRunner {
         return { kind: "advanced" };
       case "failed": {
         this.emit({ type: "commandFinished", exitCode: outcome.exitCode, output: outcome.output });
-        // A command that died because a tool it needs is not on the PATH, when
-        // the recipe has its own earlier step for installing that tool, is
-        // repaired here FIRST — the install step is re-run once and the command
-        // retried — before either the model ladder or the reader sees it. This
-        // is the cheap, deterministic rung, and it mirrors macOS
-        // `installTheMissingToolTheGuideInstallsItself` running ahead of
-        // `climbTheFixLadder`.
-        const healed = await this.trySelfHealMissingTool(step, rawCommand, outcome, approved, shell);
-        if (healed !== undefined) return healed;
-        // Self-repair before surfacing: when a ladder is wired, a non-zero exit
-        // gets a model-proposed fix (run under the gate) and a retry of the
-        // original before the reader ever sees a dead terminal. Without a ladder
-        // the behavior is unchanged — surface at once.
-        if (this.fixLadder !== undefined) {
-          return this.runFixLadder(this.fixLadder, approved, step, rawCommand, outcome.exitCode, outcome.output, shell);
-        }
-        return {
-          kind: "blocked",
-          status: this.surface("That command didn't finish cleanly. Here's where it stopped.", rawCommand),
-        };
+        return this.handleFailedCommand(
+          step,
+          rawCommand,
+          outcome.exitCode,
+          outcome.output,
+          approved,
+          shell,
+          "That command didn't finish cleanly. Here's where it stopped.",
+        );
       }
-      case "timed_out":
-        return {
-          kind: "blocked",
-          status: this.surface("That command took too long, so Iris stopped it.", rawCommand),
-        };
+      case "timed_out": {
+        // A timeout is a failure like any other, and it gets the SAME self-heal
+        // and fix-ladder chance a non-zero exit does — otherwise a command that
+        // hangs (a `winget` waiting on an unanswerable console prompt, say) is
+        // structurally denied every repair, which a fast non-zero exit would
+        // have reached. 124 is the conventional "killed by a timeout" exit code,
+        // so the fix proposer can tell a timeout apart from a real exit. Mirrors
+        // macOS converting `.timedOut` into `.failed(exitStatus: 124)` so it
+        // flows through the identical failure ladder. `timed_out` carries no
+        // output of its own, so a plain-English line stands in.
+        const timeoutOutput = "That command took too long, so Iris stopped it.";
+        this.emit({ type: "commandFinished", exitCode: 124, output: timeoutOutput });
+        return this.handleFailedCommand(step, rawCommand, 124, timeoutOutput, approved, shell, timeoutOutput);
+      }
       case "session_failed":
         return { kind: "blocked", status: { type: "sessionFailed" } };
     }
+  }
+
+  /// Shared failure handling for a command that exited non-zero OR timed out:
+  /// the cheap deterministic self-heal first (re-run the recipe's own install
+  /// step for a missing tool, mirroring macOS
+  /// `installTheMissingToolTheGuideInstallsItself` running ahead of
+  /// `climbTheFixLadder`), then the model fix ladder when one is wired, and only
+  /// then a surface with `surfaceFallback` when neither recovered it. Without a
+  /// ladder the behavior is unchanged — surface at once with that message.
+  private async handleFailedCommand(
+    step: RecipeStep,
+    rawCommand: string,
+    exitCode: number,
+    output: string,
+    approved: ApprovedCommand,
+    shell: ShellSession,
+    surfaceFallback: string,
+  ): Promise<StepProgress> {
+    const failedOutcome: Extract<CommandOutcome, { kind: "failed" }> = { kind: "failed", exitCode, output };
+    const healed = await this.trySelfHealMissingTool(step, rawCommand, failedOutcome, approved, shell);
+    if (healed !== undefined) return healed;
+    if (this.fixLadder !== undefined) {
+      return this.runFixLadder(this.fixLadder, approved, step, rawCommand, exitCode, output, shell);
+    }
+    return { kind: "blocked", status: this.surface(surfaceFallback, rawCommand) };
   }
 
   /// Hands a failed command to the fix ladder and translates the ladder's
@@ -550,8 +605,19 @@ export class AutopilotRunner {
           : shell.run(approved, DEFAULT_COMMAND_TIMEOUT_MS);
       },
       emit: (event) => this.emit(event),
+      // The red 'Stop' sets `this.aborted`; the ladder polls this before each
+      // model call and fix command so a Stop halts it mid-climb instead of after
+      // it finishes spending. The shell's own `abort` kills whatever command is
+      // in flight; this stops the ladder from starting the next one.
+      shouldStop: () => this.aborted,
     });
 
+    if (result.kind === "stopped") {
+      // The reader stopped the run while the ladder was climbing. The run is
+      // terminal; discard the ladder's outcome exactly as an in-flight command's
+      // outcome is discarded.
+      return { kind: "blocked", status: this.abortedStatus() };
+    }
     if (result.kind === "repaired") {
       this.advance();
       return { kind: "advanced" };

@@ -25,6 +25,7 @@ import { friendlyLabel } from "./friendly-label";
 // module at runtime — which also keeps the fix-ladder↔runner import a type cycle,
 // not a value one.
 import type { FixLadder } from "./fix-ladder";
+import { firstProgramToken, selfHealStepForFailure } from "./setup-detour";
 import {
   DEFAULT_COMMAND_TIMEOUT_MS,
   LONG_RUNNING_GRACE_MS,
@@ -95,6 +96,14 @@ export type AutopilotEvent =
   | { readonly type: "fixProposed"; readonly diagnosis: string }
   /// The main process should open this URL/app; opening it is the whole step.
   | { readonly type: "openRequested"; readonly href: string }
+  /// A prerequisite the recipe needs was missing, so the setup-recovery detour
+  /// began. Lists each missing tool with the page that installs it; emitted once,
+  /// before any download page is opened, by `runSetupDetour`.
+  | { readonly type: "setupDetour"; readonly missing: readonly { readonly tool: string; readonly downloadHref: string }[] }
+  /// A command died because a tool it needs was not on the PATH, and the recipe
+  /// has its own earlier step for installing that tool. Iris is re-running that
+  /// step now, before it treats the failure as a real failure.
+  | { readonly type: "installingMissingTool"; readonly tool: string; readonly command: string }
   /// Only the reader can finish this. Float the eye to it and show this.
   | { readonly type: "handedToReader"; readonly instruction: string; readonly href?: string }
   /// A command needs one explicit tap before it runs.
@@ -127,6 +136,11 @@ export class AutopilotRunner {
   private index = 0;
   private finished = false;
   private events: AutopilotEvent[] = [];
+  // Steps that have already had the missing-tool self-heal run for them, so a
+  // step is repaired at most once: if it still fails as "command not found"
+  // after the recipe's own install step was re-run, it escalates (surfaces)
+  // rather than looping. Mirrors macOS running the guide's install step once.
+  private readonly selfHealedStepIds = new Set<string>();
   // The URL a dev-server step actually served on, if it differed from the recipe
   // default (e.g. Vite moved to :5174 because :5173 was taken). Used so the
   // "open" step lands on the app that is really there.
@@ -337,6 +351,15 @@ export class AutopilotRunner {
         return { kind: "advanced" };
       case "failed": {
         this.emit({ type: "commandFinished", exitCode: outcome.exitCode, output: outcome.output });
+        // A command that died because a tool it needs is not on the PATH, when
+        // the recipe has its own earlier step for installing that tool, is
+        // repaired here FIRST — the install step is re-run once and the command
+        // retried — before either the model ladder or the reader sees it. This
+        // is the cheap, deterministic rung, and it mirrors macOS
+        // `installTheMissingToolTheGuideInstallsItself` running ahead of
+        // `climbTheFixLadder`.
+        const healed = await this.trySelfHealMissingTool(step, rawCommand, outcome, approved, shell);
+        if (healed !== undefined) return healed;
         // Self-repair before surfacing: when a ladder is wired, a non-zero exit
         // gets a model-proposed fix (run under the gate) and a retry of the
         // original before the reader ever sees a dead terminal. Without a ladder
@@ -427,6 +450,86 @@ export class AutopilotRunner {
   async continuePastCurrentStep(shell: ShellSession): Promise<RunnerStatus> {
     this.advance();
     return this.runUntilBlocked(shell);
+  }
+
+  /// Repairs a "command not found" failure the recipe can fix itself: when the
+  /// failed command reached for a tool an EARLIER recipe step installs, re-run
+  /// that install step once and retry the command. Returns the resumed progress
+  /// on a repair (advanced on a clean retry, blocked/surfaced on a retry that
+  /// still failed), or undefined when this is not a self-healable failure and
+  /// the caller should surface it the ordinary way.
+  ///
+  /// Nothing here is model-proposed: the command run is one the recipe already
+  /// publishes, so it goes through the risk gate under the same provenance as
+  /// any recipe command. Once-only per step (`selfHealedStepIds`) so a genuinely
+  /// broken step escalates instead of looping.
+  private async trySelfHealMissingTool(
+    step: RecipeStep,
+    rawCommand: string,
+    outcome: Extract<CommandOutcome, { kind: "failed" }>,
+    originalApproved: ApprovedCommand,
+    shell: ShellSession,
+  ): Promise<StepProgress | undefined> {
+    if (this.selfHealedStepIds.has(step.id)) return undefined;
+    const installStep = selfHealStepForFailure(
+      this.recipe,
+      this.index,
+      rawCommand,
+      outcome.exitCode,
+      outcome.output,
+      this.platform,
+    );
+    if (installStep === undefined) return undefined;
+
+    const installCommand = this.commandFor(installStep);
+    if (installCommand === undefined) return undefined;
+    const approvedInstall = approve(installCommand, RECIPE_PROVENANCE, this.autonomyGranted);
+    if (approvedInstall === undefined) return undefined;
+
+    // Only now commit to the repair — from here it counts as this step's one
+    // attempt whether or not it succeeds.
+    this.selfHealedStepIds.add(step.id);
+    const missingTool = firstProgramToken(rawCommand);
+    this.emit({ type: "installingMissingTool", tool: missingTool, command: installCommand });
+
+    // Run the recipe's own install step, in the folder it declares.
+    const installFolder = workingDirectoryForPlatform(installStep, this.platform);
+    if (installFolder !== undefined && !(await this.moveInto(installFolder, shell))) return undefined;
+    this.emit({ type: "commandStarted", text: installCommand, friendlyLabel: friendlyLabel(installCommand) });
+    const installOutcome = await shell.run(approvedInstall, DEFAULT_COMMAND_TIMEOUT_MS);
+    if (installOutcome.kind === "session_failed") {
+      return { kind: "blocked", status: { type: "sessionFailed" } };
+    }
+    if (installOutcome.kind !== "succeeded") {
+      this.emit({
+        type: "commandFinished",
+        exitCode: installOutcome.kind === "failed" ? installOutcome.exitCode : 1,
+        output: installOutcome.kind === "failed" ? installOutcome.output : "",
+      });
+      return undefined; // install didn't take — let the caller surface the original failure
+    }
+    this.emit({ type: "commandFinished", exitCode: 0, output: installOutcome.output });
+
+    // Retry the original command, back in ITS folder. The per-command PowerShell
+    // re-reads the PATH from the registry, so the just-installed tool is visible.
+    const stepFolder = workingDirectoryForPlatform(step, this.platform);
+    if (stepFolder !== undefined && !(await this.moveInto(stepFolder, shell))) return undefined;
+    this.emit({ type: "commandStarted", text: rawCommand, friendlyLabel: friendlyLabel(rawCommand) });
+    const retry = await shell.run(originalApproved, DEFAULT_COMMAND_TIMEOUT_MS);
+    switch (retry.kind) {
+      case "succeeded":
+        if (retry.servedUrl !== undefined) this.detectedServedUrl = retry.servedUrl;
+        this.emit({ type: "commandFinished", exitCode: 0, output: retry.output });
+        this.advance();
+        return { kind: "advanced" };
+      case "failed":
+        this.emit({ type: "commandFinished", exitCode: retry.exitCode, output: retry.output });
+        return undefined; // still broken — escalate via the caller's surface
+      case "timed_out":
+        return { kind: "blocked", status: this.surface("That command took too long, so Iris stopped it.", rawCommand) };
+      case "session_failed":
+        return { kind: "blocked", status: { type: "sessionFailed" } };
+    }
   }
 
   /// Moves `shell` into the folder the step declared, and reports whether it

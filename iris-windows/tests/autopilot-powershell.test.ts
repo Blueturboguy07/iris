@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  REFRESH_PATH_FROM_REGISTRY,
   encodeForPowerShell,
   parseRun,
   psSingleQuote,
@@ -25,6 +26,18 @@ describe("PowerShell command wrapping", () => {
     expect(script).toContain("& { git status }");
     expect(script).toContain("__IRIS_CODE__:");
     expect(script).toContain("__IRIS_CWD__:");
+  });
+
+  it("refreshes PATH from the registry before the command, so a just-installed tool is seen", () => {
+    const script = wrapCommandScript("git status", "C:\\repo");
+    // The refresh must come BEFORE the command runs, or the command would still
+    // be blind to a tool the previous step installed.
+    expect(script).toContain(REFRESH_PATH_FROM_REGISTRY);
+    expect(script.indexOf(REFRESH_PATH_FROM_REGISTRY)).toBeLessThan(script.indexOf("& { git status }"));
+    // It reads both the machine and the user Path values — an installer writes
+    // to one or the other depending on whether it ran elevated.
+    expect(script).toContain("'Path','Machine'");
+    expect(script).toContain("'Path','User'");
   });
 
   it("encodes a script as UTF-16LE base64 that round-trips", () => {

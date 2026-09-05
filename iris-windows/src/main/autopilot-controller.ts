@@ -14,6 +14,11 @@ import { recipeClonesARepo, type InstallRecipe, type RecipeOutput } from "../ser
 import { AutopilotRunner, type AutopilotEvent, type RunnerStatus } from "../services/autopilot/runner";
 import type { FixLadder } from "../services/autopilot/fix-ladder";
 import type { ShellSession } from "../services/autopilot/shell";
+import {
+  runSetupDetour,
+  type DetourClock,
+  type ToolProbe,
+} from "../services/autopilot/setup-detour";
 import { PowerShellSession } from "./powershell-session";
 import { PosixShellSession } from "./posix-shell-session";
 
@@ -94,6 +99,11 @@ export class AutopilotController {
     // provider and the OS strings while this class stays testable with none; the
     // default gives no ladder, so a failed command surfaces exactly as before.
     private readonly makeFixLadder: (recipe: InstallRecipe) => FixLadder | undefined = () => undefined,
+    // The setup-recovery detour's seams (tool probing + wall clock). Present in
+    // production (wired in `main/index.ts`); absent in unit tests that are not
+    // exercising the detour, in which case the detour is skipped entirely so a
+    // recipe's prerequisite checks never shell out in the suite.
+    private readonly detourSeams: { readonly probe: ToolProbe; readonly clock: DetourClock } | undefined = undefined,
   ) {}
 
   /// Whether Iris knows how to install this app on Windows. Async because the
@@ -123,6 +133,30 @@ export class AutopilotController {
     this.dispose();
     this.shell = this.makeShell();
     this.recipe = recipe;
+
+    // Before the recipe's first step, walk the setup-recovery detour: check the
+    // prerequisites the recipe needs but does not install (git, node), and if
+    // any is missing, install it (winget under the grant) or send the reader to
+    // its download page and wait for it to appear. A detour that gives up
+    // surfaces here rather than marching into a recipe whose first step would
+    // fail on a missing tool. Skipped when the detour seams are not wired
+    // (unit tests that are not exercising it).
+    if (this.detourSeams !== undefined) {
+      const detour = await runSetupDetour(recipe, this.shell, {
+        probe: this.detourSeams.probe,
+        clock: this.detourSeams.clock,
+        platform: process.platform,
+        autonomyGranted: true,
+        emit: (event) => this.forwardEvent(event),
+      });
+      if (detour.kind === "surfaced") {
+        const status: RunnerStatus = { type: "surfaced", stepIndex: 0, reason: detour.reason };
+        this.host.emitEvent({ type: "surfaced", reason: detour.reason });
+        this.dispose();
+        return status;
+      }
+    }
+
     // Granted, so the runner runs the whole vetted install hands-off (only the
     // catastrophe floor can still stop a command). The ladder, when the reader
     // has a model key, lets a failed command self-repair before it ever reaches
@@ -175,12 +209,7 @@ export class AutopilotController {
   /// and opening the finished app.
   private pump(status: RunnerStatus): RunnerStatus {
     for (const event of this.runner?.drainEvents() ?? []) {
-      this.host.emitEvent(event);
-      if (event.type === "openRequested") {
-        this.host.openExternal(event.href);
-      } else if (event.type === "handedToReader") {
-        this.host.floatToGate(event.instruction, event.href);
-      }
+      this.forwardEvent(event);
     }
     if (status.type === "finished") {
       // Capture the clone path (the shell's cwd) BEFORE dispose tears the
@@ -190,6 +219,18 @@ export class AutopilotController {
       this.dispose();
     }
     return status;
+  }
+
+  /// Streams one event to the renderer and performs the app-only side effect it
+  /// implies. Shared by the runner pump and the setup detour so an `openRequested`
+  /// from either one opens its URL the same way.
+  private forwardEvent(event: AutopilotEvent): void {
+    this.host.emitEvent(event);
+    if (event.type === "openRequested") {
+      this.host.openExternal(event.href);
+    } else if (event.type === "handedToReader") {
+      this.host.floatToGate(event.instruction, event.href);
+    }
   }
 
   /// Assembles the `FinishedInstall` handed to `onFinished` from the recipe the

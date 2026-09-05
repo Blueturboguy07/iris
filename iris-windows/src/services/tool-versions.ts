@@ -32,6 +32,10 @@ const TOOL_SPECS: ReadonlyMap<string, readonly [string, readonly string[]]> = ne
   ["docker", ["docker", ["--version"]] as const],
   ["java", ["java", ["--version"]] as const],
   ["adb", ["adb", ["version"]] as const],
+  // The Windows package manager, probed by the setup-recovery detour to decide
+  // whether the winget fast path is available before it falls back to a manual
+  // download page. A safe version probe like every other entry.
+  ["winget", ["winget", ["--version"]] as const],
 ]);
 
 export function toolSpecFor(tool: string): readonly [string, readonly string[]] | null {

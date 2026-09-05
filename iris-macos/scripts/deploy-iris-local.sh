@@ -67,12 +67,44 @@ codesign -dvv "${APP_DEST}" 2>&1 | grep -E "Authority=Developer ID|TeamIdentifie
 # com.publikhq.iris and ALSO claims the iris:// URL scheme. If it stays
 # registered, LaunchServices has two claimants for one scheme and can resolve
 # iris:// (the "Open in Iris" handoff) to the wrong — or a since-deleted — copy.
-# That is exactly how dozens of phantom handlers accreted before. So: drop the
-# build copy's registration and force the /Applications copy to be the one and
-# only iris:// handler on every deploy.
+# That is exactly how dozens of phantom handlers accreted before.
+#
+# Unregistering only THIS run's own .build-local copy was not enough: every
+# `xcodebuild build`/`xcodebuild test` anywhere (a different .build-* dir, a
+# DerivedData copy, a scratch worktree, an old DMG staging folder) registers
+# its OWN Iris.app under the same bundle id and never gets cleaned up when that
+# directory is later deleted — LaunchServices keeps the dangling registration.
+# On this Mac they had piled up to 54 separate `com.publikhq.iris` claimants,
+# most pointing at directories that no longer exist, and a `iris://` open (the
+# live-run report's "`open -a Iris 'iris://guide/…'` does nothing") is free to
+# resolve to any one of them instead of the real, running /Applications copy.
+# So: sweep EVERY registered com.publikhq.iris bundle other than the one at
+# APP_DEST and drop its registration, then force APP_DEST to be the one and
+# only iris:// handler on every deploy — not just the previous build's copy.
 echo "🧹 Making /Applications/Iris.app the sole iris:// handler…"
 if [ -x "${LSREG}" ]; then
-  "${LSREG}" -u "${APP_SRC}" 2>/dev/null || true
+  "${LSREG}" -dump 2>/dev/null | awk -v skip="${APP_DEST}" '
+    BEGIN { path = ""; ident = "" }
+    /^--------------------------------------------------------------------------------$/ {
+      if (ident == "com.publikhq.iris" && path != "" && path != skip) print path
+      path = ""; ident = ""
+      next
+    }
+    /^path: / {
+      line = $0
+      sub(/^path: */, "", line)
+      sub(/ *\(0x[0-9a-f]*\)$/, "", line)
+      path = line
+    }
+    /^identifier: / {
+      line = $0
+      sub(/^identifier: */, "", line)
+      ident = line
+    }
+    END { if (ident == "com.publikhq.iris" && path != "" && path != skip) print path }
+  ' | while IFS= read -r stalePath; do
+    "${LSREG}" -u "${stalePath}" 2>/dev/null || true
+  done
   "${LSREG}" -f "${APP_DEST}" 2>/dev/null || true
   CLAIMANTS="$("${LSREG}" -dump 2>/dev/null | grep -c 'claimed schemes:.*iris:' || true)"
   echo "   iris:// claimants now registered: ${CLAIMANTS} (want 1)"

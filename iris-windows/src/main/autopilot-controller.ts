@@ -72,6 +72,12 @@ export interface AutopilotHost {
   /// app refresh its list. Carries the whole `FinishedInstall`, not just the
   /// output, so provenance can be recorded at the one moment it is knowable.
   onFinished(finishedInstall: FinishedInstall): void;
+  /// The reader hit the red 'Stop': the run is over and its shell has been
+  /// killed. The host folds the autopilot window away — mirroring macOS
+  /// `onAutopilotDidStop`, which the escape hatch calls unconditionally so the
+  /// reader is never left with a window and no way out. Optional so existing
+  /// hosts/tests need not implement it.
+  onAborted?(): void;
 }
 
 export class AutopilotController {
@@ -208,6 +214,25 @@ export class AutopilotController {
       throw new Error("No install is running.");
     }
     return this.pump(await this.runner.continuePastCurrentStep(this.shell));
+  }
+
+  /// The red 'Stop' escape hatch. Kills the running step's process tree, marks
+  /// the run terminal (no further step runs), streams the `aborted` event to the
+  /// terminal, and folds the window away via the host. Unconditional and
+  /// idempotent — safe when nothing is running, mirroring macOS
+  /// `abortOrCloseAutopilotFromTheEscapeHatch`, so the button is never dead.
+  abort(): RunnerStatus {
+    const status: RunnerStatus = this.runner ? this.runner.abort() : { type: "aborted", stepIndex: 0 };
+    // Forward the `aborted` event (and anything else queued) before the runner
+    // is torn down, so the terminal shows the run ending.
+    for (const event of this.runner?.drainEvents() ?? []) {
+      this.host.emitEvent(event);
+    }
+    // Kill the running command's whole process tree, then tear the session down.
+    this.shell?.abort();
+    this.dispose();
+    this.host.onAborted?.();
+    return status;
   }
 
   dispose(): void {

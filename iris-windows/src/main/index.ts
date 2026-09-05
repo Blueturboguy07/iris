@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, screen, shell } from "electron";
 import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import { createTray } from "./tray";
+import { createTray, observeAutopilotEventForTray, setTrayInstallActive, clearTrayYourTurn } from "./tray";
 import { SettingsStore } from "./settings";
 import { CompanionManager } from "./companion";
 import { AccountSession, configuredSupabaseProject } from "./account-session";
@@ -452,6 +452,8 @@ function openAutopilotWindow(slug: string): BrowserWindow {
     webPreferences: { preload: preloadPath(), contextIsolation: true, nodeIntegration: false },
   });
   const win = autopilotWindow;
+  // A run is now active, so the tray offers 'Stop the install' for its duration.
+  setTrayInstallActive(true);
   void win.loadFile(rendererPath("autopilot", "index.html"), { query: { slug } });
   win.webContents.once("did-finish-load", () => {
     if (win.isDestroyed()) return;
@@ -468,6 +470,10 @@ function openAutopilotWindow(slug: string): BrowserWindow {
   win.on("closed", () => {
     autopilotWindow = null;
     autopilot?.dispose();
+    // The run is over; drop the tray's 'Stop the install' item and any stale
+    // "your turn" state.
+    setTrayInstallActive(false);
+    clearTrayYourTurn();
   });
   return win;
 }
@@ -670,7 +676,13 @@ function autopilotController(): AutopilotController {
       if (granted) settings.set("autopilotAutonomyGranted", true);
       return granted;
     },
-    emitEvent: (event) => broadcast("autopilot:event", event),
+    emitEvent: (event) => {
+      broadcast("autopilot:event", event);
+      // Drive the tray's "your turn" state (tooltip, menu item, toast) off the
+      // same event stream — it raises when the run stops for the reader and
+      // clears when it moves again. See `services/autopilot/your-turn.ts`.
+      observeAutopilotEventForTray(event);
+    },
     openExternal: (url) => openExternalSafely(url),
     floatToGate: (instruction, href) => {
       // Bring the terminal to the reader and open the page a sign-in step points
@@ -707,6 +719,12 @@ function autopilotController(): AutopilotController {
       const output = finishedInstall.output;
       if (output.type === "local_web") openExternalSafely(output.url);
       broadcast("autopilot:finished", output);
+    },
+    onAborted: () => {
+      // The reader hit 'Stop': fold the terminal away so they are never left
+      // with a window they can't get out of (macOS `onAutopilotDidStop`). The
+      // window's own 'closed' handler clears the tray's run state.
+      if (autopilotWindow && !autopilotWindow.isDestroyed()) autopilotWindow.close();
     },
   },
   // Keep the default shell factory (PowerShell on Windows), and inject the
@@ -833,6 +851,11 @@ function handleGuideCommand(command: string, args: Record<string, unknown>): unk
     case "autopilot_continue_past":
       // The reader chose "Continue past it" on a surfaced step.
       return autopilotController().continuePast();
+
+    case "autopilot_abort":
+      // The red 'Stop': kill the running step's process tree and end the run.
+      // The host's `onAborted` folds the window away.
+      return autopilotController().abort();
 
     case "foreground_app_identity":
       // Windows has no cross-process foreground-app API without a native module.
@@ -985,6 +1008,18 @@ if (gotSingleInstanceLock) {
             settingsWindow = null;
           });
         }
+      },
+      onYourTurn: () => {
+        // Land the reader on the install that is waiting for them.
+        if (autopilotWindow && !autopilotWindow.isDestroyed()) {
+          autopilotWindow.show();
+          autopilotWindow.focus();
+        }
+      },
+      onStopInstall: () => {
+        // The tray's half of the escape hatch — same funnel as the window's red
+        // 'Stop'. `onAborted` folds the window away.
+        autopilotController().abort();
       },
       onQuit: () => app.quit(),
     });

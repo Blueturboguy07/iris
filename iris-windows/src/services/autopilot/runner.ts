@@ -118,6 +118,9 @@ export type AutopilotEvent =
   /// Iris hands it back to the reader with `verifierLabel`.
   | { readonly type: "watchTimedOut"; readonly index: number; readonly verifierLabel: string }
   | { readonly type: "advanced"; readonly index: number }
+  /// The reader hit the red 'Stop'. The run is over; the running command's
+  /// process tree is being killed by the shell, and no further step runs.
+  | { readonly type: "aborted" }
   | { readonly type: "finished"; readonly output: RecipeOutput };
 
 /// Why the runner stopped pumping. Everything except `finished`/`sessionFailed`
@@ -135,6 +138,9 @@ export type RunnerStatus =
     }
   | { readonly type: "needsConfirm"; readonly stepIndex: number; readonly command: string; readonly reason: string }
   | { readonly type: "surfaced"; readonly stepIndex: number; readonly reason: string; readonly failingCommand?: string }
+  /// Terminal, like `finished`: the reader stopped the run from the escape
+  /// hatch. Not resumable — a new install starts a new runner.
+  | { readonly type: "aborted"; readonly stepIndex: number }
   | { readonly type: "sessionFailed" };
 
 type StepProgress = { readonly kind: "advanced" } | { readonly kind: "blocked"; readonly status: RunnerStatus };
@@ -142,6 +148,10 @@ type StepProgress = { readonly kind: "advanced" } | { readonly kind: "blocked"; 
 export class AutopilotRunner {
   private index = 0;
   private finished = false;
+  /// Set by `abort()` (the red 'Stop'). Once true the machine is terminal: the
+  /// drive loop stops before the next step, and a command whose outcome is still
+  /// in flight is discarded rather than surfaced when the killed shell returns.
+  private aborted = false;
   private events: AutopilotEvent[] = [];
   // Steps that have already had the missing-tool self-heal run for them, so a
   // step is repaired at most once: if it still fails as "command not found"
@@ -221,10 +231,34 @@ export class AutopilotRunner {
     return { type: "surfaced", stepIndex: this.index, reason, failingCommand };
   }
 
+  private abortedStatus(): RunnerStatus {
+    return { type: "aborted", stepIndex: this.index };
+  }
+
+  /// The red 'Stop' escape hatch. Marks the run terminal so the drive loop halts
+  /// and any in-flight command's outcome is discarded rather than surfaced; the
+  /// CALLER kills the running shell's process tree (`ShellSession.abort`). Safe
+  /// to call from any state — an already-finished or already-aborted run stays
+  /// as it is — mirroring macOS `abortOrCloseAutopilotFromTheEscapeHatch`, which
+  /// closes unconditionally.
+  abort(): RunnerStatus {
+    if (!this.aborted && !this.finished) {
+      this.aborted = true;
+      this.finished = true;
+      this.emit({ type: "aborted" });
+    }
+    return this.abortedStatus();
+  }
+
   /// Runs and auto-advances every step Iris owns until it either finishes, or
   /// reaches something only the reader can settle.
   async runUntilBlocked(shell: ShellSession): Promise<RunnerStatus> {
     for (;;) {
+      // The reader may have hit 'Stop' between steps (or while the last command
+      // was running); stop before starting another.
+      if (this.aborted) {
+        return this.abortedStatus();
+      }
       if (this.index >= this.recipe.steps.length) {
         this.finished = true;
         const output = this.effectiveOutput();
@@ -331,6 +365,9 @@ export class AutopilotRunner {
 
   /// The reader tapped "run it" (or declined) on a confirm-tier command.
   async confirmCurrentCommand(approved: boolean, shell: ShellSession): Promise<RunnerStatus> {
+    if (this.aborted) {
+      return this.abortedStatus();
+    }
     const step = this.currentStep();
     if (step === undefined) {
       return this.runUntilBlocked(shell);
@@ -342,7 +379,12 @@ export class AutopilotRunner {
     if (!approved) {
       return this.surface("You skipped this command, so Iris stopped here.", command);
     }
-    const approvedCommand = approveAfterAReaderTap(command, RECIPE_PROVENANCE, this.autonomyGranted);
+    const workingDirectory = workingDirectoryForPlatform(step, this.platform);
+    const approvedCommand = approveAfterAReaderTap(command, {
+      provenance: RECIPE_PROVENANCE,
+      autonomyGranted: this.autonomyGranted,
+      workingDirectory,
+    });
     if (approvedCommand === undefined) {
       return this.surface("Iris won't run this command automatically.", command);
     }
@@ -352,6 +394,9 @@ export class AutopilotRunner {
 
   /// The reader finished a sign-in / permission / manual step. Resume.
   async readerFinishedCurrentStep(shell: ShellSession): Promise<RunnerStatus> {
+    if (this.aborted) {
+      return this.abortedStatus();
+    }
     this.advance();
     return this.runUntilBlocked(shell);
   }
@@ -361,9 +406,17 @@ export class AutopilotRunner {
     if (command === undefined) {
       return { kind: "blocked", status: this.surface("This step has no command to run.") };
     }
-    const verdict = assess(command, RECIPE_PROVENANCE, this.autonomyGranted);
+    // The folder the step declares it runs in is part of the verdict: a system
+    // folder or a `..`-escape is refused even under the grant (see `risk.ts`).
+    const workingDirectory = workingDirectoryForPlatform(step, this.platform);
+    const gateOptions = {
+      provenance: RECIPE_PROVENANCE,
+      autonomyGranted: this.autonomyGranted,
+      workingDirectory,
+    };
+    const verdict = assess(command, gateOptions);
     if (verdict.tier === "runs_without_asking") {
-      const approved = approve(command, RECIPE_PROVENANCE, this.autonomyGranted)!;
+      const approved = approve(command, gateOptions)!;
       return this.execute(approved, step, shell);
     }
     if (verdict.tier === "needs_a_confirm_tap") {
@@ -400,10 +453,24 @@ export class AutopilotRunner {
       }
     }
 
+    // Stopped during the (hidden) folder move; don't start the command.
+    if (this.aborted) {
+      return { kind: "blocked", status: this.abortedStatus() };
+    }
+
     this.emit({ type: "commandStarted", text: rawCommand, friendlyLabel: friendlyLabel(rawCommand) });
     const outcome: CommandOutcome = step.longRunning
       ? await shell.runLongRunning(approved, step.readyWhen, LONG_RUNNING_GRACE_MS)
       : await shell.run(approved, DEFAULT_COMMAND_TIMEOUT_MS);
+
+    // The reader hit 'Stop' while this command was in flight. The shell's
+    // process tree has been (or is being) killed, so whatever the killed
+    // command reports back — a non-zero exit, a session failure — is not a real
+    // result and must not be surfaced as a step that "didn't finish cleanly".
+    // The run is already terminal; discard the outcome.
+    if (this.aborted) {
+      return { kind: "blocked", status: this.abortedStatus() };
+    }
 
     switch (outcome.kind) {
       case "succeeded":

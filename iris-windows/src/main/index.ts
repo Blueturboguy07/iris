@@ -19,6 +19,7 @@ import { guideBackedRecipeResolver } from "../services/autopilot/guide-recipe-re
 import type { InstallRecipe } from "../services/autopilot/recipe";
 import type { FetchLike } from "../services/guide-service";
 import { FixLadder, ModelFixProposer, hostsReachedByRecipe } from "../services/autopilot/fix-ladder";
+import { defaultWatchExecutor } from "../services/autopilot/watch";
 import { firstAvailableMaintainProvider } from "../services/maintain/model-provider";
 import { RegistryRefreshingToolProbe, RealDetourClock } from "./setup-detour-host";
 import { MaintainController, type MaintainHost } from "./maintain/controller";
@@ -738,7 +739,27 @@ function autopilotController(): AutopilotController {
   // from the registry (so a tool the detour just installed is seen) and the wall
   // clock. Wiring them is what turns the detour on in production; the unit suite
   // leaves them out and injects fakes.
-  { probe: new RegistryRefreshingToolProbe(), clock: new RealDetourClock() });
+  { probe: new RegistryRefreshingToolProbe(), clock: new RealDetourClock() },
+  // The watch executor for `verify`/watched steps. Its toolVersion rung — the
+  // cheapest and most heavily-authored watch signal (every guide's `install-rust`
+  // watches for `cargo`, every tools check for git/node) — is wired to the same
+  // execFile-based `checkToolVersion` the `check_tool_version` IPC already uses,
+  // so it can actually verify in production instead of the "not wired" default
+  // that answers false forever. The visual capture/evaluation seams stay unwired
+  // here (they need the screenshot pipeline + a model transport); side-signal
+  // watching is fully live. Wrapped so a non-allowlisted tool — which
+  // `checkToolVersion` throws on, though the executor already refuses one before
+  // asking — can never escape as a rejection, only a quiet "not installed".
+  () =>
+    defaultWatchExecutor({
+      isToolInstalled: async (tool: string) => {
+        try {
+          return (await checkToolVersion(tool)).available;
+        } catch {
+          return false;
+        }
+      },
+    }));
   return autopilot;
 }
 

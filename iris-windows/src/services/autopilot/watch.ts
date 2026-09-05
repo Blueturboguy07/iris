@@ -402,6 +402,32 @@ export function parseAxElementPresenceOutput(stdout: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// The perceptual-diff rung (rung 2): "free unless the screen changed".
+// ---------------------------------------------------------------------------
+
+/// How many bits of a 64-bit difference hash must flip before a frame counts as
+/// a meaningful change, ported verbatim from
+/// `WatchLoop.minimumHammingDistanceThatCountsAsAMeaningfulChange`. A blinking
+/// caret or a ticking clock moves one or two bits; opening a window or a terminal
+/// filling with output moves far more than five.
+export const MINIMUM_HAMMING_DISTANCE_THAT_COUNTS = 5;
+
+/// The Hamming distance between two 64-bit difference hashes — the count of bits
+/// that differ. Pure and directly tested; the macOS analog is
+/// `PerceptualFrameHash.hammingDistance`.
+export function hammingDistanceBetweenFingerprints(left: bigint, right: bigint): number {
+  // Non-negative fingerprints in practice; the mask keeps the XOR well-defined
+  // even if a seam ever handed back a wider or signed value.
+  let differingBits = (left ^ right) & 0xffffffffffffffffn;
+  let count = 0;
+  while (differingBits > 0n) {
+    count += Number(differingBits & 1n);
+    differingBits >>= 1n;
+  }
+  return count;
+}
+
+// ---------------------------------------------------------------------------
 // The seams the executor reaches the machine through.
 // ---------------------------------------------------------------------------
 
@@ -440,6 +466,15 @@ export interface WatchSeams {
   captureScreenshotJpegBase64(): Promise<string | undefined>;
   /// visual. Judges one frame and returns a verdict, or undefined.
   evaluateVisualCheck(request: WatchVisualCheckRequest): Promise<WatchVerdict | undefined>;
+  /// rung 2 — the perceptual diff. A cheap 64-bit difference hash of the current
+  /// screen (a ~256px grayscale capture on macOS), or undefined when a host has
+  /// not wired screen capture. When it is undefined the executor reads the side
+  /// signals every poll (the shipped default); when it is wired, an unchanged
+  /// screen makes the poll free — the reader reading a step is not acting on it —
+  /// and a changing screen is the evidence a slow step is still progressing.
+  /// NEVER captured for a `sensitive` step, for the same reason the visual rung
+  /// is not: a fingerprint is still derived from pixels.
+  captureScreenFingerprint(): Promise<bigint | undefined>;
   /// Seconds on a monotonic timeline. Only differences are used, so where it
   /// starts does not matter. Backs the ≥ 10 s-between-visual-checks budget.
   nowInSeconds(): number;
@@ -524,6 +559,10 @@ export function defaultWatchSeams(
         parseAxElementPresenceOutput(await runPowerShellForStdout(buildAxElementQueryCommand(roleLabel)))),
     captureScreenshotJpegBase64: overrides.captureScreenshotJpegBase64 ?? (async () => undefined),
     evaluateVisualCheck: overrides.evaluateVisualCheck ?? (async () => undefined),
+    // Not wired by default (like the visual rung): a host supplies the fingerprint
+    // capture from `main/`'s screenshot pipeline. Until then the perceptual-diff
+    // gate is inert and the executor reads the side signals every poll.
+    captureScreenFingerprint: overrides.captureScreenFingerprint ?? (async () => undefined),
     nowInSeconds: overrides.nowInSeconds ?? (() => Date.now() / 1000),
     waitForMilliseconds:
       overrides.waitForMilliseconds ??
@@ -540,19 +579,39 @@ export function defaultWatchSeams(
 export const MAXIMUM_VISUAL_CHECKS_PER_STEP = 8;
 export const MINIMUM_SECONDS_BETWEEN_VISUAL_CHECKS = 10;
 
-/// How long to wait between polls of a watched step, and how many polls before a
-/// watch that never verifies gives up and hands the step to the reader. 2 s
-/// matches the macOS loop's cadence; 90 polls (~3 minutes) is a generous ceiling
-/// so a slow-but-real reader action is not abandoned, while still bounding the
-/// wait so `awaitStepCompletion` always returns.
+/// How long to wait between polls of a watched step. 2 s matches the macOS
+/// loop's cadence.
 export const MILLISECONDS_BETWEEN_POLLS = 2000;
+
+/// How many CONSECUTIVE polls with no observed progress may pass before a watch
+/// that never verifies gives up and hands the step to the reader. ~90 polls
+/// (~3 minutes) of nothing changing is the ceiling.
+///
+/// This is NOT a wall-clock cap: macOS's `WatchLoop` has no elapsed-time or
+/// poll-count bound and watches a step for as long as it takes — only the model
+/// budget is finite. The Windows executor is an awaitable a pumped runner calls
+/// inline, so it must eventually return; the port keeps that faithful by counting
+/// only polls where NOTHING happened. A meaningful screen change (rung 2) resets
+/// the counter, so a genuinely-slow-but-live step — a large `npm install` still
+/// spilling output — is watched well past three minutes instead of being handed
+/// back as stalled. When no capture seam is wired there is no progress signal, so
+/// every poll counts and the behaviour is the old fixed ~3-minute ceiling.
 export const DEFAULT_MAXIMUM_POLLS = 90;
+
+/// The absolute safety ceiling on poll iterations, so `awaitStepCompletion`
+/// always returns even if the screen changes forever (a video playing behind the
+/// step). ~3 hours at the 2 s cadence — far beyond any real install, and the
+/// escape hatch (`shouldAbort`) exits long before it in practice.
+export const ABSOLUTE_MAXIMUM_POLLS = 5400;
 
 /// Why a watched step stopped being watched.
 export type WatchStepOutcome =
   | {
       readonly kind: "verified";
-      /// Which expectation settled it, for the `watchVerified` event.
+      /// Which expectation settled it, for the `watchVerified` event. With the
+      /// AND semantics below, every declared side signal was satisfied; this
+      /// names the strongest (most expensive) of them, the one that best proves
+      /// the step is actually done.
       readonly verifiedBy: WatchExpectation["type"];
     }
   | {
@@ -560,7 +619,11 @@ export type WatchStepOutcome =
       /// The most recent `userStuck` hint a visual check produced, if any — so
       /// the handoff can surface what the model noticed.
       readonly stuckHint?: string;
-    };
+    }
+  /// The reader hit the red 'Stop' while the watch was polling. The executor
+  /// stopped promptly; the runner discards this, exactly as it discards an
+  /// in-flight command's outcome on abort.
+  | { readonly kind: "aborted" };
 
 /// Options for one `awaitStepCompletion` call. Every bound is overridable so a
 /// test drives the loop deterministically; production takes the defaults.
@@ -570,8 +633,14 @@ export interface AwaitStepCompletionOptions {
   /// model can tell this step's moment from the previous step's.
   readonly commandTheStepAsksFor?: string;
   readonly hintsTheStepAuthorWrote?: readonly string[];
+  /// The no-progress ceiling for this call (see `DEFAULT_MAXIMUM_POLLS`).
   readonly maximumPolls?: number;
   readonly context?: WatchScreenContext;
+  /// Polled between rungs so the red 'Stop' escape hatch cancels an in-flight
+  /// watch promptly rather than letting it poll for minutes after the run is
+  /// terminal. The runner passes `() => this.aborted`; the macOS analog is
+  /// `WatchLoop.stopWatching()` cancelling its ticking task synchronously.
+  readonly shouldAbort?: () => boolean;
 }
 
 /// Blocks on a step's `watch` block until one expectation verifies, cheapest
@@ -580,63 +649,192 @@ export interface AwaitStepCompletionOptions {
 export class WatchStepExecutor {
   constructor(private readonly seams: WatchSeams) {}
 
-  /// Polls the watch's expectations until one verifies or the poll budget runs
-  /// out. A `sensitive` watch never reaches the visual rung. Returns `verified`
-  /// (with which expectation settled it) or `timedOut` (with any stuck hint).
+  /// Polls the watch's expectations until the step is confirmed done or the
+  /// no-progress budget runs out. Returns `verified` (with the strongest side
+  /// signal that settled it, or `visual`), `timedOut` (with any stuck hint), or
+  /// `aborted` (the reader hit 'Stop'). A `sensitive` watch never reaches the
+  /// visual rung, nor is its screen ever fingerprinted.
+  ///
+  /// The ladder each poll, matching macOS `performOneWatchTick`:
+  ///   rung 2  the perceptual diff — an unchanged screen (when capture is wired)
+  ///           makes the poll free and there is nothing new to read.
+  ///   rung 3  the local signals, AND across ALL declared side signals — the
+  ///           step is done only when EVERY one is satisfied, not any single one
+  ///           (macOS `evaluateLocalSignals`). Evaluated cheapest-first and
+  ///           short-circuited on the first that is unsatisfied.
+  ///   rung 4  the visual model check, reached only when the side signals could
+  ///           not settle it and the step declares a non-sensitive `visual`.
   async awaitStepCompletion(
     watch: StepWatch,
     options: AwaitStepCompletionOptions = {},
   ): Promise<WatchStepOutcome> {
     const orderedExpectations = orderExpectationsCheapestFirst(watch.expect);
-    const maximumPolls = options.maximumPolls ?? DEFAULT_MAXIMUM_POLLS;
+    const sideSignalExpectations = orderedExpectations.filter(
+      (expectation) => expectation.type !== "visual",
+    );
+    const visualExpectation = orderedExpectations.find(
+      (expectation): expectation is Extract<WatchExpectation, { type: "visual" }> =>
+        expectation.type === "visual",
+    );
+    const stepIsSensitive = watch.sensitive === true;
+    // A sensitive step may never be looked at: no visual model call AND no
+    // fingerprint capture, since both derive from pixels.
+    const mayLookAtPixels = !stepIsSensitive;
+    const mayUseVisual = mayLookAtPixels && visualExpectation !== undefined;
+    const noProgressCeiling = options.maximumPolls ?? DEFAULT_MAXIMUM_POLLS;
+
+    // Nothing declared here can ever confirm the step — there is no pixel-free
+    // side signal to check, and the visual rung is either forbidden (a sensitive
+    // step is never captured) or not declared. Polling the full ~3-minute ceiling
+    // to reach the identical timeout is a silent stall indistinguishable from a
+    // hang, so hand back to the reader at once instead. This is the sensitive
+    // visual-only case (5 shipped guides carry a visual-only `verify`/watch);
+    // the non-sensitive visual-only-but-capture-unwired case is caught inside the
+    // loop once a capture attempt proves the seam is not wired.
+    if (sideSignalExpectations.length === 0 && !mayUseVisual) {
+      return { kind: "timedOut" };
+    }
 
     // The visual budget is per-step working state, fresh for each call, so no
     // step's spend can leak into the next one.
     let visualChecksUsedOnThisStep = 0;
     let secondsAtMostRecentVisualCheck: number | undefined;
     let mostRecentStuckHint: string | undefined;
+    let previousFingerprint: bigint | undefined;
+    let consecutivePollsWithoutProgress = 0;
 
-    for (let pollIndex = 0; pollIndex < maximumPolls; pollIndex += 1) {
-      for (const expectation of orderedExpectations) {
-        if (expectation.type === "visual") {
-          // A sensitive step is NEVER captured — the visual rung is skipped
-          // outright and the step settles from side signals or hands back.
-          if (watch.sensitive === true) continue;
+    for (let pollIndex = 0; pollIndex < ABSOLUTE_MAXIMUM_POLLS; pollIndex += 1) {
+      if (options.shouldAbort?.() === true) return { kind: "aborted" };
 
-          if (visualChecksUsedOnThisStep >= MAXIMUM_VISUAL_CHECKS_PER_STEP) continue;
-          const nowInSeconds = this.seams.nowInSeconds();
-          if (
-            secondsAtMostRecentVisualCheck !== undefined &&
-            nowInSeconds - secondsAtMostRecentVisualCheck < MINIMUM_SECONDS_BETWEEN_VISUAL_CHECKS
-          ) {
-            continue;
-          }
+      // Rung 2 — the perceptual diff. Only when a fingerprint seam is wired and
+      // the step is not sensitive. The first frame is a baseline (read the
+      // signals, but never spend a model call); an unchanged frame after that
+      // costs nothing else and is the overwhelmingly common path.
+      const fingerprint = mayLookAtPixels ? await this.seams.captureScreenFingerprint() : undefined;
+      const fingerprintSeamIsWired = fingerprint !== undefined;
+      let screenMeaningfullyChanged = true;
+      let isBaselineFrame = false;
+      if (fingerprintSeamIsWired) {
+        if (previousFingerprint === undefined) {
+          isBaselineFrame = true;
+          screenMeaningfullyChanged = false;
+        } else {
+          screenMeaningfullyChanged =
+            hammingDistanceBetweenFingerprints(previousFingerprint, fingerprint) >=
+            MINIMUM_HAMMING_DISTANCE_THAT_COUNTS;
+        }
+        previousFingerprint = fingerprint;
+      }
 
-          // The budget is spent BEFORE the call, not after: a failed call still
-          // cost time and still hit a rate limit, and a loop that only counted
-          // successes would retry a broken model every poll. Mirrors macOS.
-          visualChecksUsedOnThisStep += 1;
-          secondsAtMostRecentVisualCheck = nowInSeconds;
+      // A wired, non-baseline, unchanged frame settles nothing new — the reader
+      // is reading the step, not acting on it — so skip every signal read this
+      // poll. This is the rung that makes the common case free.
+      const nothingChangedSoNothingToRead =
+        fingerprintSeamIsWired && !isBaselineFrame && !screenMeaningfullyChanged;
 
-          const verdict = await this.evaluateVisualExpectation(expectation, options);
-          if (verdict?.kind === "completed") {
-            return { kind: "verified", verifiedBy: "visual" };
-          }
-          if (verdict?.kind === "userStuck") {
-            mostRecentStuckHint = verdict.hint;
-          }
-          continue;
+      if (!nothingChangedSoNothingToRead) {
+        // Rung 3 — the local signals, AND across all of them.
+        const sideSignalVerdict = await this.evaluateSideSignals(sideSignalExpectations);
+        if (sideSignalVerdict.kind === "allSatisfied") {
+          return { kind: "verified", verifiedBy: sideSignalVerdict.strongestSatisfied };
         }
 
-        if (await this.isSideSignalSatisfied(expectation)) {
-          return { kind: "verified", verifiedBy: expectation.type };
+        // Rung 4 — the visual model check. Reached only when the side signals
+        // could not settle it (`notAllSatisfied` or none declared) and the step
+        // declares a non-sensitive visual. On a wired fingerprint seam a model
+        // call is spent only when the screen actually changed — never on the
+        // baseline — mirroring macOS paying for the model only after something
+        // has happened; with no seam wired the visual rung is reachable every
+        // poll, subject to its own budget/spacing.
+        const visualIsAllowedThisPoll =
+          mayUseVisual && (!fingerprintSeamIsWired || screenMeaningfullyChanged);
+        if (
+          visualIsAllowedThisPoll &&
+          visualExpectation !== undefined &&
+          visualChecksUsedOnThisStep < MAXIMUM_VISUAL_CHECKS_PER_STEP
+        ) {
+          const nowInSeconds = this.seams.nowInSeconds();
+          const spacingAllowsAnotherCheck =
+            secondsAtMostRecentVisualCheck === undefined ||
+            nowInSeconds - secondsAtMostRecentVisualCheck >= MINIMUM_SECONDS_BETWEEN_VISUAL_CHECKS;
+          if (spacingAllowsAnotherCheck) {
+            // The budget is spent BEFORE the call, not after: a failed call
+            // still cost time and still hit a rate limit, and a loop that only
+            // counted successes would retry a broken model every poll. Mirrors
+            // macOS.
+            visualChecksUsedOnThisStep += 1;
+            secondsAtMostRecentVisualCheck = nowInSeconds;
+
+            const visualResult = await this.evaluateVisualExpectation(visualExpectation, options);
+            if (visualResult === "captureUnavailable") {
+              // The visual rung is the only thing that could confirm this step
+              // and the screenshot seam is not wired on this build, so it can
+              // never verify. With no side signal to fall back on, hand back to
+              // the reader NOW rather than burn the whole no-progress budget on
+              // polls that provably cannot settle — a silent stall reads exactly
+              // like a hang. Once a host wires the capture seam this branch is
+              // never taken. (Finding: the visual rung unwired in production.)
+              if (sideSignalExpectations.length === 0) {
+                return { kind: "timedOut", stuckHint: mostRecentStuckHint };
+              }
+              // With side signals present, keep polling those; the visual budget
+              // spent above simply bounds how many dead capture attempts happen.
+            } else if (visualResult?.kind === "completed") {
+              return { kind: "verified", verifiedBy: "visual" };
+            } else if (visualResult?.kind === "userStuck") {
+              mostRecentStuckHint = visualResult.hint;
+            }
+          }
         }
       }
 
+      // Progress accounting: a meaningful, non-baseline screen change is the
+      // evidence a step is still advancing, so it resets the no-progress
+      // countdown. Without a wired capture seam there is no progress signal, so
+      // every poll counts against the ceiling exactly as the fixed ceiling did.
+      const observedProgress =
+        fingerprintSeamIsWired && !isBaselineFrame && screenMeaningfullyChanged;
+      if (observedProgress) {
+        consecutivePollsWithoutProgress = 0;
+      } else {
+        consecutivePollsWithoutProgress += 1;
+        if (consecutivePollsWithoutProgress >= noProgressCeiling) {
+          return { kind: "timedOut", stuckHint: mostRecentStuckHint };
+        }
+      }
+
+      if (options.shouldAbort?.() === true) return { kind: "aborted" };
       await this.seams.waitForMilliseconds(MILLISECONDS_BETWEEN_POLLS);
     }
 
     return { kind: "timedOut", stuckHint: mostRecentStuckHint };
+  }
+
+  /// Evaluates every declared side (pixel-free) signal with AND semantics: the
+  /// step is `allSatisfied` only when EVERY one is satisfied. Cheapest-first and
+  /// short-circuited — the first unsatisfied signal ends the round, so a costlier
+  /// PowerShell probe is never spawned once a cheaper check has already failed.
+  /// `strongestSatisfied` (when all pass) is the most expensive side signal, the
+  /// one that best proves the step is done. Mirrors macOS `evaluateLocalSignals`
+  /// (`everyLocalExpectationIsSatisfied`).
+  private async evaluateSideSignals(
+    sideSignalExpectations: readonly WatchExpectation[],
+  ): Promise<
+    | { readonly kind: "allSatisfied"; readonly strongestSatisfied: WatchExpectation["type"] }
+    | { readonly kind: "notAllSatisfied" }
+    | { readonly kind: "noneDeclared" }
+  > {
+    if (sideSignalExpectations.length === 0) return { kind: "noneDeclared" };
+    // `sideSignalExpectations` is already cheapest-first, so the last one to be
+    // confirmed is the strongest.
+    let strongestSatisfied: WatchExpectation["type"] = sideSignalExpectations[0]!.type;
+    for (const expectation of sideSignalExpectations) {
+      if (!(await this.isSideSignalSatisfied(expectation))) {
+        return { kind: "notAllSatisfied" };
+      }
+      strongestSatisfied = expectation.type;
+    }
+    return { kind: "allSatisfied", strongestSatisfied };
   }
 
   /// A single pixel-free expectation. Never captures a screenshot.
@@ -670,13 +868,18 @@ export class WatchStepExecutor {
     }
   }
 
+  /// Runs one visual model check, distinguishing three outcomes the caller must
+  /// treat differently: `"captureUnavailable"` (no screenshot seam wired — the
+  /// rung can NEVER verify, so an all-visual watch should give up now rather than
+  /// stall), a `WatchVerdict` (the model answered), or `undefined` (a frame was
+  /// captured but the model's answer could not be read — a real not-yet).
   private async evaluateVisualExpectation(
     expectation: Extract<WatchExpectation, { type: "visual" }>,
     options: AwaitStepCompletionOptions,
-  ): Promise<WatchVerdict | undefined> {
+  ): Promise<WatchVerdict | "captureUnavailable" | undefined> {
     const screenshotJpegBase64 = await this.seams.captureScreenshotJpegBase64();
     if (screenshotJpegBase64 === undefined || screenshotJpegBase64.length === 0) {
-      return undefined;
+      return "captureUnavailable";
     }
     return this.seams.evaluateVisualCheck({
       screenshotJpegBase64,

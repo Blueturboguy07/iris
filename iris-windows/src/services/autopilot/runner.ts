@@ -18,7 +18,7 @@
 import type { InstallRecipe, RecipeOutput, RecipeStep, StepCheck, StepKind, WatchExpectation } from "./recipe";
 import { advancesWithoutRunningAnything, commandForPlatform, workingDirectoryForPlatform } from "./recipe";
 import type { ApprovedCommand, Provenance } from "./risk";
-import { approve, approveAfterAReaderTap, assess } from "./risk";
+import { approve, approveAfterAReaderTap, assess, forbiddenWorkingDirectory } from "./risk";
 import { friendlyLabel } from "./friendly-label";
 // Type-only: the ladder is INJECTED (the controller builds it with the model
 // provider + the recipe's hosts), so the runner needs its shape, never its
@@ -357,7 +357,20 @@ export class AutopilotRunner {
           const outcome = await this.watchExecutor!.awaitStepCompletion(step.watch!, {
             stepTitle: step.title,
             commandTheStepAsksFor: this.commandFor(step),
+            // The red 'Stop' cancels an in-flight watch: the executor polls this
+            // between rungs and returns promptly. Without it the watch keeps
+            // spawning PowerShell for up to its whole no-progress budget after the
+            // run is already terminal, and could still emit a stale
+            // watchVerified/advance. Mirrors macOS `WatchLoop.stopWatching()`
+            // cancelling its ticking task the instant the escape hatch fires.
+            shouldAbort: () => this.aborted,
           });
+          // Stopped while the watch was polling: the run is terminal, so discard
+          // the outcome exactly as an in-flight command's outcome is discarded —
+          // no watchVerified, no watchTimedOut, no advance.
+          if (this.aborted || outcome.kind === "aborted") {
+            return this.abortedStatus();
+          }
           if (outcome.kind === "verified") {
             this.emit({ type: "watchVerified", index: this.index, verifiedBy: outcome.verifiedBy });
             this.advance();
@@ -411,7 +424,10 @@ export class AutopilotRunner {
     if (!approved) {
       return this.surface("You skipped this command, so Iris stopped here.", command);
     }
-    const workingDirectory = workingDirectoryForPlatform(step, this.platform);
+    // Judge against the folder the command will run in — its declared folder, or
+    // the shell's real location when it declares none — so the tap approves the
+    // command as it will actually run, not on its text alone.
+    const workingDirectory = this.gateWorkingDirectory(step, shell);
     const approvedCommand = approveAfterAReaderTap(command, {
       provenance: RECIPE_PROVENANCE,
       autonomyGranted: this.autonomyGranted,
@@ -433,14 +449,30 @@ export class AutopilotRunner {
     return this.runUntilBlocked(shell);
   }
 
+  /// The folder to JUDGE a step's command against: the folder the step declares,
+  /// or — when it declares none — where the shell is actually sitting right now.
+  /// The gate's working-directory floor (a system folder, a drive root, a `..`-
+  /// or embedded-`cd`-escape) must stay live for EVERY command, not only the
+  /// steps that happen to name a folder: in a multi-step recipe only the step
+  /// after the clone declares one, and if the shell's real location ever diverges
+  /// from what the recipe declares (an earlier step or a fix left a `Set-Location`
+  /// behind), an undeclared step must still be judged against where it truly runs.
+  /// Mirrors macOS `assess(_, inWorkingDirectory: step.workingDirectory ??
+  /// shellSession.currentWorkingDirectory)`.
+  private gateWorkingDirectory(step: RecipeStep, shell: ShellSession): string {
+    return workingDirectoryForPlatform(step, this.platform) ?? shell.currentDirectory();
+  }
+
   private async runCommandStep(step: RecipeStep, shell: ShellSession): Promise<StepProgress> {
     const command = this.commandFor(step);
     if (command === undefined) {
       return { kind: "blocked", status: this.surface("This step has no command to run.") };
     }
-    // The folder the step declares it runs in is part of the verdict: a system
-    // folder or a `..`-escape is refused even under the grant (see `risk.ts`).
-    const workingDirectory = workingDirectoryForPlatform(step, this.platform);
+    // The folder the step runs in is part of the verdict: a system folder or a
+    // `..`-escape is refused even under the grant (see `risk.ts`). When the step
+    // declares no folder, the shell's real current directory is used instead, so
+    // the floor is never silently skipped for an undeclared-folder step.
+    const workingDirectory = this.gateWorkingDirectory(step, shell);
     const gateOptions = {
       provenance: RECIPE_PROVENANCE,
       autonomyGranted: this.autonomyGranted,
@@ -678,7 +710,16 @@ export class AutopilotRunner {
 
     const installCommand = this.commandFor(installStep);
     if (installCommand === undefined) return undefined;
-    const approvedInstall = approve(installCommand, RECIPE_PROVENANCE, this.autonomyGranted);
+    // Judge the re-run install step's command against the folder it will run in —
+    // its declared folder, or where the shell is sitting when it declares none —
+    // exactly as the per-step gate does. Reaching an earlier recipe step from the
+    // self-heal path must not skip the working-directory floor.
+    const installFolder = workingDirectoryForPlatform(installStep, this.platform);
+    const approvedInstall = approve(installCommand, {
+      provenance: RECIPE_PROVENANCE,
+      autonomyGranted: this.autonomyGranted,
+      workingDirectory: installFolder ?? shell.currentDirectory(),
+    });
     if (approvedInstall === undefined) return undefined;
 
     // Only now commit to the repair — from here it counts as this step's one
@@ -687,8 +728,9 @@ export class AutopilotRunner {
     const missingTool = firstProgramToken(rawCommand);
     this.emit({ type: "installingMissingTool", tool: missingTool, command: installCommand });
 
-    // Run the recipe's own install step, in the folder it declares.
-    const installFolder = workingDirectoryForPlatform(installStep, this.platform);
+    // Run the recipe's own install step, in the folder it declares. `moveInto`
+    // refuses a forbidden folder itself (see below), so a system-folder install
+    // folder never gets entered.
     if (installFolder !== undefined && !(await this.moveInto(installFolder, shell))) return undefined;
     this.emit({ type: "commandStarted", text: installCommand, friendlyLabel: friendlyLabel(installCommand) });
     const installOutcome = await shell.run(approvedInstall, DEFAULT_COMMAND_TIMEOUT_MS);
@@ -743,6 +785,14 @@ export class AutopilotRunner {
   /// reader is waiting to watch; a move that FAILS is surfaced by the caller.
   private async moveInto(folder: string, shell: ShellSession): Promise<boolean> {
     if (!isAPlainFolder(folder)) return false;
+    // The single strong folder-entry gate, mirroring macOS `moveInto` calling
+    // `isASystemFolder`: a Windows system folder, a drive root, or a `..`-escape
+    // is refused even under the grant — the same absolute floor `risk.ts` applies
+    // to a step's declared workingDirectory. `isAPlainFolder` alone accepts
+    // `C:\Windows` (it only rejects `..` and shell-expandable text), so this is
+    // what protects every `moveInto` caller — including the self-heal, whose
+    // install/retry folders never route through the per-step risk gate.
+    if (forbiddenWorkingDirectory(folder) !== undefined) return false;
     const approved = approve(
       moveIntoCommandFor(folder, this.platform),
       RECIPE_PROVENANCE,

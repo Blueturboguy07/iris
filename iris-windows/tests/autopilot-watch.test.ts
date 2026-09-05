@@ -16,6 +16,9 @@ import {
   WatchStepExecutor,
   MAXIMUM_VISUAL_CHECKS_PER_STEP,
   MINIMUM_SECONDS_BETWEEN_VISUAL_CHECKS,
+  MINIMUM_HAMMING_DISTANCE_THAT_COUNTS,
+  hammingDistanceBetweenFingerprints,
+  defaultWatchSeams,
   type WatchSeams,
   type WatchVerdict,
 } from "../src/services/autopilot/watch";
@@ -38,6 +41,7 @@ interface SeamCallCounts {
   isAxElementPresent: number;
   captureScreenshotJpegBase64: number;
   evaluateVisualCheck: number;
+  captureScreenFingerprint: number;
 }
 
 interface FakeSeamsController {
@@ -51,6 +55,9 @@ interface FakeSeamsController {
 
 function makeFakeSeams(script: {
   toolInstalled?: (tool: string) => boolean;
+  /** A per-tool answer, consulted when `toolInstalled` is not given — lets a
+   *  test make git present but node absent for the AND-semantics cases. */
+  toolInstalledByName?: Record<string, boolean>;
   foregroundProcessName?: string | undefined;
   foregroundBrowserHost?: string | undefined;
   axElementPresent?: boolean;
@@ -58,6 +65,11 @@ function makeFakeSeams(script: {
   visualVerdict?: WatchVerdict | undefined;
   /** Seconds the clock advances on each poll's `waitForMilliseconds`. */
   secondsAdvancedPerPoll?: number;
+  /** The screen fingerprints handed back per `captureScreenFingerprint` call,
+   *  in order; the last value repeats. Undefined entries mean "capture not
+   *  wired". Absent (the default) leaves the fingerprint seam unwired entirely,
+   *  which is the shipped production default (side signals read every poll). */
+  fingerprints?: (bigint | undefined)[];
 } = {}): FakeSeamsController {
   const calls: SeamCallCounts = {
     isToolInstalled: 0,
@@ -66,6 +78,7 @@ function makeFakeSeams(script: {
     isAxElementPresent: 0,
     captureScreenshotJpegBase64: 0,
     evaluateVisualCheck: 0,
+    captureScreenFingerprint: 0,
   };
   const secondsAtEachVisualCheck: number[] = [];
   const toolsAskedAbout: string[] = [];
@@ -75,7 +88,8 @@ function makeFakeSeams(script: {
     async isToolInstalled(tool: string): Promise<boolean> {
       calls.isToolInstalled += 1;
       toolsAskedAbout.push(tool);
-      return script.toolInstalled?.(tool) ?? false;
+      if (script.toolInstalled !== undefined) return script.toolInstalled(tool);
+      return script.toolInstalledByName?.[tool] ?? false;
     },
     async readForegroundProcess() {
       calls.readForegroundProcess += 1;
@@ -99,6 +113,12 @@ function makeFakeSeams(script: {
       calls.evaluateVisualCheck += 1;
       secondsAtEachVisualCheck.push(clockSeconds);
       return script.visualVerdict;
+    },
+    async captureScreenFingerprint() {
+      const index = calls.captureScreenFingerprint;
+      calls.captureScreenFingerprint += 1;
+      if (script.fingerprints === undefined) return undefined; // unwired
+      return script.fingerprints[Math.min(index, script.fingerprints.length - 1)];
     },
     nowInSeconds() {
       return clockSeconds;
@@ -349,6 +369,295 @@ describe("the timeout", () => {
 });
 
 // ---------------------------------------------------------------------------
+// AND semantics across a step's side signals (finding 1)
+// ---------------------------------------------------------------------------
+
+describe("multiple side signals verify with AND, not OR", () => {
+  it("does NOT settle a two-tool check when only the first tool is present", async () => {
+    // The `check-tools` step shared across the Windows guides:
+    // expect [toolVersion git, toolVersion node]. git is installed, node is not.
+    // The step must keep waiting — verifying here would march into an npm step
+    // with node still missing.
+    const fake = makeFakeSeams({ toolInstalledByName: { git: true, node: false } });
+    const executor = new WatchStepExecutor(fake.seams);
+
+    const outcome = await executor.awaitStepCompletion(
+      watchOf([
+        { type: "toolVersion", tool: "git" },
+        { type: "toolVersion", tool: "node" },
+      ]),
+      { maximumPolls: 3 },
+    );
+
+    expect(outcome.kind).toBe("timedOut");
+  });
+
+  it("settles the two-tool check only once BOTH tools are present", async () => {
+    const fake = makeFakeSeams({ toolInstalledByName: { git: true, node: true } });
+    const executor = new WatchStepExecutor(fake.seams);
+
+    const outcome = await executor.awaitStepCompletion(
+      watchOf([
+        { type: "toolVersion", tool: "git" },
+        { type: "toolVersion", tool: "node" },
+      ]),
+      { maximumPolls: 3 },
+    );
+
+    // Verified, and named by the strongest (last, most-expensive) side signal —
+    // here both are toolVersion, so node (authored second).
+    expect(outcome).toEqual({ kind: "verified", verifiedBy: "toolVersion" });
+  });
+
+  it("short-circuits the AND on the first unsatisfied signal, never spawning the costlier probe", async () => {
+    // toolVersion (git) is absent, so the costlier urlHost probe below it must
+    // never be read: one failed cheap check already means "not all satisfied".
+    const fake = makeFakeSeams({
+      toolInstalledByName: { git: false },
+      foregroundBrowserHost: "publikhq.com",
+    });
+    const executor = new WatchStepExecutor(fake.seams);
+
+    const outcome = await executor.awaitStepCompletion(
+      watchOf([
+        { type: "toolVersion", tool: "git" },
+        { type: "urlHost", host: "publikhq.com" },
+      ]),
+      { maximumPolls: 2 },
+    );
+
+    expect(outcome.kind).toBe("timedOut");
+    expect(fake.calls.readForegroundBrowserHost).toBe(0);
+  });
+
+  it("falls to the visual rung when a side signal is unsatisfied but a visual is declared", async () => {
+    // node missing (side signal not all satisfied) AND a visual is declared:
+    // macOS `localSignalsCannotTell` → consult the model, which says completed.
+    const fake = makeFakeSeams({
+      toolInstalledByName: { node: false },
+      visualVerdict: { kind: "completed" },
+      secondsAdvancedPerPoll: 100,
+    });
+    const executor = new WatchStepExecutor(fake.seams);
+
+    const outcome = await executor.awaitStepCompletion(
+      watchOf([
+        { type: "toolVersion", tool: "node" },
+        { type: "visual", prompt: "does it look done?" },
+      ]),
+      { maximumPolls: 3 },
+    );
+
+    expect(outcome).toEqual({ kind: "verified", verifiedBy: "visual" });
+    expect(fake.calls.evaluateVisualCheck).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The perceptual-diff rung — "free unless the screen changed" (finding 4)
+// ---------------------------------------------------------------------------
+
+describe("the screen-diff gate", () => {
+  it("reads the side signals every poll when no fingerprint seam is wired (the shipped default)", async () => {
+    // fingerprints absent → capture returns undefined → the gate is inert and
+    // every poll reads the (never-satisfied) side signal.
+    const fake = makeFakeSeams({ toolInstalledByName: { git: false } });
+    const executor = new WatchStepExecutor(fake.seams);
+
+    await executor.awaitStepCompletion(watchOf([{ type: "toolVersion", tool: "git" }]), {
+      maximumPolls: 4,
+    });
+
+    // Four polls, four side-signal reads — nothing gated them.
+    expect(fake.calls.isToolInstalled).toBe(4);
+  });
+
+  it("skips the side-signal read on an unchanged screen once a fingerprint seam is wired", async () => {
+    // A steady screen (same fingerprint every capture): the baseline poll reads
+    // the side signal, every unchanged poll after it reads nothing.
+    const fake = makeFakeSeams({
+      toolInstalledByName: { git: false },
+      fingerprints: [0n], // one value, repeats — the screen never changes
+    });
+    const executor = new WatchStepExecutor(fake.seams);
+
+    await executor.awaitStepCompletion(watchOf([{ type: "toolVersion", tool: "git" }]), {
+      maximumPolls: 5,
+    });
+
+    // Only the baseline frame read the side signal; the four unchanged polls were
+    // free. This is the rung that makes the common case cost nothing.
+    expect(fake.calls.isToolInstalled).toBe(1);
+    expect(fake.calls.captureScreenFingerprint).toBeGreaterThan(1);
+  });
+
+  it("reads the side signals again on a meaningfully-changed screen", async () => {
+    // Baseline 0n, then a value far enough away to clear the Hamming threshold on
+    // the second poll, then steady — so exactly two side-signal reads happen.
+    const changed = (1n << BigInt(MINIMUM_HAMMING_DISTANCE_THAT_COUNTS)) - 1n; // >= threshold bits set
+    const fake = makeFakeSeams({
+      toolInstalledByName: { git: false },
+      fingerprints: [0n, changed, changed, changed],
+    });
+    const executor = new WatchStepExecutor(fake.seams);
+
+    await executor.awaitStepCompletion(watchOf([{ type: "toolVersion", tool: "git" }]), {
+      maximumPolls: 5,
+    });
+
+    // Baseline (poll 0) + the changed frame (poll 1) both read; the steady polls
+    // after that do not.
+    expect(fake.calls.isToolInstalled).toBe(2);
+  });
+
+  it("never fingerprints a sensitive step", async () => {
+    const fake = makeFakeSeams({
+      toolInstalledByName: { git: false },
+      fingerprints: [0n],
+    });
+    const executor = new WatchStepExecutor(fake.seams);
+
+    await executor.awaitStepCompletion(
+      watchOf([{ type: "toolVersion", tool: "git" }], /* sensitive */ true),
+      { maximumPolls: 3 },
+    );
+
+    expect(fake.calls.captureScreenFingerprint).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Progress-aware timeout (finding 3)
+// ---------------------------------------------------------------------------
+
+describe("the progress-aware timeout", () => {
+  it("keeps watching a still-changing screen well past the no-progress ceiling", async () => {
+    // The screen changes every poll (each fingerprint clears the threshold vs the
+    // last), so a slow-but-live step is never handed back at the ceiling. With a
+    // no-progress ceiling of 3 and 12 always-changing polls, it does NOT time out
+    // early — it runs to the poll budget the test caps it at.
+    const everChanging: bigint[] = [];
+    for (let i = 0; i < 12; i += 1) {
+      // Alternate between two distant fingerprints so consecutive frames always
+      // differ by more than the threshold.
+      everChanging.push(i % 2 === 0 ? 0n : 0xffffffffffffffffn);
+    }
+    const fake = makeFakeSeams({
+      toolInstalledByName: { git: false },
+      fingerprints: everChanging,
+    });
+    const executor = new WatchStepExecutor(fake.seams);
+
+    const outcome = await executor.awaitStepCompletion(
+      watchOf([{ type: "toolVersion", tool: "git" }]),
+      { maximumPolls: 3 },
+    );
+
+    // It polled far more than the no-progress ceiling of 3 because every change
+    // reset the counter — evidence the step is still progressing.
+    expect(outcome.kind).toBe("timedOut");
+    expect(fake.calls.captureScreenFingerprint).toBeGreaterThan(3);
+  });
+
+  it("times out at the no-progress ceiling when the screen sits still", async () => {
+    const fake = makeFakeSeams({
+      toolInstalledByName: { git: false },
+      fingerprints: [7n], // steady
+    });
+    const executor = new WatchStepExecutor(fake.seams);
+
+    const outcome = await executor.awaitStepCompletion(
+      watchOf([{ type: "toolVersion", tool: "git" }]),
+      { maximumPolls: 3 },
+    );
+
+    expect(outcome.kind).toBe("timedOut");
+    // Baseline + 2 unchanged polls = 3 no-progress polls, then it gives up.
+    expect(fake.calls.captureScreenFingerprint).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Abort cancels an in-flight watch promptly (finding 2)
+// ---------------------------------------------------------------------------
+
+describe("shouldAbort", () => {
+  it("returns aborted promptly and stops polling when the escape hatch fires", async () => {
+    let aborted = false;
+    const fake = makeFakeSeams({ toolInstalledByName: { git: false } });
+    const executor = new WatchStepExecutor(fake.seams);
+
+    // Abort after the first poll's side-signal read.
+    const originalIsToolInstalled = fake.seams.isToolInstalled.bind(fake.seams);
+    (fake.seams as { isToolInstalled: WatchSeams["isToolInstalled"] }).isToolInstalled = async (
+      tool: string,
+    ) => {
+      aborted = true;
+      return originalIsToolInstalled(tool);
+    };
+
+    const outcome = await executor.awaitStepCompletion(
+      watchOf([{ type: "toolVersion", tool: "git" }]),
+      { maximumPolls: 90, shouldAbort: () => aborted },
+    );
+
+    expect(outcome).toEqual({ kind: "aborted" });
+    // It did NOT poll its whole budget after the abort — one side-signal read,
+    // then it noticed the abort and returned.
+    expect(fake.calls.isToolInstalled).toBe(1);
+  });
+
+  it("returns aborted before doing any work when already aborted", async () => {
+    const fake = makeFakeSeams({ toolInstalledByName: { git: true } });
+    const executor = new WatchStepExecutor(fake.seams);
+
+    const outcome = await executor.awaitStepCompletion(
+      watchOf([{ type: "toolVersion", tool: "git" }]),
+      { maximumPolls: 5, shouldAbort: () => true },
+    );
+
+    expect(outcome).toEqual({ kind: "aborted" });
+    expect(fake.calls.isToolInstalled).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The Hamming helper + the production seam plumbing (findings 4 and 7)
+// ---------------------------------------------------------------------------
+
+describe("hammingDistanceBetweenFingerprints", () => {
+  it("counts the differing bits of two 64-bit hashes", () => {
+    expect(hammingDistanceBetweenFingerprints(0n, 0n)).toBe(0);
+    expect(hammingDistanceBetweenFingerprints(0n, 1n)).toBe(1);
+    expect(hammingDistanceBetweenFingerprints(0b1010n, 0b0101n)).toBe(4);
+    expect(hammingDistanceBetweenFingerprints(0n, 0xffffffffffffffffn)).toBe(64);
+  });
+});
+
+describe("defaultWatchSeams", () => {
+  it("wires the toolVersion rung through an injected isToolInstalled instead of the false default", async () => {
+    // The production wiring (main/index.ts) hands in a real checker; without an
+    // override the seam answers false forever, which is the bug finding 7 fixes.
+    const asked: string[] = [];
+    const wired = defaultWatchSeams({
+      isToolInstalled: async (tool) => {
+        asked.push(tool);
+        return tool === "cargo";
+      },
+    });
+    expect(await wired.isToolInstalled("cargo")).toBe(true);
+    expect(await wired.isToolInstalled("git")).toBe(false);
+    expect(asked).toEqual(["cargo", "git"]);
+
+    // The unwired default is false (not "wired"): a fingerprint capture and a
+    // tool check both answer the inert value until a host supplies them.
+    const bare = defaultWatchSeams();
+    expect(await bare.isToolInstalled("cargo")).toBe(false);
+    expect(await bare.captureScreenFingerprint()).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
 
@@ -467,5 +776,81 @@ describe("the visual prompt shape", () => {
     expect(userPrompt).toContain('"Start the app"');
     expect(userPrompt).toContain("pnpm dev");
     expect(userPrompt).toContain("is the window open?");
+  });
+});
+
+describe("a watch that can never verify hands back at once (finding: no ~3-minute silent stall)", () => {
+  /** Minimal seams with call counters, and a fixed screenshot value (undefined =
+   *  the capture seam is not wired). The fingerprint seam is always unwired, the
+   *  production default. */
+  function countingSeams(screenshot: string | undefined): {
+    seams: WatchSeams;
+    counts: () => { waits: number; captures: number };
+  } {
+    let waits = 0;
+    let captures = 0;
+    const seams: WatchSeams = {
+      async isToolInstalled() {
+        return false;
+      },
+      async readForegroundProcess() {
+        return undefined;
+      },
+      async readForegroundBrowserHost() {
+        return undefined;
+      },
+      async isAxElementPresent() {
+        return false;
+      },
+      async captureScreenshotJpegBase64() {
+        captures += 1;
+        return screenshot;
+      },
+      async captureScreenFingerprint() {
+        return undefined;
+      },
+      async evaluateVisualCheck() {
+        return undefined; // the model never confirms
+      },
+      nowInSeconds() {
+        return 0;
+      },
+      async waitForMilliseconds() {
+        waits += 1;
+      },
+    };
+    return { seams, counts: () => ({ waits, captures }) };
+  }
+
+  it("hands a sensitive visual-only step back immediately, never capturing and never polling", async () => {
+    const { seams, counts } = countingSeams("a-frame");
+    const outcome = await new WatchStepExecutor(seams).awaitStepCompletion(
+      watchOf([{ type: "visual", prompt: "the key is pasted?" }], /* sensitive */ true),
+      { maximumPolls: 90 },
+    );
+    expect(outcome.kind).toBe("timedOut");
+    expect(counts().captures).toBe(0); // a sensitive step is never looked at
+    expect(counts().waits).toBe(0); // and does not burn the 90-poll budget
+  });
+
+  it("hands a non-sensitive visual-only step back once it learns the capture seam is unwired", async () => {
+    const { seams, counts } = countingSeams(undefined); // capture not wired
+    const outcome = await new WatchStepExecutor(seams).awaitStepCompletion(
+      watchOf([{ type: "visual", prompt: "looks done?" }]),
+      { maximumPolls: 90 },
+    );
+    expect(outcome.kind).toBe("timedOut");
+    expect(counts().captures).toBe(1); // it tried once, learned the rung is dead
+    expect(counts().waits).toBe(0); // then gave up instead of polling ~3 minutes
+  });
+
+  it("still polls a visual-only step to its budget when capture IS wired (unchanged)", async () => {
+    const { seams, counts } = countingSeams("a-frame"); // wired; model keeps saying not-yet
+    const outcome = await new WatchStepExecutor(seams).awaitStepCompletion(
+      watchOf([{ type: "visual", prompt: "looks done?" }]),
+      { maximumPolls: 3 },
+    );
+    expect(outcome.kind).toBe("timedOut");
+    expect(counts().waits).toBeGreaterThan(0); // it genuinely watched, no fast-fail
   });
 });

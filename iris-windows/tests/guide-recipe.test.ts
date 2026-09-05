@@ -400,14 +400,22 @@ describe("the runner drives a derived recipe exactly as a static one", () => {
     expect(derivedEvents.at(-1)?.type).toBe("finished");
   });
 
-  it("runs the LIVE openascii guide's derived recipe end to end to finished", async () => {
+  it("runs the LIVE openascii guide's derived recipe up to its watched verify step", async () => {
     const derived = recipeFromGuide(loadGuideFixture("openascii"), { platform: "windows" });
     if (derived.kind !== "recipe") throw new Error("expected a recipe");
-    const events = await eventsFromRunning(derived.recipe);
-    // The prose open-shell (noop) and the trailing verify both self-complete, so
-    // the install reaches the open step and finishes.
+    // Driven with NO watch executor wired, the prose open-shell (noop) self-
+    // completes and every command runs, so the install reaches the open step —
+    // and then the trailing `verify` step (a visual watch: "drop in a photo") is
+    // handed to the reader as "your turn", because nothing can confirm it without
+    // watching the machine. This is the integrated watch-loop behaviour: a verify
+    // step is no longer silently self-completed.
+    const runner = new AutopilotRunner(derived.recipe, "win32", true);
+    const status = await runner.runUntilBlocked(MockShell.alwaysSucceeds());
+    const events = runner.drainEvents();
     expect(events.some((event) => event.type === "openRequested" && event.href === "http://localhost:5173")).toBe(true);
-    expect(events.at(-1)?.type).toBe("finished");
+    expect(status.type).toBe("needsReader");
+    // The last thing the runner did was hand the verify step over.
+    expect(events.at(-1)?.type).toBe("handedToReader");
   });
 });
 

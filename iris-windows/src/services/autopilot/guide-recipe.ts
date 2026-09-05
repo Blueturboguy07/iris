@@ -18,6 +18,7 @@ import type {
   IrisGuide,
   IrisGuideBranch,
   IrisGuideStep,
+  IrisStepWatch,
   IrisUnsupportedPair,
 } from "./guide-model";
 import { branchKeyFor } from "./guide-model";
@@ -28,7 +29,7 @@ import type {
   RecipePrerequisite,
   RecipeStep,
   StepCheck,
-  StepExpectation,
+  StepWatch,
 } from "./recipe";
 
 /// Which branch of a guide to derive. `platform` is the reader's computer;
@@ -103,6 +104,13 @@ function recipeStepFromGuideStep(step: IrisGuideStep): RecipeStep {
     title: step.title,
     body: step.body,
     ...(step.verifierLabel !== undefined ? { verifierLabel: step.verifierLabel } : {}),
+    // Carry the guide's watch block through verbatim so the watch-loop port can
+    // confirm the step from the reader's machine. The runner consults it for a
+    // `verify` step and for a reader step (sign_in/permission/web/paste); a
+    // `command` step advances on its own exit, so its watch is simply unused.
+    ...(step.watch !== undefined && step.watch.expect.length > 0
+      ? { watch: watchForRecipe(step.watch) }
+      : {}),
   };
 
   switch (step.kind) {
@@ -155,21 +163,22 @@ function recipeStepFromGuideStep(step: IrisGuideStep): RecipeStep {
       return { ...shared, kind: "paste", instruction: step.body };
 
     case "verify":
-      return {
-        ...shared,
-        kind: "verify",
-        ...(step.watch !== undefined && step.watch.expect.length > 0
-          ? { verifyExpectations: step.watch.expect.map(expectationForRecipe) }
-          : {}),
-      };
+      // The verify step's watch expectations rode in on `shared` above; here it
+      // is just the kind. A verify step with no watch hands to the reader after
+      // the bounded wait (the runner's behaviour), which is faithful to macOS.
+      return { ...shared, kind: "verify" };
   }
 }
 
-/// The guide expectation type and the recipe expectation type are the same shape;
-/// this is the identity map, spelled out so a future divergence is caught by the
-/// compiler rather than silently mis-carried.
-function expectationForRecipe(expectation: StepExpectation): StepExpectation {
-  return expectation;
+/// Maps the guide model's watch block to the recipe's `StepWatch`. The two
+/// expectation unions are the same shape; keeping `sensitive` and `expect`
+/// explicit means a future divergence is caught by the compiler rather than
+/// silently mis-carried.
+function watchForRecipe(watch: IrisStepWatch): StepWatch {
+  return {
+    sensitive: watch.sensitive,
+    expect: watch.expect.map((expectation) => expectation),
+  };
 }
 
 // ── Prerequisites (setup steps) ────────────────────────────────────────────────

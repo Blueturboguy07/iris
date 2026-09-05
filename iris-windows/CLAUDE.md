@@ -139,7 +139,9 @@ the macOS Swift autopilot. It is pure and unit-tested (`tests/autopilot-*.test.t
 `recipe.ts` (the schema), `risk.ts` (the command gate), `runner.ts` (the no-click
 state machine driven against a `ShellSession`), `shell.ts` (the interface +
 `MockShell`), `recipes.ts` (the built-in recipes), `fix-ladder.ts` (the
-self-repair ladder). The real shell —
+self-repair ladder), `watch.ts` (the watch-expectation executor), and
+`setup-detour.ts` (the prerequisite-recovery detour + missing-tool self-heal).
+The real shell —
 `src/main/powershell-session.ts` — spawns one PowerShell per command and threads
 the working directory forward, so it lives in `main/`; its pure parsing helpers
 are unit-tested and the whole thing is exercised end to end by
@@ -215,6 +217,29 @@ not reached in production (still unit-tested at the runner level). The terminal
 shows a plain-English `friendlyLabel` per command (`friendly-label.ts`) with the
 raw command dimmed, and a spinner while running. Keep every risk pattern literal
 present in `risk.ts` — the web guide tests grep for them.
+
+**Watch-expectation executor (`watch.ts`).** The Windows analog of the macOS
+adaptive `WatchLoop`, scoped to what the runner needs: given a step's `watch`
+block (`{ sensitive?, expect: Expectation[] }`), `WatchStepExecutor.awaitStepCompletion`
+blocks — bounded — until one expectation verifies, cheapest-first (`toolVersion`
+→ `foregroundApp` → `urlHost` → `axElement` → `visual`), then the step advances
+with no tap. A `verify` step is pure watch; a reader step (sign_in/permission/manual)
+that carries a watch surfaces "your turn" up front but is auto-advanced the moment
+the watch verifies, and only handed back (with `verifierLabel`) on timeout. The
+runner emits `watchVerified`/`watchTimedOut`. Because the runner is a *pumped*
+machine (not a background timer like macOS), this is an awaitable the runner calls
+inline; every OS call is an injected seam (`WatchSeams`) with a real default, so
+the whole thing is faked in vitest. The foreground read reuses
+`app-inventory.ts`'s `GetForegroundWindow` seam; `urlHost`/`axElement` are
+PowerShell UI Automation one-liners (`buildActiveBrowserUrlCommand` /
+`buildAxElementQueryCommand`, exercised by hand via `tests/windows-only/watch-seams.ps1`
+on a real box). A `foregroundApp` expectation's guide identity (a macOS bundle id)
+is mapped to a Windows exe through a reviewed table keyed off `WINDOWS_CATALOG_APPS`.
+The `visual` rung (screenshot + a model verdict, budgeted ≤ 8/step and ≥ 10 s
+apart, NEVER for a `sensitive` step) is fully implemented and tested but its two
+seams — capture and model evaluation — default to "not wired": they need `main/`'s
+screenshot pipeline and a model transport a host injects, so side-signal watching
+works today and the visual rung lights up when a host supplies those.
 
 ## Style
 

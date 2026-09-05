@@ -19,6 +19,7 @@ import {
   type DetourClock,
   type ToolProbe,
 } from "../services/autopilot/setup-detour";
+import { defaultWatchExecutor, type WatchStepExecutor } from "../services/autopilot/watch";
 import { PowerShellSession } from "./powershell-session";
 import { PosixShellSession } from "./posix-shell-session";
 
@@ -104,6 +105,11 @@ export class AutopilotController {
     // exercising the detour, in which case the detour is skipped entirely so a
     // recipe's prerequisite checks never shell out in the suite.
     private readonly detourSeams: { readonly probe: ToolProbe; readonly clock: DetourClock } | undefined = undefined,
+    // Builds the watch executor a `verify`/watched step blocks on. The default
+    // runs the real Windows PowerShell side signals; the visual rung stays inert
+    // until a host wires screenshot capture + a model evaluator into it. Injected
+    // (and one-per-install) so tests can hand in a fake with no OS calls.
+    private readonly makeWatchExecutor: () => WatchStepExecutor = () => defaultWatchExecutor(),
   ) {}
 
   /// Whether Iris knows how to install this app on Windows. Async because the
@@ -158,10 +164,17 @@ export class AutopilotController {
     }
 
     // Granted, so the runner runs the whole vetted install hands-off (only the
-    // catastrophe floor can still stop a command). The ladder, when the reader
-    // has a model key, lets a failed command self-repair before it ever reaches
-    // them; undefined when there is no key, so it surfaces at once.
-    this.runner = new AutopilotRunner(recipe, process.platform, true, this.makeFixLadder(recipe));
+    // catastrophe floor can still stop a command). The fix ladder, when the
+    // reader has a model key, lets a failed command self-repair before it ever
+    // reaches them; the watch executor lets a `verify`/watched step confirm
+    // itself and advance without a tap. Both are undefined-tolerant.
+    this.runner = new AutopilotRunner(
+      recipe,
+      process.platform,
+      true,
+      this.makeFixLadder(recipe),
+      this.makeWatchExecutor(),
+    );
     return this.pump(await this.runner.runUntilBlocked(this.shell));
   }
 

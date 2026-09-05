@@ -36,7 +36,50 @@ export type StepKind =
   /// The reader grants a Windows permission or clears a UAC prompt.
   | "permission"
   /// Any other action only the reader can take.
-  | "manual";
+  | "manual"
+  /// Iris does nothing but WATCH: it blocks on this step's `watch` expectations
+  /// (see below) until one of them verifies, then advances on its own. The
+  /// Windows analog of a macOS guide's `verify` step, which the adaptive
+  /// `WatchLoop` clears without being told. A `verify` step with no `watch`
+  /// block, or one whose watch nothing can confirm, hands to the reader with the
+  /// step's `verifierLabel` after a bounded wait.
+  | "verify";
+
+/// One thing the watch executor can confirm about the reader's machine without
+/// the reader saying so, mirroring the macOS guide `Expectation` union and the
+/// Windows guide JSON's `watch.expect[]`. Ordered cheapest-first by
+/// `services/autopilot/watch.ts` before it evaluates them; the first that
+/// verifies settles the step.
+export type WatchExpectation =
+  /// A tool the guide installs is now on PATH (`services/tool-versions.ts`).
+  | { readonly type: "toolVersion"; readonly tool: string }
+  /// A particular app is in the foreground. The `bundleId` is the identity the
+  /// guide carries (a macOS bundle id or an `.exe` name); `watch.ts` maps it to
+  /// a Windows executable name via its reviewed catalog table.
+  | { readonly type: "foregroundApp"; readonly bundleId: string }
+  /// The frontmost browser tab is showing this host (or a subdomain of it).
+  | { readonly type: "urlHost"; readonly host: string }
+  /// A UI Automation element with this name/role is present on the foreground
+  /// window.
+  | { readonly type: "axElement"; readonly roleLabel: string }
+  /// A screenshot, judged by a model against this question. The most expensive
+  /// rung, budgeted (≤ 8 per step, ≥ 10 s apart) and never taken for a
+  /// `sensitive` watch.
+  | { readonly type: "visual"; readonly prompt: string };
+
+/// The `watch` block a step may carry: what Iris looks for to confirm the step
+/// finished, and whether the step is `sensitive` (a secret is on screen), which
+/// forbids any screenshot for the whole step. Mirrors the macOS `IrisStepWatch`
+/// and the Windows guide JSON's `watch: { sensitive?, expect: Expectation[] }`.
+export interface StepWatch {
+  /// True when a secret (an API key, a password) is visible while this step is
+  /// open. A sensitive step is NEVER captured for a `visual` check — it settles
+  /// from the pixel-free side signals alone, or hands to the reader. Mirrors
+  /// macOS's `theStepIsMarkedSensitive` suspension.
+  readonly sensitive?: boolean;
+  /// The expectations, any one of which verifying advances the step.
+  readonly expect: readonly WatchExpectation[];
+}
 
 /// How Iris can confirm a reader step finished, so the install resumes on its
 /// own instead of waiting for a tap.
@@ -70,6 +113,17 @@ export interface RecipeStep {
   /// How Iris can tell the step is done without being told. Absent means the
   /// step is finished the moment Iris performs it.
   readonly check?: StepCheck;
+  /// What Iris watches for to confirm this step finished — polled by
+  /// `services/autopilot/watch.ts`. A `verify` step blocks on it; a reader step
+  /// (sign_in/permission/manual) that carries one is auto-advanced when the
+  /// watch verifies instead of waiting for the reader. Absent keeps the old
+  /// behaviour: nothing is watched and the step advances or hands over as before.
+  readonly watch?: StepWatch;
+  /// The line shown to the reader if a watched step's expectations never verify
+  /// within the bounded wait and Iris has to hand it back — the Windows analog
+  /// of the guide `Step.verifierLabel`. Falls back to a generic sentence when
+  /// absent.
+  readonly verifierLabel?: string;
   /// The folder this step's command runs in, stated by the recipe instead of
   /// inherited from a `cd` some earlier step left behind in the shell.
   ///

@@ -15,11 +15,12 @@
 // an instruction the UI floats the eye next to.
 //
 
-import type { InstallRecipe, RecipeOutput, RecipeStep, StepCheck, StepKind } from "./recipe";
+import type { InstallRecipe, RecipeOutput, RecipeStep, StepCheck, StepKind, WatchExpectation } from "./recipe";
 import { commandForPlatform, workingDirectoryForPlatform } from "./recipe";
 import type { ApprovedCommand, Provenance } from "./risk";
 import { approve, approveAfterAReaderTap, assess } from "./risk";
 import { friendlyLabel } from "./friendly-label";
+import type { WatchStepExecutor } from "./watch";
 import {
   DEFAULT_COMMAND_TIMEOUT_MS,
   LONG_RUNNING_GRACE_MS,
@@ -92,6 +93,12 @@ export type AutopilotEvent =
   | { readonly type: "needsConfirm"; readonly command: string; readonly reason: string }
   /// A command no tap can make informed; the install stops here for the reader.
   | { readonly type: "surfaced"; readonly reason: string; readonly failingCommand?: string }
+  /// A watched step's expectation verified on its own — the step advanced with
+  /// no tap. `verifiedBy` names which expectation settled it.
+  | { readonly type: "watchVerified"; readonly index: number; readonly verifiedBy: WatchExpectation["type"] }
+  /// A watched step's expectations never verified within the bounded wait, so
+  /// Iris hands it back to the reader with `verifierLabel`.
+  | { readonly type: "watchTimedOut"; readonly index: number; readonly verifierLabel: string }
   | { readonly type: "advanced"; readonly index: number }
   | { readonly type: "finished"; readonly output: RecipeOutput };
 
@@ -134,6 +141,11 @@ export class AutopilotRunner {
     // production an autopilot run is always granted; kept a parameter (default
     // false) so the un-granted three-tier behavior stays unit-testable.
     private readonly autonomyGranted: boolean = false,
+    // Watches a step's `watch` expectations and blocks a `verify` step until one
+    // verifies — the Windows analog of the macOS adaptive `WatchLoop`. Injected
+    // so the whole runner stays testable with a fake; undefined means "no
+    // watching wired", and a watched step then falls back to the reader handoff.
+    private readonly watchExecutor: WatchStepExecutor | undefined = undefined,
   ) {}
 
   private commandFor(step: RecipeStep): string | undefined {
@@ -217,7 +229,55 @@ export class AutopilotRunner {
         continue;
       }
 
-      // sign_in / permission / manual: only the reader can finish it.
+      // A `verify` step, or any reader step carrying a `watch` block, is settled
+      // by watching the reader's machine rather than by a tap — the Windows
+      // analog of the macOS adaptive watch loop. A `verify` step is pure watch
+      // (Iris surfaces nothing until it either verifies or times out); a reader
+      // step (sign_in/permission/manual) that carries a watch still surfaces
+      // "your turn" up front so the reader can act, and is advanced without a tap
+      // the moment the watch verifies. A reader step with no watch falls through
+      // to the plain handoff below, unchanged.
+      if (step.kind === "verify" || step.watch !== undefined) {
+        const isReaderStep = step.kind !== "verify";
+        const readerInstruction = isReaderStep ? this.instructionFor(step) : this.verifierLabelFor(step);
+
+        if (isReaderStep) {
+          this.emit({ type: "handedToReader", instruction: readerInstruction, href: step.href });
+        }
+
+        const canWatch =
+          this.watchExecutor !== undefined &&
+          step.watch !== undefined &&
+          step.watch.expect.length > 0;
+        if (canWatch) {
+          const outcome = await this.watchExecutor!.awaitStepCompletion(step.watch!, {
+            stepTitle: step.title,
+            commandTheStepAsksFor: this.commandFor(step),
+          });
+          if (outcome.kind === "verified") {
+            this.emit({ type: "watchVerified", index: this.index, verifiedBy: outcome.verifiedBy });
+            this.advance();
+            continue;
+          }
+          // Timed out: the watch could not confirm it, so hand it back.
+          this.emit({ type: "watchTimedOut", index: this.index, verifierLabel: this.verifierLabelFor(step) });
+        }
+
+        // Either nothing was watchable, or the watch timed out. A reader step
+        // already surfaced above; a verify step surfaces the handoff now.
+        if (!isReaderStep) {
+          this.emit({ type: "handedToReader", instruction: readerInstruction, href: step.href });
+        }
+        return {
+          type: "needsReader",
+          stepIndex: this.index,
+          instruction: readerInstruction,
+          href: step.href,
+          check: step.check,
+        };
+      }
+
+      // sign_in / permission / manual with no watch: only the reader can finish it.
       const instruction = this.instructionFor(step);
       this.emit({ type: "handedToReader", instruction, href: step.href });
       return {
@@ -368,5 +428,17 @@ export class AutopilotRunner {
       default:
         return "Finish this step, then Iris will carry on.";
     }
+  }
+
+  /// The line shown when a watched step could not be confirmed on its own and
+  /// Iris hands it back — the step's own `verifierLabel`, or a generic sentence.
+  private verifierLabelFor(step: RecipeStep): string {
+    if (step.verifierLabel !== undefined && step.verifierLabel.length > 0) {
+      return step.verifierLabel;
+    }
+    if (step.instruction !== undefined && step.instruction.length > 0) {
+      return step.instruction;
+    }
+    return "Iris couldn't tell this step finished on its own — finish it, then it will carry on.";
   }
 }

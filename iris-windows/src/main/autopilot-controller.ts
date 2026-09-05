@@ -13,6 +13,7 @@ import { recipeForSlug } from "../services/autopilot/recipes";
 import { recipeClonesARepo, type InstallRecipe, type RecipeOutput } from "../services/autopilot/recipe";
 import { AutopilotRunner, type AutopilotEvent, type RunnerStatus } from "../services/autopilot/runner";
 import type { ShellSession } from "../services/autopilot/shell";
+import { defaultWatchExecutor, type WatchStepExecutor } from "../services/autopilot/watch";
 import { PowerShellSession } from "./powershell-session";
 import { PosixShellSession } from "./posix-shell-session";
 
@@ -81,6 +82,11 @@ export class AutopilotController {
     // Injected so tests can drive recipes the built-in set does not carry; in
     // production it is the reviewed, version-pinned recipe registry.
     private readonly resolveRecipe: (slug: string) => InstallRecipe | undefined = recipeForSlug,
+    // Builds the watch executor a `verify`/watched step blocks on. The default
+    // runs the real Windows PowerShell side signals; the visual rung stays inert
+    // until a host wires screenshot capture + a model evaluator into it. Injected
+    // (and one-per-install) so tests can hand in a fake with no OS calls.
+    private readonly makeWatchExecutor: () => WatchStepExecutor = () => defaultWatchExecutor(),
   ) {}
 
   /// Whether Iris knows how to install this app on Windows.
@@ -110,8 +116,9 @@ export class AutopilotController {
     this.shell = this.makeShell();
     this.recipe = recipe;
     // Granted, so the runner runs the whole vetted install hands-off (only the
-    // catastrophe floor can still stop a command).
-    this.runner = new AutopilotRunner(recipe, process.platform, true);
+    // catastrophe floor can still stop a command). The watch executor lets a
+    // `verify`/watched step confirm itself and advance without a tap.
+    this.runner = new AutopilotRunner(recipe, process.platform, true, this.makeWatchExecutor());
     return this.pump(await this.runner.runUntilBlocked(this.shell));
   }
 

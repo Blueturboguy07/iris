@@ -415,6 +415,22 @@ final class GuideSessionController: ObservableObject {
     /// apps list" instead of leaving them on a card.
     var onGuideCompleted: ((IrisGuide, IrisGuideBranch) -> Void)?
 
+    /// Fired the moment a guide starts loading from a reader's request, so
+    /// `CompanionManager` can bring the eye's overlay and bar forward — where
+    /// `OverlayEyeGuideCard` renders — and drop the settings dropdown behind it.
+    /// Injected like the other eye closures so this controller stays ignorant of
+    /// overlays and panels.
+    ///
+    /// Without it, opening a guide from the settings panel's "Follow an install
+    /// guide" picker set `loadState` to open but never surfaced the bar that
+    /// shows the guide: the field cleared and nothing appeared — the reported
+    /// "'Follow an install guide → Open' does nothing". The deep-link route
+    /// surfaced the bar from the app delegate and the picker route surfaced
+    /// nothing, so the same successful load was visible one way and invisible
+    /// the other. Firing it here makes every way of opening a guide — the
+    /// picker, an `iris://guide/…` link, a resume — bring the card into view.
+    var surfaceTheGuideCardAtTheEye: (() -> Void)?
+
     /// Fired when autopilot begins and ends, so `CompanionManager` can raise and
     /// tear down the centered terminal takeover. Injected like the eye closures
     /// so this controller stays ignorant of overlays and panels.
@@ -968,6 +984,14 @@ final class GuideSessionController: ObservableObject {
     ) async {
         cancelAnyWorkFromThePreviousStep()
         loadState = .guideIsLoading(slug: slug)
+        // Bring the eye's bar forward the instant the reader asks for a guide —
+        // synchronously, before the fetch below suspends — so the picker gives
+        // immediate feedback and the guide card has a surface to appear in the
+        // moment it loads. The overlay is where the card lives, so a guide
+        // opened from the settings panel's picker (which surfaces nothing on its
+        // own) is otherwise loaded into a bar that is never shown, and the click
+        // reads as a no-op.
+        surfaceTheGuideCardAtTheEye?()
         guideBeingFollowed = nil
         selectedBranch = nil
         currentStepIndex = 0

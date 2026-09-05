@@ -101,6 +101,55 @@ struct GuideSessionTests {
         #expect(controllerFollowingADeepLink.currentStepIndex == 0)
     }
 
+    // MARK: - Opening a guide brings its card into view
+
+    /// The reported blocker: typing a slug into the settings panel's "Follow an
+    /// install guide" picker and pressing Open cleared the field but showed
+    /// nothing — the guide loaded but the eye bar that renders its card was
+    /// never brought forward, so the click read as a no-op. The controller now
+    /// asks to surface the card the moment a guide starts opening; this pins
+    /// that the picker's exact call fires that request.
+    @Test func openingAGuideFromThePickerAsksToSurfaceItsCard() async throws {
+        let guideService = try Self.guideServiceAnsweredByTheStub()
+        let controller = GuideSessionController(guideService: guideService)
+
+        var timesTheGuideCardWasAskedToSurface = 0
+        controller.surfaceTheGuideCardAtTheEye = {
+            timesTheGuideCardWasAskedToSurface += 1
+        }
+
+        // Exactly what `GuideSlugEntryView.openTheTypedGuide` calls.
+        await controller.openLatestVersionOfGuide(slug: "lunara")
+
+        #expect(controller.loadState == .guideIsOpen)
+        #expect(timesTheGuideCardWasAskedToSurface == 1)
+    }
+
+    /// The deep-link route surfaces the card the same way, so a guide opened
+    /// from an `iris://guide/…` link is not silently loaded into a hidden bar
+    /// either — the second blocker shared the first's root cause.
+    @Test func openingAGuideFromADeepLinkAlsoAsksToSurfaceItsCard() async throws {
+        let guideService = try Self.guideServiceAnsweredByTheStub()
+        let controller = GuideSessionController(guideService: guideService)
+
+        var timesTheGuideCardWasAskedToSurface = 0
+        controller.surfaceTheGuideCardAtTheEye = {
+            timesTheGuideCardWasAskedToSurface += 1
+        }
+
+        await controller.openGuide(
+            fromDeepLink: GuideDeepLink(
+                slug: "lunara",
+                version: 2,
+                branchKey: "macos:android",
+                stepIndex: nil
+            )
+        )
+
+        #expect(controller.loadState == .guideIsOpen)
+        #expect(timesTheGuideCardWasAskedToSurface == 1)
+    }
+
     // MARK: - Failures each say their own thing
 
     @Test func everyGuideFailureProducesItsOwnUserFacingSentence() async throws {

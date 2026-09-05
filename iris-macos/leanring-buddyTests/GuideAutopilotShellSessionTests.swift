@@ -165,6 +165,54 @@ struct GuideAutopilotShellSessionTests {
         }
     }
 
+    @Test func aShellThatExitsOnItsOwnIsAutomaticallyRebuilt() async throws {
+        // Unlike the escape hatch (which SIGKILLs and then explicitly
+        // rebuilds) or a normal timeout's last-resort kill+rebuild, a shell
+        // that exits ON ITS OWN — a real crash, or (before the `ignoreeof`
+        // fix) the deadline escalation's Ctrl-D reaching an already-idle
+        // shell — used to leave `shellHasExited` permanently true with no
+        // rebuild: every command after it failed instantly with
+        // `.sessionFailed`, and "Try again" could never recover. This kills
+        // the shell from WITHIN a running command (no cancel, no timeout) to
+        // exercise `noteShellExited`'s own organic-exit path directly.
+        try await Self.withStartedSession { session in
+            let startedAt = Date()
+            let outcome = await session.run(try Self.approved("kill -9 $$"))
+            #expect(outcome == .sessionFailed,
+                    "the shell died before it could report its own command's exit status")
+            #expect(Date().timeIntervalSince(startedAt) < 15)
+
+            var recovered = false
+            for _ in 0..<20 where !recovered {
+                if case .succeeded = await session.run(try Self.approved("echo recovered")) {
+                    recovered = true
+                } else {
+                    try await Task.sleep(nanoseconds: 300_000_000)
+                }
+            }
+            #expect(recovered, "a shell that died on its own must still rebuild automatically")
+        }
+    }
+
+    @Test func theGeneratedZshrcTurnsOffExitOnEndOfInput() throws {
+        // The deadline escalation's second rung writes a raw Ctrl-D believing
+        // a command is still in the foreground. When the command has, in
+        // fact, already returned control to the shell — exactly the case
+        // when its own completion marker was simply missed — that Ctrl-D
+        // lands on an otherwise-idle interactive login shell, and a plain
+        // zsh exits on EOF at an empty prompt unless `ignoreeof` is set.
+        // Without it, the escalation meant to make a wedged command stop
+        // could instead kill the shell the guide depends on for every step
+        // after it. Only meaningful when the login shell is zsh, exactly the
+        // condition `privateZdotdir()` itself requires.
+        try #require(GuideAutopilotShellSession.loginShellIsZsh(),
+                      "this Mac's login shell is not zsh; the ZDOTDIR trick — and this guard — do not apply")
+        let zdotdir = try #require(GuideAutopilotShellSession.privateZdotdir())
+        let rc = try String(contentsOfFile: (zdotdir as NSString).appendingPathComponent(".zshrc"), encoding: .utf8)
+        #expect(rc.contains("ignoreeof"),
+                "the generated .zshrc must disable exit-on-EOF, or the deadline escalation can kill the shell it is trying to unstick")
+    }
+
     @Test func hugeOutputStaysBounded() async throws {
         try await Self.withStartedSession { session in
             let outcome = await session.run(

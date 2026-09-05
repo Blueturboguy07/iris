@@ -96,12 +96,14 @@ struct GuideAutopilotRunnerTests {
     private static func step(
         id: String = "package",
         command: String?,
-        sensitive: Bool = false
+        sensitive: Bool = false,
+        workingDirectory: String? = nil
     ) -> IrisGuideStep {
         IrisGuideStep(
             id: id, kind: .terminal, title: "Build the app", body: "…",
             command: command,
-            watch: sensitive ? IrisStepWatch(expect: [], sensitive: true) : nil
+            watch: sensitive ? IrisStepWatch(expect: [], sensitive: true) : nil,
+            workingDirectory: workingDirectory
         )
     }
 
@@ -165,6 +167,64 @@ struct GuideAutopilotRunnerTests {
         )
         #expect(result == .handedBackAsSensitive)
         #expect(shell.commandsRun.isEmpty, "a sensitive command must never reach the shell")
+    }
+
+    // MARK: - A dead shell session (the "silently and permanently stalls" field report)
+
+    /// Reproduces the campaign's own diagnosis: `.sessionFailed` (the pty
+    /// shell died mid-command — e.g. the deadline escalation's Ctrl-D
+    /// reaching a shell that had already gone idle because the command's own
+    /// completion marker was missed) used to fall straight through to the
+    /// generic `.stopped` outcome. The drive loop treats `.stopped` as
+    /// "nothing more to drive" and silently ends autopilot with no
+    /// explanation and no way to retry — the guide just sits on its last
+    /// "Working…" line forever. It must instead be surfaced as a retryable
+    /// "Your turn" row, and the ladder must never be spent trying to
+    /// model-fix it.
+    @Test func aDeadShellSessionIsSurfacedAsRetryableRatherThanSilentlyStopped() async {
+        let shell = FakeShellSession(outcomes: [.sessionFailed])
+        let proposer = FakeFixProposer()
+        let runner = Self.runner(shell: shell, proposer: proposer)
+        let result = await runner.executeStepCommand(
+            step: Self.step(command: "yarn dist:mac"), stepIndex: 7, totalSteps: 13
+        )
+        #expect(result == .surfacedToReader,
+                "a dead shell must be surfaced with a retry offer, never silently dropped as .stopped")
+        #expect(proposer.rungACalls == 0, "there is nothing a model fix could repair about a dead terminal")
+        switch runner.state {
+        case .surfacedToReader(let diagnosis, _):
+            #expect(diagnosis.localizedCaseInsensitiveContains("try again"),
+                    "the reader needs to be told this is retryable, not left on a bare failure")
+        default:
+            Issue.record("expected .surfacedToReader state, got \(runner.state)")
+        }
+    }
+
+    /// The exact chain from the campaign's ditto-step finding: `moveInto`'s own
+    /// `cd` is the first thing that runs once a step declares a
+    /// `workingDirectory`, and if THAT particular command is the one that
+    /// catches a session mid-restart, the folder was never actually wrong —
+    /// the fresh shell (which `GuideAutopilotShellSession.noteShellExited` now
+    /// rebuilds immediately) simply had not been asked yet. Before this fix,
+    /// any non-`.succeeded` outcome from the `cd` — including `.sessionFailed`
+    /// — was reported as "Iris couldn't move into ~/Simplicity", identically,
+    /// every time "Try again" repeated the exact same doomed `cd`.
+    @Test func aDeadShellDuringTheFolderMoveRecoversOnceTheFreshSessionIsRetried() async {
+        let shell = FakeShellSession(outcomes: [
+            .sessionFailed,                                   // the cd, catching the restart
+            .succeeded(workingDirectory: "/x/Simplicity"),    // the retried cd
+            .succeeded(workingDirectory: "/x/Simplicity"),    // the real command
+        ])
+        let runner = Self.runner(shell: shell)
+        let result = await runner.executeStepCommand(
+            step: Self.step(
+                command: "ditto release/mac-arm64/Simplicity.app /Applications/Simplicity.app",
+                workingDirectory: "~/Simplicity"
+            ),
+            stepIndex: 8, totalSteps: 13
+        )
+        #expect(result == .succeeded,
+                "a cd that only failed because the shell was mid-restart must not be reported as the wrong folder")
     }
 
     // MARK: - The ladder

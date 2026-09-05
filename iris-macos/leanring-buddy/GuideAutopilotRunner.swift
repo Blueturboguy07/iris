@@ -467,6 +467,13 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
             return .skippedByReader
         case .stopped:
             return .stopped
+        case .terminalSessionHadToRestart:
+            // Not a command failure the ladder could ever fix — the shell is
+            // already back (see `GuideAutopilotShellSession.noteShellExited`)
+            // and the honest, complete answer is just to run this step again,
+            // so this skips the model ladder entirely and surfaces straight
+            // to the reader with a retry offer.
+            return surface(diagnosis: Self.terminalSessionRestartedDiagnosis, command: command)
         case .failed(let exitStatus, let workingDirectory):
             return await runFailureLadder(
                 step: step, command: command,
@@ -482,7 +489,31 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         case failed(exitStatus: Int32, workingDirectory: String)
         case skippedByReader
         case stopped
+        /// The pty shell itself died mid-command — a real crash, or the
+        /// deadline escalation's Ctrl-D reaching a shell that had already gone
+        /// idle because the command's own completion marker was missed —
+        /// rather than the command running and exiting non-zero.
+        /// `GuideAutopilotShellSession` always rebuilds a fresh shell the
+        /// instant this happens (see `noteShellExited`), so by the time this
+        /// case is even seen there is a live session again; nothing about
+        /// THIS command succeeded or failed, so there is nothing a
+        /// model-proposed fix could reason about. Before this case existed,
+        /// `.sessionFailed` fell straight through to the generic `.stopped`
+        /// outcome, and the drive loop treats `.stopped` as "nothing more to
+        /// drive" — it silently ended the whole install with no explanation
+        /// and no way to retry, which is the field report this fixes:
+        /// "silently and permanently stalls ... no error, no advance".
+        case terminalSessionHadToRestart
     }
+
+    /// What the reader is told when a step's command comes back as
+    /// `.terminalSessionHadToRestart`. Named separately from the ladder's own
+    /// diagnoses because this is not a command failure the ladder could ever
+    /// fix — the terminal is already back, and the honest, complete answer is
+    /// just to run the same step again.
+    private static let terminalSessionRestartedDiagnosis =
+        "Iris's terminal session ended unexpectedly partway through this step and had to restart. "
+        + "Nothing was lost — tap Try again to re-run this step now that it's back."
 
     /// `workingDirectory` is where this command will really run — the folder
     /// the step declared, or the one the shell is already in. The gate needs
@@ -563,7 +594,10 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
             ))
             return .skippedByReader
         case .sessionFailed:
-            return .stopped
+            transcript.append(.explanation(
+                text: "Iris's terminal session ended unexpectedly and had to restart."
+            ))
+            return .terminalSessionHadToRestart
         }
     }
 
@@ -656,6 +690,11 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
             break
         case .stopped:
             return .stopped
+        case .terminalSessionHadToRestart:
+            // The shell died and rebuilt mid tool-install rather than the
+            // install itself failing — fall through to the normal ladder
+            // rather than pretending this attempt ran and lost.
+            return nil
         case .failed, .skippedByReader:
             return nil
         }
@@ -674,7 +713,7 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         case .succeeded: return .succeeded
         case .stopped: return .stopped
         case .skippedByReader: return .skippedByReader
-        case .failed: return nil
+        case .failed, .terminalSessionHadToRestart: return nil
         }
     }
 
@@ -792,7 +831,7 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
                     case .succeeded: return .succeeded
                     case .stopped: return .stopped
                     case .skippedByReader: return .skippedByReader
-                    case .failed: continue   // next rung
+                    case .failed, .terminalSessionHadToRestart: continue   // next rung
                     }
                 }
             }
@@ -971,16 +1010,32 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
             transcript.append(.explanation(text: Self.wrongFolderDiagnosis(folder)))
             return false
         }
-        switch await session.run(approved, deadline: Self.folderMoveDeadline) {
-        case .succeeded:
+        let outcome = await session.run(approved, deadline: Self.folderMoveDeadline)
+        if case .succeeded = outcome {
             return true
-        default:
-            // zsh has already printed its own "cd: no such file or directory:
-            // …" into the transcript, which is the sentence a reader can act
-            // on; this adds the part zsh cannot know — which step to go back to.
-            transcript.append(.explanation(text: Self.wrongFolderDiagnosis(folder)))
-            return false
         }
+        if case .sessionFailed = outcome {
+            // The shell just died and — since
+            // `GuideAutopilotShellSession.noteShellExited` — has ALREADY
+            // rebuilt itself, so this `cd` never actually reached the folder
+            // at all; it was answered by a session that was mid-restart, not
+            // by the folder being missing. Give the fresh shell its own try
+            // before blaming the folder. Without this, "Iris couldn't move
+            // into ~/Simplicity" fired on a session that simply had to
+            // restart — and fired again, identically, on "Try again",
+            // because the retry landed on the same misdiagnosis with nothing
+            // to tell the reader the terminal, not the folder, was the
+            // problem.
+            let retryOutcome = await session.run(approved, deadline: Self.folderMoveDeadline)
+            if case .succeeded = retryOutcome {
+                return true
+            }
+        }
+        // zsh has already printed its own "cd: no such file or directory:
+        // …" into the transcript, which is the sentence a reader can act
+        // on; this adds the part zsh cannot know — which step to go back to.
+        transcript.append(.explanation(text: Self.wrongFolderDiagnosis(folder)))
+        return false
     }
 
     /// A `cd` is instant; anything longer means the shell is wedged, and

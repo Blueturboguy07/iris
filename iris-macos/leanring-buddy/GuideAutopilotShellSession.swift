@@ -603,12 +603,27 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             // land on the queue after the new shell is already running, and
             // without this guard it would set `shellHasExited` on the new one.
             guard exitedTerminal === terminal else { return }
+            irisTrace("shell: shell process exited on its own (not via cancel/timeout) — rebuilding")
             shellHasExited = true
             markerToken = nil
             commandGeneration += 1
             let completion = finishRunning
             finishRunning = nil
             completion?(.sessionFailed)
+            // Every OTHER way this shell can end — the escape hatch's cancel,
+            // and the deadline's own last-resort kill — rebuilds immediately so
+            // the guide always has a live shell for its next step or a "Try
+            // again" tap. A shell that exits on its OWN (a real crash, or —
+            // before the `ignoreeof` fix above — the deadline's Ctrl-D reaching
+            // an already-idle shell) used to be the one path that left
+            // `shellHasExited` permanently true with no rebuild: every command
+            // after it, forever, failed instantly with `.sessionFailed`, and
+            // callers like `moveInto` reported that as "wrong folder" — the
+            // field report where a genuinely correct `~/Simplicity` was
+            // declared missing and "Try again" reproduced the identical
+            // failure. `shellHasExited` is set back to false inside
+            // `startShell` the moment the fresh terminal is assigned.
+            rebuildShell()
         }
 
         // MARK: Deadline, prompt detection, cancellation (on queue)
@@ -831,6 +846,18 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
         unset _iris_rc
         unsetopt zle 2>/dev/null
         unsetopt prompt_cr prompt_sp 2>/dev/null
+        # A command's own completion marker can be delayed or — see the fix
+        # note above `deadlineFired` — missed outright, and the deadline
+        # mechanism's second escalation writes a raw Ctrl-D (EOF) believing a
+        # command is still in the foreground. When it is not (the command
+        # already returned control to the shell), that Ctrl-D lands on an
+        # otherwise-idle INTERACTIVE LOGIN shell, and a plain zsh/bash exits
+        # on EOF at an empty prompt unless told not to. Without this line the
+        # "make it stop" escalation could itself kill the very shell the
+        # guide depends on for every step after it — turning one missed
+        # marker into a permanently dead session that no "Try again" could
+        # recover, rather than a shell Iris could just keep driving.
+        setopt ignoreeof 2>/dev/null
         stty -echo 2>/dev/null
         PS1='' PS2='' PROMPT='' RPROMPT=''
         """

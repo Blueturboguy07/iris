@@ -1641,8 +1641,14 @@ final class GuideSessionController: ObservableObject {
                 advanceFromWithinAutopilot()
             case .handedBackAsSensitive, .skippedByReader, .surfacedToReader:
                 handTheCurrentStepBackToTheReader()
-            case .longRunningStarted, .stopped:
+            case .longRunningStarted:
                 return
+            case .stopped:
+                // Same reasoning as the drive loop's own `.stopped` case: a
+                // retry that comes back unrecoverable must not leave
+                // `autopilotIsRunning` true with the reader's tap having
+                // silently done nothing.
+                stopAutopilot()
             }
         }
     }
@@ -2053,7 +2059,20 @@ final class GuideSessionController: ObservableObject {
                 handTheCurrentStepBackToTheReader()
                 return
             case .stopped:
-                // The session died; nothing more to drive.
+                // Something the ladder cannot recover from on its own (a
+                // command the risk gate could not even prepare to run) — not
+                // to be confused with `.surfacedToReader`, which is the
+                // recoverable "Iris's terminal restarted, tap Try again"
+                // path a dead pty session now takes instead of landing here.
+                // This Task ends either way, and before this fix nothing told
+                // the reader or the published state so: `autopilotIsRunning`
+                // stayed true and the takeover terminal kept showing
+                // whatever it last rendered — "running" forever with no one
+                // left to drive it. `stopAutopilot()` folds the takeover away
+                // and leaves the guide exactly where the reader was, same as
+                // the escape hatch, so closing costs them their automation
+                // and never their place — never a silent, permanent stall.
+                stopAutopilot()
                 return
             }
         }

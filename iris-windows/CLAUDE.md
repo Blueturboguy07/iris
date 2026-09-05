@@ -265,6 +265,54 @@ event stream deciding when the tray says "your turn" (a sign-in/permission/manua
 step, a confirm tap, or a surfaced failure) and when to fire the one-off Windows
 toast; `main/tray.ts` is the Electron adaptor, fed from the host's `emitEvent`.
 
+### Guided install parity (Sep 2026)
+
+The five autopilot ports above (`guide-recipe*`, `fix-ladder`, `setup-detour`,
+`watch`, `risk`/`your-turn`/escape hatch) were developed concurrently and merged
+onto `windows-parity`; this section is the single map of how they compose. One
+install now runs, end to end:
+
+1. **Prerequisites detour** — `AutopilotController.start` calls `runSetupDetour`
+   (`setup-detour.ts`) before the recipe's first step: any tool the recipe
+   *verifies but does not install* (git, node) that is missing is installed via
+   winget under the grant, or the reader is sent to its download page and Iris
+   polls until it appears. A detour that gives up surfaces; it never marches into
+   a recipe whose first step would fail.
+2. **Derived recipe steps** — the recipe itself is derived from the fetched publik
+   guide (`guide-recipe-resolver.ts` → `guide-recipe.ts` → the reviewed
+   `RecipeStep` schema), the built-in `recipes.ts` table being the offline
+   fallback only.
+3. **Per step**: the **WD-aware risk gate** (`risk.ts`, judging the declared
+   folder as well as the command text) → **execute** → **watch expectations**
+   (`watch.ts`: a `verify` step, and any reader step carrying a `watch` block,
+   blocks on `WatchStepExecutor.awaitStepCompletion` and advances the moment one
+   expectation verifies, else hands to the reader). A `noop` step self-completes;
+   a `verify` step is NOT self-completing anymore.
+4. **On a failed command**, in order: **exit-127 self-heal**
+   (`trySelfHealMissingTool` re-runs the recipe's own earlier install step once
+   and retries — the cheap deterministic rung) → **fix ladder** (`fix-ladder.ts`,
+   the reader's own model proposes ONE fix, gated at `model_proposed_fix`
+   provenance behind the recipe's host allowlist, capped) → **surface "Your
+   turn"** (the tray state + the "Try again / Continue past it" choice).
+5. **Escape hatch**: `AutopilotController.abort()` (the red 'Stop', tray "Stop the
+   install") kills the running step's process tree and marks the run terminal
+   from anywhere in the flow; an in-flight outcome is discarded, never surfaced.
+
+Reconciled invariants worth keeping:
+
+- **One expectation type.** The guide's verify/watch signals decode into
+  `WatchExpectation`/`StepWatch` and the derivation carries the guide's `watch`
+  block through verbatim onto `RecipeStep.watch` — the same field the runner and
+  `watch.ts` read. (The earlier split where the derivation wrote a separate
+  `verifyExpectations` the runner never read is gone; do not reintroduce it.)
+- **The runner constructor arg order is** `(recipe, platform, autonomyGranted,
+  fixLadder?, watchExecutor?)`; the **controller's is** `(host, makeShell?,
+  resolveRecipe?, makeFixLadder?, detourSeams?, makeWatchExecutor?)`. Every hook
+  past `autonomyGranted`/`makeShell` is optional and undefined-tolerant, so the
+  pure suite drives the runner with none of them.
+- **Self-heal runs before the fix ladder** (deterministic before model), and both
+  run before anything surfaces.
+
 ## Style
 
 Follow the publik house style, which is `iris-macos/CLAUDE.md`'s:

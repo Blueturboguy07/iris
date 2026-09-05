@@ -976,13 +976,28 @@ final class GuideSessionController: ObservableObject {
     }
 
     /// Fetches a guide and lands the reader somewhere real inside it.
+    ///
+    /// Tears down whatever guide session was already open FIRST — see
+    /// `tearDownWhicheverGuideSessionIsCurrentlyOpen()`. This function used to
+    /// call only `cancelAnyWorkFromThePreviousStep()`, which never touched
+    /// autopilot, the pointing task, or the watch loop. Iris is one shared
+    /// process: a reader (or a second `iris://guide/…` link arriving while the
+    /// first guide's autopilot is still mid-install — the exact shape of two
+    /// browser tabs each pressing "Let Iris install it") could open a SECOND
+    /// guide while the FIRST guide's autopilot runner was still driving a real
+    /// shell in the background. The step card would show the new guide from
+    /// step one while the old guide's install kept running unseen underneath
+    /// it — the live-run report of a Lunara install landing on a step captioned
+    /// with a completely different app's clone step ("COPY HICKEYFIELD TO THIS
+    /// MAC") and then freezing: the terminal the reader was watching belonged
+    /// to the OLD autopilot session, not the guide the card now named.
     func openGuide(
         slug: String,
         requestedVersion: Int?,
         branchKeyFromDeepLink: String?,
         stepIndexFromDeepLink: Int?
     ) async {
-        cancelAnyWorkFromThePreviousStep()
+        tearDownWhicheverGuideSessionIsCurrentlyOpen()
         loadState = .guideIsLoading(slug: slug)
         // Bring the eye's bar forward the instant the reader asks for a guide —
         // synchronously, before the fetch below suspends — so the picker gives
@@ -1084,17 +1099,42 @@ final class GuideSessionController: ObservableObject {
     }
 
     func closeTheGuide() {
+        tearDownWhicheverGuideSessionIsCurrentlyOpen()
+        loadState = .noGuideIsOpen
+        guideBeingFollowed = nil
+        selectedBranch = nil
+        currentStepIndex = 0
+        readerHasFinishedTheGuide = false
+        toolCheckRows = []
+        setupRecoveryState = nil
+    }
+
+    /// Everything that belongs to ONE guide session and must die before another
+    /// one — a new guide opening, or this one closing — can safely start.
+    ///
+    /// Originally written for `closeTheGuide()` alone, from a report of the eye
+    /// "randomly" moving to a spot and announcing a step nobody was on: a
+    /// pointing (or debounced-refresh) model call launched while a guide was
+    /// open finished seconds after it closed, passed its own
+    /// `!Task.isCancelled` check because nothing had cancelled it, and drove
+    /// the eye — which force-shows a hidden overlay — announcing the step
+    /// title it captured when it started.
+    ///
+    /// `openGuide` needs every one of these same teardowns, for the same
+    /// reason: it can be called while a DIFFERENT guide's session is still
+    /// live (autopilot mid-install, the watch loop still watching, a pointing
+    /// task still in flight) rather than only after `closeTheGuide` — Iris is
+    /// one shared process, and a second `iris://guide/…` link (or a second
+    /// browser tab) arriving mid-install is exactly that case. Before this,
+    /// `openGuide` called only `cancelAnyWorkFromThePreviousStep()`, which
+    /// never touched autopilot, pointing, or the watch loop — so the OLD
+    /// guide's autopilot runner kept driving a real shell in the background
+    /// while the step card switched to a new guide's step one, which is how a
+    /// Lunara run landed on a step captioned with Hickeyfield's clone step and
+    /// then froze: the terminal on screen belonged to the old session, not the
+    /// guide the card now named.
+    private func tearDownWhicheverGuideSessionIsCurrentlyOpen() {
         cancelAnyWorkFromThePreviousStep()
-        // A pointer request already in flight has to die with the guide.
-        //
-        // It did not, and the result was the strangest thing in the bug report:
-        // "randomly, it will move to a spot on my computer and say the first
-        // step, out of nowhere". A model call launched while the guide was open
-        // finished seconds after it closed, passed its own `!Task.isCancelled`
-        // check because nothing had cancelled it, and drove the eye — which
-        // force-shows a hidden overlay — announcing the step title it captured
-        // when it started. For a guide the reader never advanced, that is step
-        // one, arriving long after they walked away from it.
         pointingTask?.cancel()
         pointingTask = nil
         theQuestionThePointingTaskIsAnswering = nil
@@ -1107,13 +1147,6 @@ final class GuideSessionController: ObservableObject {
         stopPointingTheEye?()
         if autopilotIsRunning { stopAutopilot() }
         watchLoop.stopWatching()
-        loadState = .noGuideIsOpen
-        guideBeingFollowed = nil
-        selectedBranch = nil
-        currentStepIndex = 0
-        readerHasFinishedTheGuide = false
-        toolCheckRows = []
-        setupRecoveryState = nil
     }
 
     // MARK: - Branch selection

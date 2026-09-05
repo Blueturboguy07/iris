@@ -46,6 +46,9 @@ interface Collected {
 export class PosixShellSession implements ShellSession {
   private cwd: string;
   private readonly servers: ReturnType<typeof spawn>[] = [];
+  // The login shell running the current foreground command, tracked so the red
+  // 'Stop' can kill it mid-flight. Null between commands.
+  private currentChild: ReturnType<typeof spawn> | null = null;
 
   constructor(startingDirectory: string = process.env.HOME ?? "/") {
     this.cwd = startingDirectory;
@@ -105,20 +108,43 @@ export class PosixShellSession implements ShellSession {
     });
   }
 
+  /// The red 'Stop' on the dev/testing path. SIGKILLs the running command's
+  /// login shell and any dev servers. This is best-effort about descendants —
+  /// the shipped product is the PowerShell session, whose `taskkill /T` walks
+  /// the whole tree; the POSIX twin exists so a Mac can drive the flow at all.
+  abort(): void {
+    this.killTree(this.currentChild);
+    this.currentChild = null;
+    for (const server of this.servers) this.killTree(server);
+    this.servers.length = 0;
+  }
+
+  private killTree(child: ReturnType<typeof spawn> | null): void {
+    if (!child || child.pid === undefined) return;
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already dead.
+    }
+  }
+
   dispose(): void {
     for (const server of this.servers) server.kill();
     this.servers.length = 0;
+    this.currentChild = null;
   }
 
   private spawnScript(script: string, deadlineMs: number): Promise<Collected | "timed_out"> {
     return new Promise((resolve) => {
       const child = spawn(LOGIN_SHELL, ["-l", "-c", script], { env: SHELL_ENV });
+      this.currentChild = child;
       let stdout = "";
       let stderr = "";
       let settled = false;
       const finish = (value: Collected | "timed_out"): void => {
         if (settled) return;
         settled = true;
+        if (this.currentChild === child) this.currentChild = null;
         clearTimeout(timer);
         resolve(value);
       };

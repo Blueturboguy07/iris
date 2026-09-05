@@ -20,6 +20,7 @@
   const trayText = document.getElementById("tray-text");
   const trayButtons = document.getElementById("tray-buttons");
   const titleEl = document.getElementById("title");
+  const stopButton = document.getElementById("stop");
 
   const MIN_COMMAND_VISIBLE_MS = 1500; // a command reads as work for at least this long
   const BETWEEN_STEPS_MS = 700; // a deliberate breath between steps
@@ -211,6 +212,19 @@
         ]);
         break;
 
+      case "aborted":
+        // The reader hit the red 'Stop'. The main process kills the running
+        // process tree and folds this window away; show that the run ended so a
+        // frame that renders before the window closes reads honestly.
+        if (runningCursor) {
+          runningCursor.remove();
+          runningCursor = null;
+        }
+        stopRunningFriendlyLine();
+        hideTray();
+        addLine("■ Stopped. Iris ended the install.", "info");
+        break;
+
       case "finished":
         addLine("✓ All done. Opening it now.", "done");
         // Let the reader see "done", then morph back into the eye and close.
@@ -232,6 +246,21 @@
     }
   }
 
+  // The red 'Stop' escape hatch. Aborts the running step's process tree and ends
+  // the run; the main process folds this window away via `onAborted`. Guarded so
+  // a double-click can't fire two aborts.
+  let aborting = false;
+  async function stopInstall() {
+    if (aborting) return;
+    aborting = true;
+    if (stopButton) stopButton.disabled = true;
+    try {
+      await native.invoke("autopilot_abort", {});
+    } catch (error) {
+      addLine(`Iris couldn't stop cleanly: ${String(error && error.message ? error.message : error)}`, "info");
+    }
+  }
+
   let installStarted = false;
   async function beginInstall() {
     if (installStarted) return;
@@ -250,6 +279,7 @@
       return;
     }
     if (slug) titleEl.textContent = `iris — installing ${slug}`;
+    if (stopButton) stopButton.addEventListener("click", () => void stopInstall());
     native.listen("autopilot:event", (event) => enqueue(event));
     // The window opens as the eye; the main process sends "terminal" once it has
     // glided to centre, and "eye" again when we ask to collapse. The install

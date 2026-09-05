@@ -101,6 +101,10 @@ export class PowerShellSession implements ShellSession {
   // Long-running children (dev servers) kept alive for the app's lifetime and
   // killed on dispose so the runner does not leave orphans behind.
   private readonly servers: ReturnType<typeof spawn>[] = [];
+  // The PowerShell running the current foreground command, tracked so the red
+  // 'Stop' can kill it AND its whole tree (the winget/npm/build children it
+  // spawned). Null between commands.
+  private currentChild: ReturnType<typeof spawn> | null = null;
 
   constructor(startingDirectory: string = process.env.USERPROFILE ?? "C:\\") {
     this.cwd = startingDirectory;
@@ -172,11 +176,42 @@ export class PowerShellSession implements ShellSession {
     });
   }
 
+  /// The red 'Stop': kill the running command's whole process tree, then any
+  /// long-running dev servers. `taskkill /T` walks the tree from the PowerShell
+  /// down to the `winget`/`npm`/build children it launched, which a bare
+  /// `child.kill()` (a single SIGTERM to PowerShell) would orphan. Best-effort:
+  /// a child that already exited makes `taskkill` a no-op.
+  abort(): void {
+    this.killTree(this.currentChild);
+    this.currentChild = null;
+    for (const server of this.servers) {
+      this.killTree(server);
+    }
+    this.servers.length = 0;
+  }
+
+  private killTree(child: ReturnType<typeof spawn> | null): void {
+    if (!child || child.pid === undefined) {
+      return;
+    }
+    try {
+      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
+    } catch {
+      // taskkill is missing or the pid is already gone — fall through to kill().
+    }
+    try {
+      child.kill();
+    } catch {
+      // Already dead.
+    }
+  }
+
   dispose(): void {
     for (const server of this.servers) {
       server.kill();
     }
     this.servers.length = 0;
+    this.currentChild = null;
   }
 
   private spawnEncoded(script: string, deadlineMs: number): Promise<Collected | "timed_out"> {
@@ -184,6 +219,7 @@ export class PowerShellSession implements ShellSession {
       const child = spawn("powershell.exe", [...POWERSHELL_ARGS, "-EncodedCommand", encodeForPowerShell(script)], {
         windowsHide: true,
       });
+      this.currentChild = child;
       let stdout = "";
       let stderr = "";
       let settled = false;
@@ -192,6 +228,9 @@ export class PowerShellSession implements ShellSession {
           return;
         }
         settled = true;
+        if (this.currentChild === child) {
+          this.currentChild = null;
+        }
         clearTimeout(timer);
         resolve(value);
       };

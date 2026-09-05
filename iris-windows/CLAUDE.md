@@ -169,6 +169,31 @@ shows a plain-English `friendlyLabel` per command (`friendly-label.ts`) with the
 raw command dimmed, and a spinner while running. Keep every risk pattern literal
 present in `risk.ts` — the web guide tests grep for them.
 
+**Working-directory-aware gate.** `assess`/`approve`/`approveAfterAReaderTap` also
+take an options form (`{ provenance, autonomyGranted?, workingDirectory? }`)
+alongside the original positional one. The command text alone can't show where it
+runs, so the folder is judged separately: a Windows system folder (`C:\Windows`,
+`C:\Program Files*`, `%SystemRoot%`), a drive root, or a `..`-escape out of the
+guide's folder is refused outright — even under the grant, like the catastrophe
+floor (`forbiddenWorkingDirectory` / `escapesIntoAForbiddenPlace`). The runner
+passes the step's `workingDirectoryForPlatform` into the gate. A `model_proposed_fix`
+is also judged for opacity BEFORE the grant short-circuit, so the grant a reader
+gives a vetted install never launders an untrusted model's download-and-run or
+`-EncodedCommand` command.
+
+**The red 'Stop' escape hatch.** `ShellSession.abort()` kills the running step's
+whole process tree (`taskkill /pid … /T /F` on Windows), and `AutopilotRunner.abort()`
+puts the run in a terminal `aborted` state so no further step runs — an in-flight
+command's outcome is discarded, not surfaced. `AutopilotController.abort()` is
+unconditional and idempotent (the macOS `abortOrCloseAutopilotFromTheEscapeHatch`
+dead-button fix) and folds the window away via the host's `onAborted`. Reachable
+from the autopilot window's red traffic-light and the tray's "Stop the install".
+
+**Tray "your turn".** `services/autopilot/your-turn.ts` is a pure reducer over the
+event stream deciding when the tray says "your turn" (a sign-in/permission/manual
+step, a confirm tap, or a surfaced failure) and when to fire the one-off Windows
+toast; `main/tray.ts` is the Electron adaptor, fed from the host's `emitEvent`.
+
 ## Style
 
 Follow the publik house style, which is `iris-macos/CLAUDE.md`'s:

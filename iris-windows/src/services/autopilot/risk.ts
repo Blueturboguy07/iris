@@ -74,6 +74,24 @@ const CATASTROPHE_RULES: readonly Rule[] = [
     String.raw`\brm\b[^\n]*\s-[a-z]*(rf|fr)[a-z]*\s+(/|/\*|~|~/|\$home)\s*(\n|$|;|&)`,
     "This deletes the root of the disk or the whole home folder.",
   ),
+  // Delete a core branch of the machine hive. `reg delete HKCU\...` is a
+  // confirm-tier registry edit (see `CONFIRM_RULES`); this floor catches only
+  // the deletion of `HKLM` itself or one of its top-level hives (SYSTEM,
+  // SOFTWARE, …) — bricking Windows — which no install ever needs. A deeper
+  // subkey delete (`reg delete HKLM\SOFTWARE\SomeApp`) is NOT a root and stays
+  // at the confirm tier, because the trailing `\SomeApp` is not the `\s|$|/`
+  // this requires right after the hive.
+  rule(
+    String.raw`\breg\s+delete\s+(hklm|hkey_local_machine)(\\(system|software|sam|security|hardware|components|bcd\d*))?(\s|$|/)`,
+    "This deletes a core branch of the Windows registry.",
+  ),
+  // Rewrite the boot configuration. `bcdedit /enum` is read-only and stays at
+  // the confirm tier; the destructive verbs here can leave Windows unbootable,
+  // which no app install has any reason to do.
+  rule(
+    String.raw`\bbcdedit\b[^\n]*/(delete|deletevalue|import|set)\b`,
+    "This changes how Windows boots.",
+  ),
 ];
 
 // Refused WITHOUT the grant, but run WITH it: download-and-run one-liners
@@ -94,6 +112,25 @@ const DOWNLOAD_AND_RUN_RULES: readonly Rule[] = [
   rule(
     String.raw`\b(curl|wget)\b[^\n|]*\|[^\n]*\b(sh|bash|zsh)\b`,
     "This downloads a script and runs it without anyone reading it first.",
+  ),
+];
+
+// Refused for a MODEL-PROPOSED FIX even under the autonomy grant. A vetted,
+// pinned recipe may download-and-run a known installer under the grant (that is
+// how rustup and scoop install), but a fix an untrusted model wrote is never
+// allowed to reach out and run code, or to hide what it runs inside an encoded
+// blob — the two shapes an adversary-shaped hallucination would use. These are
+// checked before the grant short-circuit, so the grant that a reader gives a
+// vetted install never launders a model's opaque command through.
+const MODEL_HARD_REFUSAL_RULES: readonly Rule[] = [
+  ...DOWNLOAD_AND_RUN_RULES,
+  rule(
+    String.raw`\bdownloadstring\b`,
+    "A fix should never download code and run it.",
+  ),
+  rule(
+    String.raw`-encodedcommand\b`,
+    "This hides what it runs inside an encoded blob, so its effect can't be read.",
   ),
 ];
 
@@ -162,20 +199,245 @@ function firstMatch(rules: readonly Rule[], command: string): string | undefined
   return undefined;
 }
 
+// ── The folder the command will run in ──────────────────────────────────────
+//
+// Every rule above is a pattern over command TEXT, and the text of a command
+// does not say where it runs. Once a guide step can declare its own working
+// directory that becomes a real hole: `Remove-Item -Recurse -Force .` is a
+// tidy-up in the app folder and a catastrophe in `C:\Windows`, and the two are
+// spelled identically. So the gate also judges the folder itself — refused even
+// under the autonomy grant, the same as the catastrophe floor, because running
+// ANYTHING with the current directory set to a system folder or a drive root is
+// a class of danger the command text alone can't show. Mirrors the
+// system-folder / `..`-escape refusal in macOS `GuideAutopilotRunner.moveInto`.
+
+/// Rewrites a folder to a single lower-cased, backslash-separated form with the
+/// environment references a system folder is usually spelled with expanded, so
+/// one comparison catches `C:\Windows`, `%SystemRoot%`, and `$env:windir` alike.
+function normalizeWindowsFolder(folder: string): string {
+  return folder
+    .trim()
+    .replace(/\//g, "\\")
+    .replace(/\\+$/g, "")
+    .toLowerCase()
+    .replace(/%systemroot%|%windir%|\$env:systemroot|\$env:windir/g, "c:\\windows")
+    .replace(/%programfiles\(x86\)%|\$env:programfiles\(x86\)/g, "c:\\program files (x86)")
+    .replace(/%programfiles%|\$env:programfiles/g, "c:\\program files")
+    .replace(/%systemdrive%|\$env:systemdrive/g, "c:");
+}
+
+const SYSTEM_FOLDER_PREFIXES = ["c:\\windows", "c:\\program files (x86)", "c:\\program files"];
+
+/// Whether a normalized path is a Windows system folder (or below one). A bare
+/// drive root is handled separately by `looksLikeADriveRoot`.
+function looksLikeASystemFolder(normalizedPath: string): boolean {
+  return SYSTEM_FOLDER_PREFIXES.some(
+    (prefix) => normalizedPath === prefix || normalizedPath.startsWith(`${prefix}\\`),
+  );
+}
+
+/// Whether a normalized path is the very root of a drive (`c:` or `c:\`, which
+/// normalizes to `c:`). Nothing an install writes belongs at a drive root.
+function looksLikeADriveRoot(normalizedPath: string): boolean {
+  return /^[a-z]:$/.test(normalizedPath);
+}
+
+/// The reason a step's declared working directory is refused outright, or
+/// undefined when the folder is a fine place to run. Absolute: honored even
+/// under the autonomy grant.
+export function forbiddenWorkingDirectory(workingDirectory: string): string | undefined {
+  const folder = workingDirectory.trim();
+  if (folder === "") return undefined;
+  // A relative path that climbs out of the guide's own folder via `..`. The
+  // shell would resolve it against wherever it happens to be sitting, which is
+  // exactly the folder confusion this whole section closes.
+  if (folder.split(/[\\/]/).includes("..")) {
+    return "This step would run in a folder reached by climbing out of the install folder.";
+  }
+  const normalized = normalizeWindowsFolder(folder);
+  if (looksLikeADriveRoot(normalized)) {
+    return "This step would run at the very root of a drive.";
+  }
+  if (looksLikeASystemFolder(normalized)) {
+    return "This step would run inside a Windows system folder.";
+  }
+  return undefined;
+}
+
+/// Whether a folder is one this code will resolve relative command paths
+/// against: a drive-rooted or `~`-rooted path with nothing in it a shell would
+/// expand. A `$env:`-rooted folder is deliberately NOT resolved (the runner's
+/// `isAPlainFolder` refuses it as a working directory anyway), matching the
+/// macOS resolver, which only resolves against `~`- or `/`-rooted folders.
+function isAResolvableFolder(folder: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(folder) || folder.startsWith("~");
+}
+
+/// Splits a drive- or `~`-rooted folder into its path components, keeping the
+/// drive (`c:`) or `~` as the first, un-poppable component.
+function folderComponents(folder: string): string[] {
+  return normalizeWindowsFolder(folder).split(/[\\/]/).filter((part) => part.length > 0);
+}
+
+/// Resolves one relative path token against a folder, collapsing `.` and `..`.
+/// Reports whether a `..` tried to climb past the drive/home root — a token that
+/// escapes the folder tree entirely, which is refused regardless of where it
+/// lands.
+function resolveRelativePath(
+  token: string,
+  folder: string,
+): { readonly resolved: string; readonly escaped: boolean } {
+  const components = folderComponents(folder);
+  let escaped = false;
+  for (const piece of token.split(/[\\/]/)) {
+    if (piece === "" || piece === ".") continue;
+    if (piece === "..") {
+      // Component 0 is the drive or `~`; popping it would climb off the tree.
+      if (components.length > 1) {
+        components.pop();
+      } else {
+        escaped = true;
+      }
+      continue;
+    }
+    components.push(piece.toLowerCase());
+  }
+  const resolved = components.join("\\");
+  return { resolved, escaped };
+}
+
+/// Whether a token is a plain relative path we should resolve — not a flag
+/// (`-x`, `/f`), not an already-rooted path (`c:\…`, `\…`, `~…`), and not
+/// anything the shell would compute (`$…`, `%…`). Quotes and other punctuation
+/// mean it is not a plain path and it is left alone (opacity rules already
+/// question computed text).
+function looksLikeARelativePathToken(token: string): boolean {
+  if (token.length === 0) return false;
+  const first = token[0]!;
+  if (first === "-" || first === "/" || first === "\\" || first === "~" || first === "$" || first === "%") {
+    return false;
+  }
+  if (/^[A-Za-z]:/.test(token)) return false; // drive-rooted
+  return /^[A-Za-z0-9._\\/@+-]+$/.test(token);
+}
+
+/// The reason a relative path in the command climbs out of the guide's folder
+/// into a place nothing should be written — a drive root or a system folder —
+/// or undefined when nothing in it does. Only tokens that actually contain a
+/// `..` are considered, so an ordinary `npm ci` in an ordinary folder pays
+/// nothing and can never be refused by mistake. Absolute: honored even under
+/// the grant, because a `..`-walk into `C:\Windows\System32` is the declared-
+/// folder version of the catastrophe floor.
+export function escapesIntoAForbiddenPlace(
+  command: string,
+  workingDirectory: string,
+): string | undefined {
+  if (!isAResolvableFolder(workingDirectory)) return undefined;
+  for (const token of command.split(/\s+/)) {
+    if (!token.includes("..")) continue;
+    if (!looksLikeARelativePathToken(token)) continue;
+    const { resolved, escaped } = resolveRelativePath(token, workingDirectory);
+    if (escaped || looksLikeADriveRoot(resolved) || looksLikeASystemFolder(resolved)) {
+      return "This reaches out of the install folder into a system location.";
+    }
+  }
+  return undefined;
+}
+
+/// The inputs to the gate, when a caller has more than a provenance to give —
+/// notably the folder the command will run in. `autonomyGranted` defaults to
+/// false and `workingDirectory` to none, so an options object with just a
+/// provenance behaves exactly like the positional form.
+export interface AssessOptions {
+  readonly provenance: Provenance;
+  readonly autonomyGranted?: boolean;
+  readonly workingDirectory?: string;
+}
+
+interface NormalizedOptions {
+  readonly provenance: Provenance;
+  readonly autonomyGranted: boolean;
+  readonly workingDirectory: string | undefined;
+}
+
+/// Accepts either the original positional form (`provenance`, `autonomyGranted`)
+/// or the richer options object, so every existing caller and test keeps
+/// compiling and the folder-aware callers can pass a working directory.
+function normalizeAssessArguments(
+  provenanceOrOptions: Provenance | AssessOptions,
+  autonomyGranted: boolean,
+): NormalizedOptions {
+  if (typeof provenanceOrOptions === "string") {
+    return { provenance: provenanceOrOptions, autonomyGranted, workingDirectory: undefined };
+  }
+  return {
+    provenance: provenanceOrOptions.provenance,
+    autonomyGranted: provenanceOrOptions.autonomyGranted ?? false,
+    workingDirectory: provenanceOrOptions.workingDirectory,
+  };
+}
+
 /// The verdict for a command of a given provenance. When `autonomyGranted` is
 /// true (the reader granted "Let Iris take control" once), everything that is
-/// not in the catastrophe floor runs without asking — a per-command tap on a
+/// not refused-even-under-the-grant runs without asking — a per-command tap on a
 /// vetted install is exactly the friction the grant removes. When it is false
 /// (the default, and every existing caller/test), the original three-tier
 /// behavior is unchanged.
-export function assess(command: string, provenance: Provenance, autonomyGranted = false): Risk {
+///
+/// Passing a `workingDirectory` (via the options form) also judges the folder
+/// the command will run in: a system folder, a drive root, or a `..`-escape out
+/// of the guide's own folder is refused outright, even under the grant — the
+/// command text alone cannot show where it runs, so the folder is judged
+/// separately. Mirrors macOS `GuideAutopilotRiskAssessment.assess(_:inWorkingDirectory:)`.
+export function assess(command: string, provenance: Provenance, autonomyGranted?: boolean): Risk;
+export function assess(command: string, options: AssessOptions): Risk;
+export function assess(
+  command: string,
+  provenanceOrOptions: Provenance | AssessOptions,
+  autonomyGranted = false,
+): Risk {
+  const { provenance, autonomyGranted: granted, workingDirectory } = normalizeAssessArguments(
+    provenanceOrOptions,
+    autonomyGranted,
+  );
+
   // The catastrophe floor is absolute — refused even under the grant.
   const catastrophe = firstMatch(CATASTROPHE_RULES, command);
   if (catastrophe !== undefined) {
     return { tier: "refused_outright", reason: catastrophe };
   }
 
-  if (autonomyGranted) {
+  // The folder the command will run in — also absolute, for the same reason the
+  // floor is: no consent makes running in `C:\Windows`, or a `..`-walk into it,
+  // safe. Judged before the grant can wave anything through.
+  if (workingDirectory !== undefined) {
+    const forbiddenFolder = forbiddenWorkingDirectory(workingDirectory);
+    if (forbiddenFolder !== undefined) {
+      return { tier: "refused_outright", reason: forbiddenFolder };
+    }
+    const escape = escapesIntoAForbiddenPlace(command, workingDirectory);
+    if (escape !== undefined) {
+      return { tier: "refused_outright", reason: escape };
+    }
+  }
+
+  // A model-proposed fix is judged for opacity BEFORE the grant short-circuit,
+  // because the grant a reader gives a vetted install must never launder an
+  // untrusted model's opaque or download-and-run command. Download-and-run and
+  // encoded blobs are refused outright even under the grant; the softer opacity
+  // shapes (`$(…)`, backticks) pause for a tap.
+  if (provenance === "model_proposed_fix") {
+    const hardRefusal = firstMatch(MODEL_HARD_REFUSAL_RULES, command);
+    if (hardRefusal !== undefined) {
+      return { tier: "refused_outright", reason: hardRefusal };
+    }
+    const opaque = firstMatch(OPACITY_RULES, command);
+    if (opaque !== undefined) {
+      return { tier: "needs_a_confirm_tap", reason: opaque };
+    }
+  }
+
+  if (granted) {
     return { tier: "runs_without_asking" };
   }
 
@@ -187,33 +449,40 @@ export function assess(command: string, provenance: Provenance, autonomyGranted 
   if (confirm !== undefined) {
     return { tier: "needs_a_confirm_tap", reason: confirm };
   }
-  if (provenance === "model_proposed_fix") {
-    const opaque = firstMatch(OPACITY_RULES, command);
-    if (opaque !== undefined) {
-      return { tier: "needs_a_confirm_tap", reason: opaque };
-    }
-  }
   return { tier: "runs_without_asking" };
 }
 
 /// Approves a command the gate waves through. Undefined for anything that needs
 /// a tap or is refused — callers surface those, never force them through. Honors
-/// the same autonomy grant `assess` does.
+/// the same autonomy grant and working directory `assess` does.
+export function approve(command: string, provenance: Provenance, autonomyGranted?: boolean): ApprovedCommand | undefined;
+export function approve(command: string, options: AssessOptions): ApprovedCommand | undefined;
 export function approve(
   command: string,
-  provenance: Provenance,
+  provenanceOrOptions: Provenance | AssessOptions,
   autonomyGranted = false,
 ): ApprovedCommand | undefined {
-  return assess(command, provenance, autonomyGranted).tier === "runs_without_asking" ? mint(command) : undefined;
+  const verdict =
+    typeof provenanceOrOptions === "string"
+      ? assess(command, provenanceOrOptions, autonomyGranted)
+      : assess(command, provenanceOrOptions);
+  return verdict.tier === "runs_without_asking" ? mint(command) : undefined;
 }
 
 /// Approves a confirm-tier command after the reader's explicit tap. Refused-tier
-/// commands stay refused — no tap reaches them.
+/// commands stay refused — no tap reaches them. The folder matters here too: the
+/// tap was asked for on the command as it will run, so this must not re-assess
+/// it more leniently than the ask did.
+export function approveAfterAReaderTap(command: string, provenance: Provenance, autonomyGranted?: boolean): ApprovedCommand | undefined;
+export function approveAfterAReaderTap(command: string, options: AssessOptions): ApprovedCommand | undefined;
 export function approveAfterAReaderTap(
   command: string,
-  provenance: Provenance,
+  provenanceOrOptions: Provenance | AssessOptions,
   autonomyGranted = false,
 ): ApprovedCommand | undefined {
-  const tier = assess(command, provenance, autonomyGranted).tier;
+  const tier = (typeof provenanceOrOptions === "string"
+    ? assess(command, provenanceOrOptions, autonomyGranted)
+    : assess(command, provenanceOrOptions)
+  ).tier;
   return tier === "runs_without_asking" || tier === "needs_a_confirm_tap" ? mint(command) : undefined;
 }

@@ -186,6 +186,20 @@ struct CompanionPanelView: View {
         // instant it presents, so it shows once and never ambushes them again.
         .onAppear {
             autoPresentTheSetupHelperIfThisIsTheFirstReadyLaunch()
+            // Re-measure the panel to its real content once SwiftUI has actually
+            // mounted and laid this view out. On a cold launch the panel is
+            // positioned and shown (`positionPanelBelowStatusItem`) the same
+            // runloop turn its hosting view is created, before the content has a
+            // fitting size — so it comes up at the fallback 380pt height, which
+            // clips everything below the fold of the scroll view (the guide
+            // picker, the installed apps, the account section) with no visible
+            // scrollbar. The reported "degraded" panel after a relaunch. The
+            // resize path already exists for content that grows later; firing it
+            // once here, on the next runloop turn so layout has settled, sizes
+            // the panel to the whole home instead of the pre-layout default.
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+            }
         }
     }
 

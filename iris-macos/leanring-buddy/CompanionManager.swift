@@ -1155,6 +1155,30 @@ final class CompanionManager: ObservableObject {
                 Task { await self.appInventoryService.refreshInventory() }
             }
         }
+
+        guideSessionController.surfaceTheGuideCardAtTheEye = { [weak self] in
+            self?.bringTheEyeBarForwardToShowTheOpenGuide()
+        }
+    }
+
+    /// Bring the eye's overlay and bar forward so a just-opened guide's card is
+    /// in front of the reader, and drop the settings dropdown if it was up.
+    /// Mirrors `requestOnDemandEdit`'s surfacing: the guide card lives at the eye
+    /// (`OverlayEyeGuideCard`), so the overlay has to be visible and the bar has
+    /// to be open, whichever entry point opened the guide — the settings panel's
+    /// "Follow an install guide" picker, or an `iris://guide/…` link. The picker
+    /// used to surface nothing at all, so a successful load appeared to do
+    /// nothing; this is what makes it visible.
+    private func bringTheEyeBarForwardToShowTheOpenGuide() {
+        transientHideTask?.cancel()
+        transientHideTask = nil
+        if !isOverlayVisible {
+            overlayWindowManager.hasShownOverlayBefore = true
+            overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+            isOverlayVisible = true
+        }
+        NotificationCenter.default.post(name: .clickySummonAskBar, object: nil)
+        NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
     }
 
     /// Raises the centered terminal takeover for the run autopilot just started.
@@ -1223,6 +1247,7 @@ final class CompanionManager: ObservableObject {
         guideSessionController.sendTheEyeTo = nil
         guideSessionController.stopPointingTheEye = nil
         guideSessionController.onGuideCompleted = nil
+        guideSessionController.surfaceTheGuideCardAtTheEye = nil
         guideSessionController.onAutopilotDidStart = nil
         guideSessionController.onAutopilotDidStop = nil
         autopilotTakeoverController.dismiss(afterHold: false)

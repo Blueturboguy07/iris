@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, screen, shell } from "electron";
 import { execFile } from "node:child_process";
+import os from "node:os";
 import path from "node:path";
 import { createTray } from "./tray";
 import { SettingsStore } from "./settings";
@@ -17,6 +18,8 @@ import { AutopilotController, type FinishedInstall } from "./autopilot-controlle
 import { guideBackedRecipeResolver } from "../services/autopilot/guide-recipe-resolver";
 import type { InstallRecipe } from "../services/autopilot/recipe";
 import type { FetchLike } from "../services/guide-service";
+import { FixLadder, ModelFixProposer, hostsReachedByRecipe } from "../services/autopilot/fix-ladder";
+import { firstAvailableMaintainProvider } from "../services/maintain/model-provider";
 import { MaintainController, type MaintainHost } from "./maintain/controller";
 import type { MaintainAskAnswer, MaintainIncidentSnapshot } from "../services/maintain/incident-coordinator";
 
@@ -709,8 +712,39 @@ function autopilotController(): AutopilotController {
   // guide-backed resolver as the primary path so `canInstall`/`start` answer
   // from the fetched guide, with the built-in table as the offline fallback.
   undefined,
-  productionRecipeResolver);
+  productionRecipeResolver,
+  // The self-repair ladder, powered by the reader's own model key.
+  buildFixLadderForRecipe,
+);
   return autopilot;
+}
+
+/** Builds the self-repair ladder for one install. The proposer runs on the
+ *  reader's OWN model key (the same BYO Anthropic/OpenAI seam maintain mode
+ *  uses, never a publik host) via `firstAvailableMaintainProvider`; when no key
+ *  is configured the proposer is undefined and the ladder degrades to "surface
+ *  the failure at once with a clear reason" rather than hanging. Autonomy is
+ *  granted here because an autopilot run is only ever constructed after the
+ *  reader consented (see `start`). */
+function buildFixLadderForRecipe(recipe: InstallRecipe): FixLadder {
+  const provider = firstAvailableMaintainProvider({
+    readAnthropicApiKey: () => settings.getAnthropicApiKey(),
+    readOpenAiApiKey: () => settings.getOpenAiApiKey(),
+  });
+  const proposer = provider ? new ModelFixProposer(provider) : undefined;
+  return new FixLadder(
+    proposer,
+    recipe,
+    hostsReachedByRecipe(recipe),
+    {
+      shellPath: process.platform === "win32" ? "powershell.exe" : process.env.SHELL ?? "/bin/zsh",
+      operatingSystemVersion: `${os.type()} ${os.release()}`,
+      architecture: os.arch(),
+      knownToolVersions: [],
+    },
+    process.platform,
+    true,
+  );
 }
 
 function handleGuideCommand(command: string, args: Record<string, unknown>): unknown {
@@ -786,6 +820,14 @@ function handleGuideCommand(command: string, args: Record<string, unknown>): unk
 
     case "autopilot_reader_done":
       return autopilotController().readerFinished();
+
+    case "autopilot_retry":
+      // The reader chose "Try again" on a surfaced (self-repair-exhausted) step.
+      return autopilotController().retry();
+
+    case "autopilot_continue_past":
+      // The reader chose "Continue past it" on a surfaced step.
+      return autopilotController().continuePast();
 
     case "foreground_app_identity":
       // Windows has no cross-process foreground-app API without a native module.

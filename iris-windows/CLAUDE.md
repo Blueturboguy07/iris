@@ -138,7 +138,8 @@ allowlist of names, and the test table — in that order.
 the macOS Swift autopilot. It is pure and unit-tested (`tests/autopilot-*.test.ts`):
 `recipe.ts` (the schema), `risk.ts` (the command gate), `runner.ts` (the no-click
 state machine driven against a `ShellSession`), `shell.ts` (the interface +
-`MockShell`), `recipes.ts` (the built-in recipes). The real shell —
+`MockShell`), `recipes.ts` (the built-in recipes), `fix-ladder.ts` (the
+self-repair ladder). The real shell —
 `src/main/powershell-session.ts` — spawns one PowerShell per command and threads
 the working directory forward, so it lives in `main/`; its pure parsing helpers
 are unit-tested and the whole thing is exercised end to end by
@@ -174,6 +175,30 @@ gate (refuse / one tap / run) that mirrors the macOS
 `GuideAutopilotRiskAssessment.swift`, and an un-forgeable `ApprovedCommand` the
 shell is the only thing that will run. If you add a recipe, change the derivation,
 or loosen the gate, keep those three intact and update the tests.
+
+**The failure-fix ladder (`fix-ladder.ts`, self-repair).** When a `command`
+step exits non-zero and a `FixLadder` is wired, the runner asks the reader's OWN
+model (the maintain BYO Anthropic/OpenAI seam, never a publik host) for ONE
+structured fix, runs it under `risk.ts` at `model_proposed_fix` provenance,
+retries the original, and only surfaces to the reader once it runs out of rungs,
+budget, or ideas. Three guardrails, ported from the macOS
+`GuideAutopilot*FixProposer` + `climbTheFixLadder`: (1) a **host allowlist** —
+`validatedFix` refuses a proposed command reaching any host the recipe's own
+commands/links do not already name (the structural answer to a hallucinated
+hostname); (2) the **stricter gate** — a model fix is assessed at
+`model_proposed_fix`, where opacity (`$()`, backticks) trips a tap even for a
+command that would otherwise run; (3) **caps + a progress guard** — 2 rungs/step,
+6 fixes/guide, 8 model calls/guide, and 5 consecutive spending-but-never-running
+steps. No key configured ⇒ the ladder surfaces immediately with a clear reason,
+it never hangs. The model transport is the Codex plain-text contract (ONE fenced
+json block → the ONE validator both routes share), because `respond()` has no
+tool-use wire format to force. Exhaustion surfaces the failing command with the
+"Try again / Continue past it" choice (`autopilot_retry` /
+`autopilot_continue_past` IPC → `AutopilotRunner.retryCurrentStep` /
+`continuePastCurrentStep`). The ladder is INJECTED (default undefined = surface
+at once, the old behaviour), so it is a small hook in `runner.ts` and the whole
+loop is unit-tested in `tests/autopilot-fix-ladder.test.ts` with a fake provider
+and a `MockShell`.
 
 **Autonomy grant (mirrors the macOS side).** For a vetted, pinned recipe the
 per-command taps are friction, so the reader grants "Let Iris take control of

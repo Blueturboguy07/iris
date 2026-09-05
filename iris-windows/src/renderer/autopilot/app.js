@@ -198,6 +198,14 @@
         ]);
         break;
 
+      case "fixProposed":
+        // The fix ladder's plain-English line — what the model diagnosed or what
+        // Iris is about to try — shown between the failing command and its retry.
+        stopRunningFriendlyLine();
+        addLine(`◐ ${event.diagnosis}`, "fix");
+        await sleep(180);
+        break;
+
       case "surfaced":
         if (runningCursor) {
           runningCursor.remove();
@@ -206,9 +214,17 @@
         stopRunningFriendlyLine();
         addLine(`⚠ ${event.reason}`, "info");
         if (event.failingCommand) addLine(event.failingCommand, "output");
-        showTray("Iris couldn't finish this one on its own — take it from here.", [
-          { label: "Try again", primary: true, onClick: () => resume("autopilot_reader_done") },
-        ]);
+        // The "Your turn" row, mirroring the macOS surface: Iris tried to repair
+        // this and couldn't, so the reader chooses — re-run the same step, or
+        // skip it and carry on with the rest of the install.
+        showTray(
+          "Iris couldn't finish this one on its own — take it from here.",
+          [
+            { label: "Try again", primary: true, onClick: () => resume("autopilot_retry") },
+            { label: "Continue past it", onClick: () => resume("autopilot_continue_past") },
+          ],
+          { eye: true },
+        );
         break;
 
       case "finished":

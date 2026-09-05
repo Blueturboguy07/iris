@@ -20,6 +20,11 @@ import { commandForPlatform, workingDirectoryForPlatform } from "./recipe";
 import type { ApprovedCommand, Provenance } from "./risk";
 import { approve, approveAfterAReaderTap, assess } from "./risk";
 import { friendlyLabel } from "./friendly-label";
+// Type-only: the ladder is INJECTED (the controller builds it with the model
+// provider + the recipe's hosts), so the runner needs its shape, never its
+// module at runtime — which also keeps the fix-ladder↔runner import a type cycle,
+// not a value one.
+import type { FixLadder } from "./fix-ladder";
 import {
   DEFAULT_COMMAND_TIMEOUT_MS,
   LONG_RUNNING_GRACE_MS,
@@ -84,6 +89,10 @@ export type AutopilotEvent =
   /// `text`, for a non-technical reader (see `friendly-label.ts`).
   | { readonly type: "commandStarted"; readonly text: string; readonly friendlyLabel: string }
   | { readonly type: "commandFinished"; readonly exitCode: number; readonly output: string }
+  /// The fix ladder's plain-English line for what the model diagnosed / did on a
+  /// failed command, shown between the failing command and its retry (or the
+  /// surface). Streamed by `FixLadder`, never by a clean step.
+  | { readonly type: "fixProposed"; readonly diagnosis: string }
   /// The main process should open this URL/app; opening it is the whole step.
   | { readonly type: "openRequested"; readonly href: string }
   /// Only the reader can finish this. Float the eye to it and show this.
@@ -134,6 +143,12 @@ export class AutopilotRunner {
     // production an autopilot run is always granted; kept a parameter (default
     // false) so the un-granted three-tier behavior stays unit-testable.
     private readonly autonomyGranted: boolean = false,
+    // The self-repair ladder, built once per install by the controller with the
+    // reader's own model provider and this recipe's reachable hosts. Undefined
+    // keeps the old behavior EXACTLY — a failed command surfaces at once instead
+    // of trying to recover — which is what every existing caller and test relies
+    // on. When present, a non-zero exit runs the ladder before surfacing.
+    private readonly fixLadder: FixLadder | undefined = undefined,
   ) {}
 
   private commandFor(step: RecipeStep): string | undefined {
@@ -312,14 +327,20 @@ export class AutopilotRunner {
         this.emit({ type: "commandFinished", exitCode: 0, output: outcome.output });
         this.advance();
         return { kind: "advanced" };
-      case "failed":
+      case "failed": {
         this.emit({ type: "commandFinished", exitCode: outcome.exitCode, output: outcome.output });
-        // The failure ladder (a model proposing a fix) is a later increment; for
-        // now a failed command surfaces rather than pretending to recover.
+        // Self-repair before surfacing: when a ladder is wired, a non-zero exit
+        // gets a model-proposed fix (run under the gate) and a retry of the
+        // original before the reader ever sees a dead terminal. Without a ladder
+        // the behavior is unchanged — surface at once.
+        if (this.fixLadder !== undefined) {
+          return this.runFixLadder(this.fixLadder, approved, step, rawCommand, outcome.exitCode, outcome.output, shell);
+        }
         return {
           kind: "blocked",
           status: this.surface("That command didn't finish cleanly. Here's where it stopped.", rawCommand),
         };
+      }
       case "timed_out":
         return {
           kind: "blocked",
@@ -328,6 +349,76 @@ export class AutopilotRunner {
       case "session_failed":
         return { kind: "blocked", status: { type: "sessionFailed" } };
     }
+  }
+
+  /// Hands a failed command to the fix ladder and translates the ladder's
+  /// verdict back into the runner's own vocabulary: a repaired step advances, a
+  /// hand-back floats the eye, and an exhausted ladder surfaces the failing
+  /// command with the diagnosis the ladder settled on (the renderer offers "Try
+  /// again / Continue past it" on that surface).
+  ///
+  /// `retryOriginal` re-runs the ALREADY-APPROVED original command — the ladder
+  /// never needs to re-approve it, because the runner minted it once and owns
+  /// where it runs. A repair may have moved the shell, so the declared folder is
+  /// re-entered first, exactly as the first run did.
+  private async runFixLadder(
+    ladder: FixLadder,
+    approved: ApprovedCommand,
+    step: RecipeStep,
+    rawCommand: string,
+    exitCode: number,
+    output: string,
+    shell: ShellSession,
+  ): Promise<StepProgress> {
+    const result = await ladder.repair({
+      step,
+      command: rawCommand,
+      exitCode,
+      output,
+      workingDirectory: shell.currentDirectory(),
+      shell,
+      retryOriginal: async () => {
+        const folder = workingDirectoryForPlatform(step, this.platform);
+        if (folder !== undefined) {
+          const moved = await this.moveInto(folder, shell);
+          if (!moved) {
+            return { kind: "failed", exitCode: 1, output: `Iris couldn't move back into ${folder} to retry.` };
+          }
+        }
+        return step.longRunning
+          ? shell.runLongRunning(approved, step.readyWhen, LONG_RUNNING_GRACE_MS)
+          : shell.run(approved, DEFAULT_COMMAND_TIMEOUT_MS);
+      },
+      emit: (event) => this.emit(event),
+    });
+
+    if (result.kind === "repaired") {
+      this.advance();
+      return { kind: "advanced" };
+    }
+    if (result.kind === "hand_to_reader") {
+      this.emit({ type: "handedToReader", instruction: result.instruction });
+      return {
+        kind: "blocked",
+        status: { type: "needsReader", stepIndex: this.index, instruction: result.instruction },
+      };
+    }
+    return { kind: "blocked", status: this.surface(result.diagnosis, rawCommand) };
+  }
+
+  /// The reader chose "Try again" on a surfaced step: re-run the SAME step from
+  /// the top (its command, its folder move), rather than skipping it. Distinct
+  /// from `continuePastCurrentStep`, which skips it. Mirrors the macOS surface's
+  /// two-way "Try again / Continue past it" choice.
+  async retryCurrentStep(shell: ShellSession): Promise<RunnerStatus> {
+    return this.runUntilBlocked(shell);
+  }
+
+  /// The reader chose "Continue past it" on a surfaced step: skip the failing
+  /// step and carry on with the rest of the install.
+  async continuePastCurrentStep(shell: ShellSession): Promise<RunnerStatus> {
+    this.advance();
+    return this.runUntilBlocked(shell);
   }
 
   /// Moves `shell` into the folder the step declared, and reports whether it

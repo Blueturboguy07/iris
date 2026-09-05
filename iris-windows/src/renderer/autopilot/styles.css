@@ -209,6 +209,14 @@ body {
   font-weight: 600;
 }
 
+/* The fix ladder's diagnosis line — Iris explaining what it is trying on a
+   failed command, set apart from raw output so it reads as Iris's own voice. */
+.line.fix {
+  color: var(--accent, #8ab4f8);
+  font-style: italic;
+  margin-top: 4px;
+}
+
 .cursor {
   display: inline-block;
   width: 8px;

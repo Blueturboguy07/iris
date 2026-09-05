@@ -12,6 +12,7 @@
 import { recipeForSlug } from "../services/autopilot/recipes";
 import { recipeClonesARepo, type InstallRecipe, type RecipeOutput } from "../services/autopilot/recipe";
 import { AutopilotRunner, type AutopilotEvent, type RunnerStatus } from "../services/autopilot/runner";
+import type { FixLadder } from "../services/autopilot/fix-ladder";
 import type { ShellSession } from "../services/autopilot/shell";
 import { PowerShellSession } from "./powershell-session";
 import { PosixShellSession } from "./posix-shell-session";
@@ -81,6 +82,12 @@ export class AutopilotController {
     // Injected so tests can drive recipes the built-in set does not carry; in
     // production it is the reviewed, version-pinned recipe registry.
     private readonly resolveRecipe: (slug: string) => InstallRecipe | undefined = recipeForSlug,
+    // Builds the self-repair ladder for one install, or undefined when the app
+    // has no model key to power it — the ladder then degrades to "surface
+    // immediately". Injected so `index.ts` can wire the reader's own model
+    // provider and the OS strings while this class stays testable with none; the
+    // default gives no ladder, so a failed command surfaces exactly as before.
+    private readonly makeFixLadder: (recipe: InstallRecipe) => FixLadder | undefined = () => undefined,
   ) {}
 
   /// Whether Iris knows how to install this app on Windows.
@@ -110,8 +117,10 @@ export class AutopilotController {
     this.shell = this.makeShell();
     this.recipe = recipe;
     // Granted, so the runner runs the whole vetted install hands-off (only the
-    // catastrophe floor can still stop a command).
-    this.runner = new AutopilotRunner(recipe, process.platform, true);
+    // catastrophe floor can still stop a command). The ladder, when the reader
+    // has a model key, lets a failed command self-repair before it ever reaches
+    // them; undefined when there is no key, so it surfaces at once.
+    this.runner = new AutopilotRunner(recipe, process.platform, true, this.makeFixLadder(recipe));
     return this.pump(await this.runner.runUntilBlocked(this.shell));
   }
 
@@ -129,6 +138,22 @@ export class AutopilotController {
       throw new Error("No install is running.");
     }
     return this.pump(await this.runner.readerFinishedCurrentStep(this.shell));
+  }
+
+  /// The reader chose "Try again" on a surfaced step — re-run it from the top.
+  async retry(): Promise<RunnerStatus> {
+    if (this.runner === undefined || this.shell === undefined) {
+      throw new Error("No install is running.");
+    }
+    return this.pump(await this.runner.retryCurrentStep(this.shell));
+  }
+
+  /// The reader chose "Continue past it" on a surfaced step — skip it and go on.
+  async continuePast(): Promise<RunnerStatus> {
+    if (this.runner === undefined || this.shell === undefined) {
+      throw new Error("No install is running.");
+    }
+    return this.pump(await this.runner.continuePastCurrentStep(this.shell));
   }
 
   dispose(): void {

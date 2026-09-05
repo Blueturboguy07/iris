@@ -14,6 +14,7 @@ import { classifyExternalLink, refusalMessage } from "../services/external-links
 import { boundedCommandOutput, toolSpecFor } from "../services/tool-versions";
 import { secretStorageIsAvailable } from "./secrets";
 import { AutopilotController, type FinishedInstall } from "./autopilot-controller";
+import { RegistryRefreshingToolProbe, RealDetourClock } from "./setup-detour-host";
 import { MaintainController, type MaintainHost } from "./maintain/controller";
 import type { MaintainAskAnswer, MaintainIncidentSnapshot } from "../services/maintain/incident-coordinator";
 
@@ -680,7 +681,15 @@ function autopilotController(): AutopilotController {
       if (output.type === "local_web") openExternalSafely(output.url);
       broadcast("autopilot:finished", output);
     },
-  });
+  },
+  // Leave the shell factory and recipe registry at their defaults…
+  undefined,
+  undefined,
+  // …and wire the setup-recovery detour's real seams: a tool probe that re-reads
+  // the PATH from the registry (so a tool the detour just installed is seen) and
+  // the wall clock. Wiring them is what turns the detour on in production; the
+  // unit suite leaves them out and injects fakes.
+  { probe: new RegistryRefreshingToolProbe(), clock: new RealDetourClock() });
   return autopilot;
 }
 

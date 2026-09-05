@@ -36,11 +36,24 @@ export function psSingleQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
-/// The script Iris wraps every command in: pin the location, run the command in
-/// its own block, then report the exit code and the resulting location on marker
-/// lines the parser looks for.
+/// Rebuilds `$env:Path` from the machine and user `Path` values in the registry,
+/// the live source of truth an installer writes to. Every command runs in a fresh
+/// `powershell.exe` that inherits the Electron process's PATH — captured when Iris
+/// launched, so blind to anything installed since (a winget/rustup/uv install the
+/// autopilot just ran). Re-reading the registry per command is what lets the very
+/// next step see the tool the last step installed, without restarting Iris. This
+/// is the Windows answer to macOS's `reloadTheReadersEnvironmentIntoTheShell`.
+export const REFRESH_PATH_FROM_REGISTRY =
+  "$env:Path = " +
+  "[System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + " +
+  "[System.Environment]::GetEnvironmentVariable('Path','User')";
+
+/// The script Iris wraps every command in: refresh PATH from the registry, pin
+/// the location, run the command in its own block, then report the exit code and
+/// the resulting location on marker lines the parser looks for.
 export function wrapCommandScript(command: string, cwd: string): string {
   return [
+    REFRESH_PATH_FROM_REGISTRY,
     `Set-Location -LiteralPath ${psSingleQuote(cwd)}`,
     "$global:LASTEXITCODE = 0",
     `& { ${command} }`,
@@ -137,7 +150,7 @@ export class PowerShellSession implements ShellSession {
     // A dev server never exits. Start it in its own PowerShell pinned to the
     // current directory, then resolve as soon as its readiness marker appears —
     // or after the grace period — while leaving it running.
-    const script = `Set-Location -LiteralPath ${psSingleQuote(this.cwd)}\n& { ${command.text} }\n`;
+    const script = `${REFRESH_PATH_FROM_REGISTRY}\nSet-Location -LiteralPath ${psSingleQuote(this.cwd)}\n& { ${command.text} }\n`;
     const child = spawn("powershell.exe", [...POWERSHELL_ARGS, "-EncodedCommand", encodeForPowerShell(script)], {
       windowsHide: true,
     });

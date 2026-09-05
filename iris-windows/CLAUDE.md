@@ -306,10 +306,14 @@ Reconciled invariants worth keeping:
   `watch.ts` read. (The earlier split where the derivation wrote a separate
   `verifyExpectations` the runner never read is gone; do not reintroduce it.)
 - **The runner constructor arg order is** `(recipe, platform, autonomyGranted,
-  fixLadder?, watchExecutor?)`; the **controller's is** `(host, makeShell?,
-  resolveRecipe?, makeFixLadder?, detourSeams?, makeWatchExecutor?)`. Every hook
-  past `autonomyGranted`/`makeShell` is optional and undefined-tolerant, so the
-  pure suite drives the runner with none of them.
+  fixLadder?, watchExecutor?, eventSink?)`; the **controller's is** `(host,
+  makeShell?, resolveRecipe?, makeFixLadder?, detourSeams?, makeWatchExecutor?)`.
+  Every hook past `autonomyGranted`/`makeShell` is optional and undefined-tolerant,
+  so the pure suite drives the runner with none of them. `eventSink`, when set,
+  makes the runner forward each event live (the controller wires it to
+  `forwardEvent`) instead of buffering it for `drainEvents` — so a `handedToReader`
+  reaches the reader before a multi-minute watch begins, not after
+  `runUntilBlocked` finally resolves.
 - **Self-heal runs before the fix ladder** (deterministic before model), and both
   run before anything surfaces.
 

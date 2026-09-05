@@ -4,7 +4,12 @@ import { AutopilotController, type AutopilotHost, type FinishedInstall } from ".
 import type { InstallRecipe } from "../src/services/autopilot/recipe";
 import type { AutopilotEvent } from "../src/services/autopilot/runner";
 import { MockShell } from "../src/services/autopilot/shell";
-import { wingetInstallCommand, type DetourClock, type ToolProbe } from "../src/services/autopilot/setup-detour";
+import {
+  wingetInstallCommand,
+  type DetourClock,
+  type ToolProbe,
+  type ToolProbeResult,
+} from "../src/services/autopilot/setup-detour";
 
 /**
  * The controller wiring for the setup-recovery detour: with the detour seams
@@ -16,6 +21,7 @@ class RecordingHost implements AutopilotHost {
   readonly events: AutopilotEvent[] = [];
   readonly opened: string[] = [];
   finishedInstall: FinishedInstall | undefined;
+  aborted = false;
   async ensureAutonomyGranted(): Promise<boolean> {
     return true;
   }
@@ -29,6 +35,9 @@ class RecordingHost implements AutopilotHost {
   onFinished(finishedInstall: FinishedInstall): void {
     this.finishedInstall = finishedInstall;
   }
+  onAborted(): void {
+    this.aborted = true;
+  }
 }
 
 class FakeToolProbe implements ToolProbe {
@@ -36,9 +45,10 @@ class FakeToolProbe implements ToolProbe {
     private readonly answers: Record<string, boolean[]>,
     private readonly wingetPresent = true,
   ) {}
-  async isInstalled(tool: string): Promise<boolean> {
+  async probe(tool: string): Promise<ToolProbeResult> {
     const sequence = this.answers[tool] ?? [false];
-    return sequence.length > 1 ? sequence.shift()! : sequence[0]!;
+    const answer = sequence.length > 1 ? sequence.shift()! : sequence[0]!;
+    return answer ? "installed" : "notInstalled";
   }
   async isWingetAvailable(): Promise<boolean> {
     return this.wingetPresent;
@@ -118,5 +128,37 @@ describe("the controller's setup detour", () => {
     // The recipe's own steps never ran — the detour stopped first.
     expect(shell.commandsRun).not.toContain("git clone https://example.com/x.git");
     expect(host.events.some((e) => e.type === "surfaced")).toBe(true);
+  });
+
+  it("the red 'Stop' during the detour ends the run without starting the recipe or crashing", async () => {
+    const host = new RecordingHost();
+    const shell = MockShell.alwaysSucceeds();
+    const holder: { controller?: AutopilotController } = {};
+    // git never appears and winget is absent, so the detour opens the page and
+    // polls; the reader hits Stop while it is mid-wait.
+    const probe = new FakeToolProbe({ git: [false], node: [true] }, false);
+    const clock: DetourClock = {
+      now: () => 0, // never reaches the deadline on its own
+      sleep: async () => {
+        holder.controller!.abort();
+      },
+    };
+    const controller = new AutopilotController(
+      host,
+      () => shell,
+      (slug) => (slug === recipe.slug ? recipe : undefined),
+      () => undefined,
+      { probe, clock },
+    );
+    holder.controller = controller;
+
+    const status = await controller.start("demo");
+
+    // Aborted cleanly — the old code resumed past the detour and called
+    // runUntilBlocked on a shell abort() had already disposed to undefined.
+    expect(status.type).toBe("aborted");
+    expect(shell.commandsRun).not.toContain("git clone https://example.com/x.git");
+    // The window was folded away via onAborted.
+    expect(host.aborted).toBe(true);
   });
 });

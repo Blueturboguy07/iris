@@ -145,6 +145,10 @@ export class AutopilotController {
     this.dispose();
     this.shell = this.makeShell();
     this.recipe = recipe;
+    // Captured so the detour, and the resume after it, can tell whether `abort()`
+    // ran while they were suspended: `abort()` disposes the controller, which
+    // nulls `this.shell`, so `this.shell !== installShell` is the abort signal.
+    const installShell = this.shell;
 
     // Before the recipe's first step, walk the setup-recovery detour: check the
     // prerequisites the recipe needs but does not install (git, node), and if
@@ -154,13 +158,24 @@ export class AutopilotController {
     // fail on a missing tool. Skipped when the detour seams are not wired
     // (unit tests that are not exercising it).
     if (this.detourSeams !== undefined) {
-      const detour = await runSetupDetour(recipe, this.shell, {
+      const detour = await runSetupDetour(recipe, installShell, {
         probe: this.detourSeams.probe,
         clock: this.detourSeams.clock,
         platform: process.platform,
         autonomyGranted: true,
         emit: (event) => this.forwardEvent(event),
+        // The red 'Stop' disposes this controller (nulling `this.shell`); once it
+        // has, the detour must stop rather than keep installing tools and opening
+        // pages behind a folded-away window. It also stops the resume below from
+        // handing a disposed shell to the runner.
+        shouldCancel: () => this.shell !== installShell,
       });
+      // The abort raced the detour to completion: the shell it would run on is
+      // gone. End here without building the runner — the crash the old code hit
+      // was `runUntilBlocked(undefined)` after exactly this.
+      if (detour.kind === "cancelled" || this.shell !== installShell) {
+        return { type: "aborted", stepIndex: 0 };
+      }
       if (detour.kind === "surfaced") {
         const status: RunnerStatus = { type: "surfaced", stepIndex: 0, reason: detour.reason };
         this.host.emitEvent({ type: "surfaced", reason: detour.reason });
@@ -180,8 +195,18 @@ export class AutopilotController {
       true,
       this.makeFixLadder(recipe),
       this.makeWatchExecutor(),
+      // Live event sink: forward each event the instant the runner emits it —
+      // exactly as the setup detour above already does — so a `handedToReader`
+      // ("your turn") or a chained run reaches the renderer as it happens, not
+      // batched when `runUntilBlocked` finally resolves after a multi-minute
+      // watch. `pump`'s `drainEvents` then returns empty, so nothing is
+      // double-sent.
+      (event) => this.forwardEvent(event),
     );
-    return this.pump(await this.runner.runUntilBlocked(this.shell));
+    // `installShell`, not `this.shell`: the guard above proved they are the same
+    // object here, and the local is provably non-undefined, so a resume never
+    // hands the runner a shell an abort disposed.
+    return this.pump(await this.runner.runUntilBlocked(installShell));
   }
 
   /// The reader tapped "run it" / "skip" on a confirm-tier command.

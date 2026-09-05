@@ -248,7 +248,13 @@ export class PowerShellSession implements ShellSession {
         resolve(value);
       };
       const timer = setTimeout(() => {
-        child.kill();
+        // Kill the whole tree, not just the top PowerShell. A timed-out command
+        // (including the setup detour's unattended `winget install`, which runs
+        // under the 15-minute default deadline) has launched children —
+        // winget/msiexec/the installer — that a bare `child.kill()` would orphan,
+        // left waiting on input nobody will supply. The manual red-'Stop' path
+        // already reaps the tree via `killTree`; the deadline path must too.
+        this.killTree(child);
         finish("timed_out");
       }, deadlineMs);
 

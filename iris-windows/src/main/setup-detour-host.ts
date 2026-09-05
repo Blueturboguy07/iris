@@ -18,17 +18,21 @@
 import { execFile, spawn } from "node:child_process";
 
 import { isAllowlistedTool, toolSpecFor } from "../services/tool-versions";
-import type { DetourClock, ToolProbe } from "../services/autopilot/setup-detour";
+import type { DetourClock, ToolProbe, ToolProbeResult } from "../services/autopilot/setup-detour";
 import { REFRESH_PATH_FROM_REGISTRY, encodeForPowerShell } from "./powershell-session";
 
 const POWERSHELL_ARGS = ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass"];
 const PROBE_TIMEOUT_MS = 10_000;
 
-/// Whether a `Get-Command <tool>`, run in a PowerShell whose PATH was just
-/// refreshed from the registry, finds the tool. The tool name is only ever an
+/// What a `Get-Command <tool>`, run in a PowerShell whose PATH was just refreshed
+/// from the registry, concludes: `installed` when it exits 0, `notInstalled` when
+/// it exits 1 (Get-Command found nothing), and `couldNotBeChecked` when the probe
+/// times out or the process fails to spawn — because a probe that never ran has
+/// NOT established the tool is missing, and treating it as missing would march
+/// the reader into an install they may not need. The tool name is only ever an
 /// allowlisted one (guarded by the caller and again here), so it is safe to
 /// interpolate — there is no guide text in this path.
-function findsToolWithFreshPath(tool: string): Promise<boolean> {
+function findsToolWithFreshPath(tool: string): Promise<ToolProbeResult> {
   return new Promise((resolve) => {
     const script = [
       REFRESH_PATH_FROM_REGISTRY,
@@ -41,33 +45,41 @@ function findsToolWithFreshPath(tool: string): Promise<boolean> {
       { windowsHide: true },
     );
     let settled = false;
-    const finish = (found: boolean): void => {
+    const finish = (result: ToolProbeResult): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(found);
+      resolve(result);
     };
     const timer = setTimeout(() => {
       child.kill();
-      finish(false);
+      finish("couldNotBeChecked");
     }, PROBE_TIMEOUT_MS);
-    child.on("error", () => finish(false));
-    child.on("exit", (code) => finish(code === 0));
+    child.on("error", () => finish("couldNotBeChecked"));
+    // A null exit code means the process was killed (e.g. the timeout above won
+    // the race) rather than exiting on its own — not proof the tool is absent.
+    child.on("exit", (code) =>
+      finish(code === 0 ? "installed" : code === null ? "couldNotBeChecked" : "notInstalled"),
+    );
   });
 }
 
-/// Whether the tool answers its allowlisted `--version` probe — the check used
-/// when Iris runs on a Mac to exercise the flow (the login shell the POSIX
-/// session drives already carries the developer's PATH, so no registry refresh
-/// applies). Runs the exact executable+args `tool-versions.ts` sanctions, never
-/// anything built from recipe text.
-function answersItsVersionProbe(tool: string): Promise<boolean> {
+/// What the tool's allowlisted `--version` probe concludes — the check used when
+/// Iris runs on a Mac to exercise the flow (the login shell the POSIX session
+/// drives already carries the developer's PATH, so no registry refresh applies).
+/// Runs the exact executable+args `tool-versions.ts` sanctions, never anything
+/// built from recipe text. A clean run is `installed`; a timeout/kill is
+/// `couldNotBeChecked` (the probe did not finish); any other failure — the
+/// executable is missing (ENOENT) or exited non-zero — is `notInstalled`.
+function answersItsVersionProbe(tool: string): Promise<ToolProbeResult> {
   const spec = toolSpecFor(tool);
-  if (spec === null) return Promise.resolve(false);
+  if (spec === null) return Promise.resolve("couldNotBeChecked");
   const [executable, args] = spec;
   return new Promise((resolve) => {
     execFile(executable, [...args], { windowsHide: true, timeout: PROBE_TIMEOUT_MS, shell: false }, (error) => {
-      resolve(!error);
+      if (!error) return resolve("installed");
+      const timedOut = (error as NodeJS.ErrnoException & { killed?: boolean }).killed === true;
+      resolve(timedOut ? "couldNotBeChecked" : "notInstalled");
     });
   });
 }
@@ -76,13 +88,15 @@ function answersItsVersionProbe(tool: string): Promise<boolean> {
 /// freshly-refreshed PATH on Windows (so an install the detour just ran is seen),
 /// and a plain version probe on macOS/Linux (the dev-testing host).
 export class RegistryRefreshingToolProbe implements ToolProbe {
-  async isInstalled(tool: string): Promise<boolean> {
-    if (!isAllowlistedTool(tool)) return false;
+  async probe(tool: string): Promise<ToolProbeResult> {
+    // A tool the allowlist does not know cannot be probed by name — that is a
+    // "could not check", NOT a "definitely missing", so the detour leaves it be.
+    if (!isAllowlistedTool(tool)) return "couldNotBeChecked";
     return process.platform === "win32" ? findsToolWithFreshPath(tool) : answersItsVersionProbe(tool);
   }
 
   async isWingetAvailable(): Promise<boolean> {
-    return this.isInstalled("winget");
+    return (await this.probe("winget")) === "installed";
   }
 }
 

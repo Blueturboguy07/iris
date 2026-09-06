@@ -1557,6 +1557,22 @@ final class GuideSessionController: ObservableObject {
             autonomyGrant.grant()
         }
         autopilotBlockedExplanation = nil
+        // The reader explicitly asking Iris to run this step is exactly the
+        // same "no longer parked here on purpose" moment `performPrimaryAction`
+        // already clears this for — but "Let Iris run it" is wired straight to
+        // `startAutopilot()` from the eye bar (never through
+        // `performPrimaryAction`), so this flag survived untouched. Left set,
+        // it silently outlives the reason it was set for: go Back to a step
+        // (`readerDeliberatelyReturnedToThisStep = true`, so a live signal
+        // does not re-advance a step the reader is re-reading on purpose),
+        // then kill what that step depends on and press "Let Iris run it" to
+        // have Iris fix it — the command re-runs, the watch loop notices the
+        // real world is right again, and `onVerdict` discards that verdict
+        // forever because this was never cleared. From the reader's chair that
+        // is indistinguishable from the button doing nothing: FreeHarmony fix
+        // round (Sep 2026), the "kill the dev server, then 'Let Iris run it'"
+        // live repro.
+        readerDeliberatelyReturnedToThisStep = false
         let context = GuideAutopilotGuideContext(
             slug: guide.appSlug,
             version: guide.version,

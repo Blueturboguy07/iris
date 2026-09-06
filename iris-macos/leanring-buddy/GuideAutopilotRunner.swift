@@ -362,6 +362,19 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         shellSession.onOutputLine = { [weak self] line in
             self?.transcript.append(.output(line: line))
         }
+        // The dev-server session's real output — its ready banner included —
+        // has to reach the same transcript, or the takeover terminal a reader
+        // watches (and the screen the WatchLoop's `visual` check reads) is left
+        // showing nothing but the static "is starting from source" line
+        // forever, however long the server has actually been up. Before this,
+        // only `shellSession` was wired, so a dev-server step's own output
+        // never appeared anywhere: `curl` could prove the app was serving
+        // within 90 seconds while the screen the reader and the watch loop
+        // both saw never changed, and a step whose only completion signal is
+        // `visual` then has no way to ever fire.
+        longRunningSession.onOutputLine = { [weak self] line in
+            self?.transcript.append(.output(line: line))
+        }
     }
 
     // MARK: - Session lifecycle

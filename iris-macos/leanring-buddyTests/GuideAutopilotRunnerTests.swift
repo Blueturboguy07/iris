@@ -107,6 +107,41 @@ struct GuideAutopilotRunnerTests {
         )
     }
 
+    // MARK: - Dev-server output must reach the transcript
+
+    @Test func longRunningSessionOutputReachesTheTranscript() async {
+        // FreeHarmony fix round (Sep 2026), Bug 1: a live run's own dev server
+        // (`pnpm dev`) was serving real HTML within ~90s (confirmed by
+        // `curl`), yet the takeover terminal stayed frozen on the static "is
+        // starting from source" placeholder for 5+ minutes, and the guide
+        // never advanced. `GuideAutopilotRunner.init` wired
+        // `shellSession.onOutputLine` into the transcript but never
+        // `longRunningSession.onOutputLine` — so a dev server's real output,
+        // its ready banner included, never reached the screen the reader was
+        // watching, nor the screen the WatchLoop's `visual` check reads. This
+        // pins that BOTH sessions are wired, not only the main one.
+        let main = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")])
+        let long = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")])
+        let runner = Self.runner(shell: main, longRunning: long)
+
+        // Simulate the real pty callback the long-running session's own
+        // output would drive — exactly what a real `pnpm dev` ready banner
+        // looks like arriving line by line.
+        long.onOutputLine?("▲ Next.js 15.0.0")
+        long.onOutputLine?("- Local:        http://localhost:3000")
+
+        let outputLines = runner.transcript.compactMap { entry -> String? in
+            if case .output(let line) = entry { return line }
+            return nil
+        }
+        #expect(
+            outputLines.contains("- Local:        http://localhost:3000"),
+            "a dev server's real output must reach the same transcript the main " +
+            "session's output does, or the terminal (and the WatchLoop's screen) " +
+            "never shows it and a visual-only watch step can never fire"
+        )
+    }
+
     // MARK: - The escape hatch
 
     @Test func theRedButtonCancelsBothTheMainAndTheLongRunningSession() async {

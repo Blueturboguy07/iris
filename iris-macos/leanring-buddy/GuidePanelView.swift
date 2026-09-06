@@ -438,8 +438,22 @@ struct GuidePanelView: View {
                 }
 
                 if let verifierLabel = step.verifierLabel, !verifierLabel.isEmpty {
+                    // NOT a checkmark: this describes how the CURRENT, not-yet-
+                    // finished step will be judged done — a step whose own
+                    // condition were already true would have advanced the guide
+                    // past it, so this row is never describing something that
+                    // has happened. A filled checkmark here read as "confirmed"
+                    // to a reader who escape-hatched out of a killed dev-server
+                    // step and then pressed Next by hand through "open" and
+                    // "verify": each card showed this same glyph next to "loads
+                    // in the browser" / "a result is displayed" although
+                    // neither had been watched, confirmed, or was even true
+                    // (the server Iris had just killed), and it read as Iris
+                    // telling them the dead link it handed them had worked
+                    // (FreeHarmony fix round, Sep 2026). `circle` carries no
+                    // completion claim.
                     HStack(alignment: .top, spacing: 6) {
-                        Image(systemName: "checkmark.circle")
+                        Image(systemName: "circle")
                             .font(.system(size: 10))
                             .foregroundColor(DS.Colors.textTertiary)
                         Text(verifierLabel)
@@ -657,8 +671,11 @@ struct GuidePanelView: View {
                 }
 
                 if let verifierLabel = setupStep.verifierLabel, !verifierLabel.isEmpty {
+                    // Same reasoning as the step card's own verifierLabel row
+                    // above: a description of how completion will be judged,
+                    // not a claim that it already has been.
                     HStack(alignment: .top, spacing: 6) {
-                        Image(systemName: "checkmark.circle")
+                        Image(systemName: "circle")
                             .font(.system(size: 10))
                             .foregroundColor(DS.Colors.textTertiary)
                         Text(verifierLabel)

@@ -136,9 +136,11 @@ struct GuideAutopilotRunnerTests {
         }
         #expect(
             outputLines.contains("- Local:        http://localhost:3000"),
-            "a dev server's real output must reach the same transcript the main " +
-            "session's output does, or the terminal (and the WatchLoop's screen) " +
-            "never shows it and a visual-only watch step can never fire"
+            """
+            a dev server's real output must reach the same transcript the main \
+            session's output does, or the terminal (and the WatchLoop's screen) \
+            never shows it and a visual-only watch step can never fire
+            """
         )
     }
 

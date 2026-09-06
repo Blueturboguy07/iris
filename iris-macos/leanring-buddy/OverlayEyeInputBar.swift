@@ -804,7 +804,16 @@ struct OverlayEyeInputBarView: View {
                 if let guidePresentation {
                     OverlayEyeGuideCard(
                         presentation: guidePresentation,
-                        onPrimaryAction: { guideSessionController.performPrimaryAction() },
+                        // `guidePresentation` is a local `let` binding, captured
+                        // by this closure at the render that put THIS button on
+                        // screen — its `stepId` cannot drift out from under the
+                        // tap the way re-reading `guideSessionController` at tap
+                        // time would. See `performPrimaryAction(expectedCurrentStepId:)`.
+                        onPrimaryAction: {
+                            guideSessionController.performPrimaryAction(
+                                expectedCurrentStepId: guidePresentation.stepId
+                            )
+                        },
                         onSecondaryAction: { guideSessionController.advanceToTheNextStep() },
                         onBack: { guideSessionController.returnToThePreviousStep() },
                         onClose: { guideSessionController.closeTheGuide() },
@@ -1028,6 +1037,7 @@ struct OverlayEyeInputBarView: View {
         let readerIsOnARealStep = totalSteps > 0 && guideSessionController.currentStepIndex < totalSteps
 
         return OverlayEyeGuideStepPresentation(
+            stepId: step.id,
             appName: guide.appName,
             stepTitle: step.title,
             stepBody: step.body,

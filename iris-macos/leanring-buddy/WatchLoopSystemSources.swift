@@ -19,6 +19,7 @@
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import CryptoKit
 import Foundation
 import ScreenCaptureKit
 
@@ -304,6 +305,20 @@ final class SystemWatchLoopLocalSignalSource: WatchLoopLocalSignalSource {
             remainingDepth: Self.maximumAccessibilitySearchDepth,
             numberOfElementsInspected: &numberOfElementsInspected
         )
+    }
+
+    /// Reads the secret out of `KeychainStore` (never logged, never kept
+    /// longer than this call) and hands back a SHA-256 digest instead of the
+    /// value — the loop only ever needs to know THAT it changed, never what it
+    /// changed to, and a fingerprint that cannot be turned back into the
+    /// secret is the same privacy shape `ScreenFrameFingerprint` already uses
+    /// for a screen nobody keeps.
+    func fingerprintOfStoredCredential(ofKind secretKind: KeychainSecretKind) -> String? {
+        guard let secretValue = KeychainStore.readSecret(ofKind: secretKind) else {
+            return nil
+        }
+        let digest = SHA256.hash(data: Data(secretValue.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     /// The key CoreGraphics puts the secure-input owner's process id under. It

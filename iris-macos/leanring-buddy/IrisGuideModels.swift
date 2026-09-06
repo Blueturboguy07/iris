@@ -99,6 +99,20 @@ enum IrisStepExpectation: Equatable, Sendable {
     case urlHost(host: String)
     case toolVersion(tool: String)
     case axElement(roleLabel: String)
+    /// A named Keychain secret's value changed since this step started being
+    /// watched — present now and different from whatever was (or was not)
+    /// there a moment ago. `secretKind` is the wire name of a
+    /// `KeychainSecretKind` case ("anthropic-api-key", "openai-api-key", …).
+    ///
+    /// Added for the Sep 2026 anthropic-api-key fix round: a "paste the
+    /// secret into Iris" step used to declare `foregroundApp: com.publikhq.iris`,
+    /// which a live run proved is satisfied by anything that brings Iris
+    /// frontmost — a click on an unrelated control, even an AppleScript
+    /// activation — with no credential ever written. Requiring the stored
+    /// value to have actually CHANGED (not merely be present) is what keeps a
+    /// key already sitting in Keychain from a previous session from silently
+    /// satisfying a step nobody actually did anything on.
+    case credentialWasSaved(secretKind: String)
     case visual(prompt: String)
 
     /// True for the one expectation that cannot be answered without pixels.
@@ -118,6 +132,7 @@ extension IrisStepExpectation: Codable {
         case tool
         case roleLabel
         case prompt
+        case secretKind
     }
 
     /// An expectation whose `type` this build does not recognize throws, and
@@ -136,6 +151,8 @@ extension IrisStepExpectation: Codable {
             self = .toolVersion(tool: try container.decode(String.self, forKey: .tool))
         case "axElement":
             self = .axElement(roleLabel: try container.decode(String.self, forKey: .roleLabel))
+        case "credentialWasSaved":
+            self = .credentialWasSaved(secretKind: try container.decode(String.self, forKey: .secretKind))
         case "visual":
             self = .visual(prompt: try container.decode(String.self, forKey: .prompt))
         default:
@@ -162,6 +179,9 @@ extension IrisStepExpectation: Codable {
         case .axElement(let roleLabel):
             try container.encode("axElement", forKey: .type)
             try container.encode(roleLabel, forKey: .roleLabel)
+        case .credentialWasSaved(let secretKind):
+            try container.encode("credentialWasSaved", forKey: .type)
+            try container.encode(secretKind, forKey: .secretKind)
         case .visual(let prompt):
             try container.encode("visual", forKey: .type)
             try container.encode(prompt, forKey: .prompt)

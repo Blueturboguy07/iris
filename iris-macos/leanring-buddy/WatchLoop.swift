@@ -180,9 +180,30 @@ protocol WatchLoopLocalSignalSource: AnyObject {
 
     func isAccessibilityElementPresent(matchingRoleLabel roleLabel: String) -> Bool
 
+    /// A fingerprint of the named Keychain secret's CURRENT value, or nil when
+    /// nothing is stored under that name right now. Never the secret itself —
+    /// this exists only so two readings can be compared for equality, the way
+    /// `ScreenFrameFingerprint` stands in for a screenshot nobody keeps. Backs
+    /// `.credentialWasSaved`: a step that hands the reader an API key to paste
+    /// declares this instead of the far weaker (and, a live run proved,
+    /// trivially fooled) `foregroundApp`, so the guide only advances once a
+    /// real Keychain write has actually happened.
+    func fingerprintOfStoredCredential(ofKind secretKind: KeychainSecretKind) -> String?
+
     /// `IsSecureEventInputSet()`. True while anything on this Mac has secure
     /// keyboard entry on — a password field, a sudo prompt, a lock screen.
     func isSecureEventInputActive() -> Bool
+}
+
+extension WatchLoopLocalSignalSource {
+    /// The safe default for every conformer written before `.credentialWasSaved`
+    /// existed: "nothing is stored", which can never equal a later "nothing is
+    /// stored" reading in a way that reports a change, so an unmodified test
+    /// double simply never satisfies this expectation rather than failing to
+    /// build.
+    func fingerprintOfStoredCredential(ofKind secretKind: KeychainSecretKind) -> String? {
+        nil
+    }
 }
 
 /// The one model call the ladder can reach, made through `AssistantTransport`
@@ -320,6 +341,13 @@ final class WatchLoop: ObservableObject {
 
     private var watchPlanForTheStepBeingWatched: IrisStepWatch?
 
+    /// Baseline fingerprints for any `.credentialWasSaved` expectations this
+    /// step declares, captured once when it starts being watched and compared
+    /// against on every later tick — see `IrisStepExpectation.credentialWasSaved`.
+    /// Keyed by the expectation's wire `secretKind` string. A step that does
+    /// not declare one leaves this empty and pays nothing for it.
+    private var credentialFingerprintsWhenThisStepBeganWatching: [String: String?] = [:]
+
     /// The directory this step's `git clone` will create, worked out once when
     /// the step opens rather than on every tick.
     private var repositoryPathThisStepsCloneWouldCreate: String?
@@ -398,6 +426,19 @@ final class WatchLoop: ObservableObject {
         fingerprintOfTheMostRecentFrame = nil
         frontmostBundleIdentifierAtTheLastSideSignalSweep = nil
         proactiveHintForTheReader = nil
+        // Snapshot BEFORE anything the reader does on this step — a
+        // `.credentialWasSaved` expectation is judged against whatever the
+        // Keychain held at this exact moment, so a key that was already there
+        // from an earlier session cannot itself count as "just saved".
+        credentialFingerprintsWhenThisStepBeganWatching = [:]
+        for expectation in watchPlan.expect {
+            guard case .credentialWasSaved(let secretKind) = expectation,
+                  let kind = KeychainSecretKind(rawValue: secretKind) else {
+                continue
+            }
+            credentialFingerprintsWhenThisStepBeganWatching[secretKind] =
+                localSignalSource.fingerprintOfStoredCredential(ofKind: kind)
+        }
         captureIsSuspendedBecause = readerPausedWatching ? .theReaderPausedIris : nil
         isWatchingAStep = true
         generationOfTheStepBeingWatched += 1
@@ -418,6 +459,7 @@ final class WatchLoop: ObservableObject {
         repositoryPathThisStepsCloneWouldCreate = nil
         fingerprintOfTheMostRecentFrame = nil
         frontmostBundleIdentifierAtTheLastSideSignalSweep = nil
+        credentialFingerprintsWhenThisStepBeganWatching = [:]
         captureIsSuspendedBecause = nil
         proactiveHintForTheReader = nil
         generationOfTheStepBeingWatched += 1
@@ -692,15 +734,32 @@ final class WatchLoop: ObservableObject {
     }
 
     /// The blind path. With no screen diff to gate it, a change of frontmost app
-    /// is the trigger — it is free to read, and for the steps that end up here
-    /// ("copy the key", "paste it into Iris") it is also the actual signal that
-    /// the reader moved on.
+    /// is the trigger — it is free to read, and for a step whose only local
+    /// signal is `foregroundApp` it is also the actual signal that the reader
+    /// moved on.
+    ///
+    /// `.credentialWasSaved` is exempted from that gate. "Paste it into Iris"
+    /// is exactly the step this path exists for, and the reader's whole action
+    /// there can happen with Iris ALREADY frontmost the whole time — they
+    /// opened Settings (which made Iris frontmost) and then paste, with no
+    /// second app switch to trip the gate above. A Keychain read is exactly as
+    /// cheap as reading the frontmost app (no process spawn, unlike
+    /// `toolVersion`/`gitWorkingTreeHasACommit`), so a step that declares this
+    /// expectation is swept on every tick rather than only on an app switch —
+    /// caught live verifying this fix round: the first version of this change
+    /// left `credentialWasSaved` silently ungated by pixels but STILL gated
+    /// behind an app switch that a real paste need not produce.
     private func reachAVerdictFromSideSignalsAlone(
         watchPlan: IrisStepWatch,
         generationThisTickBelongsTo: Int
     ) async {
         let frontmostBundleIdentifier = localSignalSource.frontmostApplicationBundleIdentifier()
-        if let bundleIdentifierAtTheLastSweep = frontmostBundleIdentifierAtTheLastSideSignalSweep,
+        let watchPlanDeclaresACredentialExpectation = watchPlan.expect.contains { expectation in
+            if case .credentialWasSaved = expectation { return true }
+            return false
+        }
+        if !watchPlanDeclaresACredentialExpectation,
+           let bundleIdentifierAtTheLastSweep = frontmostBundleIdentifierAtTheLastSideSignalSweep,
            bundleIdentifierAtTheLastSweep == frontmostBundleIdentifier {
             return
         }
@@ -808,9 +867,26 @@ final class WatchLoop: ObservableObject {
         case .axElement(let roleLabel):
             return localSignalSource.isAccessibilityElementPresent(matchingRoleLabel: roleLabel)
 
+        case .credentialWasSaved(let secretKind):
+            guard let kind = KeychainSecretKind(rawValue: secretKind) else {
+                return false
+            }
+            guard let currentFingerprint = localSignalSource.fingerprintOfStoredCredential(ofKind: kind) else {
+                // Nothing stored at all yet — cannot have been "just saved".
+                return false
+            }
+            let fingerprintWhenTheStepBegan = credentialFingerprintsWhenThisStepBeganWatching[
+                secretKind, default: nil
+            ]
+            // Satisfied only by a WRITE during this step: absent-then-present,
+            // or present-then-a-different-value. A key that was already
+            // sitting in Keychain when the step opened, and never touched,
+            // reads as unchanged and does not satisfy this on its own.
+            return currentFingerprint != fingerprintWhenTheStepBegan
+
         case .visual:
             // Not a local signal. `expectationsAnsweredWithoutPixels` already
-            // filtered these out; this case exists so that adding a sixth
+            // filtered these out; this case exists so that adding another
             // expectation type is a compile error rather than a silent pass.
             return false
         }

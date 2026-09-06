@@ -719,9 +719,14 @@ struct GuidePanelView: View {
     @ViewBuilder
     private var navigationRow: some View {
         if guideSessionController.unsupportedPairForTheSelectedBranch == nil {
+            // Captured once for this render, same as `OverlayEyeInputBar`'s
+            // `guidePresentation` — see `performPrimaryAction(expectedCurrentStepId:)`
+            // for why the button's closure must not re-read the controller's
+            // live current step at tap time.
+            let stepIdThisRowWasDrawnFor = guideSessionController.currentStep?.id
             VStack(alignment: .leading, spacing: 6) {
                 if let primaryAction = guideSessionController.primaryActionForTheCurrentStep {
-                    primaryActionButton(primaryAction)
+                    primaryActionButton(primaryAction, expectedCurrentStepId: stepIdThisRowWasDrawnFor)
                 }
 
                 HStack(spacing: 12) {
@@ -758,9 +763,12 @@ struct GuidePanelView: View {
     /// disabled rather than pressable-but-inert: the reason is already on the
     /// card above, and a button that looks live and does nothing is the exact
     /// failure `iris-desktop 0.1.4` was released to fix.
-    private func primaryActionButton(_ primaryAction: GuideStepPrimaryAction) -> some View {
+    private func primaryActionButton(
+        _ primaryAction: GuideStepPrimaryAction,
+        expectedCurrentStepId: String?
+    ) -> some View {
         Button(action: {
-            guideSessionController.performPrimaryAction()
+            guideSessionController.performPrimaryAction(expectedCurrentStepId: expectedCurrentStepId)
         }) {
             Text(primaryAction.buttonLabel)
         }

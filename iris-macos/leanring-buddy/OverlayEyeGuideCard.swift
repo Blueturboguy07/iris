@@ -25,6 +25,12 @@ import SwiftUI
 /// accidentally start driving the guide: it renders, and it reports what was
 /// pressed.
 nonisolated struct OverlayEyeGuideStepPresentation: Equatable, Sendable {
+    /// The step this card was built for. Captured by the caller BEFORE it
+    /// hands the primary button's action off to `GuideSessionController`, so
+    /// a tap that lands after the watch loop has already moved the guide on
+    /// (see `performPrimaryAction(expectedCurrentStepId:)`) can be told apart
+    /// from one that still matches what is on screen.
+    let stepId: String
     let appName: String
     let stepTitle: String
     let stepBody: String

@@ -1427,13 +1427,45 @@ final class GuideSessionController: ObservableObject {
     }
 
     /// Runs whatever the primary button is currently offering.
-    func performPrimaryAction() {
+    ///
+    /// `expectedCurrentStepId` is the id of the step the button the reader
+    /// physically pressed was drawn for — captured by the view at the render
+    /// that put that button on screen, not re-read here. It closes a race the
+    /// Anthropic-key live run found (Sep 2026 fix round): `WatchLoop.onVerdict`
+    /// advances the guide on its OWN Task the moment it notices the step is
+    /// done (e.g. the browser already reached the right URL), with no lock
+    /// against a reader's tap landing at the same moment. Before this guard, a
+    /// tap that arrived just after such a silent advance ran `performPrimaryAction`
+    /// fresh against the NEW current step — a step the reader never saw and
+    /// never acted on — and its case (not its stale on-screen label) is what
+    /// decides what happens, so a "Continue" the reader read as "leave the
+    /// step I'm looking at" could invisibly resolve to "leave the step Iris
+    /// already moved us to as well", walking the guide two steps for one tap
+    /// (open-console → create-key → copy-key, "Click Create Key" skipped
+    /// entirely, no key ever created). Since the reader's goal — leave the
+    /// step they were looking at — is already satisfied whenever the guide
+    /// has moved on before their tap is even processed, a stale tap is simply
+    /// ignored rather than being run against whatever step is current now.
+    /// `nil` (the default) keeps every caller that has not been taught to
+    /// pass a step id, and the setup-recovery detour, unaffected — the detour
+    /// runs with the watch loop stood down (`pointTheWatchLoopAtTheCurrentStep`),
+    /// so it has no analogous race to guard against.
+    func performPrimaryAction(expectedCurrentStepId: String? = nil) {
         // Moving on, or acting on the step, hands the step back to the watch
         // loop: the reader is no longer parked here on purpose.
         readerDeliberatelyReturnedToThisStep = false
         // And the note explaining a corrected position belongs to the step it
         // was about; carried forward it would explain the wrong thing.
         positionWasCorrectedExplanation = nil
+        if let expectedCurrentStepId, !readerIsInSetupRecovery,
+           currentStep?.id != expectedCurrentStepId {
+            irisTrace(
+                "primary action: rendered for step \(expectedCurrentStepId) but the guide "
+                + "is now on \(currentStep?.id ?? "nil") — ignoring the stale tap rather than "
+                + "acting on a step the reader never saw"
+            )
+            return
+        }
         guard let primaryAction = primaryActionForTheCurrentStep else {
             return
         }

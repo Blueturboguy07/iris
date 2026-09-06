@@ -2098,7 +2098,25 @@ final class GuideSessionController: ObservableObject {
                     continue
                 }
                 // The step has a watch: the dev server runs in its own session
-                // and the watch loop owns completion. Autopilot stays on, yields.
+                // and the watch loop owns completion. But sitting here as a
+                // full, centered takeover for however long that takes is
+                // exactly what stranded a reader before: the terminal fully
+                // occludes the guide's own step card — the one whose
+                // checkbox and Next button the watch loop lights up the
+                // moment it notices — with no gate bar, no pointer, and no
+                // visible sign that a stall is recoverable. MEASURED on
+                // Nutcracker's live run: `npm run dev` came up and served
+                // HTTP 200 within seconds, iris.log went silent for 5m21s+,
+                // and the only reason the install ever continued was an
+                // accidental mis-click that happened to land on a Next
+                // button nothing on screen said was there. Hand back and
+                // gate it exactly like a step Iris cannot finish itself, so
+                // the terminal parks aside and "I did it — continue" is a
+                // real escape hatch underneath the watch loop's own timer,
+                // not just a hidden card waiting on luck.
+                handTheCurrentStepBackToTheReader()
+                theStepTheReaderIsBeingAskedToFinish = stepIndexBeingDriven
+                onAutopilotWaitingForReaderAtGate?(step.title, step.body)
                 return
             case .handedBackAsSensitive, .skippedByReader, .surfacedToReader:
                 // Iris could not finish this step on its own. Hand it to the

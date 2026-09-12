@@ -381,7 +381,7 @@ nonisolated struct CatalogAppInventoryEntry: Identifiable, Equatable, Sendable {
     let name: String
     let macBundleId: String?
     let latestReleaseTag: String?
-    let guideSlug: String? = nil
+    let guideSlug: String?
     let installationState: CatalogAppInstallationState
     let updateAvailability: CatalogAppUpdateAvailability
     /// Advisory only: whether this app's source is one Iris may edit locally —

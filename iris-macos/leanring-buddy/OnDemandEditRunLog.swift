@@ -66,7 +66,8 @@ final class OnDemandEditRunLog {
         fileNameFormatter.dateFormat = "yyyyMMdd-HHmmssSSS"
         // Timestamp-first names sort chronologically by plain string compare,
         // which is what the pruner relies on.
-        let fileName = "\(fileNameFormatter.string(from: now))-\(appSlug).log"
+        let safeSlug = OnDemandEditRunLog.safeAppSlugForFileName(appSlug)
+        let fileName = "\(fileNameFormatter.string(from: now))-\(safeSlug).log"
         filePath = (directoryPath as NSString).appendingPathComponent(fileName)
 
         lineTimestampFormatter = DateFormatter()
@@ -74,12 +75,12 @@ final class OnDemandEditRunLog {
         lineTimestampFormatter.dateFormat = "HH:mm:ss"
 
         let header = """
-        Iris on-demand edit — \(appSlug) (\(kindLabel))
+        Iris on-demand edit — \(OnDemandEditMemoryRecord.scrubbedSingleLine(appSlug, toCharacterCount: 160)) (\(OnDemandEditMemoryRecord.scrubbedSingleLine(kindLabel, toCharacterCount: 80)))
         Started: \(now)
         Iris version: \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown")
         Iris build: \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown")
         Run identifier: \(UUID().uuidString)
-        Request: \(scrubbedRequest)
+        Request: \(OnDemandEditMemoryRecord.scrubbedSingleLine(scrubbedRequest, toCharacterCount: 600))
 
         """
         guard fileManager.createFile(atPath: filePath, contents: Data(header.utf8)),
@@ -94,7 +95,10 @@ final class OnDemandEditRunLog {
     /// timestamp so commands with heredocs stay readable.
     func record(_ line: String, at date: Date = Date()) {
         let stamp = lineTimestampFormatter.string(from: date)
-        let indented = line
+        let scrubbedLine = GuideAutopilotOutputBuffer.scrubbed(
+            GuideAutopilotOutputBuffer.strippedOfControlSequences(line)
+        )
+        let indented = scrubbedLine
             .components(separatedBy: "\n")
             .enumerated()
             .map { $0.offset == 0 ? $0.element : "         \($0.element)" }
@@ -266,21 +270,40 @@ struct OnDemandEditMemoryRecord: Codable, Sendable {
         return truncated(scrubbed, toCharacterCount: characterCount)
     }
 
+    /// Converts free text that is about to become one memory record field into
+    /// a bounded, single-line observation. Memory is later interpolated into a
+    /// prompt, so a model-derived sentence, path, or outcome must not be able
+    /// to manufacture a new prompt line or carry a credential-shaped value.
+    nonisolated static func scrubbedSingleLine(
+        _ text: String,
+        toCharacterCount characterCount: Int
+    ) -> String {
+        let controlStripped = GuideAutopilotOutputBuffer.strippedOfControlSequences(text)
+        let scrubbed = GuideAutopilotOutputBuffer.scrubbed(controlStripped)
+        let singleLine = scrubbed.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return truncated(singleLine, toCharacterCount: characterCount)
+    }
+
     /// A copy whose free-text fields are short enough that the encoded line
     /// stays inside `OnDemandEditRunLog.maximumMemoryRecordLineBytes`. One
     /// pathological field (a pasted stack trace as the "request", say) must
     /// never be able to blow the per-line budget or the prompt budget.
     func truncatedForStorage() -> OnDemandEditMemoryRecord {
         var trimmed = self
-        trimmed.scrubbedRequest = Self.truncated(scrubbedRequest, toCharacterCount: 600)
-        trimmed.agentFinalNarration = Self.truncated(agentFinalNarration, toCharacterCount: 400)
+        trimmed.appSlug = Self.scrubbedSingleLine(appSlug, toCharacterCount: 160)
+        trimmed.kind = Self.scrubbedSingleLine(kind, toCharacterCount: 80)
+        trimmed.scrubbedRequest = Self.scrubbedSingleLine(scrubbedRequest, toCharacterCount: 600)
+        trimmed.agentFinalNarration = Self.scrubbedSingleLine(agentFinalNarration, toCharacterCount: 400)
         trimmed.verificationObservation = Self.scrubbedVerificationObservation(
             verificationObservation
         )
-        trimmed.outcome = Self.truncated(outcome, toCharacterCount: 300)
+        trimmed.outcome = Self.scrubbedSingleLine(outcome, toCharacterCount: 300)
+        trimmed.symptomVerdict = symptomVerdict.map {
+            Self.scrubbedSingleLine($0, toCharacterCount: 80)
+        }
         trimmed.filesTouched = filesTouched
             .prefix(Self.maximumRememberedFilePaths)
-            .map { Self.truncated($0, toCharacterCount: 160) }
+            .map { Self.scrubbedSingleLine($0, toCharacterCount: 160) }
 
         // Field-by-field caps are usually enough; this loop is the hard floor
         // that guarantees the byte budget even for input those caps miss
@@ -291,15 +314,15 @@ struct OnDemandEditMemoryRecord: Codable, Sendable {
               encodedLine.utf8.count > OnDemandEditRunLog.maximumMemoryRecordLineBytes,
               shrinkPasses < 12 {
             shrinkPasses += 1
-            trimmed.scrubbedRequest = Self.truncated(
+            trimmed.scrubbedRequest = Self.scrubbedSingleLine(
                 trimmed.scrubbedRequest, toCharacterCount: max(trimmed.scrubbedRequest.count / 2, 40))
-            trimmed.agentFinalNarration = Self.truncated(
+            trimmed.agentFinalNarration = Self.scrubbedSingleLine(
                 trimmed.agentFinalNarration, toCharacterCount: max(trimmed.agentFinalNarration.count / 2, 40))
             if let observation = trimmed.verificationObservation, !observation.isEmpty {
                 trimmed.verificationObservation = Self.truncated(
                     observation, toCharacterCount: max(observation.count / 2, 40))
             }
-            trimmed.outcome = Self.truncated(
+            trimmed.outcome = Self.scrubbedSingleLine(
                 trimmed.outcome, toCharacterCount: max(trimmed.outcome.count / 2, 40))
             if !trimmed.filesTouched.isEmpty {
                 trimmed.filesTouched.removeLast()
@@ -395,6 +418,13 @@ extension OnDemandEditRunLog {
     /// so `../` and friends are neutralised at the point of use rather than
     /// trusted.
     nonisolated static func memoryFileName(forAppSlug appSlug: String) -> String {
+        "\(safeAppSlugForFileName(appSlug)).jsonl"
+    }
+
+    /// Catalog slugs become filenames under the run-log directory. Keep the
+    /// same conservative mapping for both JSONL memory and human-readable log
+    /// files so a malformed or hostile catalog value cannot escape that folder.
+    nonisolated private static func safeAppSlugForFileName(_ appSlug: String) -> String {
         let pathSafeCharacters = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
         let sanitizedSlug = String(appSlug.map { pathSafeCharacters.contains($0) ? $0 : "-" })
         // A name with nothing but separators left ("", "..", "///") carries no
@@ -402,7 +432,7 @@ extension OnDemandEditRunLog {
         // colliding on a name that looks like a path.
         let slugHasRealCharacters = sanitizedSlug.contains { $0 != "-" && $0 != "_" }
         let usableSlug = slugHasRealCharacters ? String(sanitizedSlug.prefix(80)) : "unknown-app"
-        return "\(usableSlug).jsonl"
+        return usableSlug
     }
 
     nonisolated static func memoryFilePath(
@@ -658,16 +688,21 @@ extension OnDemandEditRunLog {
 
         var parts: [String] = [
             dayFormatter.string(from: record.date),
-            record.kind.isEmpty ? "edit" : record.kind,
+            record.kind.isEmpty
+                ? "edit"
+                : OnDemandEditMemoryRecord.scrubbedSingleLine(record.kind, toCharacterCount: 80),
         ]
-        if let verificationObservation = OnDemandEditMemoryRecord.scrubbedVerificationObservation(
-            record.verificationObservation
-        ) {
+        if let verificationObservation = record.verificationObservation.map({
+            OnDemandEditMemoryRecord.scrubbedSingleLine($0, toCharacterCount: 600)
+        }), !verificationObservation.isEmpty {
             parts.append("verification observation (UNTRUSTED): \"\(verificationObservation)\"")
         }
-        parts.append("asked: \"\(OnDemandEditMemoryRecord.truncated(record.scrubbedRequest, toCharacterCount: 200))\"")
+        parts.append("asked: \"\(OnDemandEditMemoryRecord.scrubbedSingleLine(record.scrubbedRequest, toCharacterCount: 200))\"")
         if !record.filesTouched.isEmpty {
-            parts.append("files: \(record.filesTouched.joined(separator: ", "))")
+            let paths = record.filesTouched.map {
+                OnDemandEditMemoryRecord.scrubbedSingleLine($0, toCharacterCount: 160)
+            }
+            parts.append("files: \(paths.joined(separator: ", "))")
         }
         if !record.agentFinalNarration.isEmpty {
             // Labelled as a claim, not a finding. This line is the model's own
@@ -678,13 +713,13 @@ extension OnDemandEditRunLog {
             // true of that API — because each read it here and took it as
             // established. Whatever the next run inherits, it must inherit as
             // an assertion it still has to check.
-            parts.append("claimed (UNCONFIRMED): \"\(OnDemandEditMemoryRecord.truncated(record.agentFinalNarration, toCharacterCount: 200))\"")
+            parts.append("claimed (UNCONFIRMED): \"\(OnDemandEditMemoryRecord.scrubbedSingleLine(record.agentFinalNarration, toCharacterCount: 200))\"")
         }
         if !record.outcome.isEmpty {
-            parts.append("outcome: \(record.outcome)")
+            parts.append("outcome: \(OnDemandEditMemoryRecord.scrubbedSingleLine(record.outcome, toCharacterCount: 300))")
         }
         if let symptomVerdict = record.symptomVerdict, !symptomVerdict.isEmpty {
-            parts.append("verdict: \(symptomVerdict)")
+            parts.append("verdict: \(OnDemandEditMemoryRecord.scrubbedSingleLine(symptomVerdict, toCharacterCount: 80))")
         }
         return "- " + parts.joined(separator: " · ")
     }

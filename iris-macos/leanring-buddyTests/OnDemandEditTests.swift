@@ -562,6 +562,29 @@ import Testing
         #expect(!contentsAfterClose.contains("after close"))
     }
 
+    @Test func runLogKeepsCatalogSlugsAndActivityInsideTheLogBoundary() throws {
+        let directory = Self.makeTemporaryDirectory()
+        let credential = "FAKE_RUN_LOG_CREDENTIAL_123456789"
+        let runLog = try #require(OnDemandEditRunLog(
+            appSlug: "../../outside\nINJECTED",
+            kindLabel: "feature\nINJECTED-KIND",
+            scrubbedRequest: "request\nAPI_TOKEN=\(credential)",
+            directoryPath: directory
+        ))
+
+        let logURL = URL(fileURLWithPath: runLog.filePath)
+        #expect(logURL.deletingLastPathComponent().standardizedFileURL.path
+            == URL(fileURLWithPath: directory).standardizedFileURL.path)
+        #expect(!logURL.lastPathComponent.contains("/"))
+
+        runLog.record("model output\nAPI_TOKEN=\(credential)")
+        runLog.finish(outcome: "failed: API_TOKEN=\(credential)")
+        let contents = try String(contentsOf: logURL, encoding: .utf8)
+        #expect(contents.contains("[REDACTED]"))
+        #expect(!contents.contains(credential))
+        #expect(!contents.contains("Iris on-demand edit — ../../outside\n"))
+    }
+
     /// The runs directory is pruned oldest-first so it never grows unbounded —
     /// creating a new log keeps the total at the cap.
     @Test func oldRunLogsArePrunedOldestFirst() throws {

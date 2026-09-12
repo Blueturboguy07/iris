@@ -16,6 +16,10 @@ Parallel workers have narrow file ownership; the root agent reviews their
 interaction, builds one combined candidate, and operates the actual Iris Test
 UI. A passing fixture or source check is recorded separately from native use.
 
+The broader working contract for the whole lifecycle, including nontechnical
+intake, model routing, real computer-use acceptance and defensive testing, is
+in [`docs/testing/iris-test-whole-system-plan.md`](../../docs/testing/iris-test-whole-system-plan.md).
+
 ## Current integration scope
 
 | Area | Change | Required proof |
@@ -99,6 +103,12 @@ Actual computer use after installation, with screenshots inspected:
    Mac app catalog rows and the explicit Ask-me-each-step / Run-installs-for-me
    controls. Iris Test still refuses marketplace installation, as intended for
    this isolated target.
+8. A separate registered NitroAI Iris QA fixture was launched through
+   computer use after its prior disposable swap. The real onboarding screen
+   was completed to the app dashboard, where Dashboard, Settings, note-source
+   actions, search and the empty-library state were visible. This is evidence
+   of a real disposable app launch and UI reachability, not proof that a new
+   feature was delivered by Iris.
 
 This proves those installed control transitions and retained records. It does
 not prove a new complex feature, a fresh full installer run, terminal-minimized

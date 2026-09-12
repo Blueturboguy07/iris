@@ -2,9 +2,9 @@
 //  ChatActionTools.swift
 //  leanring-buddy
 //
-//  The two things a chat message can actually DO — put text on the reader's
-//  clipboard, and run one command on their Mac — plus the gate the command
-//  passes before it runs.
+//  The three things a chat message can actually DO — put text on the reader's
+//  clipboard, run one command on their Mac, and open a publik install guide at
+//  the eye — plus the gate the command passes before it runs.
 //
 //  Until this file existed, chat was structurally incapable of doing either:
 //  `buildRequestBody` was called with no tools on the chat route, ever, so a
@@ -57,6 +57,7 @@ enum ChatActionTools {
 
     static let clipboardToolName = "put_text_on_the_clipboard"
     static let runCommandToolName = "run_a_command_in_the_terminal"
+    static let openInstallGuideToolName = "open_an_install_guide"
 
     /// How many rounds of client-executed tools one chat message may spend.
     /// A round is one model turn's worth of tool calls, so this is the ceiling
@@ -131,6 +132,42 @@ enum ChatActionTools {
         ],
     ]
 
+    /// The third thing chat can do: put a publik install guide on screen.
+    /// Until this tool existed the prompt told the model, truthfully, that it
+    /// could not install anything from the conversation — a reader who asked
+    /// Iris to "install simplicity" was sent to a website button, while the
+    /// guide picker sat two clicks away in the settings panel behind a text
+    /// field that wanted a slug. The model does not need the slug: it passes
+    /// the app as the reader named it, and `CompanionManager` matches that
+    /// against the live catalog, opens the guide at the eye, and reports back
+    /// in words — including, on a miss, the list of apps that DO have guides.
+    static let openAnInstallGuideTool: [String: Any] = [
+        "name": openInstallGuideToolName,
+        "description": """
+        Open a publik app's step-by-step install guide right here in Iris, as a \
+        card at the eye the reader can follow or hand to Iris to run. Use it the \
+        moment the reader says they want to install, set up, get or try a publik \
+        app. You do not need to know the app's slug: pass the app as the reader \
+        named it and Iris matches it against the live catalog. If nothing \
+        matches, the result lists every app Iris has a guide for, so you can \
+        offer those instead of guessing. It opens one guide at a time and \
+        replaces a guide that is already open, so do not call it while the \
+        reader is partway through an install unless they asked to switch. It \
+        installs nothing by itself — opening the guide is the whole action.
+        """,
+        "input_schema": [
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["app"],
+            "properties": [
+                "app": [
+                    "type": "string",
+                    "description": "The publik app the reader wants, as they said it — a name like \"Simplicity\" or a slug like \"nut-ai\".",
+                ],
+            ],
+        ],
+    ]
+
     /// Everything chat sends. `web_search` is Anthropic's own server-side
     /// tool, reused verbatim from the autopilot's fix ladder rather than
     /// redeclared — a reader who asked for a Homebrew install command once got
@@ -144,9 +181,20 @@ enum ChatActionTools {
         [
             putTextOnTheClipboardTool,
             runACommandInTheTerminalTool,
+            openAnInstallGuideTool,
             GuideAutopilotFixProposer.webSearchTool,
         ]
     }
+}
+
+/// What happened when chat asked for an install guide, in the two shapes the
+/// runner needs: whether the world changed (a guide is now on screen), and the
+/// sentence the model is handed about it.
+struct ChatActionGuideOpenReport: Sendable {
+    let guideWasOpened: Bool
+    /// Written for the model, not the reader: what was opened or why nothing
+    /// was, and — on a miss — what Iris could open instead.
+    let messageForTheModel: String
 }
 
 /// Executes the client-side chat tools. One instance per `CompanionManager`,
@@ -195,6 +243,13 @@ final class ChatActionToolRunner {
         await ChatActionToolRunner.runThroughTheReadersLoginShell(approvedCommand)
     }
 
+    /// Opens one publik install guide at the eye and says what happened.
+    /// Supplied by `CompanionManager`, which owns both the catalog (to turn
+    /// "the calorie one" into a guide slug) and the guide session. Nil means
+    /// this Iris cannot open guides from chat, and the tool says so instead of
+    /// pretending.
+    var openTheInstallGuideForApp: (@MainActor (_ appNameOrSlug: String) async -> ChatActionGuideOpenReport)?
+
     // MARK: - Per-message state
 
     /// True once this message has copied something or run something. The chat
@@ -224,6 +279,8 @@ final class ChatActionToolRunner {
             return copyTextToTheClipboard(toolInput)
         case ChatActionTools.runCommandToolName:
             return await runOneCommandThroughTheGate(toolInput)
+        case ChatActionTools.openInstallGuideToolName:
+            return await openTheInstallGuide(toolInput)
         default:
             // web_search runs on Anthropic's side and never arrives here. A
             // name Iris does not have still gets a straight answer rather than
@@ -260,6 +317,39 @@ final class ChatActionToolRunner {
             """,
             isError: false
         )
+    }
+
+    // MARK: - The install guide
+
+    private func openTheInstallGuide(_ toolInput: [String: Any]) async -> ClaudeClientToolResult {
+        let appNameOrSlug = ((toolInput["app"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !appNameOrSlug.isEmpty else {
+            return ClaudeClientToolResult(
+                contentText: "No app was named, so no guide was opened. Ask the reader which publik app they mean.",
+                isError: true
+            )
+        }
+        guard let openTheInstallGuideForApp else {
+            return ClaudeClientToolResult(
+                contentText: """
+                This Iris cannot open install guides from chat, so nothing was opened. Point the \
+                reader at the app's page on publikhq.com, where "Install and customize" opens the guide.
+                """,
+                isError: true
+            )
+        }
+
+        let report = await openTheInstallGuideForApp(appNameOrSlug)
+        if report.guideWasOpened {
+            // A guide on screen is a change in the world the reader can see,
+            // so a failed request after this must not be silently retried.
+            hasDoneAnythingForThisChatMessage = true
+        }
+        irisTrace("chat/guide: \(report.guideWasOpened ? "opened" : "not opened") for \(appNameOrSlug.count) characters of app name")
+        // `isError` is about whether the tool ran: a miss that came back with
+        // the list of apps Iris does have is an answer, not a failure.
+        return ClaudeClientToolResult(contentText: report.messageForTheModel, isError: false)
     }
 
     // MARK: - The command

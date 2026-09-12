@@ -40,6 +40,28 @@ nonisolated struct CatalogAppDescriptor: Decodable, Equatable, Sendable {
     /// The newest published release tag, e.g. `v0.1.1`. Null when the app has
     /// no releases, or when publik's catalog sync has not run yet.
     let latestReleaseTag: String?
+    /// The slug publik serves this app's install guide under
+    /// (`GET /api/iris/guides/{guideSlug}`), or nil when it has none published.
+    /// This is what lets the panel offer "Install with Iris" and lets chat open
+    /// a guide by the app's name: before the catalog carried it, the only way
+    /// into a guide without a website link was typing a slug from memory.
+    /// Optional in the wire format too, so a catalog served by an older publik
+    /// still decodes — it simply offers no guides.
+    let guideSlug: String?
+
+    init(
+        slug: String,
+        name: String,
+        macBundleId: String?,
+        latestReleaseTag: String?,
+        guideSlug: String? = nil
+    ) {
+        self.slug = slug
+        self.name = name
+        self.macBundleId = macBundleId
+        self.latestReleaseTag = latestReleaseTag
+        self.guideSlug = guideSlug
+    }
 }
 
 private nonisolated struct CatalogAppDirectoryResponse: Decodable {
@@ -296,8 +318,39 @@ nonisolated struct CatalogAppInventoryEntry: Identifiable, Equatable, Sendable {
     /// on-demand edit coordinator re-checks provenance LIVE the moment the
     /// reader acts, so a stale positive here can never actually cause an edit.
     let isLocallyEditable: Bool
+    /// The slug of the install guide publik serves for this app, or nil when
+    /// publik has none published. Carried through from the catalog so the
+    /// "Install with Iris" affordance and chat's guide tool can act on an
+    /// entry without a second lookup.
+    let guideSlug: String?
+
+    init(
+        slug: String,
+        name: String,
+        macBundleId: String?,
+        latestReleaseTag: String?,
+        installationState: CatalogAppInstallationState,
+        updateAvailability: CatalogAppUpdateAvailability,
+        isLocallyEditable: Bool,
+        guideSlug: String? = nil
+    ) {
+        self.slug = slug
+        self.name = name
+        self.macBundleId = macBundleId
+        self.latestReleaseTag = latestReleaseTag
+        self.installationState = installationState
+        self.updateAvailability = updateAvailability
+        self.isLocallyEditable = isLocallyEditable
+        self.guideSlug = guideSlug
+    }
 
     var id: String { slug }
+
+    /// True when publik serves an install guide for this app — the one
+    /// condition under which Iris can install it itself.
+    var hasAnInstallGuide: Bool {
+        guideSlug != nil
+    }
 
     var isInstalled: Bool {
         if case .installed = installationState {
@@ -574,7 +627,8 @@ final class AppInventoryService: ObservableObject {
                     forInstallationState: installationState,
                     latestReleaseTag: catalogDescriptor.latestReleaseTag
                 ),
-                isLocallyEditable: locallyEditableSlugs.contains(catalogDescriptor.slug)
+                isLocallyEditable: locallyEditableSlugs.contains(catalogDescriptor.slug),
+                guideSlug: catalogDescriptor.guideSlug
             )
         }
     }

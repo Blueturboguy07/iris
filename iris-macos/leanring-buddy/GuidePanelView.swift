@@ -788,6 +788,10 @@ struct GuidePanelView: View {
 /// The way in when nobody clicked an `iris://` link: type a slug. Deliberately
 /// a text field rather than a hard-coded catalog, because a list of guides
 /// baked into this app would go stale the moment publik publishes another one.
+/// The live list lives in "Discover apps" below, where every catalog app with
+/// a guide carries an "Install with Iris" pill; this field stays for the app
+/// somebody already knows the name of, and for a guide the catalog cannot see
+/// (a listing still in review, opened by slug on purpose).
 struct GuideSlugEntryView: View {
     @ObservedObject var guideSessionController: GuideSessionController
     @State private var slugInput: String = ""
@@ -799,7 +803,7 @@ struct GuideSlugEntryView: View {
                 .foregroundColor(DS.Colors.muted)
 
             HStack(spacing: 8) {
-                TextField("App name, e.g. cue", text: $slugInput)
+                TextField("App slug, e.g. cue — or pick one under Discover apps", text: $slugInput)
                     .textFieldStyle(.plain)
                     .font(.system(size: 12))
                     .foregroundColor(DS.Colors.ink)

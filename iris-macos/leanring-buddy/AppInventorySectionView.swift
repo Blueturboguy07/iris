@@ -305,6 +305,12 @@ struct AppInventorySectionView: View {
 struct DiscoverAppsSectionView: View {
     @ObservedObject var appInventoryService: AppInventoryService
 
+    /// The reader tapped "Install with Iris" on an app: open its install guide
+    /// at the eye. Wired by `CompanionPanelView` to the guide session. Only
+    /// offered for an entry whose catalog row names a guide, so the button is
+    /// never a dead end. Defaulted to a no-op so a preview still builds.
+    var onInstallWithIris: (CatalogAppInventoryEntry) -> Void = { _ in }
+
     /// What the reader has typed. Filtering is done in memory over the
     /// already-fetched catalog, so it is instant and needs no network.
     @State private var searchText: String = ""
@@ -454,49 +460,70 @@ struct DiscoverAppsSectionView: View {
 
     // MARK: One app
 
+    /// Two controls side by side rather than one button wrapping the row: a
+    /// SwiftUI `Button` nested inside another `Button` hands the inner tap to
+    /// the outer one, so "Install with Iris" would have opened the browser.
+    /// The name and subtitle open the publik page as they always did; the
+    /// pill on the right opens the install guide here, at the eye.
     private func discoverAppRow(for discoverableEntry: CatalogAppInventoryEntry) -> some View {
-        Button(action: { openPublikPage(for: discoverableEntry) }) {
-            HStack(spacing: 8) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(discoverableEntry.name)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(DS.Colors.textPrimary)
+        HStack(spacing: 8) {
+            Button(action: { openPublikPage(for: discoverableEntry) }) {
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(discoverableEntry.name)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(DS.Colors.textPrimary)
 
-                    Text(subtitle(for: discoverableEntry))
-                        .font(.system(size: 10))
+                        Text(subtitle(for: discoverableEntry))
+                            .font(.system(size: 10))
+                            .foregroundColor(DS.Colors.textTertiary)
+                    }
+
+                    Spacer(minLength: 4)
+
+                    // A quiet "opens in your browser" cue, so tapping is understood
+                    // to leave Iris rather than install something in place.
+                    Image(systemName: "arrow.up.forward")
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(DS.Colors.textTertiary)
                 }
-
-                Spacer(minLength: 4)
-
-                // A quiet "opens in your browser" cue, so tapping is understood
-                // to leave Iris rather than install something in place.
-                Image(systemName: "arrow.up.forward")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(DS.Colors.textTertiary)
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
-                    .fill(Color.white.opacity(0.045))
-            )
-            .contentShape(RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous))
+            .buttonStyle(.plain)
+            .pointerCursor()
+            .help("Open \(discoverableEntry.name) on publik in your browser.")
+
+            // Only when publik actually serves a guide for this app. An app
+            // without one keeps its browser-only row rather than a button that
+            // would land on "Publik has not published a guide for this app yet."
+            if discoverableEntry.hasAnInstallGuide {
+                Button(action: { onInstallWithIris(discoverableEntry) }) {
+                    Text("Install with Iris")
+                }
+                .irisPrimaryPill(isFullWidth: false, isCompact: true)
+                .help("Opens the step-by-step install guide for \(discoverableEntry.name) here in Iris. You can follow it yourself or let Iris run it.")
+            }
         }
-        .buttonStyle(.plain)
-        .pointerCursor()
-        .help("Open \(discoverableEntry.name) on publik. Iris never installs anything itself.")
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
+                .fill(Color.white.opacity(0.045))
+        )
     }
 
     /// A published release tag reads as "there is something to install today";
     /// its absence still gets a row, because the publik page is worth reaching
-    /// even for an app whose release has not landed.
+    /// even for an app whose release has not landed. An app with a guide says
+    /// so, because that is the difference between "read about it" and "Iris
+    /// can put it on this Mac".
     private func subtitle(for discoverableEntry: CatalogAppInventoryEntry) -> String {
+        let installability = discoverableEntry.hasAnInstallGuide ? "guide available" : "view on publik"
         if let latestReleaseTag = discoverableEntry.latestReleaseTag {
-            return "\(latestReleaseTag) · view on publik"
+            return "\(latestReleaseTag) · \(installability)"
         }
-        return "View on publik"
+        return installability.prefix(1).uppercased() + installability.dropFirst()
     }
 
     private func openPublikPage(for discoverableEntry: CatalogAppInventoryEntry) {

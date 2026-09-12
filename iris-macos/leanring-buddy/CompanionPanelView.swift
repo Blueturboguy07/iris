@@ -285,7 +285,16 @@ struct CompanionPanelView: View {
                 // "It is hard to know which repos to install after the first
                 // one." The installed apps are above; this is where the reader
                 // finds the rest of the catalog and picks the next one.
-                DiscoverAppsSectionView(appInventoryService: appInventoryService)
+                DiscoverAppsSectionView(
+                    appInventoryService: appInventoryService,
+                    onInstallWithIris: { discoverableEntry in
+                        // The catalog names the guide's slug; it is the app's
+                        // own slug for every listing today, but the catalog is
+                        // the authority if that ever differs.
+                        let guideSlugToOpen = discoverableEntry.guideSlug ?? discoverableEntry.slug
+                        Task { await guideSessionController.openLatestVersionOfGuide(slug: guideSlugToOpen) }
+                    }
+                )
                     .padding(.horizontal, 16)
 
                 Spacer()

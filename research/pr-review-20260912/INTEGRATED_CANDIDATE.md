@@ -20,6 +20,22 @@ The broader working contract for the whole lifecycle, including nontechnical
 intake, model routing, real computer-use acceptance and defensive testing, is
 in [`docs/testing/iris-test-whole-system-plan.md`](../../docs/testing/iris-test-whole-system-plan.md).
 
+## Parallel swarm run
+
+Three bounded Luna max-effort reviews ran against this same isolated checkout:
+
+- harness-goal audit: retained the existing deterministic contract and recorded
+  live-model, installed-app, and cost gaps instead of fabricating results;
+- lifecycle review: added one shared launchability predicate across package,
+  install/replace, restore, relaunch, and Test registry paths;
+- defensive review: hardened run-log and memory egress against path escape,
+  control characters, prompt injection, and credential-shaped values.
+
+The root pass then integrated those commits, added the bounded unavailable-probe
+clarification, rebuilt through Xcode, installed only **Iris Test**, and exercised
+the actual controls. Agents did not run paid feature requests or touch regular
+Iris data.
+
 ## Current integration scope
 
 | Area | Change | Required proof |

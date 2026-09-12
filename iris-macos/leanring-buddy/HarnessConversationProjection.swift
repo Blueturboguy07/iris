@@ -142,13 +142,28 @@ nonisolated enum HarnessCodexConversationBudget {
 
     private static func containsNegativeEvidence(_ text: String) -> Bool {
         let lowercased = text.lowercased()
-        let markers = [
-            "error", "failed", "failure", "not found", "no such file", "permission denied",
+        let phraseMarkers = [
+            "failed", "failure", "not found", "no such file", "permission denied",
             "access denied", "missing", "unavailable", "not available", "not installed",
-            "blocked", "unable", "could not", "cannot", "false", "no output", "not run",
+            "blocked", "unable", "could not", "cannot", "no output", "not run",
             "not changed", "unknown", "stopped", "cancelled"
         ]
-        return markers.contains(where: { lowercased.contains($0) })
+        if phraseMarkers.contains(where: { lowercased.contains($0) }) {
+            return true
+        }
+
+        // Do not treat source-like success output such as `return false` or
+        // `throw new Error(...)` as a failed command. Bare diagnostic lines
+        // still count, as do conventional `Error:` prefixes.
+        let lines = lowercased.split(whereSeparator: \.isNewline).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if lines.contains(where: { $0 == "false" || $0.hasPrefix("false ") }) {
+            return true
+        }
+        return lines.contains(where: {
+            $0.hasPrefix("error:") || $0.hasPrefix("error -") || $0 == "error"
+        })
     }
 
     private static func utf8ByteCount(of messages: [HarnessModelMessage]) -> Int {

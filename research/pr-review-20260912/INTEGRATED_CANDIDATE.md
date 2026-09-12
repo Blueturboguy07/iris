@@ -134,7 +134,11 @@ Actual computer use after installation, with screenshots inspected:
 This proves those installed control transitions and retained records. It does
 not prove a new complex feature, a fresh full installer run, terminal-minimized
 behavior during a concurrent install/edit, or a new update/relaunch/Undo cycle.
-No paid feature request was submitted during this integration acceptance pass.
+The rebuilt app still reported a machine-local Keychain read failure
+(`status=-25293`) on startup; Settings now gives the plain-language
+“Always Allow” recovery instruction, but this pass does not claim the
+underlying macOS access issue is fixed for every machine. No paid feature
+request was submitted during this integration acceptance pass.
 The earlier recorded narrow native lifecycle successes remain separate.
 
 ## Findings that changed this pass

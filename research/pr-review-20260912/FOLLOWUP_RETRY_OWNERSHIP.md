@@ -21,4 +21,6 @@ The build also contains the separate pure redaction-helper extraction documented
 
 The standalone test entry point documents compilation against an already-built native module. `GuideRetryWindowProbe.swift` is opt-in and presents production terminal controls with a suspended fake shell. It is explicitly a controlled native fixture, not a full installer or phone acceptance test.
 
+Computer-use follow-up: in that separately identified native probe, the actual Try again button was clicked. Its retry/continue row disappeared and the real Working indicator appeared during the held refresh. Clicking the actual red Stop control removed the terminal content and began the closing eye animation. These observations support retry feedback and the Stop click path only. The probe retains its application delegate for the run-loop lifetime; its controls are not part of the installed product.
+
 This change addresses one observed concurrency mechanism. It does not establish that Kneecap installs end to end, that a dirty existing folder may be overwritten, or that upstream integration is complete. The separate Iris Test installer isolation restriction remains intact. No model calls, credential permissions, command risk gates or user repositories were changed by this patch.

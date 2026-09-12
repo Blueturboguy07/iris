@@ -33,7 +33,12 @@ struct GuideRetryWindowProbeMain {
         let delegate = GuideRetryWindowProbeApplicationDelegate()
         application.delegate = delegate
         application.activate(ignoringOtherApps: true)
-        application.run()
+        // NSApplication.delegate is weak. Keep the delegate alive for the
+        // entire run loop so its takeover and fixture owners cannot disappear
+        // after launch setup completes.
+        withExtendedLifetime(delegate) {
+            application.run()
+        }
     }
 }
 

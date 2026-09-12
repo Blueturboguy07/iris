@@ -5,7 +5,12 @@ import Foundation
 struct IrisTestAppDeliveryChecks {
     static func main() throws {
         let files = FileManager.default
-        let root = URL(fileURLWithPath: "/private/tmp").appendingPathComponent("iris-delivery-boundary-" + UUID().uuidString)
+        // The registry deliberately rejects symlink components. macOS's
+        // temporary directory is beneath `/var`, which is a symlink on this
+        // host, so keep this disposable fixture under the canonical shared
+        // scratch root instead.
+        let root = URL(fileURLWithPath: "/Users/Shared", isDirectory: true)
+            .appendingPathComponent("iris-delivery-boundary-" + UUID().uuidString)
         try files.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? files.removeItem(at: root) }
         let projects = root.appendingPathComponent("Projects")

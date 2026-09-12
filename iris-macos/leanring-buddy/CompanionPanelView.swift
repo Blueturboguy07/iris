@@ -297,6 +297,27 @@ struct CompanionPanelView: View {
                 )
                     .padding(.horizontal, 16)
 
+                if IrisTestEnvironment.isEnabled
+                    || Bundle.main.bundleURL.path.contains("/Build/Products/Test/") {
+                    Spacer()
+                        .frame(height: 14)
+
+                    SavedAppVersionsSection(
+                        receiptStore: companionManager.savedAppVersionsReceiptStore,
+                        onUndoReceipt: { receipt in
+                            companionManager.requestUndoSavedAppVersion(receipt)
+                        },
+                        testProjects: companionManager.savedTestProjects,
+                        previewTestBackups: { project in
+                            companionManager.previewSavedTestBackups(for: project)
+                        },
+                        onCleanupTestBackups: { project in
+                            await companionManager.cleanupSavedTestBackups(for: project)
+                        }
+                    )
+                        .padding(.horizontal, 16)
+                }
+
                 Spacer()
                     .frame(height: 14)
 

@@ -6,15 +6,27 @@ import AppKit
 struct SavedAppVersionsSection: View {
     private let receiptStore: AppDeliveryReceiptStore
     private let onUndoReceipt: ((AppDeliveryReceipt) -> Void)?
+    private let testProjects: [IrisTestProjectRegistry.Project]
+    private let previewTestBackups: ((IrisTestProjectRegistry.Project) -> String)?
+    private let onCleanupTestBackups: ((IrisTestProjectRegistry.Project) async -> String)?
     @State private var records: [AppDeliveryReceiptStore.Entry] = []
     @State private var missingFiles = false
+    @State private var isShowingCleanupConfirmation = false
+    @State private var cleanupMessage: String?
+    @State private var selectedTestProjectSlug: String?
 
     init(
         receiptStore: AppDeliveryReceiptStore = AppDeliveryReceiptStore(),
-        onUndoReceipt: ((AppDeliveryReceipt) -> Void)? = nil
+        onUndoReceipt: ((AppDeliveryReceipt) -> Void)? = nil,
+        testProjects: [IrisTestProjectRegistry.Project] = [],
+        previewTestBackups: ((IrisTestProjectRegistry.Project) -> String)? = nil,
+        onCleanupTestBackups: ((IrisTestProjectRegistry.Project) async -> String)? = nil
     ) {
         self.receiptStore = receiptStore
         self.onUndoReceipt = onUndoReceipt
+        self.testProjects = testProjects
+        self.previewTestBackups = previewTestBackups
+        self.onCleanupTestBackups = onCleanupTestBackups
     }
 
     var body: some View {
@@ -83,13 +95,62 @@ struct SavedAppVersionsSection: View {
                     Text("Showing up to \(AppDeliveryReceiptStore.maximumEntries) saved records. Additional records may not appear here; nothing was deleted.")
                         .foregroundColor(DS.Colors.amber)
                 }
+                if let onCleanupTestBackups, isIrisTestRuntime {
+                    Divider()
+                        .padding(.vertical, 4)
+                    Text("Iris Test cleanup")
+                        .foregroundColor(DS.Colors.textPrimary)
+                    if testProjects.isEmpty {
+                        Text("No eligible registered Test app is available. Iris will not guess a project or remove anything.")
+                            .foregroundColor(DS.Colors.amber)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Picker("Test app", selection: $selectedTestProjectSlug) {
+                            ForEach(testProjects, id: \.slug) { project in
+                                Text(project.name).tag(Optional(project.slug))
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        let selectedProject = testProjects.first(where: { $0.slug == selectedTestProjectSlug }) ?? testProjects[0]
+                        Text(previewTestBackups?(selectedProject) ?? "Iris will re-check this Test app before removing anything.")
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button("Review cleanup…") {
+                            isShowingCleanupConfirmation = true
+                        }
+                        .irisTinyButton()
+                        .alert("Remove obsolete Test backups?", isPresented: $isShowingCleanupConfirmation) {
+                            Button("Cancel", role: .cancel) {}
+                            Button("Remove obsolete backups", role: .destructive) {
+                                Task {
+                                    let result = await onCleanupTestBackups(selectedProject)
+                                    await MainActor.run {
+                                        cleanupMessage = result
+                                        refresh()
+                                    }
+                                }
+                            }
+                        } message: {
+                            Text(previewTestBackups?(selectedProject) ?? "Iris will re-check project identity, recovery references, bundle identity, and paths immediately before removing anything. Your source clone and installed app are not deleted.")
+                        }
+                        if let cleanupMessage {
+                            Text(cleanupMessage)
+                                .foregroundColor(DS.Colors.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
                 Button("Refresh") { refresh() }.irisTinyButton()
             }
             .padding(.top, DS.Spacing.sm)
         }
         .font(DS.Typography.caption)
         .foregroundColor(DS.Colors.textSecondary)
-        .onAppear { refresh() }
+        .onAppear {
+            refresh()
+            if selectedTestProjectSlug == nil {
+                selectedTestProjectSlug = testProjects.first?.slug
+            }
+        }
     }
 
     private func refresh() {
@@ -107,5 +168,15 @@ struct SavedAppVersionsSection: View {
         case .installed: return "Last recorded event: app files replaced."
         case .restored: return "Last recorded event: previous app files restored."
         }
+    }
+
+    /// Xcode's Test scheme injects the Test bundle identity into the app
+    /// process, but a debug launch can briefly report the host identity while
+    /// the debug dylib is being loaded. The product-path fallback keeps the
+    /// Test-only cleanup affordance visible in that narrow window without ever
+    /// exposing it from the normal /Applications/Iris.app build.
+    private var isIrisTestRuntime: Bool {
+        IrisTestEnvironment.isEnabled
+            || Bundle.main.bundleURL.path.contains("/Build/Products/Test/")
     }
 }

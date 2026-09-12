@@ -263,6 +263,13 @@ final class CompanionManager: ObservableObject {
     /// distinct instance — never overwriting an installed/signed bundle.
     private let appRelaunchService = AppRelaunchService()
 
+    /// The receipt store used by the Test-only saved-version panel. Keeping
+    /// this accessor on the manager ensures Settings and delivery share the
+    /// same durable records rather than showing a second, disconnected store.
+    var savedAppVersionsReceiptStore: AppDeliveryReceiptStore {
+        appRelaunchService.deliveryReceiptStore
+    }
+
     /// The USER-INITIATED on-demand editor: the reader picks an installed
     /// catalog app, says what to change (an explicit bug fix or feature), and
     /// Iris edits the local source, verifies it, and commits it on a branch —
@@ -2144,6 +2151,67 @@ final class CompanionManager: ObservableObject {
                     afterHold: false, onlyIfOwnedBy: .onDemandEdit
                 )
                 onDemandEditTakeoverIsUp = false
+            }
+        }
+    }
+
+    /// The registered Test projects are exposed only for the Test Settings
+    /// picker. The picker makes the cleanup scope explicit instead of silently
+    /// sweeping every project behind one button.
+    var savedTestProjects: [IrisTestProjectRegistry.Project] {
+        IrisTestProjectRegistry.projects()
+    }
+
+    /// A read-only, deliberately conservative preview. It counts older,
+    /// restored records for the selected project whose payload is still
+    /// readable, but does not claim that any will be deleted: the cleanup
+    /// engine re-checks recovery references, identity, paths, and retention
+    /// rules under its exclusive store lock immediately before deletion.
+    func previewSavedTestBackups(for project: IrisTestProjectRegistry.Project) -> String {
+        guard IrisTestEnvironment.isEnabled,
+              IrisTestProjectRegistry.project(slug: project.slug) == project else {
+            return "This Test app is no longer registered. No files are eligible."
+        }
+        let cutoff = Date().addingTimeInterval(-7 * 24 * 60 * 60)
+        let restored = savedAppVersionsReceiptStore.entries().compactMap { entry -> AppDeliveryReceipt? in
+            guard case .valid(let receipt) = entry,
+                  receipt.phase == .restored,
+                  receipt.bundleIdentifier == project.bundleIdentifier,
+                  receipt.startedAt < cutoff,
+                  savedAppVersionsReceiptStore.backupIsAvailable(for: receipt) else { return nil }
+            return receipt
+        }
+        guard !restored.isEmpty else {
+            return "No older restored backups for \(project.name) appear eligible. Recent, newest, protected, or unreadable copies are kept."
+        }
+        return "Up to \(restored.count) older restored backup(s) for \(project.name) may be removable. Recent, newest, recovery-protected, changed, or unreadable copies are kept after a final safety check."
+    }
+
+    /// Explicit, Test-only cleanup for one selected saved app project. This is
+    /// opt-in from Settings; there is no background purge and no production-app
+    /// path through this method.
+    @MainActor
+    func cleanupSavedTestBackups(for project: IrisTestProjectRegistry.Project) async -> String {
+        guard IrisTestEnvironment.isEnabled else {
+            return "Saved-version cleanup is available only in Iris Test. No files were removed."
+        }
+        guard IrisTestProjectRegistry.project(slug: project.slug) == project else {
+            return "\(project.name) is no longer registered. No files were removed."
+        }
+        let outcome = await IrisTestAppDelivery.cleanupObsoleteBackups(
+            project: project, service: appRelaunchService
+        )
+        switch outcome {
+        case .cleaned(let result):
+            return "\(project.name): removed \(result.deletedPaths.count) obsolete restored backup(s). Protected and recent copies were kept."
+        case .refused(let message):
+            return "\(project.name): no files were removed. \(message)"
+        case .failed(let error):
+            switch error {
+            case .deletionFailed(_, let deletedPaths, _, _):
+                return "\(project.name): cleanup stopped after \(deletedPaths.count) backup(s) were removed; no completion was claimed. Review saved versions before trying again."
+            default:
+                return "\(project.name): cleanup stopped safely; no completion was claimed. Review saved versions before trying again."
             }
         }
     }

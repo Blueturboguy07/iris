@@ -65,6 +65,12 @@ Iris data.
 - Earlier paid transfer trials produced no accepted complex feature. They are
   not repeated merely to inflate test counts. Costs and live outcomes must be
   attributed to an identified run, not inferred from static tests.
+- The accepted PlantGPT source commit `0db25ba8126d2351129f7dff18bc4b757e928705`
+  and its matching launchable replacement artifact still exist locally. The
+  registered checkout is at base `e42e184f…`, and the current UI delivery route
+  has no replayable accepted-edit coordinator state for that older branch. A
+  fresh delivery/restart/Undo journey is therefore unverified because of these
+  route and identity preconditions, not because the artifact is missing.
 
 ## Installed candidate and fresh checks, September 12 UTC
 

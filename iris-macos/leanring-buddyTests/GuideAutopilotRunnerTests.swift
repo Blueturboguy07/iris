@@ -11,7 +11,11 @@
 
 import Foundation
 import Testing
+#if IRIS_HARNESS_STANDALONE
+@testable import IrisHarnessNative
+#else
 @testable import Iris
+#endif
 
 @MainActor
 struct GuideAutopilotRunnerTests {
@@ -30,6 +34,11 @@ struct GuideAutopilotRunnerTests {
         /// How many times the escape hatch asked this session to cancel — the
         /// red button must reach BOTH the main and the long-running session.
         private(set) var cancelCount = 0
+        /// Holds scripted runs open so a test can model a real dev server and
+        /// release an old completion after a replacement owner exists.
+        var holdRuns = false
+        private(set) var heldRunCount = 0
+        private var heldRunContinuations: [CheckedContinuation<GuideAutopilotCommandOutcome, Never>] = []
 
         init(outcomes: [GuideAutopilotCommandOutcome]) {
             self.outcomes = outcomes
@@ -45,8 +54,19 @@ struct GuideAutopilotRunnerTests {
             deadline: TimeInterval
         ) async -> GuideAutopilotCommandOutcome {
             commandsRun.append(command.text)
+            if holdRuns {
+                heldRunCount += 1
+                return await withCheckedContinuation { continuation in
+                    heldRunContinuations.append(continuation)
+                }
+            }
             if outcomes.count > 1 { return outcomes.removeFirst() }
             return outcomes.first ?? .succeeded(workingDirectory: currentWorkingDirectory)
+        }
+
+        func resolveNextHeldRun(with outcome: GuideAutopilotCommandOutcome) {
+            guard !heldRunContinuations.isEmpty else { return }
+            heldRunContinuations.removeFirst().resume(returning: outcome)
         }
     }
 
@@ -74,7 +94,12 @@ struct GuideAutopilotRunnerTests {
     private static func runner(
         shell: FakeShellSession,
         longRunning: FakeShellSession? = nil,
-        proposer: FakeFixProposer? = nil
+        proposer: FakeFixProposer? = nil,
+        guideInstallers: [String: String] = [:],
+        sourceOwner: String? = nil,
+        sourceRepo: String? = nil,
+        sourceCommit: String? = nil,
+        sourceMetadataReader: @escaping @Sendable (String) async -> GuideAutopilotSourceCheckoutMetadata = { _ in .unknown }
     ) -> GuideAutopilotRunner {
         let proposer = proposer ?? FakeFixProposer()
         return GuideAutopilotRunner(
@@ -84,12 +109,17 @@ struct GuideAutopilotRunnerTests {
             guideContext: GuideAutopilotGuideContext(
                 slug: "whimprflow", version: 3, appName: "WhimprFlow",
                 platformLabel: "macOS",
-                hostsReachedByTheGuide: ["github.com"]
+                hostsReachedByTheGuide: ["github.com"],
+                commandTheGuidePublishesToInstallEachTool: guideInstallers,
+                sourceOwner: sourceOwner,
+                sourceRepo: sourceRepo,
+                sourceCommit: sourceCommit
             ),
             // No artificial hold in tests: a fake shell returns instantly and
             // the suite must stay fast and deterministic. The pacing floor is
             // exercised on its own in `pacingHoldsAFastCommandButNotASlowOne`.
-            pacing: .instant
+            pacing: .instant,
+            sourceMetadataReader: sourceMetadataReader
         )
     }
 
@@ -107,40 +137,25 @@ struct GuideAutopilotRunnerTests {
         )
     }
 
-    // MARK: - Dev-server output must reach the transcript
+    private static let sourcePinGuardCommand = """
+    (
+    if ! git config --get remote.origin.url 2>/dev/null | grep -qxF "https://example.test/source"; then
+      echo "~/fixture already exists and is not a clean copy of this app's source. Move or rename that folder, then press Try again."
+      exit 1
+    fi
+    if git status --porcelain 2>/dev/null | grep -q .; then
+      echo "~/fixture already exists and is not a clean copy of this app's source. Move or rename that folder, then press Try again."
+      exit 1
+    fi
+    git checkout 0123456789abcdef0123456789abcdef01234567
+    )
+    """
 
-    @Test func longRunningSessionOutputReachesTheTranscript() async {
-        // FreeHarmony fix round (Sep 2026), Bug 1: a live run's own dev server
-        // (`pnpm dev`) was serving real HTML within ~90s (confirmed by
-        // `curl`), yet the takeover terminal stayed frozen on the static "is
-        // starting from source" placeholder for 5+ minutes, and the guide
-        // never advanced. `GuideAutopilotRunner.init` wired
-        // `shellSession.onOutputLine` into the transcript but never
-        // `longRunningSession.onOutputLine` — so a dev server's real output,
-        // its ready banner included, never reached the screen the reader was
-        // watching, nor the screen the WatchLoop's `visual` check reads. This
-        // pins that BOTH sessions are wired, not only the main one.
-        let main = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")])
-        let long = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")])
-        let runner = Self.runner(shell: main, longRunning: long)
-
-        // Simulate the real pty callback the long-running session's own
-        // output would drive — exactly what a real `pnpm dev` ready banner
-        // looks like arriving line by line.
-        long.onOutputLine?("▲ Next.js 15.0.0")
-        long.onOutputLine?("- Local:        http://localhost:3000")
-
-        let outputLines = runner.transcript.compactMap { entry -> String? in
-            if case .output(let line) = entry { return line }
-            return nil
-        }
-        #expect(
-            outputLines.contains("- Local:        http://localhost:3000"),
-            """
-            a dev server's real output must reach the same transcript the main \
-            session's output does, or the terminal (and the WatchLoop's screen) \
-            never shows it and a visual-only watch step can never fire
-            """
+    private static func sourcePinStep() -> IrisGuideStep {
+        IrisGuideStep(
+            id: "pin-source", kind: .terminal, title: "Pin source", body: "",
+            command: sourcePinGuardCommand,
+            workingDirectory: "/Users/test/fixture"
         )
     }
 
@@ -176,6 +191,264 @@ struct GuideAutopilotRunnerTests {
         #expect(GuideAutopilotPacing.instant.remainingHold(afterElapsed: 0) == 0)
     }
 
+    // MARK: - Terminal recovery and output ownership
+
+    @Test func aRecoveredDeadTerminalIsSurfacedForExplicitRetryWithoutReplayingTheStep() async {
+        let shell = FakeShellSession(outcomes: [.terminalSessionRestarted])
+        let proposer = FakeFixProposer(
+            rungA: [GuideAutopilotProposedFix(
+                diagnosis: "should never be asked",
+                confidence: "high",
+                action: .runACommand(command: "echo repair", whatItDoes: "repairs"),
+                retryTheOriginalCommandAfterwards: true,
+                cameFromWebSearch: false
+            )]
+        )
+        let runner = Self.runner(shell: shell, proposer: proposer)
+
+        let result = await runner.executeStepCommand(
+            step: Self.step(command: "install-tool --apply"), stepIndex: 2, totalSteps: 5
+        )
+
+        #expect(result == .surfacedToReader)
+        #expect(shell.commandsRun == ["install-tool --apply"],
+                "a dead terminal must not replay a potentially non-idempotent command")
+        #expect(proposer.rungACalls == 0 && proposer.rungBCalls == 0,
+                "terminal recovery is not a model-repair opportunity")
+        guard case .surfacedToReader(let diagnosis, _) = runner.state else {
+            Issue.record("expected an actionable surfaced state, got \(runner.state)")
+            return
+        }
+        #expect(diagnosis.contains("did not replay"))
+        #expect(diagnosis.contains("Try again"))
+    }
+
+    @Test func aBusyTerminalRejectionIsNotMisreportedAsARecoveredShellOrSentToTheModel() async {
+        let shell = FakeShellSession(outcomes: [.sessionBusy])
+        let proposer = FakeFixProposer(
+            rungA: [GuideAutopilotProposedFix(
+                diagnosis: "should never be asked",
+                confidence: "high",
+                action: .runACommand(command: "echo repair", whatItDoes: "repairs"),
+                retryTheOriginalCommandAfterwards: true,
+                cameFromWebSearch: false
+            )]
+        )
+        let runner = Self.runner(shell: shell, proposer: proposer)
+
+        let result = await runner.executeStepCommand(
+            step: Self.step(command: "npm install"), stepIndex: 2, totalSteps: 5
+        )
+
+        #expect(result == .surfacedToReader)
+        #expect(shell.commandsRun == ["npm install"])
+        #expect(proposer.rungACalls == 0 && proposer.rungBCalls == 0,
+                "a serial-session busy rejection must not duplicate work or spend a model call")
+        guard case .surfacedToReader(let diagnosis, _) = runner.state else {
+            Issue.record("expected a surfaced busy state, got \(runner.state)")
+            return
+        }
+        #expect(diagnosis.contains("still finishing"))
+        #expect(!diagnosis.contains("fresh terminal is ready"))
+    }
+
+    @Test func longRunningOwnershipCoversNoCwdStepsCancellationRetryAndStaleCompletion() async {
+        let main = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")])
+        let long = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")])
+        long.holdRuns = true
+        let runner = Self.runner(shell: main, longRunning: long)
+        let firstStep = Self.step(id: "run-first", command: "npm run dev")
+
+        #expect(await runner.executeStepCommand(
+            step: firstStep, stepIndex: 0, totalSteps: 3
+        ) == .longRunningStarted)
+        // The fake observes entry into run itself; this does not pretend that
+        // the production API can acknowledge process startup before returning.
+        for _ in 0..<100 where long.heldRunCount == 0 {
+            await Task.yield()
+        }
+        #expect(long.heldRunCount == 1)
+
+        let secondAttempt = await runner.executeStepCommand(
+            step: Self.step(id: "run-second", command: "npm run dev"),
+            stepIndex: 1,
+            totalSteps: 3
+        )
+        #expect(secondAttempt == .surfacedToReader)
+        #expect(long.commandsRun.count == 1,
+                "a second no-cwd long-running step must not enter the side session")
+
+        let sensitiveAttempt = await runner.executeStepCommand(
+            step: Self.step(command: "echo SECRET && npm run dev", sensitive: true),
+            stepIndex: 1,
+            totalSteps: 3
+        )
+        #expect(sensitiveAttempt == .handedBackAsSensitive)
+        #expect(!runner.transcript.contains { entry in
+            if case .commandFromTheGuide(let text) = entry { return text.contains("SECRET") }
+            return false
+        }, "a sensitive long-running command must not be surfaced as busy with raw text")
+
+        await runner.abortTheCurrentStepBecauseTheReaderAskedToStop()
+        #expect(long.cancelCount == 1)
+
+        // The first run is intentionally left unresolved: this models a stale
+        // completion arriving after an explicit abort released its owner.
+        #expect(await runner.executeStepCommand(
+            step: Self.step(id: "run-retry", command: "npm run dev"),
+            stepIndex: 2,
+            totalSteps: 3
+        ) == .longRunningStarted)
+        for _ in 0..<100 where long.heldRunCount < 2 {
+            await Task.yield()
+        }
+        #expect(long.heldRunCount == 2)
+
+        long.resolveNextHeldRun(with: .timedOut)
+        // The old run's completion must not clear the retry's ownership.
+        for _ in 0..<100 {
+            if case .running(let stepIndex) = runner.state, stepIndex == 2 { break }
+            await Task.yield()
+        }
+        #expect(runner.state == .running(stepIndex: 2),
+                "a stale timeout must not surface against the replacement step")
+        let staleCompletionAttempt = await runner.executeStepCommand(
+            step: Self.step(id: "run-after-stale", command: "npm run dev"),
+            stepIndex: 3,
+            totalSteps: 4
+        )
+        #expect(staleCompletionAttempt == .surfacedToReader)
+        #expect(long.commandsRun.count == 2,
+                "a stale completion must not make the replacement lane appear free")
+
+        long.resolveNextHeldRun(with: .succeeded(workingDirectory: "/x"))
+    }
+
+    @Test func aLongRunningTimeoutSurfacesAnActionableRetryWithoutReplay() async {
+        let main = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")])
+        let long = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")])
+        long.holdRuns = true
+        let runner = Self.runner(shell: main, longRunning: long)
+
+        #expect(await runner.executeStepCommand(
+            step: Self.step(command: "npm run dev"), stepIndex: 0, totalSteps: 1
+        ) == .longRunningStarted)
+        for _ in 0..<100 where long.heldRunCount == 0 {
+            await Task.yield()
+        }
+        long.resolveNextHeldRun(with: .timedOut)
+        for _ in 0..<100 {
+            if case .surfacedToReader = runner.state { break }
+            await Task.yield()
+        }
+
+        guard case .surfacedToReader(let diagnosis, _) = runner.state else {
+            Issue.record("expected a surfaced long-running timeout, got \(runner.state)")
+            return
+        }
+        #expect(diagnosis.contains("too long"))
+        #expect(diagnosis.contains("not replayed"))
+        #expect(diagnosis.contains("Try again"))
+        #expect(long.commandsRun.count == 1)
+    }
+
+    @Test func anUnexpectedLongRunningCancellationSurfacesAnActionableRetry() async {
+        let main = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")])
+        let long = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")])
+        long.holdRuns = true
+        let runner = Self.runner(shell: main, longRunning: long)
+
+        #expect(await runner.executeStepCommand(
+            step: Self.step(command: "npm run dev"), stepIndex: 0, totalSteps: 1
+        ) == .longRunningStarted)
+        for _ in 0..<100 where long.heldRunCount == 0 {
+            await Task.yield()
+        }
+        long.resolveNextHeldRun(with: .cancelled)
+        for _ in 0..<100 {
+            if case .surfacedToReader = runner.state { break }
+            await Task.yield()
+        }
+
+        guard case .surfacedToReader(let diagnosis, _) = runner.state else {
+            Issue.record("expected a surfaced long-running interruption, got \(runner.state)")
+            return
+        }
+        #expect(diagnosis.contains("interrupted"))
+        #expect(diagnosis.contains("did not replay"))
+        #expect(diagnosis.contains("Try again"))
+        #expect(long.commandsRun.count == 1)
+    }
+
+    @Test func aRefusedLongRunningCommandDoesNotHoldTheSideSessionLane() async {
+        let main = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")])
+        let long = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")])
+        let runner = Self.runner(shell: main, longRunning: long)
+
+        #expect(await runner.executeStepCommand(
+            step: Self.step(command: "sudo npm run dev"), stepIndex: 0, totalSteps: 2
+        ) == .skippedByReader)
+        #expect(long.commandsRun.isEmpty)
+
+        #expect(await runner.executeStepCommand(
+            step: Self.step(command: "npm run dev"), stepIndex: 1, totalSteps: 2
+        ) == .longRunningStarted,
+        "a refused confirmation must not strand the side-session ownership latch")
+    }
+
+    @Test func longRunningSessionOutputReachesTheSameTranscript() async {
+        let main = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")])
+        let long = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")])
+        let runner = Self.runner(shell: main, longRunning: long)
+
+        long.onOutputLine?("dev server ready")
+        long.onOutputLine?("http://localhost:3000")
+
+        let outputLines = runner.transcript.compactMap { entry -> String? in
+            if case .output(let line) = entry { return line }
+            return nil
+        }
+        #expect(outputLines.contains("http://localhost:3000"))
+    }
+
+    @Test func aRecoveredShellDoesNotReplayTheOriginalCommandButAnExplicitSecondRunCan() async {
+        let shell = FakeShellSession(outcomes: [
+            .terminalSessionRestarted,
+            .succeeded(workingDirectory: "/x"),
+        ])
+        let runner = Self.runner(shell: shell)
+        let step = Self.step(command: "ditto release/App.app /Applications/App.app")
+
+        #expect(await runner.executeStepCommand(step: step, stepIndex: 0, totalSteps: 1) == .surfacedToReader)
+        #expect(shell.commandsRun == ["ditto release/App.app /Applications/App.app"])
+
+        #expect(await runner.executeStepCommand(step: step, stepIndex: 0, totalSteps: 1) == .succeeded)
+        #expect(shell.commandsRun == [
+            "ditto release/App.app /Applications/App.app",
+            "ditto release/App.app /Applications/App.app",
+        ])
+    }
+
+    @Test func aWorkingDirectoryMoveRetriesOnceAfterARecoveredTerminalBeforeTheRealCommand() async {
+        let shell = FakeShellSession(outcomes: [
+            .terminalSessionRestarted,
+            .succeeded(workingDirectory: "/Users/x/app"),
+            .succeeded(workingDirectory: "/Users/x/app"),
+        ])
+        let runner = Self.runner(shell: shell)
+
+        #expect(await runner.executeStepCommand(
+            step: Self.step(command: "printf ready", workingDirectory: "/Users/x/app"),
+            stepIndex: 0,
+            totalSteps: 1
+        ) == .succeeded)
+        #expect(shell.commandsRun == [
+            "cd /Users/x/app",
+            "cd /Users/x/app",
+            "printf ready",
+        ])
+    }
+
     // MARK: - Happy path
 
     @Test func aCleanCommandSucceedsAndTheExitStatusIsRecorded() async {
@@ -193,6 +466,120 @@ struct GuideAutopilotRunnerTests {
         #expect(recordedAZeroExit)
     }
 
+    @Test func aSuccessfulGlobalInstallRefreshesTheShellBeforeTheNextStep() async {
+        let shell = FakeShellSession(outcomes: [
+            .succeeded(workingDirectory: "/x"), // npm install -g yarn
+            .succeeded(workingDirectory: "/x"), // environment refresh
+            .succeeded(workingDirectory: "/x"), // yarn install
+        ])
+        let runner = Self.runner(shell: shell)
+
+        #expect(
+            await runner.executeStepCommand(
+                step: Self.step(command: "npm install -g yarn"),
+                stepIndex: 0,
+                totalSteps: 2
+            ) == .succeeded
+        )
+        #expect(shell.commandsRun == [
+            "npm install -g yarn",
+            GuideAutopilotShellSession.reloadTheReadersEnvironmentCommand,
+        ])
+
+        #expect(
+            await runner.executeStepCommand(
+                step: Self.step(command: "yarn install"),
+                stepIndex: 1,
+                totalSteps: 2
+            ) == .succeeded
+        )
+        #expect(shell.commandsRun.last == "yarn install")
+    }
+
+    @Test func aMissingYarnReplaysTheGuideInstallBeforeAskingTheModel() async {
+        let shell = FakeShellSession(outcomes: [
+            .failed(exitStatus: 127, workingDirectory: "/x"), // yarn install
+            .succeeded(workingDirectory: "/x"),                // npm install -g yarn
+            .succeeded(workingDirectory: "/x"),                // environment refresh
+            .succeeded(workingDirectory: "/x"),                // yarn install retry
+        ])
+        let proposer = FakeFixProposer(
+            rungA: [nil], rungB: [nil]
+        )
+        let runner = Self.runner(
+            shell: shell,
+            proposer: proposer,
+            guideInstallers: ["yarn": "npm install -g yarn"]
+        )
+
+        let result = await runner.executeStepCommand(
+            step: Self.step(command: "yarn install"), stepIndex: 6, totalSteps: 13
+        )
+
+        #expect(result == .succeeded)
+        #expect(shell.commandsRun == [
+            "yarn install",
+            "npm install -g yarn",
+            GuideAutopilotShellSession.reloadTheReadersEnvironmentCommand,
+            "yarn install",
+        ])
+        #expect(proposer.rungACalls == 0)
+        #expect(proposer.rungBCalls == 0)
+        #expect(runner.transcript.contains {
+            if case .explanation(let text) = $0 {
+                return text.contains("yarn") && text.contains("own step")
+            }
+            return false
+        })
+    }
+
+    @Test func aMissingToolDoesNotRetryItsCommandAfterEnvironmentRefreshFails() async {
+        let shell = FakeShellSession(outcomes: [
+            .failed(exitStatus: 127, workingDirectory: "/x"),
+            .succeeded(workingDirectory: "/x"),
+            .sessionFailed,
+        ])
+        let proposer = FakeFixProposer()
+        let runner = Self.runner(
+            shell: shell, proposer: proposer,
+            guideInstallers: ["node": "echo fixture-installer"]
+        )
+        let result = await runner.executeStepCommand(
+            step: Self.step(command: "node app.js"), stepIndex: 1, totalSteps: 2
+        )
+        #expect(result == .surfacedToReader)
+        #expect(shell.commandsRun == [
+            "node app.js", "echo fixture-installer",
+            GuideAutopilotShellSession.reloadTheReadersEnvironmentCommand,
+        ])
+        #expect(proposer.rungACalls == 0 && proposer.rungBCalls == 0)
+    }
+
+    @Test func aGuideGlobalPackageInstallMapsItsPackageManagerWithoutAWatch() {
+        let installStep = IrisGuideStep(
+            id: "install-yarn", kind: .terminal, title: "Install Yarn", body: "",
+            command: "npm install -g yarn"
+        )
+        let branch = IrisGuideBranch(
+            platform: .macos, target: nil, label: "macOS", shell: .terminal,
+            setupSteps: [],
+            steps: [
+                installStep,
+                IrisGuideStep(
+                    id: "dependencies", kind: .terminal, title: "Install dependencies", body: "",
+                    command: "yarn install"
+                ),
+            ],
+            unsupported: nil
+        )
+
+        #expect(
+            GuideSessionController.commandsThisGuidePublishesToInstallEachToolForAutopilot(
+                branch: branch
+            ) == ["yarn": "npm install -g yarn"]
+        )
+    }
+
     // MARK: - Sensitive
 
     @Test func aSensitiveStepIsNeverExecuted() async {
@@ -206,65 +593,349 @@ struct GuideAutopilotRunnerTests {
         #expect(shell.commandsRun.isEmpty, "a sensitive command must never reach the shell")
     }
 
-    // MARK: - A dead shell session (the "silently and permanently stalls" field report)
-
-    /// Reproduces the campaign's own diagnosis: `.sessionFailed` (the pty
-    /// shell died mid-command — e.g. the deadline escalation's Ctrl-D
-    /// reaching a shell that had already gone idle because the command's own
-    /// completion marker was missed) used to fall straight through to the
-    /// generic `.stopped` outcome. The drive loop treats `.stopped` as
-    /// "nothing more to drive" and silently ends autopilot with no
-    /// explanation and no way to retry — the guide just sits on its last
-    /// "Working…" line forever. It must instead be surfaced as a retryable
-    /// "Your turn" row, and the ladder must never be spent trying to
-    /// model-fix it.
-    @Test func aDeadShellSessionIsSurfacedAsRetryableRatherThanSilentlyStopped() async {
-        let shell = FakeShellSession(outcomes: [.sessionFailed])
-        let proposer = FakeFixProposer()
-        let runner = Self.runner(shell: shell, proposer: proposer)
-        let result = await runner.executeStepCommand(
-            step: Self.step(command: "yarn dist:mac"), stepIndex: 7, totalSteps: 13
-        )
-        #expect(result == .surfacedToReader,
-                "a dead shell must be surfaced with a retry offer, never silently dropped as .stopped")
-        #expect(proposer.rungACalls == 0, "there is nothing a model fix could repair about a dead terminal")
-        switch runner.state {
-        case .surfacedToReader(let diagnosis, _):
-            #expect(diagnosis.localizedCaseInsensitiveContains("try again"),
-                    "the reader needs to be told this is retryable, not left on a bare failure")
-        default:
-            Issue.record("expected .surfacedToReader state, got \(runner.state)")
-        }
-    }
-
-    /// The exact chain from the campaign's ditto-step finding: `moveInto`'s own
-    /// `cd` is the first thing that runs once a step declares a
-    /// `workingDirectory`, and if THAT particular command is the one that
-    /// catches a session mid-restart, the folder was never actually wrong —
-    /// the fresh shell (which `GuideAutopilotShellSession.noteShellExited` now
-    /// rebuilds immediately) simply had not been asked yet. Before this fix,
-    /// any non-`.succeeded` outcome from the `cd` — including `.sessionFailed`
-    /// — was reported as "Iris couldn't move into ~/Simplicity", identically,
-    /// every time "Try again" repeated the exact same doomed `cd`.
-    @Test func aDeadShellDuringTheFolderMoveRecoversOnceTheFreshSessionIsRetried() async {
-        let shell = FakeShellSession(outcomes: [
-            .sessionFailed,                                   // the cd, catching the restart
-            .succeeded(workingDirectory: "/x/Simplicity"),    // the retried cd
-            .succeeded(workingDirectory: "/x/Simplicity"),    // the real command
-        ])
-        let runner = Self.runner(shell: shell)
-        let result = await runner.executeStepCommand(
-            step: Self.step(
-                command: "ditto release/mac-arm64/Simplicity.app /Applications/Simplicity.app",
-                workingDirectory: "~/Simplicity"
-            ),
-            stepIndex: 8, totalSteps: 13
-        )
-        #expect(result == .succeeded,
-                "a cd that only failed because the shell was mid-restart must not be reported as the wrong folder")
-    }
-
     // MARK: - The ladder
+
+    @Test func aDirtySourcePinSurfacesTheFoundFolderWithoutEnteringTheRepairLadder() async {
+        let shell = FakeShellSession(outcomes: [
+            .succeeded(workingDirectory: "/Users/test/fixture"), // declared folder
+            .failed(exitStatus: 1, workingDirectory: "/Users/test/fixture") // source guard
+        ])
+        shell.modelTail = """
+        ~/fixture already exists and is not a clean copy of this app's source.
+         M Sources/Editor.swift
+        ?? notes/local.md
+        """
+        let proposer = FakeFixProposer(rungA: [nil], rungB: [nil])
+        let runner = Self.runner(shell: shell, proposer: proposer)
+
+        let result = await runner.executeStepCommand(
+            step: Self.sourcePinStep(), stepIndex: 5, totalSteps: 15
+        )
+
+        #expect(result == .surfacedToReader)
+        #expect(proposer.rungACalls == 0)
+        #expect(proposer.rungBCalls == 0)
+        #expect(shell.commandsRun == [
+            "cd /Users/test/fixture",
+            Self.sourcePinGuardCommand,
+        ])
+        guard case .surfacedToReader(let diagnosis, _) = runner.state else {
+            Issue.record("expected the source pin to hand the step back, got \(runner.state)")
+            return
+        }
+        #expect(diagnosis.contains("source check stopped in /Users/test/fixture"))
+        #expect(diagnosis.contains("Sources/Editor.swift"))
+        #expect(diagnosis.contains("notes/local.md"))
+        #expect(!diagnosis.contains("couldn't move into"))
+    }
+
+    @Test func sourcePinRetryRemainsAnExplicitSingleStepAndDoesNotLoopOrReclone() async {
+        let shell = FakeShellSession(outcomes: [
+            .succeeded(workingDirectory: "/Users/test/fixture"),
+            .failed(exitStatus: 1, workingDirectory: "/Users/test/fixture"),
+            .succeeded(workingDirectory: "/Users/test/fixture"),
+            .failed(exitStatus: 1, workingDirectory: "/Users/test/fixture"),
+        ])
+        shell.modelTail = "~/fixture already exists and is not a clean copy of this app's source."
+        let proposer = FakeFixProposer(rungA: [nil], rungB: [nil])
+        let runner = Self.runner(shell: shell, proposer: proposer)
+
+        _ = await runner.executeStepCommand(
+            step: Self.sourcePinStep(), stepIndex: 5, totalSteps: 15
+        )
+        _ = await runner.executeStepCommand(
+            step: Self.sourcePinStep(), stepIndex: 5, totalSteps: 15
+        )
+
+        #expect(proposer.rungACalls == 0)
+        #expect(proposer.rungBCalls == 0)
+        #expect(shell.commandsRun == [
+            "cd /Users/test/fixture",
+            Self.sourcePinGuardCommand,
+            "cd /Users/test/fixture",
+            Self.sourcePinGuardCommand,
+        ])
+        #expect(!shell.commandsRun.contains("git clone https://example.test/source"))
+    }
+
+    @Test func sourcePinNamesOnlySafeRelativePorcelainPathsAndStatesWhenNamesWereNotPrinted() {
+        let tail = """
+        ~/fixture already exists and is not a clean copy of this app's source.
+         M Sources/Editor.swift
+        ?? notes/local.md
+        ?? ../outside.md
+        ?? /private/tmp/outside.md
+        ?? \"quoted name.md\"
+        R  old.md -> new.md
+        """
+        let refusal = GuideAutopilotSourceCheckoutRefusal.detect(
+            command: Self.sourcePinGuardCommand,
+            exitStatus: 1,
+            scrubbedOutputTail: tail,
+            workingDirectory: "/Users/test/fixture"
+        )
+        #expect(refusal?.verifiedWorkingDirectory == "/Users/test/fixture")
+        #expect(refusal?.safeRelativeChangedPaths == ["Sources/Editor.swift", "notes/local.md"])
+
+        let noNames = GuideAutopilotSourceCheckoutRefusal.detect(
+            command: Self.sourcePinGuardCommand,
+            exitStatus: 1,
+            scrubbedOutputTail: "~/fixture already exists and is not a clean copy of this app's source.",
+            workingDirectory: "/Users/test/fixture"
+        )
+        #expect(noNames?.safeRelativeChangedPaths.isEmpty == true)
+        #expect(noNames?.readerFacingDiagnosis.contains("did not expose the individual changed filenames") == true)
+    }
+
+    @Test func unrelatedGitFailureIsNotLabeledAsASourcePinRefusal() {
+        let refusal = GuideAutopilotSourceCheckoutRefusal.detect(
+            command: "git status --porcelain",
+            exitStatus: 1,
+            scrubbedOutputTail: "not a clean copy",
+            workingDirectory: "/Users/test/fixture"
+        )
+        #expect(refusal == nil)
+    }
+
+    @Test func correctCleanPinRemainsRefusedAndExplainsTheMatchingSource() async {
+        let shell = FakeShellSession(outcomes: [
+            .succeeded(workingDirectory: "/Users/test/kneecap"),
+            .failed(exitStatus: 1, workingDirectory: "/Users/test/kneecap")
+        ])
+        shell.modelTail = "kneecap already exists and is not a clean copy of this app's source."
+        let runner = Self.runner(
+            shell: shell,
+            sourceOwner: "Blueturboguy07",
+            sourceRepo: "kneecap",
+            sourceCommit: "fc48ba487a1e0d0cd10b30d6600acd2895ffdbed",
+            sourceMetadataReader: { _ in
+                GuideAutopilotSourceCheckoutMetadata(
+                    head: "fc48ba487a1e0d0cd10b30d6600acd2895ffdbed",
+                    origin: "https://github.com/Blueturboguy07/kneecap.git",
+                    porcelainOutput: "",
+                    statusOutputWasTruncated: false
+                )
+            }
+        )
+
+        let result = await runner.executeStepCommand(
+            step: Self.sourcePinStep(), stepIndex: 5, totalSteps: 15
+        )
+
+        #expect(result == .surfacedToReader)
+        guard case .surfacedToReader(let diagnosis, _) = runner.state else { return }
+        #expect(diagnosis.contains("folder is named kneecap"))
+        #expect(diagnosis.contains("source origin matches Blueturboguy07/kneecap"))
+        #expect(diagnosis.contains("revision matches the guide pin"))
+        #expect(diagnosis.contains("no changed paths"))
+        #expect(diagnosis.contains("does not waive this refusal"))
+    }
+
+    @Test func correctDirtyPinNamesTrackedChangesAndFinderMetadataSeparately() async {
+        let shell = FakeShellSession(outcomes: [
+            .succeeded(workingDirectory: "/Users/test/kneecap"),
+            .failed(exitStatus: 1, workingDirectory: "/Users/test/kneecap")
+        ])
+        shell.modelTail = "kneecap already exists and is not a clean copy of this app's source."
+        let runner = Self.runner(
+            shell: shell,
+            sourceOwner: "Blueturboguy07",
+            sourceRepo: "kneecap",
+            sourceCommit: "fc48ba487a1e0d0cd10b30d6600acd2895ffdbed",
+            sourceMetadataReader: { _ in
+                GuideAutopilotSourceCheckoutMetadata(
+                    head: "fc48ba487a1e0d0cd10b30d6600acd2895ffdbed",
+                    origin: "git@github.com:Blueturboguy07/kneecap.git",
+                    porcelainOutput: " M Sources/Editor.swift\n?? .DS_Store\n",
+                    statusOutputWasTruncated: false
+                )
+            }
+        )
+
+        _ = await runner.executeStepCommand(
+            step: Self.sourcePinStep(), stepIndex: 5, totalSteps: 15
+        )
+
+        guard case .surfacedToReader(let diagnosis, _) = runner.state else { return }
+        #expect(diagnosis.contains("tracked changes: Sources/Editor.swift"))
+        #expect(diagnosis.contains("Finder metadata: .DS_Store"))
+        #expect(!diagnosis.contains("untracked source paths: .DS_Store"))
+    }
+
+    @Test func dirtyWrongPinNamesOriginAndRevisionMismatchesButStillRefuses() async {
+        let shell = FakeShellSession(outcomes: [
+            .succeeded(workingDirectory: "/Users/test/kneecap"),
+            .failed(exitStatus: 1, workingDirectory: "/Users/test/kneecap")
+        ])
+        shell.modelTail = "kneecap already exists and is not a clean copy of this app's source."
+        let runner = Self.runner(
+            shell: shell,
+            sourceOwner: "Blueturboguy07",
+            sourceRepo: "kneecap",
+            sourceCommit: "fc48ba487a1e0d0cd10b30d6600acd2895ffdbed",
+            sourceMetadataReader: { _ in
+                GuideAutopilotSourceCheckoutMetadata(
+                    head: "0000000000000000000000000000000000000000",
+                    origin: "https://github.com/other-owner/other-repo.git",
+                    porcelainOutput: " M package.json\n",
+                    statusOutputWasTruncated: false
+                )
+            }
+        )
+
+        _ = await runner.executeStepCommand(
+            step: Self.sourcePinStep(), stepIndex: 5, totalSteps: 15
+        )
+
+        guard case .surfacedToReader(let diagnosis, _) = runner.state else { return }
+        #expect(diagnosis.contains("source origin does not match"))
+        #expect(diagnosis.contains("revision does not match"))
+        #expect(diagnosis.contains("tracked changes: package.json"))
+    }
+
+    @Test func absentCheckoutKeepsFolderNamedAndAllFreshFactsUnconfirmed() async {
+        let shell = FakeShellSession(outcomes: [
+            .succeeded(workingDirectory: "/Users/test/missing-copy"),
+            .failed(exitStatus: 1, workingDirectory: "/Users/test/missing-copy")
+        ])
+        shell.modelTail = "missing-copy already exists and is not a clean copy of this app's source."
+        let runner = Self.runner(
+            shell: shell,
+            sourceOwner: "Blueturboguy07",
+            sourceRepo: "kneecap",
+            sourceCommit: "fc48ba487a1e0d0cd10b30d6600acd2895ffdbed"
+        )
+
+        _ = await runner.executeStepCommand(
+            step: Self.sourcePinStep(), stepIndex: 5, totalSteps: 15
+        )
+
+        guard case .surfacedToReader(let diagnosis, _) = runner.state else { return }
+        #expect(diagnosis.contains("folder is named missing-copy"))
+        #expect(diagnosis.contains("source origin is unconfirmed"))
+        #expect(diagnosis.contains("revision is unconfirmed"))
+        #expect(diagnosis.contains("changed paths are unconfirmed"))
+    }
+
+    @Test func unreadableOrTruncatedStatusStaysExplicitlyUnconfirmed() async {
+        let shell = FakeShellSession(outcomes: [
+            .succeeded(workingDirectory: "/Users/test/kneecap"),
+            .failed(exitStatus: 1, workingDirectory: "/Users/test/kneecap")
+        ])
+        shell.modelTail = "kneecap already exists and is not a clean copy of this app's source."
+        let runner = Self.runner(
+            shell: shell,
+            sourceMetadataReader: { _ in
+                GuideAutopilotSourceCheckoutMetadata(
+                    head: nil,
+                    origin: nil,
+                    porcelainOutput: nil,
+                    statusOutputWasTruncated: true
+                )
+            }
+        )
+
+        _ = await runner.executeStepCommand(
+            step: Self.sourcePinStep(), stepIndex: 5, totalSteps: 15
+        )
+
+        guard case .surfacedToReader(let diagnosis, _) = runner.state else { return }
+        #expect(diagnosis.contains("Fresh Git status could not be confirmed"))
+        #expect(diagnosis.contains("changed paths are unconfirmed"))
+        #expect(!diagnosis.contains("status output was truncated"))
+    }
+
+    @Test func truncatedStatusNamesOnlyTheSafeBoundedPrefixAndSaysItWasCut() async {
+        let shell = FakeShellSession(outcomes: [
+            .succeeded(workingDirectory: "/Users/test/kneecap"),
+            .failed(exitStatus: 1, workingDirectory: "/Users/test/kneecap")
+        ])
+        shell.modelTail = "kneecap already exists and is not a clean copy of this app's source."
+        let runner = Self.runner(
+            shell: shell,
+            sourceMetadataReader: { _ in
+                GuideAutopilotSourceCheckoutMetadata(
+                    head: "fc48ba487a1e0d0cd10b30d6600acd2895ffdbed",
+                    origin: "https://github.com/Blueturboguy07/kneecap.git",
+                    porcelainOutput: " M Sources/Editor.swift\n?? notes/local.md\n",
+                    statusOutputWasTruncated: true
+                )
+            }
+        )
+
+        _ = await runner.executeStepCommand(
+            step: Self.sourcePinStep(), stepIndex: 5, totalSteps: 15
+        )
+
+        guard case .surfacedToReader(let diagnosis, _) = runner.state else { return }
+        #expect(diagnosis.contains("tracked changes: Sources/Editor.swift"))
+        #expect(diagnosis.contains("untracked source paths: notes/local.md"))
+        #expect(diagnosis.contains("status output was truncated"))
+    }
+
+    @Test func staleSourceMetadataDoesNotDisplayAfterTheSessionEnds() async {
+        let shell = FakeShellSession(outcomes: [
+            .succeeded(workingDirectory: "/Users/test/kneecap"),
+            .failed(exitStatus: 1, workingDirectory: "/Users/test/kneecap")
+        ])
+        shell.modelTail = "kneecap already exists and is not a clean copy of this app's source."
+        let runner = Self.runner(
+            shell: shell,
+            sourceMetadataReader: { _ in
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                return GuideAutopilotSourceCheckoutMetadata(
+                    head: "fc48ba487a1e0d0cd10b30d6600acd2895ffdbed",
+                    origin: "https://github.com/Blueturboguy07/kneecap.git",
+                    porcelainOutput: "",
+                    statusOutputWasTruncated: false
+                )
+            }
+        )
+        let resultTask = Task { await runner.executeStepCommand(
+            step: Self.sourcePinStep(), stepIndex: 5, totalSteps: 15
+        ) }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+        await runner.endSession()
+        #expect(await resultTask.value == .stopped)
+        #expect(!runner.transcript.contains { entry in
+            if case .explanation(let text) = entry {
+                return text.contains("source origin matches")
+            }
+            return false
+        })
+    }
+
+    @Test func cancelledSourceMetadataDoesNotDisplayAStaleDiagnosis() async {
+        let shell = FakeShellSession(outcomes: [
+            .succeeded(workingDirectory: "/Users/test/kneecap"),
+            .failed(exitStatus: 1, workingDirectory: "/Users/test/kneecap")
+        ])
+        shell.modelTail = "kneecap already exists and is not a clean copy of this app's source."
+        let runner = Self.runner(
+            shell: shell,
+            sourceMetadataReader: { _ in
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                return GuideAutopilotSourceCheckoutMetadata(
+                    head: "fc48ba487a1e0d0cd10b30d6600acd2895ffdbed",
+                    origin: "https://github.com/Blueturboguy07/kneecap.git",
+                    porcelainOutput: "",
+                    statusOutputWasTruncated: false
+                )
+            }
+        )
+        let resultTask = Task { await runner.executeStepCommand(
+            step: Self.sourcePinStep(), stepIndex: 5, totalSteps: 15
+        ) }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+        resultTask.cancel()
+        #expect(await resultTask.value == .stopped)
+        #expect(!runner.transcript.contains { entry in
+            if case .explanation(let text) = entry {
+                return text.contains("source origin matches")
+            }
+            return false
+        })
+    }
 
     @Test func aFailureIsRepairedByRungAAndTheOriginalRetried() async {
         // Original fails, fix runs clean, retry of the original succeeds.

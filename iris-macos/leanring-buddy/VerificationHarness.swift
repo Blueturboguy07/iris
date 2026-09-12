@@ -85,6 +85,8 @@ struct VerificationOutcome: Sendable {
     /// when the stack has no test command — honestly skipped, never a silent
     /// green.
     var suite: VerificationStageResult = .notRun
+    var confinedSuite: VerificationStageResult? = nil
+    var nativeSuite: VerificationStageResult? = nil
 
     /// COMPATIBILITY ACCESSOR. "The build stage did not fail" — which is what
     /// this field has always meant, absent and green alike. Every reader that
@@ -171,6 +173,25 @@ struct VerificationOutcome: Sendable {
     /// nothing ran it.
     var atLeastOneVerificationStageActuallyRan: Bool {
         build != .notRun || suite != .notRun || reproPassedAfterPatch != nil
+    }
+
+    var editReceipt: EditVerificationReceipt {
+        func recordedResult(_ stage: VerificationStageResult) -> Bool? {
+            switch stage {
+            case .passed: return true
+            case .failed: return false
+            case .notRun: return nil
+            }
+        }
+        return EditVerificationReceipt(
+            buildPassed: recordedResult(build), testsPassed: recordedResult(suite),
+            confinedTestsPassed: confinedSuite.flatMap(recordedResult),
+            nativeTestsPassed: nativeSuite.flatMap(recordedResult),
+            nativeTestsRequired: nativeSuite != nil,
+            symptomReproduced: earnsVerifiedFix,
+            failureStage: blockedStage,
+            failureOutputTail: blockedStage == nil ? nil : blockedOutputTail.map(scrubbedVerificationOutputTail)
+        )
     }
 }
 
@@ -331,6 +352,9 @@ enum VerificationHarness {
             guard outcome.suite == .passed else {
                 return blocked(&outcome, stage: "suite", tail: suiteResult?.outputTail ?? "")
             }
+            let observedOutput = GuideAutopilotOutputBuffer.scrubbed(suiteResult?.outputTail ?? "")
+            outcome.evidenceLog.append("Observed test command: \(testCommand); exit 0. Output tail (untrusted test output):\n"
+                + String(observedOutput.suffix(2_048)))
         }
 
         // ── Feature Engine verification ladder (plan §9) ───────────────────
@@ -363,7 +387,7 @@ enum VerificationHarness {
         let collectedEvidence = evidenceFromCollectedSignals(outcome: outcome)
         outcome.verificationEvidence = collectedEvidence
         outcome.verificationRung = FeatureEditVerificationLadder.highestEarnedRung(from: collectedEvidence)
-        outcome.evidenceLog = collectedEvidence.evidenceLogLines()
+        outcome.evidenceLog = collectedEvidence.evidenceLogLines() + outcome.evidenceLog
         // When the caller told us how this app runs, also record the rung it
         // must reach to auto-commit (ratified decision 5a). Data only — this
         // harness does not gate on it; the caller does.
@@ -549,7 +573,9 @@ enum VerificationHarness {
         _ outcome: inout VerificationOutcome, stage: String, tail: String
     ) -> VerificationOutcome {
         outcome.blockedStage = stage
-        outcome.blockedOutputTail = String(tail.suffix(2000))
+        // Redact before the final cap so a long credential cannot lose the
+        // prefix that identifies it to the scrubber.
+        outcome.blockedOutputTail = scrubbedVerificationOutputTail(tail)
         irisTrace("maintain: verification BLOCKED at \(stage)")
         return outcome
     }

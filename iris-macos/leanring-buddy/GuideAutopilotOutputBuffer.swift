@@ -179,8 +179,27 @@ nonisolated struct GuideAutopilotOutputBuffer {
         #"gh[pousr]_[A-Za-z0-9]{20,}"#,
         #"AKIA[0-9A-Z]{16}"#,
         #"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|\z)"#,
-        #"Bearer [A-Za-z0-9._-]{20,}"#,
-        #"\b[A-Z_]*(KEY|TOKEN|SECRET|PASSWORD)[A-Z_]*\s*=\s*\S+"#,
+        // A Bearer line without a header still needs a meaningful token
+        // length, so ordinary prose such as "Bearer ok" stays intact.
+        #"(?im)^[ \t]*bearer[ \t]+[A-Za-z0-9._~+/=-]{8,}[ \t]*$"#,
+        #"(?i)\bbearer[ \t]+[A-Za-z0-9._~+/=-]{20,}"#,
+        // Keep the legacy uppercase assignment rule, but consume a complete
+        // quoted value. Its old token-only form left the tail of an
+        // uppercase assignment with a quoted value in model-bound output.
+        #"\b[A-Z_]*(KEY|TOKEN|SECRET|PASSWORD)[A-Z_]*[ \t]*=[ \t]*(?:["'][^\r\n"']*["']|[^\s\r\n]+)"#,
+        // These exact header names consume the complete value on one line,
+        // including short schemes such as "Basic ABC123" and values with
+        // spaces. The line anchor keeps a header from consuming the next line.
+        #"(?im)^[ \t]*(?:authorization|proxy-authorization|x-api-key|api-key|api_key|x-auth-token|x-access-token)[ \t]*:[^\r\n]*"#,
+        #"(?im)^[ \t]*(?:authorization|proxy-authorization|x-api-key|api-key|api_key|x-auth-token|x-access-token)[ \t]*=[^\r\n]*"#,
+        #"(?im)^[ \t]*(?:key|token)[ \t]*:[ \t]*[^\r\n]*"#,
+        #"(?i)\b(?:key|token)[ \t]*=[ \t]*(?:["'][^\r\n"']*["']|[^\s\r\n]+)"#,
+        #"(?i)\b(?:[A-Za-z0-9]+[_-])+(?:key|token)[ \t]*(?:=|:)[ \t]*(?:["'][^\r\n"']*["']|[^\s\r\n]+)"#,
+        // Match credential-shaped names such as api_key, x-api-key,
+        // authorization, and access-token in either header or assignment
+        // form. The explicit separators keep ordinary words like "monkey"
+        // and prose such as "the keyboard is ready" intact.
+        #"(?i)\b(?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|auth(?:orization)?|secret|password|private[_-]?key)(?:[_-][A-Za-z0-9]+)*[ \t]*(?:=|:)[ \t]*(?:["'][^\r\n"']*["']|[^\s\r\n]+)"#,
     ].map {
         // Compile-time constant patterns; a typo should crash tests loudly.
         // swiftlint:disable:next force_try

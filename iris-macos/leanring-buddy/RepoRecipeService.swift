@@ -93,12 +93,19 @@ nonisolated enum RepoRecipeService {
         //    A `matched: false` finding is an explicit negative whose commands
         //    the merge must ignore, and a nil result is "no opinion" — both are
         //    dropped here so only real signals reach the merge.
-        let matchedFindings: [EcosystemDetectorFinding] = allDetectors.compactMap { detector in
+        let detectedFindings: [EcosystemDetectorFinding] = allDetectors.compactMap { detector in
             guard let finding = detector.detect(repoRootPath: repoRootPath), finding.matched else {
                 return nil
             }
             return finding
         }
+
+        // A complete Electron entrypoint plus packaging declaration is stronger
+        // evidence of the shipped shell than a Tauri directory alone. Remove
+        // only the competing Tauri finding in that case. Incomplete or
+        // contradictory Electron declarations leave the normal field merge
+        // untouched, preserving real Tauri mixed repos and surfacing conflicts.
+        let matchedFindings = findingsAfterShippingPrecedence(detectedFindings)
 
         // 2. Mine `.github/workflows/*.yml` `run:` steps into per-field candidates
         //    at `ciWorkflowStep` provenance — the plan's "CI step is a
@@ -169,6 +176,15 @@ nonisolated enum RepoRecipeService {
     }
 
     // MARK: - Per-field merge
+
+    private static func findingsAfterShippingPrecedence(
+        _ findings: [EcosystemDetectorFinding]
+    ) -> [EcosystemDetectorFinding] {
+        guard findings.contains(where: { $0.shippingStack == .electron }) else {
+            return findings
+        }
+        return findings.filter { $0.shippingStack != .tauri }
+    }
 
     /// One candidate command for a single recipe field, from a detector or a CI
     /// `run:` step, carrying everything the merge needs to rank it.

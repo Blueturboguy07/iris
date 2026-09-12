@@ -40,18 +40,18 @@ struct IrisEyeView: View {
     }
 
     private var irisColor: Color {
-        mood == .done ? DS.Colors.green : DS.Colors.accent
+        mood == .done ? DS.Colors.eyeGreen : DS.Colors.eyeAccent
     }
 
     private var satelliteColor: Color {
         switch mood {
-        case .watching, .done: return DS.Colors.green
-        case .idle, .thinking, .paused: return DS.Colors.quiet
+        case .watching, .done: return DS.Colors.eyeGreen
+        case .idle, .thinking, .paused: return DS.Colors.eyeQuiet
         }
     }
 
     private var ringColor: Color {
-        mood == .thinking ? DS.Colors.accent.opacity(0.34) : Color.white.opacity(0.16)
+        mood == .thinking ? DS.Colors.eyeAccent.opacity(0.34) : Color.white.opacity(0.16)
     }
 
     private var clampedLook: CGSize {
@@ -71,7 +71,7 @@ struct IrisEyeView: View {
             if let progress {
                 Circle()
                     .trim(from: 0, to: max(0, min(1, progress)))
-                    .stroke(DS.Colors.accent, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    .stroke(DS.Colors.eyeAccent, style: StrokeStyle(lineWidth: 2, lineCap: .round))
                     .frame(width: 23, height: 23)
                     .rotationEffect(.degrees(-90))
                     .animation(DS.Motion.contentIn, value: progress)

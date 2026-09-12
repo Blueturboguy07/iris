@@ -55,6 +55,52 @@ import Testing
         let clone = Self.makeClone(); defer { try? FileManager.default.removeItem(atPath: clone) }
         #expect(AppRelaunchService.tauriPackagingCommand(clonePath: clone) == "cargo tauri build")
     }
+
+    @Test("only exact Tauri help flags enable unsigned app packaging")
+    func tauriHelpFlagsAvoidSubstringSpoofing() {
+        let supportedHelp = """
+        Usage: tauri build [OPTIONS]
+          --bundles <BUNDLES>
+          --no-sign
+        """
+        #expect(AppRelaunchService.tauriHelpSupportsUnsignedAppBundle(supportedHelp))
+
+        let spoofedHelp = """
+        Usage: tauri build [OPTIONS]
+          --bundlesome <BUNDLES>
+          --no-signature
+        """
+        #expect(!AppRelaunchService.tauriHelpSupportsUnsignedAppBundle(spoofedHelp))
+    }
+
+    @Test("unsupported Tauri help preserves the compatible command")
+    func unsupportedTauriHelpPreservesCommand() {
+        let baseCommand = "'node_modules/.bin/tauri' build"
+        let oldHelp = "Usage: tauri build [OPTIONS]\n  --bundles <BUNDLES>\n  --no-signature"
+
+        #expect(AppRelaunchService.tauriPackagingCommandApplyingSupportedFlags(
+            baseCommand: baseCommand,
+            helpOutput: oldHelp,
+            helpSucceeded: true
+        ) == baseCommand)
+        #expect(AppRelaunchService.tauriPackagingCommandApplyingSupportedFlags(
+            baseCommand: baseCommand,
+            helpOutput: "--bundles --no-sign",
+            helpSucceeded: false
+        ) == baseCommand)
+    }
+
+    @Test("supported Tauri help adds app bundle and no-sign flags")
+    func supportedTauriHelpAddsUnsignedAppFlags() {
+        let baseCommand = "'node_modules/.bin/tauri' build"
+        let supportedHelp = "Options:\n  --bundles <BUNDLES>\n  --no-sign"
+
+        #expect(AppRelaunchService.tauriPackagingCommandApplyingSupportedFlags(
+            baseCommand: baseCommand,
+            helpOutput: supportedHelp,
+            helpSucceeded: true
+        ) == "'node_modules/.bin/tauri' build --bundles app --no-sign")
+    }
 }
 
 // MARK: - Working out what a clone actually is
@@ -168,5 +214,55 @@ import Testing
     @Test("a clone path that does not exist is other, not a crash")
     func aMissingCloneIsOther() {
         #expect(AppRelaunchService.stackOfClone(atPath: "/nope/not/here") == .other)
+    }
+
+    @Test("a Tauri clone overrides stale catalog Electron fallback")
+    func tauriCloneOverridesStaleElectronFallback() throws {
+        let clone = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-tauri-fallback-\(UUID().uuidString)").path
+        try FileManager.default.createDirectory(
+            atPath: "\(clone)/src-tauri", withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: clone) }
+
+        FileManager.default.createFile(
+            atPath: "\(clone)/src-tauri/tauri.conf.json", contents: Data("{}".utf8))
+        #expect(AppRelaunchService.packagingStack(
+            clonePath: clone,
+            fallback: .electron
+        ) == .tauri)
+    }
+
+    @Test("an unknown clone preserves the curated fallback")
+    func unknownClonePreservesFallback() throws {
+        let clone = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-unknown-stack-\(UUID().uuidString)").path
+        try FileManager.default.createDirectory(atPath: clone, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: clone) }
+
+        #expect(AppRelaunchService.packagingStack(
+            clonePath: clone,
+            fallback: .electron
+        ) == .electron)
+    }
+
+    @Test("the packaging command follows the clone-derived stack")
+    func packagingCommandUsesCloneDerivedStack() throws {
+        let clone = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-tauri-command-\(UUID().uuidString)").path
+        try FileManager.default.createDirectory(
+            atPath: "\(clone)/src-tauri", withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: clone) }
+
+        FileManager.default.createFile(
+            atPath: "\(clone)/src-tauri/tauri.conf.json", contents: Data("{}".utf8))
+        try #"{"devDependencies":{"@tauri-apps/cli":"^2.11.4"}}"#
+            .write(toFile: "\(clone)/package.json", atomically: true, encoding: .utf8)
+
+        let stack = AppRelaunchService.packagingStack(clonePath: clone, fallback: .electron)
+        #expect(stack == .tauri)
+        #expect(AppRelaunchService.packageCommandForTesting(
+            forStack: stack,
+            clonePath: clone
+        ) == "npx --no-install tauri build")
     }
 }

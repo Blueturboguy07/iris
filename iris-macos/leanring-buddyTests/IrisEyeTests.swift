@@ -805,19 +805,27 @@ struct OverlayEyeBarDoesNotDelegateToTheOldPanelTests {
         return (try? String(contentsOf: inputBarSourceURL, encoding: .utf8)) ?? ""
     }
 
-    @Test func theBarNeverAsksTheOldPanelToOpen() {
+    @Test func theConversationPathNeverAsksTheOldPanelToOpen() {
         let source = Self.sourceOfTheInputBar
         // Sanity first: a missing or unreadable file must fail loudly rather
         // than pass by finding nothing in an empty string.
         #expect(source.contains("OverlayEyeInputBarView"), "the bar's source could not be read")
 
-        // The notifications that open the menu bar panel. Neither may appear in
-        // the bar, in a comment or otherwise — the comment that used to sit
-        // above the post explained the hand-off, and it went with it.
-        #expect(!source.contains("clickyShowPanel"))
-        #expect(!source.contains("clickyTogglePanel"))
-        // And nothing posts anything at all from here any more.
-        #expect(!source.contains("NotificationCenter"))
+        // Settings links are allowed to open the menu bar panel. Only the
+        // conversation send/answer path must remain inside the eye bar.
+        guard let sendStart = source.range(of: "private func send(_ messageText: String)"),
+              let answerEnd = source.range(
+                  of: "private func showWhateverIrisJustSaid",
+                  range: sendStart.upperBound..<source.endIndex
+              ) else {
+            Issue.record("the bar's conversation send/answer path could not be located")
+            return
+        }
+        let conversationPath = String(source[sendStart.lowerBound..<answerEnd.lowerBound])
+        #expect(!conversationPath.contains("clickyShowPanel"))
+        #expect(!conversationPath.contains("clickyTogglePanel"))
+        #expect(!conversationPath.contains("NotificationCenter"))
+        #expect(source.contains("NotificationCenter.default.post(name: .clickyShowPanel"))
     }
 
     @Test func theBarRendersTheAnswerItself() {
@@ -827,6 +835,16 @@ struct OverlayEyeBarDoesNotDelegateToTheOldPanelTests {
         // above alone would not notice the first half of that.
         #expect(source.contains("latestAssistantResponseText"))
         #expect(source.contains("answerArea"))
+    }
+
+    @Test func visibleHistoryHasAConcreteHeightForPanelSizing() {
+        let source = Self.sourceOfTheInputBar
+
+        // A max-only frame leaves the conditional ScrollView free to report
+        // zero height to the self-sizing hosting panel. The non-empty archive
+        // needs a bounded, concrete frame when History is shown.
+        #expect(source.contains(".frame(height: 220)"))
+        #expect(!source.contains(".frame(maxHeight: 220)"))
     }
 }
 

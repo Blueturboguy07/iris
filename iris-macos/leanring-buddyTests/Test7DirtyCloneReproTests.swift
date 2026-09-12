@@ -454,6 +454,16 @@ struct Test7FailureCardTextIsSelectableTests {
         #expect(!header.isEmpty, "the header helper was not found")
         #expect(header.contains(".textSelection(.enabled)"), "the card header is not selectable")
     }
+
+    @Test func failedVerificationOffersOnlyTheScrubbedReceiptDetail() {
+        let cardSource = Self.sourceOfTheCard
+        #expect(cardSource.contains("private var verificationFailureDetail:"), "receipt detail helper is missing")
+        #expect(cardSource.contains("DisclosureGroup(isExpanded: $verificationFailureDetailsAreExpanded)"),
+                "verification detail is not collapsed behind a disclosure")
+        #expect(cardSource.contains("Label(\"Why it stopped\""), "failure disclosure has no reader-facing label")
+        #expect(cardSource.contains("coordinator.verificationReceipt?.readerFacingFailureDetail"),
+                "failure detail is not sourced through the receipt sanitizer")
+    }
 }
 
 // MARK: - Harness

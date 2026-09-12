@@ -220,12 +220,16 @@ enum ClaudeCodeLogin {
         query[kSecAttrAccount as String] = NSUserName()
 
         var readResult: CFTypeRef?
-        var status = SecItemCopyMatching(query as CFDictionary, &readResult)
+        var status = KeychainReadPolicy.perform(allowsUserInteraction: true) {
+            SecItemCopyMatching(query as CFDictionary, &readResult)
+        }
         if status == errSecItemNotFound {
             // Retry without pinning the account, in case it was stored under a
             // different one than the current short name.
             query.removeValue(forKey: kSecAttrAccount as String)
-            status = SecItemCopyMatching(query as CFDictionary, &readResult)
+            status = KeychainReadPolicy.perform(allowsUserInteraction: true) {
+                SecItemCopyMatching(query as CFDictionary, &readResult)
+            }
         }
         return (readResult as? Data, status)
     }

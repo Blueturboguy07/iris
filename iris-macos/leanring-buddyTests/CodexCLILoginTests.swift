@@ -186,6 +186,27 @@ struct CodexExecInvocationTests {
         #expect(pinned[modelIndex + 1] == "gpt-5.6-sol")
     }
 
+    @Test func choosingAModelKeepsEveryIsolationRule() throws {
+        let arguments = CodexExecInvocation.arguments(
+            finalMessageOutputPath: "/tmp/o.txt", workingDirectory: "/tmp", model: "gpt-test"
+        )
+        #expect(try CodexExecInvocation.validated(arguments) == arguments)
+        #expect(arguments.contains("--ignore-user-config"))
+        #expect(arguments.contains("--ephemeral"))
+        let sandboxIndex = try #require(arguments.firstIndex(of: "--sandbox"))
+        #expect(arguments[sandboxIndex + 1] == "read-only")
+    }
+
+    @Test(arguments: ["--other-flag", "not a model", "model\n"])
+    func malformedModelIsRejectedBeforeLaunch(_ model: String) {
+        let arguments = CodexExecInvocation.arguments(
+            finalMessageOutputPath: "/tmp/o.txt", workingDirectory: "/tmp", model: model
+        )
+        #expect(throws: CodexExecInvocation.ValidationError.invalidModelIdentifier) {
+            try CodexExecInvocation.validated(arguments)
+        }
+    }
+
     // MARK: The isolation property
 
     @Test func whatTheBuilderProducesIsAlwaysAccepted() throws {

@@ -202,6 +202,25 @@ nonisolated enum MaintainDiagnosticProbe {
 
     // MARK: - Per-tool read-only rules
 
+    /// The escalation steer also offers a build-document read. Recognize that
+    /// narrow shape without classifying arbitrary source reads as system probes.
+    /// This is an observation label, never command authorization.
+    static func looksLikeABuildDocumentationRead(_ command: String) -> Bool {
+        let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedCommand.contains("$"), !trimmedCommand.contains("`"),
+              !trimmedCommand.contains("<"), !trimmedCommand.contains(">"),
+              !trimmedCommand.contains("\\"),
+              splitIntoUnquotedShellSegments(trimmedCommand).count == 1 else { return false }
+        let tokens = tokenizeRespectingQuotes(trimmedCommand)
+        guard tokens.count >= 2, tokens[0] == "cat" || tokens[0] == "/bin/cat" else { return false }
+        let names: Set<String> = ["readme", "readme.md", "readme.txt", "build", "build.md",
+                                  "build.txt", "contributing", "contributing.md", "contributing.txt"]
+        return tokens.dropFirst().allSatisfy { token in
+            let path = token.hasPrefix("./") ? String(token.dropFirst(2)) : token
+            return names.contains(path.lowercased())
+        }
+    }
+
     /// Several of the allowlisted binaries have write-capable modes
     /// (`defaults write`, `log erase`, `xattr -w`, `codesign --sign`). The
     /// allowlist is by binary; this is the second half of the check, by

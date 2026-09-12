@@ -43,6 +43,14 @@ protocol GuideTargetLocating {
     /// The paid path, used only when the two above come back empty and the
     /// step's target was never authored.
     func locateByAskingTheModel(stepTitle: String, stepBody: String) async -> CGRect?
+
+    /// Credential-safe failure text from the most recent model request.
+    /// Nil means it completed normally or there is no model-specific failure.
+    var modelFailureMessage: String? { get }
+}
+
+extension GuideTargetLocating {
+    var modelFailureMessage: String? { nil }
 }
 
 /// What the eye was told to do about the current step.
@@ -385,8 +393,16 @@ enum GuideStepPointingCoordinator {
 
         var found: CGRect?
         var theModelWasAsked = false
+        var theModelLocationWasRejected = false
         if target.isWindow, let bundleIdentifier = target.inApp {
-            found = locator.locateWindow(ofApp: bundleIdentifier)
+            // The model/capture path is about the focused window, not an
+            // arbitrary member of the app's window list. Keep the old window
+            // lookup as one bounded compatibility fallback for apps that do
+            // not publish a focused-window attribute.
+            found = locator.locateFocusedWindow(ofApp: bundleIdentifier)
+            if found == nil {
+                found = locator.locateWindow(ofApp: bundleIdentifier)
+            }
         }
         if found == nil {
             found = locator.locateInAccessibilityTree(descriptor: target.descriptor, inApp: target.inApp)
@@ -399,24 +415,39 @@ enum GuideStepPointingCoordinator {
             // Read BEFORE the ask, because this is the one rung slow enough for
             // the screen to change underneath it and afterwards there is no way
             // to learn where a window that has since moved used to be.
+            let applicationWhenAsked = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            let displaysWhenAsked = NSScreen.screens.map(\.frame)
             let windowTheAnswerWillDescribe = windowThePointingCaptureWillBeCroppedTo(using: locator)
             let rectangleTheModelAnsweredWith = await locator.locateByAskingTheModel(
                 stepTitle: stepTitle, stepBody: stepBody
             )
-            found = rectangleTheModelAnsweredWith.map {
-                rectangleMovedWithTheWindowItWasFoundIn(
+            found = rectangleTheModelAnsweredWith.flatMap {
+                GuidePointingFreshness.rectangleIfStillUsable(
                     $0,
-                    whereThatWindowWasWhenTheScreenWasCaptured: windowTheAnswerWillDescribe?.frame,
-                    whereThatWindowIsNow: windowTheAnswerWillDescribe.flatMap {
-                        locator.locateFocusedWindow(ofApp: $0.bundleIdentifier)
-                    }
+                    capturedApplication: applicationWhenAsked,
+                    currentApplication: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+                    capturedWindow: windowTheAnswerWillDescribe?.frame,
+                    currentWindow: windowThePointingCaptureWillBeCroppedTo(using: locator)?.frame,
+                    capturedDisplays: displaysWhenAsked,
+                    currentDisplays: NSScreen.screens.map(\.frame)
                 )
             }
+            theModelLocationWasRejected = rectangleTheModelAnsweredWith != nil && found == nil
         }
 
         guard let rectangle = found else {
+            let refusal: GuidePointRefusal
+            if theModelWasAsked, let failureMessage = locator.modelFailureMessage {
+                refusal = .pointingUnavailable(message: failureMessage)
+            } else if theModelLocationWasRejected {
+                refusal = .pointingUnavailable(
+                    message: "I couldn't confirm that location on the current screen, so I stopped pointing."
+                )
+            } else {
+                refusal = .couldNotFindIt(descriptor: target.descriptor)
+            }
             return GuideStepPointingOutcome(
-                decision: .doNotPoint(.couldNotFindIt(descriptor: target.descriptor)),
+                decision: .doNotPoint(refusal),
                 screenLocation: nil,
                 displayFrame: nil,
                 theModelWasAsked: theModelWasAsked
@@ -472,6 +503,9 @@ struct SystemGuideTargetLocator: GuideTargetLocating {
     /// like every other model call in this app, and this file must not build a
     /// second route to one.
     var askTheModel: ((String, String) async -> CGRect?)?
+    var readModelFailureMessage: (() -> String?)? = nil
+
+    var modelFailureMessage: String? { readModelFailureMessage?() }
 
     func locateInAccessibilityTree(descriptor: String, inApp bundleIdentifier: String?) -> CGRect? {
         guard AXIsProcessTrusted() else { return nil }
@@ -550,11 +584,12 @@ struct SystemGuideTargetLocator: GuideTargetLocating {
         else {
             return nil
         }
-        // No minimised check, unlike `locateWindow(ofApp:)` above: a window in
-        // the Dock is not the one the app has focused, and the reference read of
-        // this attribute — `SystemWatchLoopLocalSignalSource`, which is what the
-        // capture crop actually goes through — makes no such check either.
-        return frame(of: (focusedWindowValue as! AXUIElement))
+        let focusedWindow = focusedWindowValue as! AXUIElement
+        // A minimized focused window can retain its last geometry. It is not a
+        // visible place for the eye to fly, so use the same non-minimized rule
+        // as the bounded window-list fallback above.
+        guard !isMinimised(focusedWindow) else { return nil }
+        return frame(of: focusedWindow)
     }
 
     private func isMinimised(_ window: AXUIElement) -> Bool {

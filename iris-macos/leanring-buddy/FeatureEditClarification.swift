@@ -8,7 +8,7 @@
 //  should-I-ask decision is decoupled from the edit loop entirely (OpenHands
 //  measured a real resolve-rate gain from that split), the questions are
 //  batched into ONE round before any edit (Plan-Mode shape), and a question is
-//  emitted ONLY when one of four fixed triggers fires — otherwise the engine
+//  emitted ONLY when one of five fixed triggers fires — otherwise the engine
 //  proceeds. This file is that decision, pure: no model calls, no file I/O,
 //  no SwiftUI. The coordinator gathers the boolean/shape signals (from the
 //  derived RepoRecipe, from the two-pass self-consistency check, from the
@@ -21,7 +21,7 @@ import Foundation
 
 // MARK: - Why a question is being asked
 
-/// The ONLY four reasons the engine is allowed to interrupt the reader before
+/// The ONLY five reasons the engine is allowed to interrupt the reader before
 /// editing (plan §7). Keeping the triggers as a closed enum — rather than
 /// letting call sites invent ad-hoc questions — is what enforces the
 /// "few, high-value" rule structurally: a new kind of question requires a new
@@ -45,6 +45,11 @@ nonisolated enum ClarificationTrigger: String, Sendable, CaseIterable {
     /// service's rollout/tenancy posture), or the shape itself could not be
     /// classified and the right checklist + auto-commit rung depend on it.
     case runtimeShapeDecision
+
+    /// The optional model-derived safety classification was unavailable. Iris
+    /// does not guess silently; it asks the reader to choose a bounded,
+    /// reversible posture instead.
+    case safetyClassificationUnavailable
 }
 
 // MARK: - One tappable question
@@ -70,7 +75,7 @@ nonisolated struct ClarificationQuestion: Sendable, Identifiable, Equatable {
     /// notification wearing a question's clothes.
     let options: [String]
 
-    /// Which of the four §7 triggers produced this question, kept on the
+    /// Which of the five §7 triggers produced this question, kept on the
     /// value so the coordinator can route the answer (e.g. a
     /// `requiredInfoAbsentFromRepo` answer about the build command flows into
     /// the ratified-1b model-authored-command consent path, while a
@@ -146,12 +151,16 @@ nonisolated enum FeatureEditClarificationLogic {
     ///   - impliesIrreversibleAction: True when the request classifier found
     ///     a data-format change, public-interface break, or destructive
     ///     migration implied by the request.
+    ///   - requestProbeUnavailable: True when an optional model safety probe
+    ///     failed or returned malformed output; this adds one bounded question
+    ///     without blocking the edit.
     static func questions(
         forRequest request: String,
         requestLooksAmbiguous: Bool,
         recipeIsUnknown: Bool,
         runtimeShape: RecipeRuntimeShape,
-        impliesIrreversibleAction: Bool
+        impliesIrreversibleAction: Bool,
+        requestProbeUnavailable: Bool = false
     ) -> [ClarificationQuestion] {
         var batchedQuestions: [ClarificationQuestion] = []
 
@@ -191,7 +200,24 @@ nonisolated enum FeatureEditClarificationLogic {
             ))
         }
 
-        // Trigger 3 — required info absent from the repo. Today this exact
+        // Trigger 3 — optional safety classification unavailable. Keep this
+        // separate from the explicit irreversible trigger so a provider outage
+        // never creates a destructive-looking accusation, while still giving
+        // a nontechnical reader a clear, reversible choice.
+        if requestProbeUnavailable && !impliesIrreversibleAction {
+            batchedQuestions.append(ClarificationQuestion(
+                prompt: "Iris couldn't reliably tell whether this change affects "
+                    + "saved data or a public interface. How should it proceed?",
+                options: [
+                    "Keep the change additive and easy to undo (recommended)",
+                    "Show me the plan, then let me decide",
+                    "Stop here",
+                ],
+                trigger: .safetyClassificationUnavailable
+            ))
+        }
+
+        // Trigger 4 — required info absent from the repo. Today this exact
         // situation is the hard "unknown stack" refusal; asking is what turns
         // the wall into a capability (§4). The first option is the ratified
         // decision 1b escape hatch: the reader may supply/approve a build
@@ -211,7 +237,7 @@ nonisolated enum FeatureEditClarificationLogic {
             ))
         }
 
-        // Trigger 4 — runtime-shape decision. Two distinct shapes warrant a
+        // Trigger 5 — runtime-shape decision. Two distinct shapes warrant a
         // question; the two local shapes deliberately do NOT (their checklist
         // column applies silently — asking would be the over-asking §7 bans):
         //   • builtForScale — the rollout/tenancy posture (flag-gated,

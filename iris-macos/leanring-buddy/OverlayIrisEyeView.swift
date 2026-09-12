@@ -552,7 +552,7 @@ struct OverlayIrisEyeView: View {
         if mood == .done {
             // `.iris-eye--done .iris-eye__iris { background: var(--color-grass) }`,
             // taken from the design system's green rather than the raw hex.
-            return AnyShapeStyle(DS.Colors.green)
+            return AnyShapeStyle(DS.Colors.eyeGreen)
         }
         return AnyShapeStyle(
             RadialGradient(
@@ -570,8 +570,8 @@ struct OverlayIrisEyeView: View {
         var stops: [Gradient.Stop] = []
         var bandStart: Double = 0
         while bandStart < 1 {
-            stops.append(Gradient.Stop(color: DS.Colors.accent, location: min(bandStart, 1)))
-            stops.append(Gradient.Stop(color: DS.Colors.accent, location: min(bandStart + 0.07, 1)))
+            stops.append(Gradient.Stop(color: DS.Colors.eyeAccent, location: min(bandStart, 1)))
+            stops.append(Gradient.Stop(color: DS.Colors.eyeAccent, location: min(bandStart + 0.07, 1)))
             stops.append(Gradient.Stop(color: Self.irisGradientDeepBlue, location: min(bandStart + 0.08, 1)))
             stops.append(Gradient.Stop(color: Self.irisGradientDeepBlue, location: min(bandStart + 0.16, 1)))
             bandStart += Self.irisGradientBandWidth

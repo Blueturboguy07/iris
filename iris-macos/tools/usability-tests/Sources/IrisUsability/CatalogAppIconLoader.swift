@@ -1,0 +1,1 @@
+../../../../leanring-buddy/CatalogAppIconLoader.swift

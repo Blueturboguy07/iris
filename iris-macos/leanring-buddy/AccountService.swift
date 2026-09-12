@@ -21,6 +21,7 @@ import AuthenticationServices
 import Combine
 import CryptoKit
 import Foundation
+import OSLog
 
 // MARK: - Which publik project this build talks to
 
@@ -138,6 +139,7 @@ enum AccountServiceError: Error, Equatable, Sendable {
     case authorizationServerRejectedTheRequest(reason: String)
     case couldNotReachTheAuthorizationServer(reason: String)
     case theSessionResponseCouldNotBeRead
+    case refreshSessionIsNoLongerValid
 
     var userFacingMessage: String {
         switch self {
@@ -155,11 +157,31 @@ enum AccountServiceError: Error, Equatable, Sendable {
             return "Iris could not reach publik. Check your connection and try again."
         case .theSessionResponseCouldNotBeRead:
             return "Iris could not read the sign-in response. Try again."
+        case .refreshSessionIsNoLongerValid:
+            return "Your saved session has expired or was revoked. Sign in again."
         }
     }
 }
 
 // MARK: - The service
+
+/// The production boundary is Keychain only. Tests inject an in-memory store.
+@MainActor
+struct AccountSessionStorage {
+    var read: () -> Result<String?, KeychainStoreError>
+    var save: (String) throws -> Void
+    var delete: () throws -> Void
+    var reconnect: () -> Result<String?, KeychainStoreError>
+
+    static var keychain: Self {
+        Self(
+            read: { KeychainStore.readSecretResult(ofKind: .supabaseRefreshToken) },
+            save: { try KeychainStore.saveSecret($0, ofKind: .supabaseRefreshToken) },
+            delete: { try KeychainStore.deleteSecret(ofKind: .supabaseRefreshToken) },
+            reconnect: { KeychainStore.readSecretResult(ofKind: .supabaseRefreshToken, allowsUserInteraction: true) }
+        )
+    }
+}
 
 @MainActor
 final class AccountService: ObservableObject {
@@ -174,6 +196,9 @@ final class AccountService: ObservableObject {
     /// The last thing that went wrong, in words meant for the user. Cleared the
     /// moment another attempt starts.
     @Published private(set) var signInFailureMessage: String?
+    @Published private(set) var sessionPersistenceMessage: String?
+    @Published private(set) var isRestoringSession = false
+    @Published private(set) var needsSavedLoginAuthorization = false
 
     /// Whether a BYO Anthropic key is stored. Deliberately a Bool and not the
     /// key: once saved, the key is never read back into the UI layer.
@@ -206,6 +231,63 @@ final class AccountService: ObservableObject {
     /// thing worth persisting and is the only thing that is.
     private var currentAccessToken: String?
     private var currentAccessTokenExpiryDate: Date?
+    private var currentRefreshToken: String?
+    private var refreshTask: Task<String?, Never>?
+    private var sessionGeneration = UUID()
+    private var lastRestoreAttempt: Date?
+    private var sessionWasExplicitlyEnded = false
+    private let sessionStorage: AccountSessionStorage
+    private let projectConfiguration: @MainActor () -> (URL, String)?
+    private let sessionLogger = Logger(subsystem: "com.publikhq.iris", category: "account-session")
+
+    var savedSessionRetryLabel: String {
+        if sessionWasExplicitlyEnded { return "Retry removing saved login" }
+        return needsSavedLoginAuthorization || sessionPersistenceMessage != nil
+            ? "Reconnect saved login" : "Retry saved login"
+    }
+
+    func retrySavedSessionAction() async {
+        if sessionWasExplicitlyEnded {
+            signOut()
+        } else if needsSavedLoginAuthorization || sessionPersistenceMessage != nil {
+            _ = await reconnectSavedSession()
+        } else {
+            await restorePreviousSessionIfPossible(forceRetry: true)
+        }
+    }
+
+    /// User-initiated only. A one-time approval is not proof that background
+    /// access works. Check it before rotating the saved refresh token.
+    @discardableResult
+    func reconnectSavedSession() async -> Bool {
+        guard !sessionWasExplicitlyEnded, !isSignInInProgress, !isRestoringSession else { return false }
+        var saved = sessionStorage.read()
+        if case .failure = saved {
+            guard case .success = sessionStorage.reconnect() else {
+                needsSavedLoginAuthorization = true
+                signInFailureMessage = "Keychain access was not approved. Your saved login was kept. Try Reconnect saved login when ready."
+                return false
+            }
+            saved = sessionStorage.read()
+        }
+        switch saved {
+        case .failure:
+            needsSavedLoginAuthorization = true
+            signInFailureMessage = "macOS still blocks background access to your saved login. Reconnect and choose Always Allow for Iris in the Keychain prompt. Nothing was deleted."
+            return false
+        case .success(let token):
+            guard token != nil || currentRefreshToken != nil else {
+                needsSavedLoginAuthorization = false
+                signInFailureMessage = "No saved login was found. Sign in once to connect your account."
+                return false
+            }
+        }
+        needsSavedLoginAuthorization = false
+        signInFailureMessage = nil
+        // Never replace a newer, unsaved in-memory token with the older disk copy.
+        await restorePreviousSessionIfPossible(forceRetry: true)
+        return signedInAccount != nil && sessionPersistenceMessage == nil && signInFailureMessage == nil
+    }
 
     /// Held so the browser sheet is not deallocated mid-flow.
     private var activeWebAuthenticationSession: ASWebAuthenticationSession?
@@ -221,8 +303,20 @@ final class AccountService: ObservableObject {
     /// accepts (`docs/iris-assistant-protocol.md` section 3).
     private static let authCallbackURLString = "iris://auth/callback"
 
-    init(urlSession: URLSession = .shared) {
+    init(
+        urlSession: URLSession = .shared,
+        sessionStorage: AccountSessionStorage? = nil,
+        projectConfiguration: (@MainActor () -> (URL, String)?)? = nil,
+        loadOtherCredentials: Bool = true
+    ) {
         self.urlSession = urlSession
+        self.sessionStorage = sessionStorage ?? .keychain
+        self.projectConfiguration = projectConfiguration ?? {
+            guard let url = SupabaseProjectConfiguration.projectURL(),
+                  let key = SupabaseProjectConfiguration.anonymousKey() else { return nil }
+            return (url, key)
+        }
+        guard loadOtherCredentials else { return }
         self.hasStoredAnthropicAPIKey = KeychainStore.hasSecret(ofKind: .anthropicAPIKey)
         self.hasConnectedClaudeCodeLogin = KeychainStore.hasSecret(ofKind: .anthropicOAuthToken)
         self.codexLoginState = CodexCLILogin.currentState()
@@ -230,14 +324,38 @@ final class AccountService: ObservableObject {
 
     // MARK: - Restoring a previous session
 
-    /// Trades the stored refresh token for a fresh access token at launch, so a
-    /// user who signed in last week is still signed in today without seeing a
-    /// browser window. Silent on failure by design: an expired or revoked
-    /// refresh token means "signed out", which the panel already knows how to
-    /// show, and an error toast at launch would be noise.
-    func restorePreviousSessionIfPossible() async {
-        guard KeychainStore.readSecret(ofKind: .supabaseRefreshToken) != nil else { return }
-        _ = await refreshAccessTokenUsingStoredRefreshToken()
+    /// A failed launch check can recover on a later panel opening. No browser
+    /// or password UI is opened, and panel appearances are rate bounded.
+    func restorePreviousSessionIfPossible(forceRetry: Bool = false) async {
+        guard !isSignInInProgress, !sessionWasExplicitlyEnded else { return }
+        if !forceRetry, let lastRestoreAttempt,
+           Date().timeIntervalSince(lastRestoreAttempt) < 30 { return }
+        lastRestoreAttempt = Date()
+        retrySavingCurrentSession()
+        _ = await currentAccessTokenRefreshingIfNeeded()
+    }
+
+    func retrySavingCurrentSession() {
+        guard sessionPersistenceMessage != nil, let currentRefreshToken else { return }
+        persistRefreshToken(currentRefreshToken)
+    }
+
+    private func invalidatePendingSessionWork() {
+        sessionGeneration = UUID()
+        refreshTask?.cancel()
+        refreshTask = nil
+        isRestoringSession = false
+        activeWebAuthenticationSession?.cancel()
+        activeWebAuthenticationSession = nil
+        isSignInInProgress = false
+    }
+
+    /// Re-read metadata after the reader explicitly reconnects a saved item.
+    /// These checks remain silent if macOS still refuses background access.
+    func refreshSavedCredentialState() {
+        hasStoredAnthropicAPIKey = KeychainStore.hasSecret(ofKind: .anthropicAPIKey)
+        hasConnectedClaudeCodeLogin = KeychainStore.hasSecret(ofKind: .anthropicOAuthToken)
+        refreshCodexLoginState()
     }
 
     // MARK: - OAuth in the system browser
@@ -247,13 +365,16 @@ final class AccountService: ObservableObject {
     func signIn(withProvider provider: AccountSignInProvider) async {
         guard !isSignInInProgress else { return }
 
+        invalidatePendingSessionWork()
+        let signInGeneration = sessionGeneration
         isSignInInProgress = true
         signInFailureMessage = nil
-        defer { isSignInInProgress = false }
+        defer {
+            if signInGeneration == sessionGeneration { isSignInInProgress = false }
+        }
 
         do {
-            guard let supabaseProjectURL = SupabaseProjectConfiguration.projectURL(),
-                  let supabaseAnonymousKey = SupabaseProjectConfiguration.anonymousKey() else {
+            guard let (supabaseProjectURL, supabaseAnonymousKey) = projectConfiguration() else {
                 throw AccountServiceError.supabaseIsNotConfiguredInThisBuild
             }
 
@@ -285,14 +406,17 @@ final class AccountService: ObservableObject {
                 supabaseProjectURL: supabaseProjectURL,
                 supabaseAnonymousKey: supabaseAnonymousKey
             )
+            guard signInGeneration == sessionGeneration else { return }
             adoptSession(session)
         } catch let accountServiceError as AccountServiceError {
+            guard signInGeneration == sessionGeneration else { return }
             // A cancelled sign-in is the user changing their mind, not a
             // failure worth putting red text on the panel for.
             if accountServiceError != .signInWasCancelled {
                 signInFailureMessage = accountServiceError.userFacingMessage
             }
         } catch {
+            guard signInGeneration == sessionGeneration else { return }
             signInFailureMessage = AccountServiceError
                 .couldNotReachTheAuthorizationServer(reason: error.localizedDescription)
                 .userFacingMessage
@@ -422,13 +546,16 @@ final class AccountService: ObservableObject {
     func signIn(withEmailAddress emailAddress: String, password: String) async {
         guard !isSignInInProgress else { return }
 
+        invalidatePendingSessionWork()
+        let signInGeneration = sessionGeneration
         isSignInInProgress = true
         signInFailureMessage = nil
-        defer { isSignInInProgress = false }
+        defer {
+            if signInGeneration == sessionGeneration { isSignInInProgress = false }
+        }
 
         do {
-            guard let supabaseProjectURL = SupabaseProjectConfiguration.projectURL(),
-                  let supabaseAnonymousKey = SupabaseProjectConfiguration.anonymousKey() else {
+            guard let (supabaseProjectURL, supabaseAnonymousKey) = projectConfiguration() else {
                 throw AccountServiceError.supabaseIsNotConfiguredInThisBuild
             }
 
@@ -438,10 +565,13 @@ final class AccountService: ObservableObject {
                 supabaseProjectURL: supabaseProjectURL,
                 supabaseAnonymousKey: supabaseAnonymousKey
             )
+            guard signInGeneration == sessionGeneration else { return }
             adoptSession(session)
         } catch let accountServiceError as AccountServiceError {
+            guard signInGeneration == sessionGeneration else { return }
             signInFailureMessage = accountServiceError.userFacingMessage
         } catch {
+            guard signInGeneration == sessionGeneration else { return }
             signInFailureMessage = AccountServiceError
                 .couldNotReachTheAuthorizationServer(reason: error.localizedDescription)
                 .userFacingMessage
@@ -453,11 +583,20 @@ final class AccountService: ObservableObject {
     /// Forgets the session on this machine. The refresh token is deleted from
     /// the Keychain and the access token stops existing with the process.
     func signOut() {
+        invalidatePendingSessionWork()
+        sessionWasExplicitlyEnded = true
+        needsSavedLoginAuthorization = false
+        currentRefreshToken = nil
         currentAccessToken = nil
         currentAccessTokenExpiryDate = nil
         signedInAccount = nil
         signInFailureMessage = nil
-        try? KeychainStore.deleteSecret(ofKind: .supabaseRefreshToken)
+        sessionPersistenceMessage = nil
+        do {
+            try sessionStorage.delete()
+        } catch {
+            sessionPersistenceMessage = "Signed out for now, but macOS could not remove the saved login. Reconnect saved access, then sign out again before restarting Iris."
+        }
     }
 
     // MARK: - Handing a token to the transport
@@ -466,6 +605,7 @@ final class AccountService: ObservableObject {
     /// the one in memory is missing or about to expire. Nil means "not signed
     /// in", which the transport reports as `signInRequired`.
     func currentAccessTokenRefreshingIfNeeded() async -> String? {
+        guard !sessionWasExplicitlyEnded, !isSignInInProgress else { return nil }
         if let currentAccessToken,
            let currentAccessTokenExpiryDate,
            currentAccessTokenExpiryDate.timeIntervalSinceNow > Self.accessTokenRefreshLeadTimeInSeconds {
@@ -474,22 +614,62 @@ final class AccountService: ObservableObject {
         return await refreshAccessTokenUsingStoredRefreshToken()
     }
 
-    /// Called when the funded route answered 401 despite a token that looked
-    /// live. One refresh is attempted; if that fails the user is signed out,
-    /// because a refresh token the server will not honor is not worth keeping.
+    /// A chat 401 is not proof that the saved refresh token is invalid.
+    /// Temporary network, server or Keychain failures must never delete it.
     func handleAccessTokenRejectedByServer() async {
         currentAccessToken = nil
         currentAccessTokenExpiryDate = nil
-        if await refreshAccessTokenUsingStoredRefreshToken() == nil {
-            signOut()
-        }
+        _ = await currentAccessTokenRefreshingIfNeeded()
     }
 
     @discardableResult
     private func refreshAccessTokenUsingStoredRefreshToken() async -> String? {
-        guard let storedRefreshToken = KeychainStore.readSecret(ofKind: .supabaseRefreshToken),
-              let supabaseProjectURL = SupabaseProjectConfiguration.projectURL(),
-              let supabaseAnonymousKey = SupabaseProjectConfiguration.anonymousKey() else {
+        if let refreshTask {
+            let awaitedGeneration = sessionGeneration
+            let token = await refreshTask.value
+            return awaitedGeneration == sessionGeneration ? token : nil
+        }
+        let refreshGeneration = sessionGeneration
+        let task = Task { @MainActor [weak self] () -> String? in
+            guard let self else { return nil }
+            return await self.performSessionRefresh(generation: refreshGeneration)
+        }
+        refreshTask = task
+        isRestoringSession = true
+        let token = await task.value
+        guard sessionGeneration == refreshGeneration else { return nil }
+        refreshTask = nil
+        isRestoringSession = false
+        return token
+    }
+
+    private func performSessionRefresh(generation: UUID) async -> String? {
+        guard generation == sessionGeneration, !Task.isCancelled else { return nil }
+        let storedRefreshToken: String
+        if let currentRefreshToken {
+            storedRefreshToken = currentRefreshToken
+        } else {
+            switch sessionStorage.read() {
+            case .success(let token):
+                needsSavedLoginAuthorization = false
+                guard let token else {
+                    sessionLogger.info("restore: saved_login_absent")
+                    return nil
+                }
+                storedRefreshToken = token
+            case .failure(let error):
+                needsSavedLoginAuthorization = true
+                if case .keychainOperationFailed(let status) = error {
+                    sessionLogger.error("restore: keychain_unavailable status=\(status)")
+                } else {
+                    sessionLogger.error("restore: saved_login_unreadable")
+                }
+                signInFailureMessage = "Iris cannot read your saved login because macOS has blocked Keychain access. Your login was kept. Choose Reconnect saved login; if macOS asks, choose Always Allow for Iris."
+                return nil
+            }
+        }
+        guard let (supabaseProjectURL, supabaseAnonymousKey) = projectConfiguration() else {
+            signInFailureMessage = AccountServiceError.supabaseIsNotConfiguredInThisBuild.userFacingMessage
             return nil
         }
 
@@ -500,15 +680,18 @@ final class AccountService: ObservableObject {
                 supabaseProjectURL: supabaseProjectURL,
                 supabaseAnonymousKey: supabaseAnonymousKey
             )
+            guard generation == sessionGeneration, !Task.isCancelled else { return nil }
             adoptSession(session)
             return session.accessToken
         } catch {
-            // A refresh that the server refused means the session is over.
-            // A refresh that never reached the server means we are offline, and
-            // throwing the stored token away over a flaky network would sign
-            // the user out for no reason — so only the former clears state.
-            if case AccountServiceError.authorizationServerRejectedTheRequest = error {
+            guard generation == sessionGeneration, !Task.isCancelled else { return nil }
+            if case AccountServiceError.refreshSessionIsNoLongerValid = error {
+                sessionLogger.notice("refresh: session_expired_or_revoked")
                 signOut()
+                signInFailureMessage = AccountServiceError.refreshSessionIsNoLongerValid.userFacingMessage
+            } else {
+                sessionLogger.notice("refresh: unavailable_saved_login_preserved")
+                signInFailureMessage = "Iris could not reconnect right now. Your saved login was kept. Retry when your connection is available."
             }
             return nil
         }
@@ -517,13 +700,13 @@ final class AccountService: ObservableObject {
     // MARK: - Talking to Supabase
 
     /// The one decoded shape all three grants return.
-    private struct SupabaseSession: Decodable {
+    private struct SupabaseSession: Decodable, Sendable {
         let accessToken: String
         let refreshToken: String
         let expiresInSeconds: Int?
         let user: SupabaseUser?
 
-        struct SupabaseUser: Decodable {
+        struct SupabaseUser: Decodable, Sendable {
             let identifier: String
             let emailAddress: String?
 
@@ -596,15 +779,31 @@ final class AccountService: ObservableObject {
             throw AccountServiceError.theSessionResponseCouldNotBeRead
         }
         guard (200...299).contains(httpResponse.statusCode) else {
+            sessionLogger.notice("session_request: rejected status=\(httpResponse.statusCode)")
+            if grantType == "refresh_token",
+               Self.isDefinitiveRefreshRejection(statusCode: httpResponse.statusCode, body: responseData) {
+                throw AccountServiceError.refreshSessionIsNoLongerValid
+            }
             throw AccountServiceError.authorizationServerRejectedTheRequest(
                 reason: Self.userFacingReason(forAuthFailureBody: responseData, statusCode: httpResponse.statusCode)
             )
         }
 
-        guard let session = try? JSONDecoder().decode(SupabaseSession.self, from: responseData) else {
+        guard let session = try? JSONDecoder().decode(SupabaseSession.self, from: responseData),
+              !session.accessToken.isEmpty, !session.refreshToken.isEmpty else {
             throw AccountServiceError.theSessionResponseCouldNotBeRead
         }
         return session
+    }
+
+    /// Only explicit session-invalid codes authorize forgetting credentials.
+    /// Generic 4xx, rate limits, proxy errors and all 5xx remain retryable.
+    static func isDefinitiveRefreshRejection(statusCode: Int, body: Data) -> Bool {
+        guard [400, 401, 403].contains(statusCode),
+              let fields = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let code = (fields["error_code"] ?? fields["code"]) as? String else { return false }
+        return ["refresh_token_not_found", "refresh_token_already_used", "session_not_found",
+                "session_expired", "user_not_found", "user_banned"].contains(code)
     }
 
     /// Reads only the named fields of a Supabase error body. Anything else in
@@ -629,11 +828,13 @@ final class AccountService: ObservableObject {
     /// Takes a freshly minted session: refresh token to the Keychain, access
     /// token to memory, identity to the published state the panel reads.
     private func adoptSession(_ session: SupabaseSession) {
+        sessionWasExplicitlyEnded = false
+        currentRefreshToken = session.refreshToken
         currentAccessToken = session.accessToken
         let expiresInSeconds = TimeInterval(session.expiresInSeconds ?? 3600)
         currentAccessTokenExpiryDate = Date().addingTimeInterval(expiresInSeconds)
 
-        try? KeychainStore.saveSecret(session.refreshToken, ofKind: .supabaseRefreshToken)
+        persistRefreshToken(session.refreshToken)
 
         if let user = session.user {
             signedInAccount = SignedInAccount(
@@ -646,6 +847,17 @@ final class AccountService: ObservableObject {
             signedInAccount = SignedInAccount(userIdentifier: "", emailAddress: nil)
         }
         signInFailureMessage = nil
+    }
+
+    private func persistRefreshToken(_ token: String) {
+        do {
+            try sessionStorage.save(token)
+            sessionPersistenceMessage = nil
+            sessionLogger.info("session_save: succeeded")
+        } catch {
+            sessionLogger.error("session_save: failed_memory_session_retained")
+            sessionPersistenceMessage = "You're connected for this session, but macOS has not saved your login. Choose Reconnect saved login before quitting Iris."
+        }
     }
 
     // MARK: - Choosing a route

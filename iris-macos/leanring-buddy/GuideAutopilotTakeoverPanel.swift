@@ -42,6 +42,11 @@ final class GuideAutopilotTakeoverModel: ObservableObject {
     @Published var manualStepInstruction: String = ""
 }
 
+/// The workflow that owns the one visible terminal takeover. Guide installs
+/// and on-demand edits may run at the same time, but a terminal window must
+/// never silently change which runner it is showing.
+typealias GuideAutopilotTakeoverOwner = IrisTerminalWorkflow
+
 /// The controller that owns the two panels and drives the morph in and out.
 @MainActor
 final class GuideAutopilotTakeoverController {
@@ -119,6 +124,12 @@ final class GuideAutopilotTakeoverController {
     /// flag because the entry morph and a park deferred behind it can overlap.
     private var irisOwnFrameAnimationsInFlight = 0
 
+    /// Follow-ups requested while a collapse is already in flight. A guide can
+    /// finish during the same animation that was started by its minimize light;
+    /// dropping its completion callback would leave the install finished without
+    /// opening the app or refreshing the inventory.
+    private var pendingDismissFollowUps: [() -> Void] = []
+
     /// The `didMove` subscription on the terminal panel, kept so it dies with
     /// the panels rather than outliving them.
     private var terminalDidMoveObserver: NSObjectProtocol?
@@ -129,6 +140,33 @@ final class GuideAutopilotTakeoverController {
     private var screenLayoutChangeObserver: NSObjectProtocol?
 
     private var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
+    /// The takeover belongs on the display where the reader invoked it. A
+    /// menu-bar app has no key window of its own, so `NSScreen.main` can still
+    /// name another display after the eye bar was clicked. That put a reopened
+    /// terminal on the neighboring display, while the compact summary vanished
+    /// from the bar on the display the reader was looking at.
+    private static func screenAtTheReadersPointerOrFallback() -> NSScreen? {
+        let pointer = NSEvent.mouseLocation
+        if let screen = NSScreen.screens.first(where: { $0.visibleFrame.contains(pointer) }) {
+            return screen
+        }
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(pointer) }) {
+            return screen
+        }
+        return NSScreen.main ?? NSScreen.screens.first
+    }
+
+    /// Once a takeover exists, follow the display its panel occupies during a
+    /// screen-layout notification. This avoids moving a reader's terminal to
+    /// whichever display happens to be `main` when the notification arrives.
+    private func screenContainingTheCurrentTakeoverOrFallback() -> NSScreen? {
+        if let terminalPanel,
+           let screen = NSScreen.screens.first(where: { $0.frame.intersects(terminalPanel.frame) }) {
+            return screen
+        }
+        return Self.screenAtTheReadersPointerOrFallback()
+    }
 
     init() {
         screenLayoutChangeObserver = NotificationCenter.default.addObserver(
@@ -151,6 +189,25 @@ final class GuideAutopilotTakeoverController {
 
     var isPresented: Bool { terminalPanel != nil }
 
+    /// The workflow currently shown in the terminal, if any. Callers use this
+    /// before changing their own compact-card flags, so a stale completion from
+    /// one workflow cannot tear down another workflow's terminal.
+    private(set) var presentedOwner: GuideAutopilotTakeoverOwner?
+
+    func isPresented(for owner: GuideAutopilotTakeoverOwner) -> Bool {
+        terminalPanel != nil && presentedOwner == owner
+    }
+
+    /// An explicit View terminal action also works when the owned panel
+    /// already exists behind another window. Never raise another workflow.
+    @discardableResult
+    func raisePresentedTerminal(for owner: GuideAutopilotTakeoverOwner) -> Bool {
+        guard presentedOwner == owner, !isDismissing,
+              let terminal = terminalPanel else { return false }
+        terminal.makeKeyAndOrderFront(nil)
+        return true
+    }
+
     /// Bring up the takeover: dim the desktop, and morph the eye into the
     /// centered terminal that `runner` streams the work into.
     ///
@@ -172,15 +229,19 @@ final class GuideAutopilotTakeoverController {
         onContinuePastSurfacedStep: @escaping () -> Void,
         onReaderFinishedManualStep: @escaping () -> Void,
         onEscapeHatch: @escaping () -> Void,
-        afterTheReaderMinimizesIt: (() -> Void)? = nil
-    ) {
+        afterTheReaderMinimizesIt: (() -> Void)? = nil,
+        owner: GuideAutopilotTakeoverOwner = .guideInstall
+    ) -> Bool {
         // Already up (e.g. a resumed run) — never stack a second takeover.
-        guard terminalPanel == nil, !isDismissing else { return }
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        guard TerminalTakeoverOwnershipPolicy.mayPresent(
+            requestedWorkflow: owner, presentedWorkflow: presentedOwner
+        ), !isDismissing else { return false }
+        guard let screen = Self.screenAtTheReadersPointerOrFallback() else { return false }
         isDismissing = false
 
         let takeoverModel = GuideAutopilotTakeoverModel()
         self.model = takeoverModel
+        self.presentedOwner = owner
 
         eyeSizedFrame = Self.eyeSizedFrame(on: screen)
         terminalSizedFrame = Self.terminalSizedFrame(on: screen)
@@ -207,6 +268,7 @@ final class GuideAutopilotTakeoverController {
         let terminal = Self.makeChromelessPanel(
             frame: eyeSizedFrame, asA: GuideAutopilotTakeoverTerminalPanel.self
         )
+        terminal.title = owner == .onDemandEdit ? "Iris edit terminal" : "Iris install terminal"
         terminal.ignoresMouseEvents = false
         // "The terminal Iris is using is not movable at all." It was true: a
         // `.borderless` panel has no title bar to grab, and this is the only
@@ -289,7 +351,7 @@ final class GuideAutopilotTakeoverController {
                 aParkWasRequestedDuringEntry = false
                 parkForManualStep(title: pendingManualTitle, instruction: pendingManualInstruction)
             }
-            return
+            return true
         }
 
         // Let the eye read as "arrived" for a beat, then morph: grow the window
@@ -320,6 +382,7 @@ final class GuideAutopilotTakeoverController {
                 takeoverModel.showsTerminalFace = true
             }
         }
+        return true
     }
 
     /// Slide the terminal to the corner and shrink it, and lift the dim, so the
@@ -330,6 +393,7 @@ final class GuideAutopilotTakeoverController {
     /// on an already-parked window: the SLIDE is idempotent, the TEXT is not —
     /// re-parking is how two manual steps in a row change what the card says.
     func parkForManualStep(title: String, instruction: String) {
+        guard presentedOwner == .guideInstall else { return }
         pendingManualTitle = title
         pendingManualInstruction = instruction
         guard let terminal = terminalPanel, !isDismissing else { return }
@@ -378,6 +442,7 @@ final class GuideAutopilotTakeoverController {
     /// finished the manual step and Iris is about to run the next command. A
     /// no-op unless the terminal is actually parked.
     func returnToCenter() {
+        guard presentedOwner == .guideInstall else { return }
         aParkWasRequestedDuringEntry = false
         guard let terminal = terminalPanel, !isDismissing, isParked else { return }
         isParked = false
@@ -468,7 +533,7 @@ final class GuideAutopilotTakeoverController {
     /// because it named a spot on a screen that no longer exists.
     private func keepTheTakeoverOnAConnectedScreen() {
         guard let terminal = terminalPanel, !isDismissing else { return }
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        guard let screen = screenContainingTheCurrentTakeoverOrFallback() else { return }
 
         eyeSizedFrame = Self.eyeSizedFrame(on: screen)
         terminalSizedFrame = Self.terminalSizedFrame(on: screen)
@@ -517,7 +582,10 @@ final class GuideAutopilotTakeoverController {
         // (open the app, refresh the list) runs for a manual, non-autopilot guide.
         guard terminalPanel != nil else { thenRun?(); return }
         // A collapse already in flight owns the teardown; don't start a second.
-        guard !isDismissing else { return }
+        guard !isDismissing else {
+            if let thenRun { pendingDismissFollowUps.append(thenRun) }
+            return
+        }
         isDismissing = true
 
         let hold: TimeInterval = afterHold && !reduceMotion ? 1.8 : 0
@@ -526,17 +594,51 @@ final class GuideAutopilotTakeoverController {
         }
     }
 
+    /// Dismiss only when this workflow owns the visible terminal. The return
+    /// value lets a caller distinguish "my terminal was folded" from "another
+    /// workflow owns it" without touching the other workflow's run.
+    @discardableResult
+    func dismiss(
+        afterHold: Bool,
+        onlyIfOwnedBy owner: GuideAutopilotTakeoverOwner,
+        thenRun: (() -> Void)? = nil
+    ) -> Bool {
+        guard terminalPanel != nil,
+              TerminalTakeoverOwnershipPolicy.mayDismiss(
+                  requestedWorkflow: owner, presentedWorkflow: presentedOwner
+              ) else { return false }
+        if isDismissing {
+            if TerminalTakeoverOwnershipPolicy.shouldQueueDismissalFollowUp(
+                requestedWorkflow: owner,
+                presentedWorkflow: presentedOwner,
+                isDismissing: isDismissing
+            ), let thenRun {
+                pendingDismissFollowUps.append(thenRun)
+            }
+            return true
+        }
+        dismiss(afterHold: afterHold, thenRun: thenRun)
+        return true
+    }
+
+    private func runDismissFollowUps(_ currentFollowUp: (() -> Void)?) {
+        currentFollowUp?()
+        let queuedFollowUps = pendingDismissFollowUps
+        pendingDismissFollowUps.removeAll()
+        queuedFollowUps.forEach { $0() }
+    }
+
     private func collapseAndClose(thenRun: (() -> Void)?) {
         guard let terminal = terminalPanel else {
             isDismissing = false
-            thenRun?()
+            runDismissFollowUps(thenRun)
             return
         }
 
         if reduceMotion {
             tearDownPanels()
             isDismissing = false
-            thenRun?()
+            runDismissFollowUps(thenRun)
             return
         }
 
@@ -568,7 +670,7 @@ final class GuideAutopilotTakeoverController {
             }, completionHandler: {
                 self.tearDownPanels()
                 self.isDismissing = false
-                thenRun?()
+                self.runDismissFollowUps(thenRun)
             })
         })
     }
@@ -585,6 +687,7 @@ final class GuideAutopilotTakeoverController {
         terminalPanel = nil
         backdropPanel = nil
         model = nil
+        presentedOwner = nil
         isParked = false
         entryMorphHasSettled = false
         aParkWasRequestedDuringEntry = false
@@ -599,23 +702,45 @@ final class GuideAutopilotTakeoverController {
 
     /// The eye's resting size at the center of the screen — the morph's endpoint.
     private static func eyeSizedFrame(on screen: NSScreen) -> CGRect {
-        let side: CGFloat = 132
-        return CGRect(
-            x: screen.frame.midX - side / 2,
-            y: screen.frame.midY - side / 2,
-            width: side, height: side
+        centeredFrameWithinVisibleFrame(
+            screen.visibleFrame,
+            preferredSize: CGSize(width: 132, height: 132),
+            margins: .zero
         )
     }
 
     /// The terminal window's size at the center of the screen, clamped so it
-    /// always leaves a margin of desktop showing around it.
+    /// always stays inside the display's usable area, with a margin of desktop
+    /// showing around it. `screen.frame` includes the menu bar and Dock bands;
+    /// centering against it can place the terminal outside the visible display
+    /// when the selected screen has a non-zero virtual-desktop origin.
     private static func terminalSizedFrame(on screen: NSScreen) -> CGRect {
-        let width = min(760, screen.frame.width - 120)
-        let height = min(480, screen.frame.height - 160)
+        centeredFrameWithinVisibleFrame(
+            screen.visibleFrame,
+            preferredSize: CGSize(width: 760, height: 480),
+            margins: CGSize(width: 60, height: 80)
+        )
+    }
+
+    /// Pure frame math for the takeover's initial and reflowed geometry. The
+    /// caller supplies `NSScreen.visibleFrame`, so the result remains valid for
+    /// a display with a Dock, menu bar, or a non-zero virtual-desktop origin.
+    /// Kept internal for geometry tests without constructing an AppKit window.
+    static func centeredFrameWithinVisibleFrame(
+        _ visibleFrame: CGRect,
+        preferredSize: CGSize,
+        margins: CGSize
+    ) -> CGRect {
+        guard !visibleFrame.isNull, !visibleFrame.isEmpty else {
+            return CGRect(origin: visibleFrame.origin, size: preferredSize)
+        }
+        let width = min(preferredSize.width, max(1, visibleFrame.width - margins.width * 2))
+        let height = min(preferredSize.height, max(1, visibleFrame.height - margins.height * 2))
         return CGRect(
-            x: screen.frame.midX - width / 2,
-            y: screen.frame.midY - height / 2,
-            width: width, height: height
+            x: visibleFrame.midX - width / 2,
+            y: visibleFrame.midY - height / 2,
+            width: width,
+            height: height
         )
     }
 
@@ -736,6 +861,10 @@ final class GuideAutopilotTakeoverController {
 /// right-click → Copy, and the wheel still scrolls because only
 /// `.leftMouseDown` is ever intercepted).
 final class GuideAutopilotTakeoverTerminalPanel: NSPanel {
+
+    // Explicit terminal actions may focus selectable output. Automatic
+    // presentation still uses orderFrontRegardless and does not request focus.
+    override var canBecomeKey: Bool { true }
 
     /// How far the pointer must travel before this stops being a click and
     /// starts being a drag. Small enough that a deliberate drag is picked up

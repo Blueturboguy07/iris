@@ -34,6 +34,14 @@
 import AppKit
 import SwiftUI
 
+private struct OnDemandEditPlanContentHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 /// THE WORDS OFF A FAILURE CARD, AS ONE BLOCK OF TEXT.
 ///
 /// Test 7 (Akrit, 0.9.1 build 17), reading a refusal he did not understand:
@@ -64,6 +72,7 @@ enum OnDemandEditFailureText {
 }
 
 struct OnDemandEditCard: View {
+    @Environment(\.irisUsesUnifiedPanel) private var usesUnifiedPanel
     @ObservedObject var coordinator: OnDemandEditCoordinator
 
     /// A preselect for the kind picker, taken from the phrasing that opened the
@@ -94,6 +103,7 @@ struct OnDemandEditCard: View {
     /// ownership. Cleared whenever the question set changes so a stale answer from
     /// one batch can never leak into the next.
     @State private var clarificationSelectionsByQuestionId: [String: String] = [:]
+    @State private var clarificationWrittenAnswers: [String: String] = [:]
 
     /// The reader's answer to the model's BLOCKED question, typed into the
     /// blocked card before "Answer and retry".
@@ -102,10 +112,27 @@ struct OnDemandEditCard: View {
     /// Momentary, so the Copy button can say it worked. See
     /// `copyTheseWordsButton`.
     @State private var justCopiedTheWords: Bool = false
+    @State private var recoveryFilesCouldNotBeFound = false
+    @State private var stopUndoConfirmationIsShowing = false
+    @State private var runningDetailsAreExpanded = false
+    @State private var savedWithoutInstallationDetailsAreExpanded = false
+    @State private var testCandidateDetailsAreExpanded = false
+    @State private var planTechnicalDetailsAreExpanded = false
+    @State private var measuredPlanContentHeight: CGFloat = 0
+    @State private var verificationFailureDetailsAreExpanded = false
 
     var body: some View {
         Group {
-            switch coordinator.phase {
+            if coordinator.savedVersionUndoIsPending || coordinator.undoIsInProgress || coordinator.isCheckingInterruptedUndo {
+                undoProgressCard
+            } else if let undoFailure = coordinator.undoFailureMessage {
+                undoRecoveryCard(message: undoFailure, canRetry: coordinator.canRetryUndo || coordinator.canResumeInterruptedUndo)
+            } else if let interruptedRecovery = coordinator.interruptedUndoRecoveryMessage {
+                undoRecoveryCard(message: interruptedRecovery, canRetry: coordinator.canResumeInterruptedUndo)
+            } else if coordinator.phase == .done, let stoppedRecovery = coordinator.stoppedUndoRecoveryMessage {
+                stoppedUndoCard(message: stoppedRecovery)
+            } else {
+                switch coordinator.phase {
             case .pickApp:
                 // Nothing is pending — the card contributes nothing to the bar.
                 EmptyView()
@@ -123,7 +150,11 @@ struct OnDemandEditCard: View {
                 // only the fallback for the instant before/after the takeover.
                 runningCard
             case .previewDiff:
-                previewCard
+                if coordinator.isUnverifiedTestCandidate {
+                    unverifiedTestCandidateCard
+                } else {
+                    previewCard
+                }
             case .committing:
                 committingCard
             case .awaitingManifestConsent:
@@ -148,12 +179,28 @@ struct OnDemandEditCard: View {
                 terminalMessageCard(reason: reason, isRefusal: true)
             case .blockedByModel(let explanation):
                 blockedByModelCard(explanation: explanation)
+                }
             }
         }
         // The bar this lives in re-measures its own height, but the settings
         // panel does not measure unless nudged — the same nudge MaintainAskCard
         // uses, so the card is never clipped as it changes phase.
         .onChange(of: coordinator.phase) { _, _ in
+            runningDetailsAreExpanded = false
+            savedWithoutInstallationDetailsAreExpanded = false
+            planTechnicalDetailsAreExpanded = false
+            measuredPlanContentHeight = 0
+            verificationFailureDetailsAreExpanded = false
+            NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+        }
+        .onChange(of: coordinator.isRecheckingSavedChanges) { _, _ in
+            planTechnicalDetailsAreExpanded = false
+            NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+        }
+        .onChange(of: coordinator.isPreparingSavedChangeRecheck) { _, _ in
+            NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+        }
+        .onChange(of: coordinator.isCheckingInterruptedUndo) { _, _ in
             NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
         }
         // A brand-new pick starts from a clean field and the phrasing's
@@ -162,6 +209,8 @@ struct OnDemandEditCard: View {
             describeText = ""
             selectedKind = preselectedKind ?? .bugFix
             clarificationSelectionsByQuestionId = [:]
+            clarificationWrittenAnswers = [:]
+            recoveryFilesCouldNotBeFound = false
         }
         // The clarification batch is recomputed per request; whenever the set of
         // questions changes (a new batch, or the batch clearing as the flow
@@ -169,6 +218,7 @@ struct OnDemandEditCard: View {
         // batch can never carry into another.
         .onChange(of: coordinator.clarificationQuestions) { _, _ in
             clarificationSelectionsByQuestionId = [:]
+            clarificationWrittenAnswers = [:]
         }
         // A retry (after "still broken", or after answering a BLOCKED question)
         // re-enters describe with the field prefilled — consumed once so a
@@ -181,30 +231,185 @@ struct OnDemandEditCard: View {
         .onAppear {
             selectedKind = preselectedKind ?? .bugFix
         }
+        .alert("Stop this Undo?", isPresented: $stopUndoConfirmationIsShowing) {
+            Button("Cancel", role: .cancel) {}
+                .keyboardShortcut(.defaultAction)
+            Button("Stop this Undo", role: .destructive) {
+                coordinator.stopUndoAndKeepRecoveryInformation()
+            }
+        } message: {
+            Text("Iris will leave the app and its working files as they are now. This does not confirm which version is installed. Recovery details will stay saved, and the affected app will remain protected from further edits.")
+        }
         .animation(DS.Motion.contentIn, value: coordinator.phase)
     }
 
     private var appName: String { coordinator.activeAppName ?? "this app" }
 
+    private var runningStatusText: String {
+        coordinator.statusLine ?? (coordinator.isRecheckingSavedChanges
+            ? "Checking the saved change…"
+            : "Working on your change…")
+    }
+
+    private var changeNeedsDeliveryFollowup: Bool {
+        coordinator.deliveryProgress.codeSaved
+            && (!coordinator.deliveryProgress.installedCopyReplaced
+                || !coordinator.deliveryProgress.relaunched)
+    }
+
+    private var undoProgressCard: some View {
+        card {
+            header(icon: "arrow.uturn.backward", title: "Restoring the previous version")
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(coordinator.statusLine ?? "Checking each recovery step…")
+                    .font(DS.Typography.caption)
+                    .foregroundColor(DS.Colors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func undoRecoveryCard(message: String, canRetry: Bool = true) -> some View {
+        card {
+            header(icon: "exclamationmark.triangle", title: canRetry ? "Undo needs attention" : "Undo was interrupted")
+            Text(message)
+                .font(DS.Typography.body)
+                .foregroundColor(DS.Colors.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+            Text(canRetry
+                 ? "Retry the unfinished steps, or stop this Undo and leave the app as it is."
+                 : "Iris has not restarted Undo. You can stop this Undo and keep the recovery details. History and Settings remain available.")
+                .font(DS.Typography.caption)
+                .foregroundColor(DS.Colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if !canRetry {
+                DisclosureGroup("Review recovery details") {
+                    Text(coordinator.undoRecoveryPaths.joined(separator: "\n"))
+                        .font(DS.Typography.caption)
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+                .font(DS.Typography.caption)
+                .pointerCursor()
+            }
+            if recoveryFilesCouldNotBeFound {
+                Text("The saved locations could not be found. Copy these details so someone can help you recover the app.")
+                    .font(DS.Typography.caption)
+                    .foregroundColor(DS.Colors.amber)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 8) {
+                Button("Show recovery files") {
+                    let existingLocations = coordinator.undoRecoveryPaths
+                        .filter { FileManager.default.fileExists(atPath: $0) }
+                        .map { URL(fileURLWithPath: $0) }
+                    recoveryFilesCouldNotBeFound = existingLocations.isEmpty
+                    if !existingLocations.isEmpty {
+                        NSWorkspace.shared.activateFileViewerSelecting(existingLocations)
+                    }
+                }
+                .irisTinyButton()
+                .help("Shows the saved app and project locations in Finder without changing them.")
+                Spacer(minLength: 0)
+                if canRetry {
+                    Button("Retry Undo") {
+                        recoveryFilesCouldNotBeFound = false
+                        if coordinator.interruptedUndoRequiresReview {
+                            coordinator.resumeInterruptedUndo()
+                        } else {
+                            coordinator.undoDeliveredChange()
+                        }
+                    }
+                    .irisPrimaryPill(isFullWidth: false, isCompact: true)
+                }
+            }
+            copyTheseWordsButton(
+                title: canRetry ? "Undo needs attention" : "Undo was interrupted",
+                lines: [message] + coordinator.undoRecoveryPaths
+            )
+            if coordinator.canStopUndo {
+                Button("Stop this Undo…") {
+                    stopUndoConfirmationIsShowing = true
+                }
+                .irisTinyButton()
+                .help("Keep the app as it is and save recovery details without claiming restoration succeeded.")
+            }
+        }
+    }
+
+    private func stoppedUndoCard(message: String) -> some View {
+        card {
+            header(icon: "pause.circle", title: "Undo stopped")
+            Text(message)
+                .font(DS.Typography.body)
+                .foregroundColor(DS.Colors.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Find these details later in Settings under Saved recovery details.")
+                .font(DS.Typography.caption)
+                .foregroundColor(DS.Colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Button("Show recovery files") {
+                    let locations = coordinator.stoppedUndoRecoveryPaths
+                        .filter { FileManager.default.fileExists(atPath: $0) }
+                        .map { URL(fileURLWithPath: $0) }
+                    recoveryFilesCouldNotBeFound = locations.isEmpty
+                    if !locations.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(locations) }
+                }
+                .irisTinyButton()
+                Spacer(minLength: 0)
+                Button("Browse apps") {
+                    UserDefaults.standard.set("Apps", forKey: "irisSettingsSection")
+                    NotificationCenter.default.post(name: .clickyShowPanel, object: nil)
+                }
+                .irisPrimaryPill(isFullWidth: false, isCompact: true)
+            }
+            if recoveryFilesCouldNotBeFound {
+                Text("The saved locations could not be found. Copy the details below for help.")
+                    .font(DS.Typography.caption)
+                    .foregroundColor(DS.Colors.amber)
+            }
+            copyTheseWordsButton(title: "Undo stopped; restoration unconfirmed", lines: [message] + coordinator.stoppedUndoRecoveryPaths)
+        }
+    }
+
     // MARK: - Describe
 
     private var describeCard: some View {
         card {
-            header(icon: "wand.and.stars", title: "Edit \(appName)")
+            header(
+                icon: coordinator.isRecheckingSavedChanges ? "checkmark.circle" : "wand.and.stars",
+                title: coordinator.isRecheckingSavedChanges ? "Recheck saved changes" : "Edit \(appName)"
+            )
 
-            Text("Tell Iris what to change. It edits your local source on a new branch, under your own model key — nothing is pushed or relaunched.")
-                .font(.system(size: 11))
+            Text(coordinator.isRecheckingSavedChanges
+                 ? "Confirm what the saved change should do. Iris will recheck it without rewriting the code."
+                 : "Iris changes a working copy, then updates and reopens the installed app when supported. Successful fixes may be sent to its developers for review; feature updates may be recorded in publik.")
+                .font(DS.Typography.caption)
                 .foregroundColor(DS.Colors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            // The explicit fix/feature pick. It is a real choice, not a
-            // convenience: it decides the honesty label and the commit trailer.
-            HStack(spacing: 8) {
-                kindPill(.bugFix, label: "Bug fix")
-                kindPill(.feature, label: "Feature")
+            if !coordinator.isRecheckingSavedChanges {
+                savedChangeRecheckAction
+
+                // The explicit fix/feature pick. It is a real choice, not a
+                // convenience: it decides the honesty label and the commit trailer.
+                HStack(spacing: 8) {
+                    kindPill(.bugFix, label: "Bug fix")
+                    kindPill(.feature, label: "Feature")
+                }
             }
 
-            TextField("What should change?", text: $describeText, axis: .vertical)
+            TextField(
+                coordinator.isRecheckingSavedChanges
+                    ? "What should the saved change do?"
+                    : "What should change?",
+                text: $describeText,
+                axis: .vertical
+            )
                 .textFieldStyle(.plain)
                 .font(.system(size: 12.5))
                 .foregroundColor(DS.Colors.ink)
@@ -222,8 +427,9 @@ struct OnDemandEditCard: View {
 
             // "Others also wanted…" prefills, only when the pool actually
             // returned some (it is k>=5-gated server-side, never one person's
-            // wish echoed back).
-            if !coordinator.suggestedRequests.isEmpty {
+            // wish echoed back). A saved-change recheck is deliberately driven
+            // by the reader's fresh description, not by historical suggestions.
+            if !coordinator.isRecheckingSavedChanges && !coordinator.suggestedRequests.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Others also wanted")
                         .font(.system(size: 9.5, weight: .semibold))
@@ -264,14 +470,41 @@ struct OnDemandEditCard: View {
                 Button("Cancel") { coordinator.cancel() }
                     .irisTextButton()
                 Spacer(minLength: 0)
-                Button("Continue") {
+                Button(coordinator.isRecheckingSavedChanges ? "Continue to recheck" : "Continue") {
                     coordinator.describeRequest(describeText, kind: selectedKind)
                 }
                 .irisPrimaryPill(isFullWidth: false, isCompact: true)
                 .disabled(
                     describeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         || coordinator.isAssessingRequest
+                        || coordinator.isPreparingSavedChangeRecheck
                 )
+            }
+        }
+    }
+
+    /// A held failed edit can be checked again from a fresh, reader-owned
+    /// description. This stays in the existing card rather than opening a
+    /// second recovery surface; the coordinator owns the saved-source guards.
+    @ViewBuilder
+    private var savedChangeRecheckAction: some View {
+        if coordinator.canRecheckSavedChanges || coordinator.isPreparingSavedChangeRecheck {
+            VStack(alignment: .leading, spacing: 4) {
+                Button(coordinator.isPreparingSavedChangeRecheck
+                       ? "Preparing recheck…"
+                       : "Recheck saved changes") {
+                    coordinator.prepareSavedChangeRecheck()
+                }
+                .irisPrimaryPill(isFullWidth: true, isCompact: true)
+                .disabled(coordinator.isPreparingSavedChangeRecheck)
+                .help("Review the saved source with a fresh description without asking Iris to rewrite it.")
+
+                if !coordinator.isRecheckingSavedChanges {
+                    Text("Use a fresh description to confirm what the saved change should do before Iris checks it.")
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }
@@ -313,7 +546,18 @@ struct OnDemandEditCard: View {
     /// explicit abort back to the describe step — nothing here has been touched).
     private var clarifyingCard: some View {
         card {
-            header(icon: "questionmark.circle", title: "A couple of questions")
+            if let proposal = coordinator.pendingHarnessScopeReconciliation {
+                scopeReconciliationContent(proposal)
+            } else {
+                clarificationQuestionContent
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var clarificationQuestionContent: some View {
+            header(icon: "questionmark.circle", title: coordinator.clarificationQuestions.count == 1
+                   ? "A quick question" : "A couple of questions")
 
             Text(coordinator.statusLine ?? "Before Iris starts, help it get this right.")
                 .font(.system(size: 11))
@@ -331,6 +575,16 @@ struct OnDemandEditCard: View {
                     // an inline pill that would clip.
                     ForEach(question.options, id: \.self) { option in
                         clarificationOptionRow(question: question, option: option)
+                            .disabled(coordinator.isAssessingRequest)
+                    }
+                    if coordinator.allowsWrittenClarification {
+                        TextField("Or describe what you mean", text: Binding(
+                            get: { clarificationWrittenAnswers[question.id] ?? "" },
+                            set: { clarificationWrittenAnswers[question.id] = $0 }))
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 11))
+                            .accessibilityLabel("Your answer to " + question.prompt)
+                            .disabled(coordinator.isAssessingRequest)
                     }
                 }
             }
@@ -339,14 +593,61 @@ struct OnDemandEditCard: View {
                 Button("Cancel") { coordinator.cancel() }
                     .irisTextButton()
                 Spacer(minLength: 0)
-                Button("Continue") {
-                    coordinator.submitClarificationAnswers(clarificationSelectionsByQuestionId)
+                Button(coordinator.isAssessingRequest ? "Updating plan…" : "Continue") {
+                    coordinator.submitClarificationAnswers(currentClarificationAnswers)
                 }
                 .irisPrimaryPill(isFullWidth: false, isCompact: true)
                 // Only enabled once EVERY question has an answer — a half-answered
                 // batch would leave the plan reasoning about a choice never made.
-                .disabled(!everyClarificationQuestionIsAnswered)
+                .disabled(!everyClarificationQuestionIsAnswered || coordinator.isAssessingRequest)
             }
+    }
+
+    @ViewBuilder
+    private func scopeReconciliationContent(_ proposal: HarnessScopeReconciliation) -> some View {
+        HStack {
+            header(icon: "arrow.triangle.2.circlepath", title: "Update the plan?")
+            Spacer(minLength: 0)
+            Button("Cancel") { coordinator.cancel() }.irisTextButton()
+        }
+        Text("Your answer changes what Iris will build. Nothing has been edited yet.")
+            .font(.system(size: 11))
+            .foregroundColor(DS.Colors.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(Array(proposal.changes.enumerated()), id: \.offset) { _, change in
+                    VStack(alignment: .leading, spacing: 3) {
+                        if let previous = change.previousStatement {
+                            Text("Before: " + previous)
+                                .foregroundColor(DS.Colors.textSecondary)
+                        }
+                        Text(change.proposedStatement.map { "Now: " + $0 } ?? "Remove this requirement")
+                            .foregroundColor(DS.Colors.textPrimary)
+                    }
+                    .font(.system(size: 11))
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                ForEach(Array(proposal.nonGoalChanges.enumerated()), id: \.offset) { _, change in
+                    Text((change.kind == .removed ? "Remove limit: " : "New limit: ") + change.statement)
+                        .font(.system(size: 11))
+                        .foregroundColor(DS.Colors.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxHeight: 180)
+        HStack(spacing: 8) {
+            Button("Keep earlier plan") {
+                coordinator.resolveHarnessScopeReconciliation(id: proposal.id, approve: false)
+            }
+            .irisTextButton()
+            Spacer(minLength: 0)
+            Button("Use updated plan") {
+                coordinator.resolveHarnessScopeReconciliation(id: proposal.id, approve: true)
+            }
+            .irisPrimaryPill(isFullWidth: false, isCompact: true)
         }
     }
 
@@ -354,8 +655,18 @@ struct OnDemandEditCard: View {
     /// current batch, so "Continue" cannot submit a partial set of answers.
     private var everyClarificationQuestionIsAnswered: Bool {
         coordinator.clarificationQuestions.allSatisfy { question in
-            clarificationSelectionsByQuestionId[question.id] != nil
+            !(currentClarificationAnswers[question.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
+    }
+
+    private var currentClarificationAnswers: [String: String] {
+        var answers = clarificationSelectionsByQuestionId
+        if coordinator.allowsWrittenClarification {
+            for (id, answer) in clarificationWrittenAnswers where !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                answers[id] = answer
+            }
+        }
+        return answers
     }
 
     /// One tappable answer to a clarification question, drawn as a wrapping
@@ -365,8 +676,10 @@ struct OnDemandEditCard: View {
         question: ClarificationQuestion, option: String
     ) -> some View {
         let isSelected = clarificationSelectionsByQuestionId[question.id] == option
+            && (clarificationWrittenAnswers[question.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         return Button(action: {
             clarificationSelectionsByQuestionId[question.id] = option
+            clarificationWrittenAnswers[question.id] = nil
         }) {
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
@@ -406,65 +719,158 @@ struct OnDemandEditCard: View {
     /// plan is informational and never bypasses that binding gate.
     private var planCard: some View {
         card {
-            header(icon: "list.bullet.rectangle", title: "Iris's plan")
+            header(
+                icon: coordinator.isRecheckingSavedChanges ? "checkmark.circle" : "list.bullet.rectangle",
+                title: coordinator.isRecheckingSavedChanges ? "Recheck plan" : "Iris's plan"
+            )
 
             if let plan = coordinator.presentedPlan {
-                Text(plan.approachSummary)
-                    .font(.system(size: 11.5))
-                    .foregroundColor(DS.Colors.textPrimary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                // The file estimate is a courtesy for the reader's judgment, not a
-                // cage (the diff-scope gate is the hard cap downstream). Only shown
-                // when the plan actually carries one — an empty estimate stays
-                // silent rather than rendering an empty heading.
-                if !plan.filesToTouch.isEmpty {
-                    planSection(title: "Files Iris expects to touch") {
-                        ForEach(plan.filesToTouch, id: \.self) { path in
-                            Text(path)
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(DS.Colors.commandText)
+                // Keep consent controls outside the scroll area so a long plan
+                // never pushes Start editing below the visible card.
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: DS.Spacing.md) {
+                        if coordinator.isRecheckingSavedChanges {
+                            Text("Iris will check the saved source against this description without rewriting the code.")
+                                .font(.system(size: 11.5))
+                                .foregroundColor(DS.Colors.textPrimary)
                                 .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                    }
-                }
+                        if !coordinator.selectedHarnessDecisions.isEmpty {
+                            planSection(title: "Your choices") {
+                                ForEach(coordinator.selectedHarnessDecisions) { decision in
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(decision.question)
+                                            .font(.system(size: 10.5))
+                                            .foregroundColor(DS.Colors.textSecondary)
+                                        Text(decision.answer)
+                                            .font(.system(size: 11.5, weight: .medium))
+                                            .foregroundColor(DS.Colors.textPrimary)
+                                    }
+                                    .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                        }
+                        if coordinator.isRecheckingSavedChanges {
+                            planSection(title: "Desired outcome") {
+                                Text(plan.approachSummary)
+                                    .font(.system(size: 11.5))
+                                    .foregroundColor(DS.Colors.textPrimary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        } else if coordinator.selectedHarnessDecisions.isEmpty {
+                            Text(plan.approachSummary)
+                                .font(.system(size: 11.5))
+                                .foregroundColor(DS.Colors.textPrimary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            DisclosureGroup("Approach details") {
+                                Text(plan.approachSummary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .font(.system(size: 10.5))
+                            .foregroundColor(DS.Colors.textSecondary)
+                            .pointerCursor()
+                        }
 
-                // The derived recipe in plain words — informed consent to what
-                // will later run un-jailed during verification.
-                planSection(title: "How Iris will build and check it") {
-                    Text(plan.resolvedRecipeSummary)
-                        .font(.system(size: 10.5))
-                        .foregroundColor(DS.Colors.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                        if !coordinator.proposedHarnessDefaults.isEmpty {
+                            DisclosureGroup("Defaults Iris is proposing") {
+                                ForEach(Array(coordinator.proposedHarnessDefaults.enumerated()), id: \.offset) { _, value in
+                                    Text(value).fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            .font(.system(size: 10.5))
+                            .foregroundColor(DS.Colors.textSecondary)
+                        }
 
-                // Normally empty — the batch was already answered in `.clarifying`
-                // — but rendered when present so a leftover open question is never
-                // hidden behind the consent tap.
-                if !plan.openQuestions.isEmpty {
-                    planSection(title: "Still open") {
-                        ForEach(plan.openQuestions) { question in
-                            Text(question.prompt)
+                        DisclosureGroup(isExpanded: $planTechnicalDetailsAreExpanded) {
+                            VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+                                // The file estimate is a courtesy for the reader's judgment, not a
+                                // cage (the diff-scope gate is the hard cap downstream). Only shown
+                                // when the plan actually carries one; an empty estimate stays
+                                // silent rather than rendering an empty heading.
+                                if !plan.filesToTouch.isEmpty {
+                                    planSection(title: "Files Iris expects to touch") {
+                                        ForEach(plan.filesToTouch, id: \.self) { path in
+                                            Text(path)
+                                                .font(.system(size: 10, design: .monospaced))
+                                                .foregroundColor(DS.Colors.commandText)
+                                                .fixedSize(horizontal: false, vertical: true)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                        }
+                                    }
+                                }
+
+                                // The derived recipe in plain words: informed consent to what
+                                // will later run un-jailed during verification.
+                                planSection(
+                                    title: coordinator.isRecheckingSavedChanges
+                                        ? "How Iris will recheck it"
+                                        : "How Iris will build and check it"
+                                ) {
+                                    Text(plan.resolvedRecipeSummary)
+                                        .font(.system(size: 10.5))
+                                        .foregroundColor(DS.Colors.textSecondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+
+                                // The §9 honesty rung it expects to reach, stated up front so the
+                                // reader knows the verification bar BEFORE approving the edit.
+                                HStack(alignment: .top, spacing: 6) {
+                                    Image(systemName: "checklist")
+                                        .accessibilityHidden(true)
+                                        .font(.system(size: 10))
+                                        .foregroundColor(DS.Colors.accent)
+                                    Text(coordinator.isRecheckingSavedChanges
+                                         ? "Acceptance criteria: \(plan.expectedRung)"
+                                         : "Planned checks, not run yet: \(plan.expectedRung)")
+                                        .font(.system(size: 10.5))
+                                        .foregroundColor(DS.Colors.textSecondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            .padding(.top, DS.Spacing.xs)
+                        } label: {
+                            Label("Technical details", systemImage: "info.circle")
                                 .font(.system(size: 10.5))
-                                .foregroundColor(DS.Colors.amber)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .foregroundColor(DS.Colors.textSecondary)
+                        }
+                        .help("Shows the files, build and check details for this plan.")
+                        .accessibilityHint("Expands to show the files, build and check details for this plan.")
+                        .pointerCursor()
+                        .onChange(of: planTechnicalDetailsAreExpanded) { _, _ in
+                            NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+                        }
+
+                        // Normally empty, the batch was already answered in `.clarifying`.
+                        // Render it when present so a leftover open question is never hidden
+                        // behind the consent tap.
+                        if !plan.openQuestions.isEmpty {
+                            planSection(title: "Still open") {
+                                ForEach(plan.openQuestions) { question in
+                                    Text(question.prompt)
+                                        .font(.system(size: 10.5))
+                                        .foregroundColor(DS.Colors.amber)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .background(
+                        GeometryReader { planContentGeometry in
+                            Color.clear.preference(
+                                key: OnDemandEditPlanContentHeightPreferenceKey.self,
+                                value: planContentGeometry.size.height
+                            )
+                        }
+                    )
                 }
-
-                // The §9 honesty rung it expects to reach, stated up front so the
-                // reader knows the verification bar BEFORE approving the edit.
-                HStack(alignment: .top, spacing: 6) {
-                    Image(systemName: "checkmark.seal")
-                        .font(.system(size: 10))
-                        .foregroundColor(DS.Colors.accent)
-                    Text("Expected verification: \(plan.expectedRung)")
-                        .font(.system(size: 10.5))
-                        .foregroundColor(DS.Colors.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                .frame(height: heightThePlanContentShouldBe)
+                .onPreferenceChange(OnDemandEditPlanContentHeightPreferenceKey.self) { measuredHeight in
+                    measuredPlanContentHeight = measuredHeight
                 }
             }
 
@@ -472,10 +878,24 @@ struct OnDemandEditCard: View {
                 Button("Cancel") { coordinator.cancel() }
                     .irisTextButton()
                 Spacer(minLength: 0)
-                Button("Start editing") { coordinator.confirmPlanAndStart() }
+                Button(coordinator.isRecheckingSavedChanges ? "Start recheck" : "Start editing") {
+                    coordinator.confirmPlanAndStart()
+                }
+                .disabled(coordinator.isPreparingSavedChangeRecheck)
                     .irisPrimaryPill(isFullWidth: false, isCompact: true)
             }
         }
+    }
+
+    /// The plan's content gets its natural height while it is short, but the
+    /// reader-facing controls remain outside a capped viewport for long plans.
+    /// A small floor prevents the first self-sizing pass from collapsing the
+    /// ScrollView before its content preference has been delivered.
+    private var heightThePlanContentShouldBe: CGFloat {
+        min(
+            max(measuredPlanContentHeight, 44),
+            OverlayEyeInteractionGeometry.tallestTheAnswerAreaMayGrow
+        )
     }
 
     /// A titled subsection of the plan card — a quiet caption over its content,
@@ -495,9 +915,14 @@ struct OnDemandEditCard: View {
 
     private var startConsentCard: some View {
         card {
-            header(icon: "wand.and.stars", title: "Edit \(appName)")
+            header(
+                icon: coordinator.isRecheckingSavedChanges ? "checkmark.circle" : "wand.and.stars",
+                title: coordinator.isRecheckingSavedChanges ? "Recheck saved changes" : "Edit \(appName)"
+            )
 
-            Text(coordinator.statusLine ?? "Iris will edit the local source on a new branch, using your own model key. Continue?")
+            Text(coordinator.statusLine ?? (coordinator.isRecheckingSavedChanges
+                ? "Ready to recheck the saved change in \(appName)?"
+                : "Ready to make this change to \(appName)?"))
                 .font(.system(size: 11.5))
                 .foregroundColor(DS.Colors.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -506,7 +931,10 @@ struct OnDemandEditCard: View {
                 Button("Cancel") { coordinator.cancel() }
                     .irisTextButton()
                 Spacer(minLength: 0)
-                Button("Start editing") { coordinator.confirmStartAndRun() }
+                Button(coordinator.isRecheckingSavedChanges ? "Start recheck" : "Start editing") {
+                    coordinator.confirmStartAndRun()
+                }
+                .disabled(coordinator.isPreparingSavedChangeRecheck)
                     .irisPrimaryPill(isFullWidth: false, isCompact: true)
             }
         }
@@ -516,55 +944,118 @@ struct OnDemandEditCard: View {
 
     private var runningCard: some View {
         card {
-            header(icon: "wand.and.stars", title: "Editing \(appName)")
-            HStack(spacing: 8) {
-                ProgressView()
-                    .progressViewStyle(.circular)
-                    .controlSize(.small)
-                    .scaleEffect(0.62)
-                    .frame(width: 13, height: 13)
-                // The status line is live now — the coordinator updates it with
-                // each real step the engine takes (the command being run, a
-                // rate-limit wait, the verification build), so this card shows
-                // what Iris is doing RIGHT NOW, not one frozen sentence.
-                Text(coordinator.statusLine ?? "Working on it under your model key…")
-                    .font(.system(size: 11.5))
-                    .foregroundColor(DS.Colors.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+                header(
+                    icon: coordinator.isRecheckingSavedChanges ? "checkmark.circle" : "wand.and.stars",
+                    title: coordinator.isRecheckingSavedChanges ? "Rechecking \(appName)" : "Editing \(appName)"
+                )
 
-            // The reader can always stop a running edit. The stop lands at the
-            // next safe boundary: Iris finishes the step in flight, reverts
-            // everything it made, and ends with "nothing was changed" — so the
-            // button flips to a disabled "Stopping…" the moment it's tapped.
-            HStack(spacing: 8) {
-                Button(coordinator.readerAskedToStopTheRun ? "Stopping…" : "Stop") {
-                    coordinator.stopRunningEdit()
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .controlSize(.small)
+                        .scaleEffect(0.62)
+                        .frame(width: 13, height: 13)
+                        .accessibilityHidden(true)
+
+                    // The live line can contain a real command or build step.
+                    // Keep the card short while exposing the complete value to
+                    // VoiceOver and the native help affordance.
+                    Text(runningStatusText)
+                        .font(.system(size: 11.5))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .help(runningStatusText)
+                        .accessibilityLabel("Current activity")
+                        .accessibilityValue(runningStatusText)
                 }
-                .irisTextButton(isDanger: true)
-                .disabled(coordinator.readerAskedToStopTheRun)
-                .help("Stops the edit at the next safe point and puts the app's source back exactly as it was.")
 
-                // Whenever this compact card is on screen during a run, the
-                // centered terminal is NOT up — the reader minimized it (or it is
-                // in the instant before/after). "Show terminal" brings it back;
-                // before this, minimizing an edit was a one-way trip with no
-                // terminal to return to (Publik Test 2: "I can't get the terminal
-                // back up after I minimize it"). Hidden once a stop is under way,
-                // because the run is ending and there is nothing left to watch.
-                if !coordinator.readerAskedToStopTheRun {
-                    Button("Show terminal") {
-                        onReopenTerminal()
+                if coordinator.currentModelRoute != nil {
+                    DisclosureGroup(isExpanded: $runningDetailsAreExpanded) {
+                        modelRouteRow
+                            .padding(.top, DS.Spacing.xs)
+                    } label: {
+                        Label("Details", systemImage: "info.circle")
+                            .font(DS.Typography.caption)
+                            .foregroundColor(DS.Colors.textSecondary)
                     }
-                    .irisTextButton()
-                    .help("Reopens the terminal you minimized so you can watch the rest of the edit.")
+                    .help("Shows the model route Iris reported for this edit.")
+                    .accessibilityHint("Expands to show the model route Iris reported for this edit.")
+                    .pointerCursor()
+                    .onChange(of: runningDetailsAreExpanded) { _, _ in
+                        NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+                    }
                 }
-                Spacer(minLength: 0)
+
+                // Stop lands at the next safe boundary and then restores the
+                // source. Show terminal reopens the real takeover after it was
+                // minimized.
+                HStack(spacing: 8) {
+                    Button {
+                        coordinator.stopRunningEdit()
+                    } label: {
+                        Label(
+                            coordinator.readerAskedToStopTheRun ? "Stopping…" : "Stop",
+                            systemImage: "stop.fill"
+                        )
+                    }
+                    .irisTextButton(isDanger: true)
+                    .disabled(coordinator.readerAskedToStopTheRun)
+                    .nativeTooltip("Stops the edit at the next safe point and puts the app's source back exactly as it was.")
+
+                    if !coordinator.readerAskedToStopTheRun {
+                        Button {
+                            onReopenTerminal()
+                        } label: {
+                            Label("Show terminal", systemImage: "rectangle.on.rectangle")
+                        }
+                        .irisTextButton()
+                        .help("Reopens the terminal you minimized so you can watch the rest of the edit.")
+                    }
+                    Spacer(minLength: 0)
+                }
             }
         }
     }
 
     // MARK: - Preview + apply (Consent #2)
+
+    private var unverifiedTestCandidateCard: some View {
+        card {
+            header(icon: "testtube.2", title: "Ready for a manual test")
+            Text("The change builds and passed code review, but Iris could not find automated tests it can run for this app. Its behavior is not verified.")
+                .font(.system(size: 11.5))
+                .foregroundColor(DS.Colors.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Try it in the separate test app. Iris will keep its previous version so you can Undo. Your normal app stays unchanged.")
+                .font(.system(size: 10.5))
+                .foregroundColor(DS.Colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let diff = coordinator.proposedDiffText, !diff.isEmpty {
+                DisclosureGroup("Code details", isExpanded: $testCandidateDetailsAreExpanded) {
+                    ScrollView {
+                        Text(diff)
+                            .font(.system(size: 10, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 150)
+                }
+                .font(.system(size: 10.5))
+                .foregroundColor(DS.Colors.textSecondary)
+                .pointerCursor()
+            }
+            HStack(spacing: 8) {
+                Button("Not now") { coordinator.dismissUnverifiedTestCandidate() }
+                    .irisTextButton()
+                    .help("Keep the source change saved without replacing the installed test app.")
+                Spacer(minLength: 0)
+                Button("Try this test build") { coordinator.tryUnverifiedTestCandidate() }
+                    .irisPrimaryPill(isFullWidth: false, isCompact: true)
+            }
+        }
+    }
 
     private var previewCard: some View {
         card {
@@ -795,6 +1286,7 @@ struct OnDemandEditCard: View {
     private var deliveringCard: some View {
         card {
             header(icon: "arrow.triangle.2.circlepath", title: "Putting the fix into \(appName)")
+            verificationReceiptRows
             HStack(spacing: 8) {
                 ProgressView()
                     .progressViewStyle(.circular)
@@ -816,13 +1308,22 @@ struct OnDemandEditCard: View {
     /// matters. Undo is always one tap away.
     private var symptomConfirmationCard: some View {
         card {
-            header(icon: "checkmark.circle", title: "Is it fixed?")
+            header(icon: "questionmark.circle", title: "Ready for your test")
+
+            verificationReceiptRows
 
             if let complaint = coordinator.activeRequestText {
-                Text("You said: “\(complaint)”")
-                    .font(.system(size: 11.5))
+                DisclosureGroup {
+                    Text(complaint)
+                        .font(DS.Typography.body)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                } label: {
+                    Text("Your request: \(complaint)")
+                        .font(DS.Typography.caption)
+                        .lineLimit(2)
+                }
                     .foregroundColor(DS.Colors.textPrimary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             HStack(spacing: 6) {
@@ -832,8 +1333,8 @@ struct OnDemandEditCard: View {
                         .scaleEffect(0.62)
                         .frame(width: 13, height: 13)
                 }
-                Text(coordinator.symptomRecheckSummary ?? "\(appName) is running with the change — Iris is looking again…")
-                    .font(.system(size: 10.5))
+                Text(coordinator.symptomRecheckSummary ?? "\(appName) relaunched. Iris is looking again; behavior is not confirmed yet.")
+                    .font(DS.Typography.caption)
                     .foregroundColor(DS.Colors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -848,10 +1349,22 @@ struct OnDemandEditCard: View {
                     .irisPrimaryPill(isFullWidth: false, isCompact: true)
             }
 
+            if (coordinator.classifiedKind == .feature
+                && coordinator.pushFeatureChangelogToPublik != nil)
+                || (coordinator.classifiedKind != .feature
+                    && coordinator.openPullRequestForTheKeptEdit != nil) {
+                Text(coordinator.classifiedKind == .feature
+                    ? "Confirming this feature can publish an update note in publik."
+                    : "Confirming this fix can send it to the app's developers for review.")
+                    .font(DS.Typography.caption)
+                    .foregroundColor(DS.Colors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             HStack(spacing: 8) {
                 Button("Undo this change") { coordinator.undoDeliveredChange() }
                     .irisTinyButton()
-                    .help("Brings back the installed \(appName) and drops the branch — nothing of the change remains.")
+                    .help("Attempts to restore the previous installed version of \(appName) and discard this change.")
                 Spacer(minLength: 0)
             }
         }
@@ -1034,9 +1547,161 @@ struct OnDemandEditCard: View {
 
     // MARK: - Done
 
+    @ViewBuilder
     private var doneCard: some View {
+        if coordinator.previousVersionWasRestored {
+            previousVersionRestoredCard
+        } else if changeNeedsDeliveryFollowup {
+            savedWithoutInstallationCard
+        } else {
+            normalDoneCard
+        }
+    }
+
+    /// A restored receipt is a different outcome from the forward delivery
+    /// summary. In particular, the old delivery progress still records that an
+    /// edited package was once built and installed; rendering that state here
+    /// would tell the reader to relaunch the very version Undo just replaced.
+    /// Keep the recovery claims explicit and separate from behavior/document
+    /// claims: Undo confirms app/source restoration only.
+    private var previousVersionRestoredCard: some View {
         card {
-            header(icon: "checkmark.circle", title: "Done")
+            header(icon: "checkmark.circle", title: "Previous version restored")
+
+            Text("The previous version of \(appName) is open again. Undo restored the app, not your documents.")
+                .font(DS.Typography.body)
+                .foregroundColor(DS.Colors.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            DisclosureGroup("Technical details") {
+                VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+                    receiptRow("Source checkout", value: "Recorded base restored")
+                    receiptRow("Base commit", value: "Restored")
+                    receiptRow("Edit branch", value: "Kept as recovery history")
+                    receiptRow("Behavior", value: "Not checked by Undo")
+                }
+                .padding(.top, DS.Spacing.xs)
+            }
+            .font(DS.Typography.caption)
+            .foregroundColor(DS.Colors.textSecondary)
+            .pointerCursor()
+
+            HStack {
+                Spacer(minLength: 0)
+                Button("Done") { coordinator.cancel() }
+                    .irisPrimaryPill(isFullWidth: false, isCompact: true)
+            }
+        }
+    }
+
+    private var savedWithoutInstallationCard: some View {
+        card {
+            VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+                header(
+                    icon: "exclamationmark.triangle",
+                    title: coordinator.deliveryProgress.installedCopyReplaced
+                        ? "Saved, but not running"
+                        : "Saved, but not installed"
+                )
+
+                Text(coordinator.deliveryProgress.installedCopyReplaced
+                     ? "The installed copy was replaced, but Iris did not confirm that the edited build is running."
+                     : "Your installed \(appName) is still the previous version. The change is saved on a branch, but that copy was not replaced.")
+                    .font(DS.Typography.caption)
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text(coordinator.canRetrySavedDelivery
+                     ? "Retry update rebuilds your saved change. It does not ask the model to edit it again."
+                     : coordinator.deliveryProgress.installedCopyReplaced
+                     ? "Next: relaunch \(appName) yourself to pick up the saved change, or use More to back up or share the branch."
+                     : "Next: rebuild \(appName) with its own project tooling, or use More to back up or share the saved branch.")
+                    .font(DS.Typography.caption)
+                    .foregroundColor(DS.Colors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                DisclosureGroup(isExpanded: $savedWithoutInstallationDetailsAreExpanded) {
+                    VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+                        if let statusLine = coordinator.statusLine {
+                            Text(statusLine)
+                                .font(DS.Typography.caption)
+                                .foregroundColor(DS.Colors.textSecondary)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        verificationReceiptRows
+                    }
+                    .padding(.top, DS.Spacing.xs)
+                } label: {
+                    Label("Technical details", systemImage: "info.circle")
+                        .font(DS.Typography.caption)
+                        .foregroundColor(DS.Colors.textSecondary)
+                }
+                .help("Shows the reported model route, branch status, and verification receipt.")
+                .accessibilityHint("Expands to show the reported model route, branch status, and verification receipt.")
+                .pointerCursor()
+                .onChange(of: savedWithoutInstallationDetailsAreExpanded) { _, _ in
+                    NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+                }
+
+                pullRequestRow
+                changelogRow
+
+                if coordinator.isAwaitingPublishConsent {
+                    publishConsentRow
+                } else {
+                    HStack(spacing: 8) {
+                        if coordinator.canRetrySavedDelivery {
+                            Button("Retry update") { coordinator.retrySavedDelivery() }
+                                .irisTinyButton()
+                                .help("Rebuilds and applies the exact saved source without another model edit.")
+                        }
+                        if coordinator.proposedDiffText != nil {
+                            Button("Back up") { coordinator.requestForkBackup() }
+                                .irisTinyButton()
+                                .help("Pushes the saved branch to your own fork. Never to anyone else's repository.")
+
+                            Menu {
+                                if coordinator.classifiedKind == .feature {
+                                    if coordinator.changelogState.allowsAnAttempt {
+                                        Button("Add to publik changelog") {
+                                            coordinator.recordFeatureChangelogToPublik()
+                                        }
+                                    }
+                                } else if coordinator.pullRequestState.allowsAnAttempt {
+                                    Button("Open a pull request") {
+                                        coordinator.openPullRequestForTheKeptEdit(because: .readerTappedTheButton)
+                                    }
+                                }
+                                Button("Share to publik") { coordinator.requestPublishToPublik() }
+                            } label: {
+                                Label("More", systemImage: "ellipsis.circle")
+                            }
+                            .menuStyle(.borderlessButton)
+                            .font(DS.Typography.caption)
+                            .foregroundColor(DS.Colors.textSecondary)
+                            .help("More ways to share the saved branch.")
+                        }
+
+                        if coordinator.deliveredChangeCanBeUndone {
+                            Button("Undo") { coordinator.undoDeliveredChange() }
+                                .irisTinyButton()
+                                .help("Restores the previous app version and checks the result. Keeps the edit history for recovery.")
+                        }
+                        Spacer(minLength: 0)
+                        Button("Done") { coordinator.cancel() }
+                            .irisPrimaryPill(isFullWidth: false, isCompact: true)
+                    }
+                }
+            }
+        }
+    }
+
+    private var normalDoneCard: some View {
+        card {
+            header(icon: "doc.text", title: "Edit summary")
+
+            verificationReceiptRows
 
             Text(coordinator.statusLine ?? "Your change is on a branch.")
                 .font(.system(size: 11.5))
@@ -1176,7 +1841,7 @@ struct OnDemandEditCard: View {
             if coordinator.deliveredChangeCanBeUndone {
                 Button("Undo") { coordinator.undoDeliveredChange() }
                     .irisTinyButton()
-                    .help("Brings back the installed app and drops the branch.")
+                    .help("Restores the previous app version and checks the result. Keeps the edit history for recovery.")
             }
             Spacer(minLength: 0)
             if coordinator.offersRetryWithMemory {
@@ -1267,6 +1932,50 @@ struct OnDemandEditCard: View {
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
 
+            if !isRefusal, let verificationFailureDetail {
+                DisclosureGroup(isExpanded: $verificationFailureDetailsAreExpanded) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Verification stage: \(verificationFailureDetail.stage)")
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundColor(DS.Colors.textSecondary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        if let output = verificationFailureDetail.output {
+                            Text(output)
+                                .font(.system(size: 10.5))
+                                .foregroundColor(DS.Colors.textPrimary)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            Text("No additional verification output was captured.")
+                                .font(.system(size: 10.5))
+                                .foregroundColor(DS.Colors.textSecondary)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(.top, DS.Spacing.xs)
+                } label: {
+                    Label("Why it stopped", systemImage: "info.circle")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+                }
+                .help("Shows the scrubbed verification stage and bounded output recorded for this failed run.")
+                .accessibilityHint("Expands to show scrubbed verification evidence from the failed run, not a new instruction.")
+                .pointerCursor()
+                .onChange(of: verificationFailureDetailsAreExpanded) { _, _ in
+                    NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+                }
+            }
+
+            // A held failed edit has a non-destructive next step: give Iris a
+            // fresh, reader-owned description and recheck the saved source. Put
+            // it before the generic stash-and-retry action so the recovery path
+            // is the first choice, while retaining set-aside for every other
+            // dirty-clone case.
+            savedChangeRecheckAction
+
             if dirtyCloneRefusal != nil {
                 setAsideAndContinueAction
             }
@@ -1288,6 +1997,14 @@ struct OnDemandEditCard: View {
                 }
             }
         }
+    }
+
+    /// The verification receipt carries only a scrubbed, bounded stage and
+    /// output from a check that actually ran. Keep it collapsed by default so
+    /// the failure card stays compact, and never turn a missing receipt into a
+    /// guessed diagnosis.
+    private var verificationFailureDetail: (stage: String, output: String?)? {
+        coordinator.verificationReceipt?.readerFacingFailureDetail
     }
 
     /// The one tap out of the dirty-clone dead end.
@@ -1317,6 +2034,7 @@ struct OnDemandEditCard: View {
             }
             .irisPrimaryPill(isFullWidth: true, isCompact: true)
             .padding(.top, 2)
+            .disabled(coordinator.isPreparingSavedChangeRecheck)
             .help("Runs git stash in that clone, then retries your edit. Nothing is deleted.")
 
             Text("Sets the changes aside in git stash — nothing is deleted, and `git stash pop` in that clone puts them all back — then Iris retries your edit.")
@@ -1355,7 +2073,7 @@ struct OnDemandEditCard: View {
                 justCopiedTheWords = false
             }
         }
-        .irisTextButton()
+        .irisTinyButton()
         .help("Copies this whole message to the clipboard.")
     }
 
@@ -1365,6 +2083,50 @@ struct OnDemandEditCard: View {
     }
 
     // MARK: - Shared chrome
+
+    @ViewBuilder
+    private var modelRouteRow: some View {
+        if let route = coordinator.currentModelRoute {
+            Text(route)
+                .font(DS.Typography.caption)
+                .foregroundColor(DS.Colors.textSecondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder
+    private var verificationReceiptRows: some View {
+        if coordinator.deliveryProgress.codeSaved, coordinator.hasCommittedChange {
+            VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+                modelRouteRow
+                receiptRow("Code", value: "Saved on a branch")
+                receiptRow("Build check", value: coordinator.verificationReceipt.map {
+                    EditVerificationReceipt.label(for: $0.buildPassed)
+                } ?? "Not reported")
+                receiptRow("Tests", value: coordinator.verificationReceipt.map {
+                    $0.testSummary
+                } ?? "Not reported")
+                receiptRow("App package", value: coordinator.deliveryProgress.freshAppBuilt ? "Built" : "Not built yet")
+                receiptRow("Installed copy", value: coordinator.deliveryProgress.installedCopyReplaced ? "Replaced" : "Not replaced")
+                receiptRow("Relaunch", value: coordinator.deliveryProgress.relaunched ? "Succeeded" : "Not completed")
+                receiptRow("Behavior", value: coordinator.deliveryProgress.behavior)
+            }
+            .padding(DS.Spacing.md)
+            .background(DS.Colors.surfaceRaised, in: RoundedRectangle(cornerRadius: DS.CornerRadius.medium))
+        }
+    }
+
+    private func receiptRow(_ title: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: DS.Spacing.sm) {
+            Text(title).foregroundColor(DS.Colors.textSecondary)
+            Spacer(minLength: DS.Spacing.sm)
+            Text(value)
+                .foregroundColor(DS.Colors.textPrimary)
+                .multilineTextAlignment(.trailing)
+        }
+        .font(DS.Typography.caption)
+    }
 
     private func header(icon: String, title: String) -> some View {
         HStack(spacing: 6) {
@@ -1376,7 +2138,7 @@ struct OnDemandEditCard: View {
             // selection that stops dead at the first line is the same "i can't
             // copy paste text on that tab" complaint in a smaller form.
             Text(title)
-                .font(.system(size: 12, weight: .semibold))
+                .font(DS.Typography.heading)
                 .foregroundColor(DS.Colors.textPrimary)
                 .textSelection(.enabled)
         }
@@ -1386,10 +2148,10 @@ struct OnDemandEditCard: View {
     /// the bar. The shell is the read-over-anything surface because this floats
     /// over the reader's real desktop, which may be a bright window.
     private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: DS.Spacing.md) {
             content()
         }
-        .padding(12)
+        .padding(usesUnifiedPanel ? DS.Spacing.md : DS.Spacing.lg)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             IrisShellBackground(
@@ -1397,8 +2159,8 @@ struct OnDemandEditCard: View {
                 surface: DS.Colors.readableOverAnything
             )
         )
-        .padding(.horizontal, 12)
-        .padding(.top, 10)
+        .padding(.horizontal, usesUnifiedPanel ? 0 : 12)
+        .padding(.top, usesUnifiedPanel ? 0 : 10)
         .onAppear {
             NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
         }

@@ -105,11 +105,68 @@ import Testing
     }
 
     @Test func aHedgedCleanPhraseIsNotMisreadAsDisqualifying() {
-        // "nothing disqualifying" contains the substring "disqualif"; the parser
-        // checks clean phrasing FIRST so this still reads as a clean pass.
+        // This complete documented phrase remains a clean pass even though it
+        // contains the word "disqualifying".
         let reply = "VERDICT: nothing disqualifying"
         let verdict = FeatureEditAdversarialReviewer.parse(reply: reply)
         #expect(verdict.isDisqualifying == false)
+    }
+
+    @Test func negativeVerdictTokensCannotClearTheReview() {
+        let negativeTokens = [
+            "UNCLEAN",
+            "NOT CLEAN",
+            "DISAPPROVED",
+            "NOT APPROVED",
+            "UNPASS",
+            "CLEAN BUT INCOMPLETE",
+            "FAILURE",
+            "REJECTED WITH CONDITIONS",
+            "BLOCKED ON MISSING EVIDENCE",
+        ]
+
+        for token in negativeTokens {
+            let verdict = FeatureEditAdversarialReviewer.parse(reply: "VERDICT: \(token)")
+            #expect(verdict.isDisqualifying == true)
+        }
+    }
+
+    @Test func anUnreadableLaterVerdictCannotBeMaskedByAnEarlierCleanOne() {
+        let reply = "VERDICT: CLEAN\nVERDICT: UNCLEAN"
+        let verdict = FeatureEditAdversarialReviewer.parse(reply: reply)
+        #expect(verdict.isDisqualifying == true)
+        #expect(verdict.issues.first?.contains("did not return a readable verdict") == true)
+    }
+
+    @Test func completeDocumentedVerdictAliasesRemainReadable() {
+        let cleanTokens = [
+            "CLEAN",
+            "PASS",
+            "PASSED",
+            "APPROVED",
+            "NO ISSUE",
+            "NOTHING DISQUALIFYING",
+            "NOTHING DISQUALIFIED",
+            "NOT DISQUALIFYING",
+            "NOT DISQUALIFIED",
+        ]
+        for token in cleanTokens {
+            #expect(FeatureEditAdversarialReviewer.parse(reply: "VERDICT: \(token)").isDisqualifying == false)
+        }
+
+        let disqualifyingTokens = [
+            "DISQUALIFYING",
+            "DISQUALIFIED",
+            "FAIL",
+            "FAILED",
+            "REJECT",
+            "REJECTED",
+            "BLOCK",
+            "BLOCKED",
+        ]
+        for token in disqualifyingTokens {
+            #expect(FeatureEditAdversarialReviewer.parse(reply: "VERDICT: \(token)").isDisqualifying == true)
+        }
     }
 
     // MARK: - Parsing: disqualifying

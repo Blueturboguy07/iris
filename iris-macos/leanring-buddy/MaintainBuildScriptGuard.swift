@@ -19,9 +19,8 @@
 //  and it happens BEFORE the human ever sees the diff.
 //
 //  So a model edit to a build-script file must be caught BEFORE that build
-//  runs. This file is only the pure detector; the coordinator (and the
-//  on-demand entry in MaintainTierCFixer) decide what to do with a hit —
-//  block outright, or surface it for an explicit, informed approval.
+//  runs. This file is only the pure detector; the edit loop decides what to do
+//  with a hit — block outright, or surface it for an explicit, informed approval.
 //
 
 import Foundation
@@ -48,6 +47,13 @@ enum MaintainBuildScriptGuard {
         //   Cargo.toml      — [build-dependencies] and `build = "…"` pull in code
         //   Makefile        — make targets
         //   *file.js runners— grunt/gulp task files executed by their runner
+        //   Package.swift  — Swift Package Manager manifest/evaluation script
+        //   setup.py       — legacy Python packaging/build script
+        //   pyproject.toml — Python build-backend/project configuration
+        //   noxfile.py     — Nox task definitions
+        //   tox.ini        — tox test/environment orchestration
+        //   gradlew(.bat)  — Gradle wrapper scripts
+        //   meson.build    — Meson build definition
         let executedFilenames: Set<String> = [
             "build.rs",
             "package.json",
@@ -59,6 +65,14 @@ enum MaintainBuildScriptGuard {
             "gruntfile.js",
             "gulpfile.js",
             "cmakelists.txt",
+            "package.swift",
+            "setup.py",
+            "pyproject.toml",
+            "noxfile.py",
+            "tox.ini",
+            "gradlew",
+            "gradlew.bat",
+            "meson.build",
         ]
         if executedFilenames.contains(basename) { return true }
 
@@ -67,7 +81,11 @@ enum MaintainBuildScriptGuard {
         //   .gyp / .gypi    — node-gyp native build config
         //   .cmake          — included and evaluated by CMake
         //   .mk             — Makefile fragments pulled in by `include`
-        let executedSuffixes = [".podspec", ".gyp", ".gypi", ".cmake", ".mk"]
+        //   .gradle         — Gradle Groovy build/settings scripts
+        //   .gradle.kts     — Gradle Kotlin build/settings scripts
+        let executedSuffixes = [
+            ".podspec", ".gyp", ".gypi", ".cmake", ".mk", ".gradle", ".gradle.kts"
+        ]
         if executedSuffixes.contains(where: { lowercasedPath.hasSuffix($0) }) { return true }
 
         return false

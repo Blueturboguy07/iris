@@ -248,10 +248,17 @@ class ClaudeAPI {
         transport: AssistantTransport
     ) -> AssistantTransportError {
         let serverErrorCode = AssistantTransportError.serverErrorCode(inFailureBody: failureBodyData)
-        // The code and status are worth a console line for whoever is debugging
-        // a build; the body itself is not logged, so a model's own words about a
-        // user's screen never land in a log file.
-        print("⚠️ Assistant request failed — status \(statusCode), code: \(serverErrorCode ?? "none")")
+        let diagnosticRoute: AssistantRequestDiagnostics.Route
+        switch transport.credentialShape {
+        case .publiksFundedTier: diagnosticRoute = .funded
+        case .aPastedAnthropicKey: diagnosticRoute = .anthropicKey
+        case .aClaudeCodeLogin: diagnosticRoute = .claudeCodeLogin
+        }
+        let diagnostic = AssistantRequestDiagnostics.traceLine(
+            route: diagnosticRoute, statusCode: statusCode, responseData: failureBodyData
+        )
+        print(diagnostic)
+        irisTrace(diagnostic)
 
         return AssistantTransportError.failure(
             forStatusCode: statusCode,

@@ -241,6 +241,11 @@ nonisolated struct EcosystemDetectorFinding: Sendable {
     /// non-matching detector may still return a finding (matched: false) to
     /// report a *negative* signal; mergers must ignore its commands.
     let matched: Bool
+
+    /// A complete, explicit desktop packaging path can identify which shell
+    /// actually ships when a clone contains more than one ecosystem's files.
+    /// A nil value is not evidence either way.
+    var shippingStack: RepoRecipeShippingStack? = nil
 }
 
 // MARK: - Detector protocol

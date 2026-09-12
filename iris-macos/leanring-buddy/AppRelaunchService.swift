@@ -2,41 +2,21 @@
 //  AppRelaunchService.swift
 //  leanring-buddy
 //
-//  The rebuild → relaunch half of the on-demand edit tool (design §4), built
-//  to Option A ("run straight from the clone's build output") and ONLY Option A:
-//  it never writes into, copies over, or otherwise touches an installed/signed
-//  `.app` bundle. It packages a fresh, launchable artifact FROM the user's own
-//  source clone and launches THAT as a distinct instance. The signed copy in
-//  /Applications (if any) is left exactly as it was — so this can never break a
-//  notarization seal or overwrite something Iris did not build.
-//
-//  Why a separate PACKAGE step at all: the verification build the engine runs
-//  before committing is a COMPILE-CHECK (Tauri `cargo build --release`, Electron
-//  `npm run build`) — it proves the source compiles, but it does NOT produce a
-//  double-clickable `.app`. The pipeline that produces one (`cargo tauri build`,
-//  the repo's own electron-builder/forge packaging script) is different, heavier,
-//  and — this is the honest catch the adversarial review names (#1/#2) — is NOT
-//  what "verified" covered. So the artifact this service produces is UNVERIFIED
-//  beyond "it packaged and a launchable bundle exists". That is why the whole
-//  relaunch is gated behind its own explicit destructive consent upstream, and
-//  why the sequence below refuses to terminate the running app until the fresh
-//  artifact is proven to exist on disk.
-//
-//  The command STRINGS here are code-authored, never model-authored — exactly
-//  like `VerificationCommands`. The model edits source files; it never chooses
-//  or rewrites the package command. That authorship split is what keeps this
-//  step safe to run un-jailed.
-//
-//  IMPORTANT — this path is UNVERIFIED until it is exercised on a real machine
-//  against a real source-clone app. It has no unit coverage in the maintain
-//  harness (which is pure-Foundation and cannot spawn `cargo tauri build` or
-//  open a real bundle), and the terminate→wait→launch mechanics have never been
-//  run against a foreign app before. Treat the first real relaunch as a
-//  supervised dogfood, not a proven flow.
+//  Packages the saved source, identifies its app artifact, and supports both
+//  installed-copy delivery and build-directory launch. Installed delivery keeps
+//  a unique previous-bundle snapshot and a durable recovery receipt. Source
+//  checks, packaging, file replacement, launch, and behavior are separate facts.
+//  A receipt never proves that the app works or that user documents were undone.
+//  Packaging commands come from recognized repository routes, not model replies.
+//  Fixture coverage lives in tools/harness-feature-host/AppDeliveryChecks.swift;
+//  real cross-app update, data preservation, and recovery acceptance are separate.
 //
 
 import AppKit
 import Foundation
+#if canImport(IrisEnvironment)
+import IrisEnvironment
+#endif
 
 /// The outcome of packaging a fresh, launchable artifact from the clone. The
 /// coordinator caches the `artifactPath` across the (possible) force-quit
@@ -91,6 +71,18 @@ enum AppRelaunchLaunchResult: Sendable {
     /// A precondition was missing at launch time (no known `macBundleId`, an
     /// unreadable artifact). Nothing was terminated.
     case ineligible(reason: String)
+    /// The fresh launch failed and the previous bundle could not be confirmed
+    /// running again. The caller must retain its recovery information.
+    case launchFailedPriorAppNotRestored(reason: String)
+}
+
+/// The result of the quit-only part of an installed delivery. A successful
+/// result means the caller may now replace the installed bundle; no filesystem
+/// delivery is performed by this method.
+enum AppRelaunchTerminationResult: Sendable, Equatable {
+    case readyForDelivery(priorApplicationPath: String?)
+    case runningAppWouldNotQuit
+    case ineligible(reason: String)
 }
 
 @MainActor
@@ -106,6 +98,7 @@ final class AppRelaunchService {
     /// before concluding it will not (an unsaved-work dialog is holding it).
     /// Short, because a well-behaved app quits in well under this.
     private let gracefulQuitTimeout: TimeInterval
+    let deliveryReceiptStore: AppDeliveryReceiptStore
 
     /// How Iris gets a code-signing identity that is IDENTICAL on every rebuild,
     /// or nil when there is none to be had. Injected rather than called directly
@@ -121,9 +114,11 @@ final class AppRelaunchService {
     /// `IrisLocalSigningIdentity` and `scripts/deploy-iris-local.sh`.
     var resolveSigningIdentity: (() async -> StableSigningIdentity?)?
 
-    init(packagingDeadline: TimeInterval = 1500, gracefulQuitTimeout: TimeInterval = 10) {
+    init(packagingDeadline: TimeInterval = 1500, gracefulQuitTimeout: TimeInterval = 10,
+         deliveryReceiptStore: AppDeliveryReceiptStore = AppDeliveryReceiptStore()) {
         self.packagingDeadline = packagingDeadline
         self.gracefulQuitTimeout = gracefulQuitTimeout
+        self.deliveryReceiptStore = deliveryReceiptStore
     }
 
     // MARK: - Working out what a clone actually is
@@ -255,8 +250,12 @@ final class AppRelaunchService {
     /// that then fails (adversarial #2).
     func packageFreshBuildFromClone(
         clonePath: String,
-        appStack: BreakAppStack
+        appStack: BreakAppStack,
+        expectedBundleIdentifier: String? = nil
     ) async -> AppRelaunchPackagingResult {
+        // A saved edit may carry stale catalog metadata. Use the actual clone
+        // for both packaging and artifact discovery, not just the command.
+        let appStack = Self.packagingStack(clonePath: clonePath, fallback: appStack)
         guard Self.stackCanProduceARelaunchableMacArtifact(appStack) else {
             return .stackHasNoRelaunchableArtifact(
                 reason: "this kind of app has no rebuildable macOS copy for Iris to relaunch"
@@ -269,10 +268,28 @@ final class AppRelaunchService {
         // Resolve the code-authored package command for this stack against this
         // repo. An Electron repo with no recognized macOS packaging script has
         // no honest command to run, so it refuses here rather than guess.
-        guard let packageCommand = Self.packageCommand(forStack: appStack, clonePath: clonePath) else {
+        guard let basePackageCommand = Self.packageCommand(forStack: appStack, clonePath: clonePath) else {
             return .stackHasNoRelaunchableArtifact(
                 reason: "this app doesn't declare a macOS packaging step Iris recognizes"
             )
+        }
+        let packageCommand: String
+        if appStack == .tauri {
+            // Probe the resolved CLI's own help before opting into flags that
+            // were added after older Tauri releases. A failed or timed-out
+            // probe preserves the compatible command without guessing support.
+            let helpCommand = Self.tauriHelpCommand(for: basePackageCommand)
+            let help = try? await runner.run(
+                helpCommand,
+                deadline: min(5, packagingDeadline)
+            )
+            packageCommand = Self.tauriPackagingCommandApplyingSupportedFlags(
+                baseCommand: basePackageCommand,
+                helpOutput: help?.outputTail ?? "",
+                helpSucceeded: help?.succeeded == true
+            )
+        } else {
+            packageCommand = basePackageCommand
         }
 
         // Everything with an mtime at or after this instant is "from this
@@ -308,7 +325,8 @@ final class AppRelaunchService {
         // without spawning `cargo tauri build`.
         switch Self.packagingVerdict(
             freshLaunchableAppBundlePath: Self.newestLaunchableAppBundle(
-                forStack: appStack, clonePath: clonePath, producedAtOrAfter: buildStartedAt
+                forStack: appStack, clonePath: clonePath, producedAtOrAfter: buildStartedAt,
+                expectedBundleIdentifier: expectedBundleIdentifier
             ),
             buildSucceeded: build?.succeeded == true,
             buildOutputTail: build?.outputTail ?? ""
@@ -353,10 +371,73 @@ final class AppRelaunchService {
                 reason: "the build finished but Iris couldn't find a launchable app it produced"
             )
         }
-        let tail = buildOutputTail.suffix(400).trimmingCharacters(in: .whitespacesAndNewlines)
+        let tail = packagingDiagnosticSummary(buildOutputTail)
         return .noLaunchableApp(
             reason: tail.isEmpty ? "the packaging build failed" : "the packaging build failed: \(tail)"
         )
+    }
+
+    /// Keep a bounded, line-aware packaging diagnostic. A character suffix can
+    /// discard the actual error line and leave only stack frames; preserve the
+    /// first likely failure line plus the final context instead.
+    static func packagingDiagnosticSummary(
+        _ output: String,
+        maximumCharacters: Int = 2_000
+    ) -> String {
+        guard maximumCharacters > 0 else { return "" }
+        // `strippedOfControlSequences` is line-oriented and intentionally
+        // removes newline/control bytes at the end; apply it per line so the
+        // separators survive for the bounded head/tail selection below. Scrub
+        // after rejoining so multiline secrets (for example private keys) are
+        // still covered by the egress redaction patterns.
+        let controlStripped = output
+            .components(separatedBy: .newlines)
+            .map(GuideAutopilotOutputBuffer.strippedOfControlSequences)
+            .joined(separator: "\n")
+        let cleaned = GuideAutopilotOutputBuffer.scrubbed(controlStripped)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleaned.count > maximumCharacters else { return cleaned }
+
+        let lines = cleaned
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return "" }
+
+        let diagnostic = lines.first(where: isLikelyPackagingDiagnosticLine) ?? lines[0]
+        let omissionMarker = "… earlier packaging output omitted …"
+        var tailLines: [String] = []
+        var usedCharacters = diagnostic.count + omissionMarker.count + 2
+
+        for line in lines.reversed() where line != diagnostic {
+            let separatorCharacters = tailLines.isEmpty ? 0 : 1
+            let additionalCharacters = separatorCharacters + line.count
+            guard usedCharacters + additionalCharacters <= maximumCharacters else { break }
+            tailLines.insert(line, at: 0)
+            usedCharacters += additionalCharacters
+        }
+
+        var parts = [diagnostic]
+        if !tailLines.isEmpty {
+            parts.append(omissionMarker)
+            parts.append(contentsOf: tailLines)
+        }
+        let summary = parts.joined(separator: "\n")
+        return summary.count <= maximumCharacters
+            ? summary
+            : String(summary.prefix(maximumCharacters))
+    }
+
+    private static func isLikelyPackagingDiagnosticLine(_ line: String) -> Bool {
+        let lowercased = line.lowercased()
+        return lowercased.contains("error")
+            || lowercased.contains("failed")
+            || lowercased.contains("fatal")
+            || lowercased.contains("enoent")
+            || lowercased.contains("eacces")
+            || lowercased.contains("cannot")
+            || lowercased.contains("could not")
+            || lowercased.contains("unable to")
     }
 
     // MARK: - Stable signing (so a rebuild is not a new app to macOS)
@@ -418,6 +499,120 @@ final class AppRelaunchService {
 
     // MARK: - Step 2: terminate the running instance, then launch the fresh build
 
+    /// Validate the fresh artifact, then terminate the exact running app before
+    /// an installed bundle can be replaced. This is the quit-only half of the
+    /// delivery transaction. The caller must not swap files unless this returns
+    /// `.readyForDelivery`.
+    func terminateRunningInstanceBeforeDelivery(
+        macBundleId: String,
+        freshBuildArtifactPath: String,
+        allowForceQuit: Bool,
+        allowedApplicationURL: ((URL) -> Bool)? = nil
+    ) async -> AppRelaunchTerminationResult {
+        let trimmedBundleId = macBundleId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedBundleId.isEmpty else {
+            return .ineligible(reason: "Iris doesn't have a bundle id for this app, so it won't guess one to relaunch")
+        }
+        let artifactURL = URL(fileURLWithPath: freshBuildArtifactPath)
+        guard FileManager.default.fileExists(atPath: freshBuildArtifactPath) else {
+            return .ineligible(reason: "the freshly built app is no longer on disk")
+        }
+        guard Self.isLaunchableMacAppBundle(
+            atPath: freshBuildArtifactPath
+        ) else {
+            return .ineligible(reason: "the freshly built app is not a launchable macOS bundle")
+        }
+        guard Self.artifactBundleIdentifier(atPath: freshBuildArtifactPath) == trimmedBundleId else {
+            return .ineligible(reason: "the built app does not match this project's app identity; your running app was left alone")
+        }
+        guard allowedApplicationURL?(artifactURL) != false else {
+            return .ineligible(reason: "Iris Test refused an app outside its registered build output.")
+        }
+
+        let runningInstances = NSRunningApplication
+            .runningApplications(withBundleIdentifier: trimmedBundleId)
+        if let allowedApplicationURL,
+           (runningInstances.count > 1
+            || !Self.applicationURLsAreAllowed(runningInstances.map(\.bundleURL), by: allowedApplicationURL)) {
+            return .ineligible(reason: "Another app is using this test identity. Iris Test left that process alone.")
+        }
+        let runningInstance = runningInstances.first
+        let priorApplicationPath = runningInstance?.bundleURL?.path
+        if let runningInstance {
+            let quit = await terminateAndWaitForExit(runningInstance, allowForceQuit: allowForceQuit)
+            switch quit {
+            case .exited:
+                return .readyForDelivery(priorApplicationPath: priorApplicationPath)
+            case .stillRunningNeedsForceConsent:
+                return .runningAppWouldNotQuit
+            case .stillRunningAfterForce:
+                return .ineligible(reason: "Iris couldn't quit the running app, so it left it alone")
+            }
+        }
+        return .readyForDelivery(priorApplicationPath: priorApplicationPath)
+    }
+
+    /// Launch an artifact after the caller has successfully completed the
+    /// quit-only preflight and any installed-bundle delivery. This method never
+    /// terminates an app. A newly appearing same-ID process blocks the launch
+    /// rather than risking two instances sharing one identity.
+    func launchFreshBuildAfterTermination(
+        macBundleId: String,
+        freshBuildArtifactPath: String,
+        allowedApplicationURL: ((URL) -> Bool)? = nil,
+        fallbackApplicationPath: String? = nil
+    ) async -> AppRelaunchLaunchResult {
+        let trimmedBundleId = macBundleId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedBundleId.isEmpty else {
+            return .ineligible(reason: "Iris doesn't have a bundle id for this app, so it won't guess one to relaunch")
+        }
+        let artifactURL = URL(fileURLWithPath: freshBuildArtifactPath)
+        guard FileManager.default.fileExists(atPath: freshBuildArtifactPath) else {
+            return .ineligible(reason: "the freshly built app is no longer on disk")
+        }
+        guard Self.isLaunchableMacAppBundle(
+            atPath: freshBuildArtifactPath
+        ) else {
+            return .ineligible(reason: "the freshly built app is not a launchable macOS bundle")
+        }
+        guard Self.artifactBundleIdentifier(atPath: freshBuildArtifactPath) == trimmedBundleId else {
+            return .ineligible(reason: "the built app does not match this project's app identity; your running app was left alone")
+        }
+        guard allowedApplicationURL?(artifactURL) != false else {
+            return .ineligible(reason: "Iris Test refused an app outside its registered build output.")
+        }
+
+        let runningInstances = NSRunningApplication
+            .runningApplications(withBundleIdentifier: trimmedBundleId)
+        if let allowedApplicationURL,
+           !Self.applicationURLsAreAllowed(runningInstances.map(\.bundleURL), by: allowedApplicationURL) {
+            return .ineligible(reason: "A test app outside the registered build output appeared before launch. Iris left it alone.")
+        }
+        guard runningInstances.isEmpty else {
+            return .ineligible(reason: "A running app appeared before launch. Iris left it alone.")
+        }
+
+        if let launched = await WindowPositionManager
+            .launchNewInstance(ofApplicationAt: artifactURL), !launched.isTerminated {
+            return .relaunchedFreshBuild
+        }
+
+        if let fallbackApplicationPath {
+            let fallbackURL = URL(fileURLWithPath: fallbackApplicationPath)
+            if allowedApplicationURL?(fallbackURL) != false {
+                if let fallback = await WindowPositionManager.launchNewInstance(ofApplicationAt: fallbackURL),
+                   !fallback.isTerminated {
+                    return .launchFailedPriorAppRestored(
+                        reason: "the freshly built app didn't start, so Iris reopened your original copy"
+                    )
+                }
+            }
+        }
+        return .launchFailedPriorAppNotRestored(
+            reason: "the freshly built app didn't start, and Iris could not confirm the original copy reopened"
+        )
+    }
+
     /// Terminate the currently running instance of `macBundleId` (if any) and
     /// launch the freshly built artifact from the clone. The order is fixed and
     /// load-bearing: terminate FIRST, wait for real exit, THEN launch — because
@@ -437,61 +632,36 @@ final class AppRelaunchService {
     func terminateRunningInstanceThenLaunchFreshBuild(
         macBundleId: String,
         freshBuildArtifactPath: String,
-        allowForceQuit: Bool
+        allowForceQuit: Bool,
+        allowedApplicationURL: ((URL) -> Bool)? = nil,
+        fallbackApplicationURL: URL? = nil
     ) async -> AppRelaunchLaunchResult {
-        let trimmedBundleId = macBundleId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedBundleId.isEmpty else {
-            return .ineligible(reason: "Iris doesn't have a bundle id for this app, so it won't guess one to relaunch")
-        }
-        let artifactURL = URL(fileURLWithPath: freshBuildArtifactPath)
-        guard FileManager.default.fileExists(atPath: freshBuildArtifactPath) else {
-            return .ineligible(reason: "the freshly built app is no longer on disk")
-        }
-
-        // Capture the running instance up front, by bundle id, ONCE — and from
-        // here on operate on that exact handle, never re-looking-up by bundle id
-        // (adversarial #3b: after the fresh build launches under the same id, a
-        // re-lookup could resolve to either instance). Its own `bundleURL` is the
-        // prior build we re-open if the fresh launch fails, so the user is never
-        // left with nothing.
-        let runningInstance = NSRunningApplication
-            .runningApplications(withBundleIdentifier: trimmedBundleId).first
-        let priorBundleURL = runningInstance?.bundleURL
-
-        if let runningInstance {
-            let quit = await terminateAndWaitForExit(runningInstance, allowForceQuit: allowForceQuit)
-            switch quit {
-            case .exited:
-                break
-            case .stillRunningNeedsForceConsent:
-                // Do NOT force-kill through the unsaved-work dialog, and do NOT
-                // launch a second instance. The old app is still up and unharmed.
-                return .runningAppWouldNotQuit
-            case .stillRunningAfterForce:
-                // We were allowed to force and still couldn't kill it. The old
-                // app is somehow still alive — launching the fresh build now
-                // would collide on bundle id, so stand down and say so honestly.
-                return .launchFailedPriorAppRestored(
-                    reason: "Iris couldn't quit the running app, so it left it alone"
-                )
-            }
-        }
-
-        // The old instance is gone (or was never up). Launch the fresh build as
-        // a distinct new instance straight from the clone's build output.
-        if let launched = await WindowPositionManager
-            .launchNewInstance(ofApplicationAt: artifactURL), !launched.isTerminated {
-            return .relaunchedFreshBuild
-        }
-
-        // The fresh build did not start. Never leave the user with no app: put
-        // back the prior build the old instance came from, if we know it.
-        if let priorBundleURL {
-            _ = await WindowPositionManager.launchNewInstance(ofApplicationAt: priorBundleURL)
-        }
-        return .launchFailedPriorAppRestored(
-            reason: "the freshly built app didn't start, so Iris reopened your original copy"
+        let termination = await terminateRunningInstanceBeforeDelivery(
+            macBundleId: macBundleId,
+            freshBuildArtifactPath: freshBuildArtifactPath,
+            allowForceQuit: allowForceQuit,
+            allowedApplicationURL: allowedApplicationURL
         )
+        switch termination {
+        case .readyForDelivery(let priorApplicationPath):
+            return await launchFreshBuildAfterTermination(
+                macBundleId: macBundleId,
+                freshBuildArtifactPath: freshBuildArtifactPath,
+                allowedApplicationURL: allowedApplicationURL,
+                fallbackApplicationPath: fallbackApplicationURL?.path ?? priorApplicationPath
+            )
+        case .runningAppWouldNotQuit:
+            // Do NOT force-kill through the unsaved-work dialog, and do NOT
+            // launch a second instance. The old app is still up and unharmed.
+            return .runningAppWouldNotQuit
+        case .ineligible(let reason):
+            return .ineligible(reason: reason)
+        }
+    }
+
+    /// Validate all captured processes, not just the first same-ID match.
+    static func applicationURLsAreAllowed(_ urls: [URL?], by policy: (URL) -> Bool) -> Bool {
+        urls.allSatisfy { url in url.map(policy) ?? false }
     }
 
     // MARK: - Step 2b: deliver the fresh build OVER the installed app
@@ -511,7 +681,8 @@ final class AppRelaunchService {
         /// when the fresh build's signing identity differs from the installed
         /// copy's (or either is unsigned/ad-hoc), so macOS may treat it as a
         /// different app and reset its TCC grants — disclosed, never hidden.
-        case replacedInstalledApp(installedPath: String, backupPath: String, grantsMayReset: Bool)
+        case replacedInstalledApp(installedPath: String, backupPath: String, grantsMayReset: Bool,
+                                  recoveryWarning: String? = nil)
         /// No installed copy of this bundle id exists apart from the clone's own
         /// build output, so there is nothing to replace. Not an error — the
         /// caller launches the build-dir artifact as it always did.
@@ -533,12 +704,21 @@ final class AppRelaunchService {
     func installFreshBuildOverInstalledApp(
         macBundleId: String,
         freshBuildArtifactPath: String,
-        clonePath: String
+        clonePath: String,
+        sourceIdentity: AppDeliveryReceipt.SourceIdentity? = nil
     ) async -> InstalledDeliveryResult {
         let bundleId = macBundleId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !bundleId.isEmpty,
               FileManager.default.fileExists(atPath: freshBuildArtifactPath) else {
             return .deliveryFailed(reason: "the freshly built app is not on disk to install")
+        }
+        guard Self.isLaunchableMacAppBundle(
+            atPath: freshBuildArtifactPath
+        ) else {
+            return .deliveryFailed(reason: "the freshly built app is not a launchable macOS bundle; your installed app was left alone")
+        }
+        guard Self.artifactBundleIdentifier(atPath: freshBuildArtifactPath) == bundleId else {
+            return .deliveryFailed(reason: "the built app does not match this project's app identity; your installed app was left alone")
         }
         let appBundleName = URL(fileURLWithPath: freshBuildArtifactPath).lastPathComponent
         guard let installedPath = Self.installedAppPath(
@@ -546,24 +726,93 @@ final class AppRelaunchService {
         ) else {
             return .noInstalledCopyToReplace
         }
+        guard Self.isLaunchableMacAppBundle(
+            atPath: installedPath
+        ) else {
+            return .deliveryFailed(reason: "the installed app is not a launchable macOS bundle; your installed app was left alone")
+        }
         // Read both signing identities BEFORE the swap, so the disclosure is
         // about the app being replaced rather than the one that replaced it.
         let freshTeam = await Self.developerTeamIdentifier(atPath: freshBuildArtifactPath)
         let installedTeam = await Self.developerTeamIdentifier(atPath: installedPath)
         let grantsMayReset = freshTeam == nil || installedTeam == nil || freshTeam != installedTeam
 
+        guard Self.artifactBundleIdentifier(atPath: installedPath) == bundleId,
+              Self.artifactBundleIdentifier(atPath: freshBuildArtifactPath) == bundleId else {
+            return .deliveryFailed(reason: "the installed or built app identity changed; no app was replaced")
+        }
+        guard NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).isEmpty else {
+            return .deliveryFailed(reason: "the app started again before delivery; the installed copy was left unchanged")
+        }
+        if let sourceIdentity {
+            guard sourceIdentity.isValid, sourceIdentity.clonePath == clonePath,
+                  await SavedEditDeliveryIdentity(clonePath: clonePath,
+                    branchName: sourceIdentity.branchName, commit: sourceIdentity.commit).stillMatchesSource() else {
+                return .deliveryFailed(reason: "The saved source changed before installation. No installed app was replaced.")
+            }
+        }
+
         let backupPath = Self.deliveryBackupPath(forBundleId: bundleId, appBundleName: appBundleName)
-        let swap = await Task.detached(priority: .userInitiated) {
-            Self.atomicallyReplaceBundle(
-                installedPath: installedPath,
-                withBundleAt: freshBuildArtifactPath,
-                snapshotTo: backupPath
-            )
+        let store = deliveryReceiptStore
+        return await Task.detached(priority: .userInitiated) {
+            Self.replaceBundleWithRecoveryReceipt(bundleIdentifier: bundleId,
+                installedPath: installedPath, artifactPath: freshBuildArtifactPath,
+                backupPath: backupPath, grantsMayReset: grantsMayReset, store: store,
+                sourceIdentity: sourceIdentity)
         }.value
+    }
+
+    /// Save recovery locations before touching the installed copy. A receipt
+    /// write failure after the swap must never be reported as an unchanged app.
+    nonisolated static func replaceBundleWithRecoveryReceipt(
+        bundleIdentifier: String, installedPath: String, artifactPath: String,
+        backupPath: String, grantsMayReset: Bool, store: AppDeliveryReceiptStore,
+        undoRecoveryStore: DeliveredEditUndoRecoveryStore = DeliveredEditUndoRecoveryStore(),
+        sourceIdentity: AppDeliveryReceipt.SourceIdentity? = nil,
+        retentionPolicy: AppDeliveryReceiptStore.BackupRetentionPolicy = .init()
+    ) -> InstalledDeliveryResult {
+        do {
+            _ = try store.admitBackup(
+                sourcePath: installedPath, destinationPath: backupPath,
+                policy: retentionPolicy, recoveryStore: undoRecoveryStore
+            )
+        } catch let error as AppDeliveryReceiptStore.RetentionError {
+            return .deliveryFailed(reason: "Iris could not safely reserve space for the previous app: \(error.localizedDescription). No files were replaced. Resolve the saved-version condition and retry.")
+        } catch {
+            return .deliveryFailed(reason: "Iris could not safely reserve space for the previous app. No files were replaced. Resolve the saved-version condition and retry.")
+        }
+        let installedIdentity = AppDeliveryReceipt.bundleIdentity(atPath: installedPath)
+        let replacementIdentity = AppDeliveryReceipt.bundleIdentity(atPath: artifactPath)
+        if let sourceIdentity {
+            guard sourceIdentity.isValid, installedIdentity?.bundleIdentifier == bundleIdentifier,
+                  replacementIdentity?.bundleIdentifier == bundleIdentifier else {
+                return .deliveryFailed(reason: "Iris could not record the exact source and app identities for Undo. No files were replaced.")
+            }
+        }
+        let receipt = AppDeliveryReceipt(bundleIdentifier: bundleIdentifier,
+            installedPath: URL(fileURLWithPath: installedPath).standardizedFileURL.path,
+            sourceArtifactPath: URL(fileURLWithPath: artifactPath).standardizedFileURL.path,
+            backupPath: URL(fileURLWithPath: backupPath).standardizedFileURL.path,
+            sourceIdentity: sourceIdentity, installedBundleIdentity: installedIdentity,
+            replacementBundleIdentity: replacementIdentity, backupBundleIdentity: installedIdentity)
+        do { try store.savePrepared(receipt) }
+        catch {
+            return .deliveryFailed(reason: "Iris could not save recovery details. Your installed app was left alone. Check available storage and retry the update.")
+        }
+        let swap = atomicallyReplaceBundle(installedPath: installedPath,
+            withBundleAt: artifactPath, snapshotTo: backupPath, undoRecoveryStore: undoRecoveryStore,
+            retentionPolicy: retentionPolicy, receiptStore: store,
+            preparedReceiptIdentifier: receipt.identifier)
         switch swap {
         case .success:
+            var warning: String?
+            do { _ = try store.transition(receipt, to: .installed) }
+            catch {
+                warning = "The app files were replaced, but Iris could not confirm that in saved history. Your previous app is kept at \(backupPath)."
+            }
             return .replacedInstalledApp(
-                installedPath: installedPath, backupPath: backupPath, grantsMayReset: grantsMayReset
+                installedPath: installedPath, backupPath: backupPath,
+                grantsMayReset: grantsMayReset, recoveryWarning: warning
             )
         case .failure(let reason):
             return .deliveryFailed(reason: reason)
@@ -574,15 +823,36 @@ final class AppRelaunchService {
     /// atomic where it can be: the backup is staged beside the installed app and
     /// moved into place. Returns whether the installed app is once again the
     /// original.
-    func restoreInstalledAppFromBackup(installedPath: String, backupPath: String) async -> Bool {
-        guard FileManager.default.fileExists(atPath: backupPath) else { return false }
-        return await Task.detached(priority: .userInitiated) {
-            Self.atomicallyReplaceBundle(
+    func restoreInstalledAppFromBackup(
+        installedPath: String, backupPath: String,
+        beforeReplacement: @escaping @Sendable () -> Bool = { true }
+    ) async -> Bool {
+        guard beforeReplacement(),
+              Self.isLaunchableMacAppBundle(atPath: backupPath),
+              Self.isLaunchableMacAppBundle(atPath: installedPath),
+              let identifier = Self.artifactBundleIdentifier(atPath: backupPath),
+              Self.artifactBundleIdentifier(atPath: installedPath) == identifier,
+              NSRunningApplication.runningApplications(withBundleIdentifier: identifier).isEmpty else { return false }
+        let restored = await Task.detached(priority: .userInitiated) {
+            guard beforeReplacement(),
+                  NSRunningApplication.runningApplications(withBundleIdentifier: identifier).isEmpty else { return false }
+            return Self.atomicallyReplaceBundle(
                 installedPath: installedPath,
                 withBundleAt: backupPath,
                 snapshotTo: nil
             ).isSuccess
         }.value
+        if restored {
+            for entry in deliveryReceiptStore.entries() {
+                guard case .valid(let receipt) = entry, receipt.phase == .installed,
+                      receipt.bundleIdentifier == identifier,
+                      receipt.installedPath == URL(fileURLWithPath: installedPath).standardizedFileURL.path,
+                      receipt.backupPath == URL(fileURLWithPath: backupPath).standardizedFileURL.path else { continue }
+                do { _ = try deliveryReceiptStore.transition(receipt, to: .restored) }
+                catch { NSLog("Iris restored app files but could not update the delivery receipt %@", receipt.identifier.uuidString) }
+            }
+        }
+        return restored
     }
 
     // MARK: - Delivery helpers (nonisolated: pure filesystem + argv tool work)
@@ -602,7 +872,8 @@ final class AppRelaunchService {
         let applicationsPath = FileManager.default.fileExists(atPath: applicationsCopy)
             ? applicationsCopy : nil
         return chooseInstalledBundlePath(
-            registeredPath: registered, applicationsPath: applicationsPath, clonePath: clonePath
+            registeredPath: registered, applicationsPath: applicationsPath, clonePath: clonePath,
+            expectedBundleIdentifier: bundleId
         )
     }
 
@@ -613,11 +884,15 @@ final class AppRelaunchService {
     nonisolated static func chooseInstalledBundlePath(
         registeredPath: String?,
         applicationsPath: String?,
-        clonePath: String
+        clonePath: String,
+        expectedBundleIdentifier: String? = nil
     ) -> String? {
-        let clonePrefix = clonePath.hasSuffix("/") ? clonePath : clonePath + "/"
+        let canonicalClone = URL(fileURLWithPath: clonePath).resolvingSymlinksInPath().path
+        let clonePrefix = canonicalClone.hasSuffix("/") ? canonicalClone : canonicalClone + "/"
         func outsideClone(_ path: String) -> Bool {
-            !clonePath.isEmpty ? (path != clonePath && !path.hasPrefix(clonePrefix)) : true
+            let canonicalPath = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+            guard clonePath.isEmpty || (canonicalPath != canonicalClone && !canonicalPath.hasPrefix(clonePrefix)) else { return false }
+            return expectedBundleIdentifier.map { artifactBundleIdentifier(atPath: canonicalPath) == $0 } ?? true
         }
         var candidates: [String] = []
         if let registeredPath, outsideClone(registeredPath) { candidates.append(registeredPath) }
@@ -627,20 +902,61 @@ final class AppRelaunchService {
         return candidates.first { $0.hasPrefix("/Applications/") } ?? candidates.first
     }
 
-    /// Where a pre-delivery snapshot of an installed bundle is kept so a delivery
-    /// can be undone. One slot per bundle id under Application Support, replaced
-    /// each delivery — only the most recent delivery is undoable, which matches
-    /// the single "Undo this change" affordance the card shows.
+    /// A separate snapshot per delivery. Later edits must not overwrite the
+    /// executable an earlier Undo record still refers to. Retention is explicit;
+    /// generating a new backup path never deletes a prior version.
     nonisolated static func deliveryBackupPath(forBundleId bundleId: String, appBundleName: String) -> String {
-        let base = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory())
-                .appendingPathComponent("Library/Application Support")
         let safeId = bundleId.replacingOccurrences(of: "/", with: "_")
-        return base
-            .appendingPathComponent("Iris/edit-delivery-backups/\(safeId)")
+        return IrisTestEnvironment.applicationSupportDirectory
+            .appendingPathComponent("edit-delivery-backups", isDirectory: true)
+            .appendingPathComponent(safeId, isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent(appBundleName)
             .path
+    }
+
+    nonisolated static func artifactBundleIdentifier(atPath path: String) -> String? {
+        guard let data = FileManager.default.contents(atPath: path + "/Contents/Info.plist"),
+              let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        else { return nil }
+        return info["CFBundleIdentifier"] as? String
+    }
+
+    /// A bundle identifier is not enough to launch an app. A stale or partial
+    /// copy can retain its Info.plist while its executable is missing, which
+    /// makes a delivery look successful until macOS refuses to open it. Keep
+    /// this predicate shared by package, install, relaunch, restore, and the
+    /// isolated Test registry so every lifecycle stage means the same thing.
+    nonisolated static func isLaunchableMacAppBundle(
+        atPath path: String,
+        expectedBundleIdentifier: String? = nil
+    ) -> Bool {
+        guard path.hasPrefix("/"), path.hasSuffix(".app"),
+              URL(fileURLWithPath: path).standardizedFileURL.path == path else { return false }
+        var bundleMetadata = stat()
+        guard lstat(path, &bundleMetadata) == 0,
+              (bundleMetadata.st_mode & S_IFMT) == S_IFDIR else { return false }
+        let infoPath = path + "/Contents/Info.plist"
+        guard let data = FileManager.default.contents(atPath: infoPath),
+              let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let bundleIdentifier = info["CFBundleIdentifier"] as? String,
+              !bundleIdentifier.isEmpty,
+              expectedBundleIdentifier.map({ $0 == bundleIdentifier }) ?? true,
+              let executable = info["CFBundleExecutable"] as? String,
+              !executable.isEmpty,
+              executable != ".", executable != "..",
+              !executable.contains("/"),
+              !executable.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+            return false
+        }
+        let executablePath = path + "/Contents/MacOS/" + executable
+        let resolvedExecutable = URL(fileURLWithPath: executablePath).resolvingSymlinksInPath().path
+        guard resolvedExecutable.hasPrefix(path + "/"),
+              FileManager.default.isExecutableFile(atPath: executablePath) else { return false }
+        var executableMetadata = stat()
+        guard lstat(executablePath, &executableMetadata) == 0,
+              (executableMetadata.st_mode & S_IFMT) == S_IFREG else { return false }
+        return true
     }
 
     // Not private so the live filesystem round-trip test can drive the real
@@ -660,8 +976,32 @@ final class AppRelaunchService {
     nonisolated static func atomicallyReplaceBundle(
         installedPath: String,
         withBundleAt source: String,
-        snapshotTo snapshotPath: String?
+        snapshotTo snapshotPath: String?,
+        undoRecoveryStore: DeliveredEditUndoRecoveryStore = DeliveredEditUndoRecoveryStore(),
+        retentionPolicy: AppDeliveryReceiptStore.BackupRetentionPolicy? = nil,
+        receiptStore: AppDeliveryReceiptStore? = nil,
+        preparedReceiptIdentifier: UUID? = nil
     ) -> BundleSwapOutcome {
+        if let retentionPolicy {
+            guard let receiptStore else {
+                return .failure(reason: "backup retention could not be checked; no files were replaced")
+            }
+            do {
+                _ = try receiptStore.admitBackup(
+                    sourcePath: installedPath, destinationPath: snapshotPath ?? "",
+                    policy: retentionPolicy, recoveryStore: undoRecoveryStore,
+                    allowingPreparedReceiptIdentifier: preparedReceiptIdentifier
+                )
+            } catch let error as AppDeliveryReceiptStore.RetentionError {
+                return .failure(reason: "backup retention could not be safely admitted: \(error.localizedDescription); no files were replaced. Resolve the saved-version condition and retry.")
+            } catch {
+                return .failure(reason: "backup retention could not be safely admitted; no files were replaced. Resolve the saved-version condition and retry.")
+            }
+        }
+        let protectedPaths = [installedPath, source] + [snapshotPath].compactMap { $0 }
+        guard !undoRecoveryStore.archivedProtection(paths: protectedPaths).blocksChanges else {
+            return .failure(reason: "saved Undo recovery information protects this app or its backup; no files were replaced")
+        }
         let fileManager = FileManager.default
         let installedURL = URL(fileURLWithPath: installedPath)
         let installedDirectory = installedURL.deletingLastPathComponent()
@@ -670,10 +1010,13 @@ final class AppRelaunchService {
         // 1. Snapshot the current installed bundle for undo.
         if let snapshotPath {
             let snapshotURL = URL(fileURLWithPath: snapshotPath)
+            var snapshotMetadata = stat()
+            guard lstat(snapshotPath, &snapshotMetadata) != 0, errno == ENOENT else {
+                return .failure(reason: "the previous app backup destination already exists; no files were replaced")
+            }
             try? fileManager.createDirectory(
                 at: snapshotURL.deletingLastPathComponent(), withIntermediateDirectories: true
             )
-            try? fileManager.removeItem(at: snapshotURL)
             guard dittoBundle(from: installedPath, to: snapshotPath) else {
                 return .failure(reason: "couldn't snapshot the installed app before replacing it")
             }
@@ -811,6 +1154,45 @@ final class AppRelaunchService {
         packageCommand(forStack: stack, clonePath: clonePath)
     }
 
+    static func packagingStack(clonePath: String, fallback: BreakAppStack) -> BreakAppStack {
+        let detected = stackOfClone(atPath: clonePath)
+        return detected == .other ? fallback : detected
+    }
+
+    /// Build the non-mutating help probe for the exact code-authored Tauri
+    /// command that will package this clone.
+    static func tauriHelpCommand(for packagingCommand: String) -> String {
+        "\(packagingCommand) --help"
+    }
+
+    /// Tauri's help output is the only authority for these optional flags.
+    /// Exact option tokens keep '--no-signature' from counting as '--no-sign'.
+    static func tauriHelpSupportsUnsignedAppBundle(_ helpOutput: String) -> Bool {
+        let optionTokens = Set(
+            helpOutput.split { character in
+                !(character == "-" || character.isLetter || character.isNumber)
+            }
+            .map(String.init)
+        )
+        return optionTokens.contains("--bundles")
+            && optionTokens.contains("--no-sign")
+    }
+
+    /// Add the Tauri flags that let Iris produce an unsigned app bundle for
+    /// its existing stable signer, but only after a successful capability probe.
+    /// Older CLIs keep their original command and receive their own build
+    /// diagnostic if that command is not usable.
+    static func tauriPackagingCommandApplyingSupportedFlags(
+        baseCommand: String,
+        helpOutput: String,
+        helpSucceeded: Bool
+    ) -> String {
+        guard helpSucceeded, tauriHelpSupportsUnsignedAppBundle(helpOutput) else {
+            return baseCommand
+        }
+        return "\(baseCommand) --bundles app --no-sign"
+    }
+
     private static func packageCommand(forStack stack: BreakAppStack, clonePath: String) -> String? {
         switch stack {
         case .tauri:
@@ -907,10 +1289,11 @@ final class AppRelaunchService {
     /// bundle from an earlier build is never returned. A launchable bundle is a
     /// directory that actually contains `Contents/MacOS` — not just any `.app`
     /// name. Nil = no fresh, launchable bundle was found.
-    private static func newestLaunchableAppBundle(
+    static func newestLaunchableAppBundle(
         forStack stack: BreakAppStack,
         clonePath: String,
-        producedAtOrAfter: Date
+        producedAtOrAfter: Date,
+        expectedBundleIdentifier: String? = nil
     ) -> String? {
         let fileManager = FileManager.default
         let cloneAsNSString = clonePath as NSString
@@ -930,6 +1313,9 @@ final class AppRelaunchService {
                 "dist/mac",
                 "dist/mac-arm64",
                 "dist/mac-universal",
+                "release/mac",
+                "release/mac-arm64",
+                "release/mac-universal",
                 "out", // electron-forge nests one level deeper; handled below
             ]
         case .nextjs, .swiftMacOS, .other:
@@ -938,19 +1324,47 @@ final class AppRelaunchService {
 
         var newestBundlePath: String?
         var newestModificationDate = Date.distantPast
+        var bestArchitectureRank = -1
 
         func considerAppBundle(atPath bundlePath: String) {
-            // A launchable bundle really has an executables directory; a bare
-            // `.app`-named folder does not count.
-            let macOSDirectory = (bundlePath as NSString).appendingPathComponent("Contents/MacOS")
-            var isDirectory: ObjCBool = false
-            guard fileManager.fileExists(atPath: macOSDirectory, isDirectory: &isDirectory),
-                  isDirectory.boolValue else { return }
-            let modificationDate = (try? fileManager.attributesOfItem(atPath: bundlePath)[.modificationDate] as? Date) ?? nil
-            let effectiveDate = modificationDate ?? Date.distantPast
+            let root = URL(fileURLWithPath: clonePath).resolvingSymlinksInPath().path
+            let bundle = URL(fileURLWithPath: bundlePath).resolvingSymlinksInPath().path
+            guard bundle.hasPrefix(root + "/") else { return }
+            let infoPath = bundle + "/Contents/Info.plist"
+            guard let data = fileManager.contents(atPath: infoPath),
+                  let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+                  let executable = info["CFBundleExecutable"] as? String,
+                  !executable.isEmpty, executable != ".", executable != "..",
+                  !executable.contains("/") else { return }
+            if let expectedBundleIdentifier,
+               info["CFBundleIdentifier"] as? String != expectedBundleIdentifier { return }
+            let executablePath = bundle + "/Contents/MacOS/" + executable
+            guard URL(fileURLWithPath: executablePath).resolvingSymlinksInPath().path.hasPrefix(bundle + "/"),
+                  fileManager.isExecutableFile(atPath: executablePath),
+                  (try? URL(fileURLWithPath: executablePath).resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+            else { return }
+            // Incremental packagers can refresh the payload without changing
+            // the outer directory timestamp. Only app payload markers count,
+            // not a fresh DMG or log sitting alongside an old app.
+            let freshnessPaths = [bundle, infoPath, executablePath,
+                                  bundle + "/Contents/Resources/app.asar"]
+            let effectiveDate = freshnessPaths.compactMap {
+                (try? fileManager.attributesOfItem(atPath: $0))?[.modificationDate] as? Date
+            }.max() ?? Date.distantPast
             // Only accept a bundle this build produced (or refreshed).
             guard effectiveDate >= producedAtOrAfter else { return }
-            if effectiveDate >= newestModificationDate {
+            // Multi-architecture Electron builds commonly finish x64 last.
+            // Prefer a fresh native/universal output over the latest timestamp.
+            #if arch(arm64)
+            let nativeSuffixes = ["mac-arm64", "darwin-arm64"]
+            #else
+            let nativeSuffixes = ["mac", "mac-x64", "darwin-x64"]
+            #endif
+            let parent = URL(fileURLWithPath: bundlePath).deletingLastPathComponent().lastPathComponent
+            let architectureRank = parent.contains("universal") || nativeSuffixes.contains(where: { parent == $0 || parent.hasSuffix("-" + $0) }) ? 1 : 0
+            if architectureRank > bestArchitectureRank ||
+                (architectureRank == bestArchitectureRank && effectiveDate >= newestModificationDate) {
+                bestArchitectureRank = architectureRank
                 newestModificationDate = effectiveDate
                 newestBundlePath = bundlePath
             }

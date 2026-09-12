@@ -438,22 +438,8 @@ struct GuidePanelView: View {
                 }
 
                 if let verifierLabel = step.verifierLabel, !verifierLabel.isEmpty {
-                    // NOT a checkmark: this describes how the CURRENT, not-yet-
-                    // finished step will be judged done — a step whose own
-                    // condition were already true would have advanced the guide
-                    // past it, so this row is never describing something that
-                    // has happened. A filled checkmark here read as "confirmed"
-                    // to a reader who escape-hatched out of a killed dev-server
-                    // step and then pressed Next by hand through "open" and
-                    // "verify": each card showed this same glyph next to "loads
-                    // in the browser" / "a result is displayed" although
-                    // neither had been watched, confirmed, or was even true
-                    // (the server Iris had just killed), and it read as Iris
-                    // telling them the dead link it handed them had worked
-                    // (FreeHarmony fix round, Sep 2026). `circle` carries no
-                    // completion claim.
                     HStack(alignment: .top, spacing: 6) {
-                        Image(systemName: "circle")
+                        Image(systemName: "checkmark.circle")
                             .font(.system(size: 10))
                             .foregroundColor(DS.Colors.textTertiary)
                         Text(verifierLabel)
@@ -671,11 +657,8 @@ struct GuidePanelView: View {
                 }
 
                 if let verifierLabel = setupStep.verifierLabel, !verifierLabel.isEmpty {
-                    // Same reasoning as the step card's own verifierLabel row
-                    // above: a description of how completion will be judged,
-                    // not a claim that it already has been.
                     HStack(alignment: .top, spacing: 6) {
-                        Image(systemName: "circle")
+                        Image(systemName: "checkmark.circle")
                             .font(.system(size: 10))
                             .foregroundColor(DS.Colors.textTertiary)
                         Text(verifierLabel)
@@ -719,14 +702,13 @@ struct GuidePanelView: View {
     @ViewBuilder
     private var navigationRow: some View {
         if guideSessionController.unsupportedPairForTheSelectedBranch == nil {
-            // Captured once for this render, same as `OverlayEyeInputBar`'s
-            // `guidePresentation` — see `performPrimaryAction(expectedCurrentStepId:)`
-            // for why the button's closure must not re-read the controller's
-            // live current step at tap time.
             let stepIdThisRowWasDrawnFor = guideSessionController.currentStep?.id
             VStack(alignment: .leading, spacing: 6) {
                 if let primaryAction = guideSessionController.primaryActionForTheCurrentStep {
-                    primaryActionButton(primaryAction, expectedCurrentStepId: stepIdThisRowWasDrawnFor)
+                    primaryActionButton(
+                        primaryAction,
+                        expectedCurrentStepId: stepIdThisRowWasDrawnFor
+                    )
                 }
 
                 HStack(spacing: 12) {
@@ -788,24 +770,21 @@ struct GuidePanelView: View {
 /// The way in when nobody clicked an `iris://` link: type a slug. Deliberately
 /// a text field rather than a hard-coded catalog, because a list of guides
 /// baked into this app would go stale the moment publik publishes another one.
-/// The live list lives in "Discover apps" below, where every catalog app with
-/// a guide carries an "Install with Iris" pill; this field stays for the app
-/// somebody already knows the name of, and for a guide the catalog cannot see
-/// (a listing still in review, opened by slug on purpose).
 struct GuideSlugEntryView: View {
     @ObservedObject var guideSessionController: GuideSessionController
     @State private var slugInput: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Follow an install guide")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(DS.Colors.muted)
+            Text("If you already know the guide's name, enter it below. Otherwise, choose an app above to see how to install it.")
+                .font(DS.Typography.caption)
+                .foregroundColor(DS.Colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 8) {
-                TextField("App slug, e.g. cue — or pick one under Discover apps", text: $slugInput)
+                TextField("Guide name, e.g. cue", text: $slugInput)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12))
+                    .font(DS.Typography.caption)
                     .foregroundColor(DS.Colors.ink)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)

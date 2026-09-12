@@ -274,7 +274,7 @@ final class OverlayEyeInputBarPanelManager {
         fromTranscriptStore chatTranscriptStore: ChatTranscriptStore
     ) -> OverlayEyeExchange {
         var exchange = OverlayEyeExchange()
-        guard let lastSavedExchange = chatTranscriptStore.mostRecentExchange else {
+        guard let lastSavedExchange = chatTranscriptStore.mostRecentExchangeInCurrentConversation else {
             return exchange
         }
 
@@ -501,6 +501,7 @@ final class OverlayEyeInputBarPanelManager {
         // reader is working in and takes no clicks. Activation is handed back
         // the moment the picker closes.
         NSApp.activate(ignoringOtherApps: true)
+        let attachmentDestination = OverlayEyePastedImageAttachment.shared.captureDestination()
         openPanel.begin { [weak self] response in
             guard let self else { return }
             self.theImagePickerIsOpen = false
@@ -515,7 +516,9 @@ final class OverlayEyeInputBarPanelManager {
                 NSApp.deactivate()
                 return
             }
-            OverlayEyePastedImageAttachment.shared.attach(contentsOf: pickedImages)
+            for image in pickedImages {
+                OverlayEyePastedImageAttachment.shared.attach(image, to: attachmentDestination)
+            }
             self.installClickOutsideMonitor()
 
             // Activation goes back to the reader's own app, and the bar takes
@@ -564,6 +567,7 @@ private struct OverlayEyeAnswerTextHeightPreferenceKey: PreferenceKey {
 /// is an attachment to the eye, and a frame around it would make it the second
 /// panel this change exists to remove.
 struct OverlayEyeInputBarView: View {
+    @AppStorage("irisPreferredEditProvider") private var preferredEditProvider = ""
 
     @ObservedObject var companionManager: CompanionManager
 
@@ -610,11 +614,10 @@ struct OverlayEyeInputBarView: View {
 
     /// Which of the two things the one field does. Only meaningful while an app
     /// is open for editing; the bar is an ask field and nothing else otherwise.
-    enum ComposerMode: Equatable { case edit, ask }
+    typealias ComposerMode = OverlayEyeInputBarDraftStore.Mode
 
-    /// Editing is the default because opening an app is a deliberate act and
-    /// editing it is the reason to have done it. Asking is one tap away.
-    @State private var composerMode: ComposerMode = .edit
+    /// General help is the default; choosing an app explicitly enters Edit.
+    @State private var composerMode: ComposerMode = .ask
 
     /// The fix/feature choice, which decides the honesty label and the commit
     /// trailer, so it is a real choice and not a convenience.
@@ -624,6 +627,14 @@ struct OverlayEyeInputBarView: View {
     /// the bar is a small panel over someone's desktop, and history is a thing
     /// you go looking for, not a thing that should be in the way.
     @State private var historyIsShowing: Bool = false
+    @State private var clearHistoryConfirmationIsShowing: Bool = false
+    @State private var newChatConfirmationIsShowing = false
+    @State private var expandedHistoryRowIndexes: Set<Int> = []
+    @State private var modelDetailsAreShowing = false
+    @State private var pendingProjectSelection: CatalogAppInventoryEntry?
+    @State private var projectSwitchConfirmationIsShowing = false
+    @State private var projectSwitchMessage: String?
+    @AppStorage(CodexEditModelSelection.defaultsKey) private var selectedCodexModel = ""
 
     @State private var typedMessage: String = ""
 
@@ -681,6 +692,7 @@ struct OverlayEyeInputBarView: View {
         let draftToRestore = companionManager.inputBarDraftStore.draftToRestoreIntoAFreshBar
         _typedMessage = State(initialValue: draftToRestore.text)
         _editKind = State(initialValue: draftToRestore.editKind)
+        _composerMode = State(initialValue: companionManager.inputBarDraftStore.mode)
     }
 
     private var suggestionsToOffer: [String] {
@@ -716,7 +728,12 @@ struct OverlayEyeInputBarView: View {
     /// away the work already in flight. The arrow goes grey instead, next to
     /// the row that says what Iris is doing with the first one.
     private var theSendButtonIsLive: Bool {
-        thereIsSomethingToSend && !theRequestIsBeingSizedUp
+        ComposerConnectionPresentation.canSendTypedRequest(
+            hasText: thereIsSomethingToSend,
+            requestIsBeingSizedUp: theRequestIsBeingSizedUp,
+            context: composerConnectionContext,
+            helpIsAvailable: accountService.canAnswerQuestions
+        ) && (effectiveComposerMode == .ask || !onDemandEditCoordinator.isPreparingSavedChangeRecheck)
     }
 
     /// True while the centered takeover window is covering the screen with a
@@ -735,80 +752,46 @@ struct OverlayEyeInputBarView: View {
             // of the same run — so it, too, suppresses the bar body. The moment
             // the takeover folds away (the diff preview, a failure) the bar
             // returns and shows the edit card.
-            || companionManager.onDemandEditTakeoverIsUp
+            || (companionManager.onDemandEditTakeoverIsUp
+                && onDemandEditCoordinator.phase == .running)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // Shown above everything else, whichever mode the bar is in right
-            // now — a rejected `iris://` link has nothing else on screen to
-            // attach an explanation to. See `CompanionManager.
-            // presentDeepLinkRejection`.
-            if let deepLinkRejectionExplanation = companionManager.deepLinkRejectionExplanation {
-                Text(deepLinkRejectionExplanation)
-                    .font(.system(size: 10.5))
-                    .foregroundColor(DS.Colors.amber)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
             if theCenteredTakeoverIsCoveringTheScreen {
-                // While the centered takeover runs the install, the corner guide
-                // card and the under-the-card terminal would each be a cluttered
-                // second copy of what the takeover is already showing. Those stay
-                // hidden.
-                //
-                // The ASK FIELD does not, and hiding it was a real bug: "if I
-                // have a question during setup, like how to set up the api key
-                // stuff, I can't chat with iris." Mid-install is exactly when a
-                // reader has a question, and this was the one moment Iris could
-                // not be asked one. The bar sits at `.screenSaver` and the
-                // takeover panel at `.floating`, so the field draws above it.
-                //
-                // NEITHER DOES AN EDIT THE READER ASKED FOR, and hiding that was
-                // the same bug again: "Edit this app click shows nothing." A
-                // guide parked at a manual step ("Plug in your iPhone and press
-                // play") keeps this flag true for as long as the reader takes,
-                // and it was swallowing the whole surface of an edit on a
-                // COMPLETELY DIFFERENT app — the pick landed and had nowhere to
-                // appear. The card belongs to the edit, so only the edit's own
-                // takeover suppresses it (see the card's own definition).
-                //
-                // With no edit on screen that card is an `EmptyView`, so nothing
-                // else is drawn and the outer VStack still collapses to just the
-                // field rather than leaving an empty glass square.
-                onDemandEditCardWhenARunOwnsTheSurface
-                textFieldRow
-                whateverTheExchangeIsUpTo
+                // While a centered takeover runs, keep the ask field available
+                // but suppress the duplicate guide/edit surface.
+                if onDemandEditCoordinator.phase != .running {
+                    onDemandEditCardWhenARunOwnsTheSurface
+                }
+                if companionManager.onDemandEditTakeoverIsUp,
+                   let runner = guideSessionController.autopilotRunner,
+                   !guideSessionController.readerHasFinishedTheGuide {
+                    IrisCompactInstallStatus(
+                        runner: runner, guide: guideSessionController,
+                        onShowTerminal: { companionManager.reopenGuideAutopilotTerminal() }
+                    )
+                }
+                if onDemandEditCoordinator.phase == .running && effectiveComposerMode == .edit {
+                    activeEditControlStrip
+                } else {
+                    textFieldRow
+                }
             } else {
-                // A maintain-mode ask outranks everything else in the bar: the
-                // reader's app just crashed, and this is the card the whole
-                // feature exists to show. It renders above the guide card and
-                // the field, and observes the coordinator itself so it appears
-                // and clears without the bar being rebuilt.
                 MaintainAskCard(coordinator: companionManager.maintainIncidentCoordinator)
-
                 onDemandEditCardWhenARunOwnsTheSurface
+                if effectiveComposerMode == .edit { finishedEditsList }
 
-                // What Iris already did to an app this session. Without it the
-                // reader who got a real result — Iris wrote and committed a
-                // plan document — closed the card and had nothing left to look
-                // at: "Clicked off Iris, and then back on, still can't see the
-                // chat history with feature or bug overlay, so can't be sure
-                // it's working."
-                finishedEditsList
-
-                // The guide sits above the field, not inside the settings dropdown.
-                // The reader following instructions is doing the main thing Iris is
-                // for; asking a question about the step is the secondary thing, and
-                // it stays available underneath rather than replacing it.
-                if let guidePresentation {
+                if let runner = guideSessionController.autopilotRunner,
+                   !guideSessionController.readerHasFinishedTheGuide {
+                    IrisCompactInstallStatus(
+                        runner: runner,
+                        guide: guideSessionController,
+                        onShowTerminal: { companionManager.reopenGuideAutopilotTerminal() }
+                    )
+                } else if let guidePresentation {
                     OverlayEyeGuideCard(
                         presentation: guidePresentation,
-                        // `guidePresentation` is a local `let` binding, captured
-                        // by this closure at the render that put THIS button on
-                        // screen — its `stepId` cannot drift out from under the
-                        // tap the way re-reading `guideSessionController` at tap
-                        // time would. See `performPrimaryAction(expectedCurrentStepId:)`.
                         onPrimaryAction: {
                             guideSessionController.performPrimaryAction(
                                 expectedCurrentStepId: guidePresentation.stepId
@@ -819,57 +802,41 @@ struct OverlayEyeInputBarView: View {
                         onClose: { guideSessionController.closeTheGuide() },
                         copyConfirmationText: guideSessionController.transientCopyConfirmationText
                     )
-                    // No divider: the card carries its own backdrop, so it already
-                    // reads as a separate surface from the field below it. A rule
-                    // between two pieces of glass would be a line floating on the
-                    // desktop with nothing behind it.
-
-                    // The one gesture that hands the install to Iris. It is the
-                    // only path to execution, which is the whole consent story.
                     if guideSessionController.canOfferAutopilot {
                         Button("Let Iris run it", action: { guideSessionController.startAutopilot() })
                             .irisPrimaryPill(isFullWidth: true, isCompact: true)
                     }
-
-                    // Why the tap did nothing. `autopilotBlockedExplanation` was
-                    // set on every refusal path and rendered by NOBODY, so a
-                    // reader who declined the consent alert — or hit any of the
-                    // six silent guard conditions — pressed a button that moved
-                    // nothing and said nothing. That is the reported bug, and
-                    // the reason it survived careful comments about not
-                    // returning in silence: the silence was downstream of them.
-                    if let blocked = guideSessionController.autopilotBlockedExplanation {
-                        Text(blocked)
-                            .font(.system(size: 10.5))
-                            .foregroundColor(DS.Colors.amber)
+                    if let explanation = guideSessionController.autopilotAvailabilityExplanation {
+                        Text(explanation)
+                            .font(DS.Typography.caption)
+                            .foregroundColor(DS.Colors.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-
-                    // While Iris is running the install, the terminal it runs it in
-                    // is shown in the centered takeover window (the eye morphs into
-                    // it). This under-the-card pane is only the fallback for when
-                    // the takeover is not up — never draw the terminal in both.
-                    if let runner = guideSessionController.autopilotRunner,
-                       !guideSessionController.autopilotIsShownAsTakeover {
-                        GuideAutopilotTerminalView(
-                            runner: runner,
-                            onApproveRiskyCommand: { guideSessionController.approveThePendingRiskyCommand() },
-                            onSkipRiskyCommand: { guideSessionController.skipThePendingRiskyCommand() },
-                            onRetrySurfacedStep: { guideSessionController.retryTheSurfacedStep() },
-                            onContinuePastSurfacedStep: { guideSessionController.skipTheSurfacedStepAndContinue() },
-                            onEscapeHatch: { guideSessionController.abortOrCloseAutopilotFromTheEscapeHatch() },
-                            // This pane's container (the bar) grows to fit its
-                            // content, so the transcript needs its own bound to
-                            // scroll inside instead of growing past the clamp.
-                            fixedTranscriptHeight: 260
-                        )
+                    if let blocked = guideSessionController.autopilotBlockedExplanation {
+                        Text(blocked)
+                            .font(DS.Typography.caption)
+                            .foregroundColor(DS.Colors.amber)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
 
                 textFieldRow
-                historyAndNewChatRow
-                chatHistoryList
-                whateverTheExchangeIsUpTo
+            }
+            // History and New chat stay available while a guide takeover is
+            // shown. They are compact secondary controls, not a second panel.
+            historyAndNewChatRow
+            chatHistoryList
+            whateverTheExchangeIsUpTo
+            if let clearFailureMessage = companionManager.chatHistoryClearFailureMessage {
+                Text(clearFailureMessage)
+                    .font(DS.Typography.caption)
+                    .foregroundColor(DS.Colors.amber)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if !companionManager.chatTranscriptStore.theTranscriptIsBeingSavedToDisk {
+                Text("This conversation could not be saved. A fresh chat may not stay fresh after restarting Iris.")
+                    .font(DS.Typography.caption)
+                    .foregroundColor(DS.Colors.amber)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         // The bar is dismissed the way every transient input on macOS is. This
@@ -892,6 +859,32 @@ struct OverlayEyeInputBarView: View {
         .onPreferenceChange(OverlayEyeInputBarHeightPreferenceKey.self) { measuredHeight in
             onTheBarsMeasuredHeightChanged(measuredHeight)
         }
+        .alert("Clear saved chat history?", isPresented: $clearHistoryConfirmationIsShowing) {
+            // Keep cancellation explicit and first so Return never confirms a
+            // destructive action by accident.
+            Button("Cancel", role: .cancel) {}
+                .keyboardShortcut(.defaultAction)
+            Button("Clear history", role: .destructive) {
+                clearChatHistoryAfterConfirmation()
+            }
+        } message: {
+            Text("This deletes saved chat questions and answers from this Mac and clears the current Iris chat. It does not change edit logs, settings, credentials, or projects.")
+        }
+        .alert("Start a new chat?", isPresented: $newChatConfirmationIsShowing) {
+            Button("Cancel", role: .cancel) {}
+                .keyboardShortcut(.defaultAction)
+            Button("New chat") { startFreshChat() }
+        } message: {
+            Text("This stops a pending chat response and clears unsent chat text and attachments. Saved history and app-edit work stay available.")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .clickyOnDemandEditRaised)) { _ in
+            let store = companionManager.inputBarDraftStore
+            guard composerMode != store.mode else { return }
+            composerMode = store.mode
+            typedMessage = store.draft.text
+            editKind = store.draft.editKind
+            modelDetailsAreShowing = false
+        }
         .onAppear {
             // The panel has to be key before the field can take focus, and it
             // becomes key one runloop turn after it is ordered front.
@@ -899,11 +892,22 @@ struct OverlayEyeInputBarView: View {
                 theTextFieldHasKeyboardFocus = true
             }
         }
+        .alert("Move this draft to another app?", isPresented: $projectSwitchConfirmationIsShowing) {
+            Button("Cancel", role: .cancel) { pendingProjectSelection = nil }
+                .keyboardShortcut(.defaultAction)
+            Button("Move draft") {
+                if let entry = pendingProjectSelection { switchComposerProject(to: entry) }
+                pendingProjectSelection = nil
+            }
+        } message: {
+            Text("Your text and attachments will stay, but the next edit will target \(pendingProjectSelection?.name ?? "the selected app"). Nothing runs until you send it.")
+        }
         // The one signal that an answer has landed. It is a counter rather than
         // the text itself because asking the same question twice produces the
         // same words, and the bar would sit on "working…" forever waiting for
         // text that never changed.
         .onChange(of: companionManager.assistantResponseGenerationCount) { _, _ in
+            expandedHistoryRowIndexes.removeAll()
             showWhateverIrisJustSaid()
         }
         // A retry that re-enters the describe step with the request prefilled
@@ -917,8 +921,8 @@ struct OverlayEyeInputBarView: View {
         // like it did nothing.
         .onChange(of: onDemandEditCoordinator.describePrefillText) { _, prefill in
             guard let prefill, !prefill.isEmpty else { return }
+            switchComposerMode(to: .edit)
             typedMessage = prefill
-            composerMode = .edit
             onDemandEditCoordinator.consumeDescribePrefill()
         }
         // Mirror the composer into the draft store on every change, so a
@@ -952,10 +956,46 @@ struct OverlayEyeInputBarView: View {
     /// than inline: the only takeover that makes this card a second copy of
     /// itself is the EDIT RUN'S OWN, and that is the one this checks. A guide's
     /// takeover is about a different install and must not hide it.
+    /// Keep a small, reachable control surface even if the full terminal is
+    /// elsewhere. A presentation flag must not remove every visible Stop.
+    private var activeEditControlStrip: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Editing \(onDemandEditCoordinator.activeAppName ?? "app")")
+                .font(DS.Typography.caption)
+                .foregroundColor(DS.Colors.textPrimary)
+            Text(onDemandEditCoordinator.statusLine ?? "Working on your change…")
+                .font(DS.Typography.caption)
+                .foregroundColor(DS.Colors.textSecondary)
+                .lineLimit(2)
+            HStack(spacing: 8) {
+                Button(onDemandEditCoordinator.readerAskedToStopTheRun ? "Stopping…" : "Stop") {
+                    onDemandEditCoordinator.stopRunningEdit()
+                }
+                .irisTextButton(isDanger: true)
+                .disabled(onDemandEditCoordinator.readerAskedToStopTheRun)
+                Button("View terminal") {
+                    companionManager.reopenOnDemandEditTakeoverTerminal()
+                }
+                .irisTinyButton()
+                .disabled(onDemandEditCoordinator.readerAskedToStopTheRun)
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
+                .fill(DS.Colors.readableOverAnything)
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
+                        .strokeBorder(DS.Colors.line, lineWidth: 1)
+                )
+        )
+    }
+
     @ViewBuilder
     private var onDemandEditCardWhenARunOwnsTheSurface: some View {
-        if onDemandEditCoordinator.phase != .describe,
-           !companionManager.onDemandEditTakeoverIsUp {
+        if (effectiveComposerMode == .edit || anEditIsInFlight),
+           onDemandEditCoordinator.phase != .describe,
+           (!companionManager.onDemandEditTakeoverIsUp || onDemandEditCoordinator.phase != .running) {
             OnDemandEditCard(
                 coordinator: onDemandEditCoordinator,
                 preselectedKind: companionManager.onDemandEditPreselectedKind,
@@ -1002,25 +1042,6 @@ struct OverlayEyeInputBarView: View {
     /// Read off the controller rather than mirrored into local state: the watch
     /// loop advances steps without anybody pressing anything, and a copy here
     /// would go stale exactly when the feature is working.
-    ///
-    /// `readerHasFinishedTheGuide` is checked here on purpose, not just inside
-    /// the controller. `currentStep`/`stepTheReaderIsLookingAt` stay pinned to
-    /// the branch's LAST step once the reader finishes it (advancing past it
-    /// would be an out-of-range index, so `advanceToTheNextStep` clamps rather
-    /// than nils it out) — so without this guard the card kept showing that
-    /// step forever. For a guide whose final step has neither a command nor a
-    /// link (a plain GUI/permission step — Astro's own last step, "Choose
-    /// where answers come from"), `primaryActionForTheCurrentStep` correctly
-    /// goes nil once finished, but `OverlayEyeGuideStepPresentation`'s OWN
-    /// fallback label-guess (`primaryActionLabel`) doesn't know that and drew a
-    /// live-looking "Done" pill anyway — one press advanced the guide (silently
-    /// completing it, including firing `onGuideCompleted`) and relabeled the
-    /// button from "Finish" to that fallback "Done", but the card itself never
-    /// went away to say so, so a second press had nothing left to advance and
-    /// the reader watched a dead button forever. `GuideSessionController`
-    /// itself already reaches a real completed state in one press — see
-    /// `AstroGuideFinishButtonReproTests` — this was purely this card
-    /// outliving the state that was supposed to hide it.
     private var guidePresentation: OverlayEyeGuideStepPresentation? {
         guard
             guideSessionController.loadState.isShowingSomethingAboutAGuide,
@@ -1069,27 +1090,40 @@ struct OverlayEyeInputBarView: View {
 
     private var textFieldRow: some View {
         // The model picker rides in the same glass shell as the field, on a thin
-        // row just above it. The bar is only 320pt wide, so a segmented control
-        // beside the field, close, and send buttons would squeeze the field to
-        // nothing — stacking it keeps both fully usable, and it reads as part of
-        // the input area rather than a floating strip. Mirrors the settings
-        // panel's model picker so the same choice is reachable without opening
-        // settings.
-        VStack(alignment: .leading, spacing: 8) {
+        // row just above it. Stacking it keeps both the model choice and the
+        // text field usable in the compact bar.
+        VStack(alignment: .leading, spacing: 6) {
+            if effectiveComposerMode == .edit,
+               onDemandEditCoordinator.isRecheckingSavedChanges,
+               onDemandEditCoordinator.phase == .describe {
+                Text("Confirm what the saved change should do. Iris will recheck it without rewriting the code.")
+                    .font(DS.Typography.caption)
+                    .foregroundColor(DS.Colors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if effectiveComposerMode == .edit && (onDemandEditCoordinator.canRecheckSavedChanges
+                        || onDemandEditCoordinator.isPreparingSavedChangeRecheck) {
+                savedChangeRecheckComposerAction
+            }
             if anAppIsOpenForEditing {
                 appComposerHeader
-                // The chat model toggle is deliberately absent here. It governs
-                // ASKING only — chat speaks Anthropic's streaming tool-use
-                // format, which `codex exec` cannot serve — and while an app is
-                // open it read as though it chose the model that would edit the
-                // app. A reader connected to Codex saw "Sonnet | Opus" and drew
-                // the obvious, wrong conclusion. It stays in settings, where it
-                // is not standing next to an editor it has nothing to do with.
-                if effectiveComposerMode == .edit {
+                if let projectSwitchMessage {
+                    Text(projectSwitchMessage)
+                        .font(DS.Typography.caption)
+                        .foregroundColor(DS.Colors.amber)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if effectiveComposerMode == .edit && !onDemandEditCoordinator.isRecheckingSavedChanges {
                     editKindRow
                 }
+            }
+            let connectionPresentation = composerConnectionPresentation
+            if connectionPresentation.showsModelControl {
+                composerModelControl
+                if modelDetailsAreShowing && !composerUsesDirectCodexModelPicker {
+                    composerModelDetails
+                }
             } else {
-                modelSelectorRow
+                composerConnectionNotice(connectionPresentation)
             }
             // With nothing attached this is EmptyView, so the bar is byte for
             // byte the bar it has always been until the reader pastes a picture.
@@ -1098,12 +1132,9 @@ struct OverlayEyeInputBarView: View {
             if theRequestIsBeingSizedUp {
                 theRequestIrisJustTook
             }
-            if anAppIsOpenForEditing {
-                servingProviderFooter
-            }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 9)
+        .padding(.vertical, 8)
         .background(IrisShellBackground(cornerRadius: DS.CornerRadius.extraLarge))
         // A picture dropped anywhere on the bar becomes an attachment. SwiftUI's
         // own drop, because the bar is an `NSHostingView` and its drag
@@ -1118,7 +1149,7 @@ struct OverlayEyeInputBarView: View {
                     .strokeBorder(DS.Colors.accent, lineWidth: 1.5)
                     .overlay(
                         Text("drop to attach")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(.system(size: 13, weight: .semibold))
                             .foregroundColor(DS.Colors.ink)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
@@ -1159,27 +1190,16 @@ struct OverlayEyeInputBarView: View {
     /// his own words vanished at the same moment — leaving him nothing to look
     /// at that proved the app had even read them.
     private var theRequestIrisJustTook: some View {
-        HStack(alignment: .top, spacing: 6) {
-            ProgressView()
-                .progressViewStyle(.circular)
-                .controlSize(.small)
-                .scaleEffect(0.62)
-                .frame(width: 13, height: 13)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Sent — Iris is sizing up the request…")
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
-                if let requestText = onDemandEditCoordinator.activeRequestText,
-                   !requestText.isEmpty {
-                    Text("“\(requestText)”")
-                        .font(.system(size: 10.5))
-                        .foregroundColor(DS.Colors.textTertiary)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+        VStack(alignment: .leading, spacing: 6) {
+            IrisChatLoadingBar(label: "Reviewing your request…")
+            if let requestText = onDemandEditCoordinator.activeRequestText,
+               !requestText.isEmpty {
+                Text("“\(requestText)”")
+                    .font(.system(size: 13))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1228,6 +1248,10 @@ struct OverlayEyeInputBarView: View {
     /// be a restart rather than a follow-up. The terminal phases are false on
     /// purpose: a finished card is a fine place to type the next request from.
     private var anEditIsInFlight: Bool {
+        if onDemandEditCoordinator.undoNeedsRecovery { return true }
+        // A stopped result is not an invitation to edit its still-protected app.
+        // Browse apps selects a fresh, eligible target before edit routing resumes.
+        if onDemandEditCoordinator.stoppedUndoRecoveryMessage != nil { return true }
         switch onDemandEditCoordinator.phase {
         case .pickApp, .describe, .done, .failed, .notEligible, .blockedByModel:
             return false
@@ -1236,11 +1260,73 @@ struct OverlayEyeInputBarView: View {
         }
     }
 
-    /// The mode actually in force. A reader can be in Ask mode and then sign
-    /// out, and a composer stuck in a mode with nothing behind it would be the
-    /// same class of dead end this whole change exists to remove.
+    /// Missing credentials show a connection state, never change user intent.
     private var effectiveComposerMode: ComposerMode {
-        (composerMode == .ask && !accountService.canAnswerQuestions) ? .edit : composerMode
+        composerMode
+    }
+
+    /// Match the dispatch condition, not the mode alone: without a selected
+    /// app the field still sends screen help even when Edit is preferred.
+    private var composerConnectionContext: ComposerConnectionPresentation.Context {
+        anAppIsOpenForEditing && effectiveComposerMode == .edit ? .projectEdit : .screenHelp
+    }
+
+    private var composerConnectionPresentation: ComposerConnectionPresentation {
+        let help: ComposerConnectionPresentation.HelpConnection
+        if accountService.signedInAccount != nil {
+            help = .publik
+        } else if accountService.hasStoredAnthropicAPIKey {
+            help = .anthropicKey
+        } else if accountService.hasConnectedClaudeCodeLogin {
+            help = .claudeCodeLogin
+        } else {
+            help = .unavailable
+        }
+
+        let editing: ComposerConnectionPresentation.EditConnection
+        if composerConnectionContext == .projectEdit {
+            switch MaintainModelProviderResolver.firstAvailable()?.identifier {
+            case "codex": editing = .codex
+            case "anthropic": editing = .anthropic
+            case "openai": editing = .openAI
+            default: editing = .unavailable
+            }
+        } else {
+            editing = .unavailable
+        }
+        return ComposerConnectionPresentation.resolve(
+            context: composerConnectionContext, help: help, editing: editing,
+            codexIsConnected: accountService.hasConnectedCodexLogin
+        )
+    }
+
+    private func composerConnectionNotice(_ presentation: ComposerConnectionPresentation) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(presentation.inlineMessage ?? presentation.connectionLabel)
+                .font(DS.Typography.caption)
+                .foregroundColor(DS.Colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let linkLabel = presentation.settingsLinkLabel {
+                HStack(spacing: 10) {
+                    Button(linkLabel) {
+                        modelDetailsAreShowing = false
+                        UserDefaults.standard.set("Connections", forKey: "irisSettingsSection")
+                        NotificationCenter.default.post(name: .clickyShowPanel, object: nil)
+                    }
+                    .irisTextButton(fontSize: 13)
+
+                    if case .screenHelp = composerConnectionContext,
+                       accountService.hasConnectedCodexLogin {
+                        Button("Choose app to edit") {
+                            modelDetailsAreShowing = false
+                            UserDefaults.standard.set("Apps", forKey: "irisSettingsSection")
+                            NotificationCenter.default.post(name: .clickyShowPanel, object: nil)
+                        }
+                        .irisTextButton(fontSize: 13)
+                    }
+                }
+            }
+        }
     }
 
     private var openAppName: String {
@@ -1257,20 +1343,53 @@ struct OverlayEyeInputBarView: View {
     /// them ran on the editing provider and the other could not.
     private var appComposerHeader: some View {
         HStack(spacing: 8) {
-            Text(openAppName)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(DS.Colors.ink)
-                .lineLimit(1)
+            if effectiveComposerMode == .ask {
+                Text("General help")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(DS.Colors.ink)
+            } else {
+            Menu {
+                ForEach(companionManager.appInventoryService.installedEntriesForDisplay.filter(\.isLocallyEditable)) { entry in
+                    Button {
+                        guard entry.slug != selectedComposerAppSlug else { return }
+                        if !typedMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || attachments.thereIsSomethingAttached {
+                            pendingProjectSelection = entry
+                            projectSwitchConfirmationIsShowing = true
+                        } else {
+                            switchComposerProject(to: entry)
+                        }
+                    } label: {
+                        if entry.slug == selectedComposerAppSlug {
+                            Label(entry.name, systemImage: "checkmark")
+                        } else {
+                            Text(entry.name)
+                        }
+                    }
+                    .disabled(guideSessionController.autopilotIsRunning
+                        && guideSessionController.guideBeingFollowed?.appSlug == entry.slug)
+                }
+            } label: {
+                Text(openAppName)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(DS.Colors.ink)
+                    .lineLimit(1)
+                    .frame(minHeight: 24)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .disabled(anEditIsInFlight || theRequestIsBeingSizedUp)
+            .accessibilityLabel("Choose project to edit")
+            .help(projectSwitchMessage ?? "Choose an installed editable app. Apps being installed are unavailable.")
+            .pointerCursor(isEnabled: !anEditIsInFlight && !theRequestIsBeingSizedUp)
+            }
 
             Spacer(minLength: 0)
 
             HStack(spacing: 3) {
-                // Ask is shown even when it cannot run. Hiding it would leave a
-                // reader whose only credential is Codex with no way to learn
-                // that Codex does not power chat — they would simply never see
-                // asking exist. Disabled with the reason underneath teaches it.
+                // General help remains selectable even when it needs a login.
                 composerModeOption(
-                    .ask, label: "Ask", isEnabled: accountService.canAnswerQuestions
+                    .ask, label: "Ask", isEnabled: true
                 )
                 composerModeOption(.edit, label: "Edit", isEnabled: true)
             }
@@ -1282,15 +1401,29 @@ struct OverlayEyeInputBarView: View {
         }
     }
 
+    private func switchComposerProject(to entry: CatalogAppInventoryEntry) {
+        guard companionManager.selectProjectForComposer(entry) else {
+            projectSwitchMessage = "Finish the active task before switching projects. Your draft is unchanged."
+            return
+        }
+        projectSwitchMessage = nil
+        switchComposerMode(to: .edit)
+        modelDetailsAreShowing = false
+    }
+
+    private var selectedComposerAppSlug: String? {
+        onDemandEditCoordinator.activeAppSlug
+            ?? companionManager.frontmostEditableAppForTheComposer?.slug
+    }
+
     private func composerModeOption(
         _ mode: ComposerMode, label: String, isEnabled: Bool
     ) -> some View {
-        // Reflects the mode IN FORCE, not the one last tapped: if Ask has been
-        // overridden for want of a chat credential, Edit is what is highlighted.
+        // Highlight the reader's choice, independent of connection availability.
         let isSelected = effectiveComposerMode == mode
-        return Button { if isEnabled { composerMode = mode } } label: {
+        return Button { if isEnabled { switchComposerMode(to: mode) } } label: {
             Text(label)
-                .font(.system(size: 9, weight: .medium))
+                .font(.system(size: 13, weight: .medium))
                 .foregroundColor(
                     isEnabled
                         ? (isSelected ? DS.Colors.ink : DS.Colors.muted)
@@ -1319,11 +1452,30 @@ struct OverlayEyeInputBarView: View {
         }
     }
 
+    /// The recovery affordance stays in the same compact composer as a normal
+    /// app edit. Preparation is coordinator-owned and may revalidate the saved
+    /// source asynchronously, so repeated taps are disabled until it publishes
+    /// the recheck mode.
+    private var savedChangeRecheckComposerAction: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Button(onDemandEditCoordinator.isPreparingSavedChangeRecheck
+                   ? "Preparing recheck…"
+                   : "Recheck saved changes") {
+                onDemandEditCoordinator.prepareSavedChangeRecheck()
+            }
+            .irisTinyButton()
+            .disabled(onDemandEditCoordinator.isPreparingSavedChangeRecheck)
+            .help("Review the saved source with a fresh description without asking Iris to rewrite it.")
+            .accessibilityLabel("Recheck saved changes")
+            .accessibilityHint("Starts a fresh description for checking the saved source without rewriting it.")
+        }
+    }
+
     private func composerKindPill(_ kind: OnDemandEditKind, label: String) -> some View {
         let isSelected = editKind == kind
         return Button { editKind = kind } label: {
             Text(label)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(isSelected ? DS.Colors.accent : DS.Colors.textSecondary)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
@@ -1354,19 +1506,103 @@ struct OverlayEyeInputBarView: View {
     /// fallback order was quietly deciding for readers who had a preference.
     @ViewBuilder
     private var servingProviderFooter: some View {
-        if effectiveComposerMode == .edit {
-            HStack(spacing: 6) {
-                Text("Edits run on")
-                    .font(.system(size: 9.5))
-                    .foregroundColor(DS.Colors.quiet)
-                editProviderPicker
-                Spacer(minLength: 0)
+        if anAppIsOpenForEditing && effectiveComposerMode == .edit {
+            VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+                HStack(spacing: DS.Spacing.sm) {
+                    Text("Project edits")
+                        .font(DS.Typography.caption)
+                        .foregroundColor(DS.Colors.textSecondary)
+                    editProviderPicker
+                    Spacer(minLength: 0)
+                }
+                if !preferredEditProvider.isEmpty,
+                   !MaintainModelProviderResolver.allAvailable().contains(where: { $0.identifier == preferredEditProvider }) {
+                    Text("Your selected provider is unavailable. The next edit uses the connected provider shown above.")
+                        .font(DS.Typography.caption)
+                        .foregroundColor(DS.Colors.amber)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if MaintainModelProviderResolver.firstAvailable()?.identifier == "codex" {
+                    CodexEditModelPicker()
+                }
             }
         } else {
-            Text(accountService.chatProviderDescription)
-                .font(.system(size: 9.5))
-                .foregroundColor(DS.Colors.quiet)
+            Text(accountService.signedInAccount != nil
+                ? "General help · Free Claude through publik"
+                : "General help · \(accountService.chatProviderDescription)")
+                .font(DS.Typography.caption)
+                .foregroundColor(DS.Colors.textSecondary)
         }
+    }
+
+    /// One control in one location, matching the action the composer will send.
+    /// Provider details live on demand, not as a second permanent chat surface.
+    @ViewBuilder
+    private var composerModelControl: some View {
+        if IrisTestEnvironment.isEnabled && anAppIsOpenForEditing && effectiveComposerMode == .edit {
+            Text("Astra Medium plan · Astra Low edit")
+                .font(DS.Typography.caption)
+                .foregroundColor(DS.Colors.textSecondary)
+                .help("Requested test routes through your Codex login. The provider may not report the resolved model.")
+        } else if composerUsesDirectCodexModelPicker {
+            CodexEditModelPicker(isCompact: true)
+        } else {
+            HStack(spacing: DS.Spacing.sm) {
+                Text(anAppIsOpenForEditing && effectiveComposerMode == .edit ? "Edit model" : "Ask Iris")
+                    .font(DS.Typography.caption)
+                    .foregroundColor(DS.Colors.textSecondary)
+                Spacer(minLength: 0)
+                Button {
+                    modelDetailsAreShowing.toggle()
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(composerModelSummary).lineLimit(1).truncationMode(.middle)
+                        Image(systemName: "chevron.down")
+                    }
+                    .font(DS.Typography.label)
+                    .foregroundColor(DS.Colors.ink)
+                    .padding(.vertical, DS.Spacing.sm)
+                }
+                .buttonStyle(.plain)
+                .pointerCursor()
+                .accessibilityLabel("Model for this request: \(composerModelSummary)")
+            }
+        }
+    }
+
+    private var composerUsesDirectCodexModelPicker: Bool {
+        anAppIsOpenForEditing
+            && effectiveComposerMode == .edit
+            && MaintainModelProviderResolver.firstAvailable()?.identifier == "codex"
+    }
+
+    /// Inline disclosure stays inside the bar's keyboard and click boundary.
+    private var composerModelDetails: some View {
+        VStack(alignment: .leading, spacing: DS.Spacing.md) {
+            if anAppIsOpenForEditing && effectiveComposerMode == .edit {
+                servingProviderFooter
+            } else {
+                modelSelectorRow
+                Text("Answers questions about your screen. Editing an app uses its connected editing model.")
+                    .font(DS.Typography.caption)
+                    .foregroundColor(DS.Colors.textSecondary)
+            }
+        }
+        .padding(DS.Spacing.md)
+        .background(RoundedRectangle(cornerRadius: DS.CornerRadius.small).fill(DS.Colors.surfaceRaised))
+    }
+
+    private var composerModelSummary: String {
+        if anAppIsOpenForEditing && effectiveComposerMode == .edit {
+            guard let provider = MaintainModelProviderResolver.firstAvailable() else { return "App editing" }
+            if provider.identifier == "codex" {
+                return selectedCodexModel.isEmpty ? "Codex default" : "Codex · \(selectedCodexModel)"
+            }
+            return provider.requestedModelDescription
+        }
+        guard accountService.canAnswerQuestions else { return "Screen help" }
+        if accountService.signedInAccount != nil { return "Included with publik" }
+        return companionManager.selectedModel.contains("opus") ? "Claude Opus" : "Claude Sonnet"
     }
 
     @ViewBuilder
@@ -1374,46 +1610,56 @@ struct OverlayEyeInputBarView: View {
         let providers = MaintainModelProviderResolver.allAvailable()
         if providers.isEmpty {
             Text("no model connected")
-                .font(.system(size: 9.5, weight: .medium))
+                .font(DS.Typography.label)
                 .foregroundColor(DS.Colors.amber)
         } else if providers.count == 1 {
             // Nothing to choose between: state it rather than offering a menu
             // with one item in it.
             Text(providers[0].displayName)
-                .font(.system(size: 9.5, weight: .medium))
+                .font(DS.Typography.label)
                 .foregroundColor(DS.Colors.textSecondary)
         } else {
             Menu {
                 ForEach(providers, id: \.identifier) { provider in
                     Button(provider.displayName) {
-                        MaintainModelProviderResolver.preferredProviderIdentifier = provider.identifier
+                        preferredEditProvider = provider.identifier
                     }
                 }
             } label: {
                 Text(MaintainModelProviderResolver.firstAvailable()?.displayName ?? "pick one")
-                    .font(.system(size: 9.5, weight: .medium))
+                    .font(DS.Typography.label)
                     .foregroundColor(DS.Colors.ink)
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
+            .accessibilityLabel("Provider for project edits")
+            .pointerCursor()
         }
     }
 
     private var modelSelectorRow: some View {
         HStack(spacing: 6) {
             Spacer(minLength: 0)
-            Text("Model")
-                .font(.system(size: 9, weight: .semibold))
+            Text("Help model")
+                .font(DS.Typography.label)
                 .foregroundColor(DS.Colors.quiet)
-            HStack(spacing: 3) {
-                barModelOption(label: "Sonnet", modelID: "claude-sonnet-4-6")
-                barModelOption(label: "Opus", modelID: "claude-opus-4-6")
+            if accountService.signedInAccount != nil {
+                Text("Managed by publik")
+                    .font(DS.Typography.label)
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .help("Free help uses the model selected by publik. Project edits have a separate model picker.")
+            } else {
+                HStack(spacing: 3) {
+                    barModelOption(label: "Sonnet", modelID: "claude-sonnet-4-6")
+                    barModelOption(label: "Opus", modelID: "claude-opus-4-6")
+                }
+                .help("Controls general help on your own Anthropic connection.")
+                .padding(3)
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Color.white.opacity(0.055))
+                )
             }
-            .padding(3)
-            .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Color.white.opacity(0.055))
-            )
         }
     }
 
@@ -1423,10 +1669,10 @@ struct OverlayEyeInputBarView: View {
             companionManager.setSelectedModel(modelID)
         } label: {
             Text(label)
-                .font(.system(size: 9, weight: .medium))
+                .font(DS.Typography.label)
                 .foregroundColor(isSelected ? DS.Colors.ink : DS.Colors.muted)
                 .padding(.horizontal, 8)
-                .frame(minHeight: 20)
+                .frame(minHeight: 26)
                 .background(
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
                         .fill(isSelected ? Color.white.opacity(0.12) : Color.clear)
@@ -1442,7 +1688,7 @@ struct OverlayEyeInputBarView: View {
 
             TextField(fieldPlaceholder, text: $typedMessage)
                 .textFieldStyle(.plain)
-                .font(.system(size: 13))
+                .font(DS.Typography.body)
                 .foregroundColor(DS.Colors.ink)
                 .focused($theTextFieldHasKeyboardFocus)
                 // cmd-V with a picture on the clipboard. The field editor's
@@ -1500,6 +1746,9 @@ struct OverlayEyeInputBarView: View {
             .buttonStyle(.plain)
             .pointerCursor(isEnabled: theSendButtonIsLive)
             .disabled(!theSendButtonIsLive)
+            .frame(width: 28, height: 28)
+            .contentShape(Rectangle())
+            .accessibilityLabel("Send message")
         }
     }
 
@@ -1513,14 +1762,14 @@ struct OverlayEyeInputBarView: View {
             onTheReaderWantsToAttachImages()
         } label: {
             Image(systemName: "paperclip")
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(attachments.thereIsSomethingAttached ? DS.Colors.accent : DS.Colors.quiet)
-                .frame(width: 18, height: 18)
+                .frame(width: 28, height: 28)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .pointerCursor()
-        .help("Attach images — or drop them anywhere on this bar")
+        .help("Attach images, or drop them anywhere on this bar")
         .accessibilityLabel("attach images")
     }
 
@@ -1528,6 +1777,9 @@ struct OverlayEyeInputBarView: View {
     /// the second time round the interesting thing about the field is that it
     /// is still there and still usable without reopening anything.
     private var fieldPlaceholder: String {
+        if effectiveComposerMode == .edit && onDemandEditCoordinator.isRecheckingSavedChanges {
+            return "What should the saved change do?"
+        }
         if anAppIsOpenForEditing, effectiveComposerMode == .edit {
             return "What should change in \(openAppName)?"
         }
@@ -1543,14 +1795,15 @@ struct OverlayEyeInputBarView: View {
             onDismissRequested()
         } label: {
             Image(systemName: "xmark")
-                .font(.system(size: 10, weight: .bold))
+                .font(.system(size: 13, weight: .bold))
                 .foregroundColor(DS.Colors.quiet)
-                .frame(width: 18, height: 18)
+                .frame(width: 28, height: 28)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .pointerCursor()
         .help("Close")
+        .accessibilityLabel("Close Iris panel")
     }
 
     // MARK: What is under the field
@@ -1561,45 +1814,96 @@ struct OverlayEyeInputBarView: View {
     /// on disk that nobody could see, and had no way to start over short of
     /// closing the bar. "New chat" is also what brings the suggestion
     /// openers back, since those are only offered on a blank exchange.
-    @ViewBuilder
     private var historyAndNewChatRow: some View {
-        if companionManager.thereIsChatHistoryToShow || exchange.thereIsAnExchangeOnScreen {
-            HStack(spacing: 6) {
-                if companionManager.thereIsChatHistoryToShow {
-                    Button {
-                        historyIsShowing.toggle()
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: historyIsShowing ? "chevron.down" : "clock.arrow.circlepath")
-                                .font(.system(size: 9, weight: .semibold))
-                            Text(historyIsShowing ? "Hide history" : "History")
-                                .font(.system(size: 9, weight: .medium))
-                        }
-                    }
-                    .irisTinyButton()
-                    .background(IrisShellBackground(cornerRadius: DS.CornerRadius.small))
+        HStack(spacing: 6) {
+            Button {
+                historyIsShowing.toggle()
+                theTextFieldHasKeyboardFocus = false
+                onTheBarShouldTakeTheKeyboardBack()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: historyIsShowing ? "chevron.down" : "clock.arrow.circlepath")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("History")
+                        .font(.system(size: 13, weight: .medium))
                 }
-
-                Spacer(minLength: 0)
-
-                Button {
-                    historyIsShowing = false
-                    companionManager.startANewChat()
-                    exchange.clearTheWholeExchange()
-                    typedMessage = ""
-                    theTextFieldHasKeyboardFocus = true
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "square.and.pencil")
-                            .font(.system(size: 9, weight: .semibold))
-                        Text("New chat")
-                            .font(.system(size: 9, weight: .medium))
-                    }
-                }
-                .irisTinyButton()
-                .background(IrisShellBackground(cornerRadius: DS.CornerRadius.small))
-                .help("Clear this conversation and start fresh")
             }
+            .irisTinyButton()
+            .accessibilityLabel(historyIsShowing ? "Hide history" : "History")
+            .accessibilityValue(historyIsShowing ? "Showing" : "Hidden")
+
+            Spacer(minLength: 4)
+
+              Button {
+                if (effectiveComposerMode == .ask && thereIsSomethingToSend)
+                    || companionManager.inputBarDraftStore.generalHelpHasDraft
+                    || attachments.generalHelpHasAttachments
+                    || companionManager.chatResponseIsPending {
+                    newChatConfirmationIsShowing = true
+                } else {
+                    startFreshChat()
+                }
+              } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "square.and.pencil")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("New chat")
+                        .font(.system(size: 13, weight: .medium))
+                }
+            }
+            .irisTinyButton()
+            .help("Start a fresh conversation. Previous conversations stay in History.")
+
+        }
+    }
+
+    private func switchComposerMode(to mode: ComposerMode) {
+        let restored = companionManager.inputBarDraftStore.switchMode(
+            to: mode, currentDraft: .init(text: typedMessage, editKind: editKind))
+        attachments.switchComposerMode(isAsking: mode == .ask)
+        if mode == .edit, let slug = selectedComposerAppSlug {
+            companionManager.inputBarDraftStore.associateEditDraft(withAppSlug: slug)
+        }
+        composerMode = mode
+        typedMessage = restored.text
+        editKind = restored.editKind
+        modelDetailsAreShowing = false
+    }
+
+    private func startFreshChat() {
+        switchComposerMode(to: .ask)
+        historyIsShowing = false
+        companionManager.startANewChat()
+        exchange.clearTheWholeExchange()
+        typedMessage = ""
+        attachments.removeAllAttachments()
+        measuredAnswerTextHeight = 0
+        onTheBarShouldTakeTheKeyboardBack()
+        DispatchQueue.main.async { theTextFieldHasKeyboardFocus = true }
+    }
+
+    /// Applies a confirmed history clear to both durable and visible chat
+    /// state. Edit cards, edit logs, settings, credentials, and projects are
+    /// deliberately outside this action's scope.
+    private func clearChatHistoryAfterConfirmation() {
+        let preserveEditDraft = anAppIsOpenForEditing && effectiveComposerMode == .edit
+        historyIsShowing = false
+        expandedHistoryRowIndexes.removeAll()
+        companionManager.clearChatHistory()
+        attachments.clearGeneralHelpAttachments()
+        exchange.clearTheWholeExchange()
+        if preserveEditDraft {
+            companionManager.inputBarDraftStore.remember(
+                OverlayEyeInputBarDraft(text: typedMessage, editKind: editKind)
+            )
+        } else {
+            typedMessage = ""
+            attachments.removeAllAttachments()
+        }
+        measuredAnswerTextHeight = 0
+        onTheBarShouldTakeTheKeyboardBack()
+        DispatchQueue.main.async {
+            theTextFieldHasKeyboardFocus = true
         }
     }
 
@@ -1608,28 +1912,95 @@ struct OverlayEyeInputBarView: View {
     @ViewBuilder
     private var chatHistoryList: some View {
         if historyIsShowing {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(companionManager.recentChatHistory(), id: \.askedAt) { past in
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(past.question)
-                                .font(.system(size: 10.5, weight: .semibold))
-                                .foregroundColor(DS.Colors.ink)
-                                .fixedSize(horizontal: false, vertical: true)
-                            Text(past.answer)
-                                .font(.system(size: 10))
-                                .foregroundColor(DS.Colors.textSecondary)
-                                .lineLimit(4)
-                                .fixedSize(horizontal: false, vertical: true)
+            let history = companionManager.recentChatHistory()
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Saved conversations")
+                        .font(DS.Typography.label)
+                        .foregroundColor(DS.Colors.ink)
+                    Spacer(minLength: 0)
+                    if !history.isEmpty {
+                        Button {
+                            clearHistoryConfirmationIsShowing = true
+                        } label: {
+                            Label("Clear history…", systemImage: "trash")
+                                .font(DS.Typography.caption)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .irisTinyButton()
+                        .help("Delete saved chat history from this Mac")
+                        .accessibilityLabel("Clear saved chat history")
                     }
                 }
-                .padding(10)
+                if history.isEmpty {
+                    Text("No saved conversations yet.")
+                        .font(DS.Typography.caption)
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .background(IrisShellBackground(cornerRadius: DS.CornerRadius.large))
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 10) {
+                            ForEach(Array(history.enumerated()), id: \.offset) { historyEntry in
+                                let historyRowIndex = historyEntry.offset
+                                let past = historyEntry.element
+                                let answerCanExpand = Self.savedAnswerNeedsExpansion(past.answer)
+                                let answerIsExpanded = expandedHistoryRowIndexes.contains(historyRowIndex)
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(past.question)
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundColor(DS.Colors.ink)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        .textSelection(.enabled)
+                                    Text(past.answer)
+                                        .font(.system(size: 13))
+                                        .foregroundColor(DS.Colors.textSecondary)
+                                        .lineLimit(answerCanExpand && !answerIsExpanded ? 4 : nil)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        .textSelection(.enabled)
+                                    if answerCanExpand {
+                                        Button(answerIsExpanded ? "Show less" : "Show more") {
+                                            if answerIsExpanded {
+                                                expandedHistoryRowIndexes.remove(historyRowIndex)
+                                            } else {
+                                                expandedHistoryRowIndexes.insert(historyRowIndex)
+                                            }
+                                        }
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundColor(DS.Colors.accent)
+                                        .buttonStyle(.plain)
+                                        .pointerCursor()
+                                        .accessibilityLabel(answerIsExpanded
+                                            ? "Show less of saved answer"
+                                            : "Show full saved answer")
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                        .padding(10)
+                    }
+                    // A ScrollView without a concrete height can report zero to
+                    // the self-sizing hosting panel after History is toggled on.
+                    // Keep the archive bounded while giving the panel a real
+                    // expanded height to measure.
+                    .frame(height: 220)
+                    .background(IrisShellBackground(cornerRadius: DS.CornerRadius.large))
+
+                }
             }
-            .frame(maxHeight: 220)
-            .background(IrisShellBackground(cornerRadius: DS.CornerRadius.large))
         }
+    }
+
+    /// Four lines in the 400pt-wide history surface are roughly 220
+    /// characters at the saved-answer font. The explicit line-break check
+    /// catches multi-line answers even when their character count is shorter.
+    private static let historyAnswerPreviewCharacterCount = 220
+
+    private static func savedAnswerNeedsExpansion(_ answer: String) -> Bool {
+        answer.count > historyAnswerPreviewCharacterCount
+            || answer.split(separator: "\n", omittingEmptySubsequences: false).count > 4
     }
 
     /// The finished edit exchanges of this session, newest first — the edit
@@ -1650,8 +2021,8 @@ struct OverlayEyeInputBarView: View {
         let mostRecentFirst = Array(onDemandEditCoordinator.sessionThread.suffix(3).reversed())
         if !mostRecentFirst.isEmpty {
             VStack(alignment: .leading, spacing: 7) {
-                Text("What Iris changed")
-                    .font(.system(size: 9.5, weight: .semibold))
+                Text("Recent app work")
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(DS.Colors.textTertiary)
 
                 ForEach(mostRecentFirst) { finishedEdit in
@@ -1660,15 +2031,15 @@ struct OverlayEyeInputBarView: View {
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("\(finishedEdit.appName) · \(finishedEdit.kind == .feature ? "feature" : "bug fix")")
-                                .font(.system(size: 9, weight: .semibold))
+                                .font(.system(size: 13, weight: .semibold))
                                 .foregroundColor(DS.Colors.quiet)
                             Text(finishedEdit.request)
-                                .font(.system(size: 10.5, weight: .medium))
+                                .font(.system(size: 13, weight: .medium))
                                 .foregroundColor(DS.Colors.ink)
                                 .lineLimit(2)
                                 .fixedSize(horizontal: false, vertical: true)
                             Text(finishedEdit.outcome)
-                                .font(.system(size: 10))
+                                .font(.system(size: 13))
                                 .foregroundColor(DS.Colors.textSecondary)
                                 .lineLimit(3)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -1693,7 +2064,8 @@ struct OverlayEyeInputBarView: View {
     /// it — in both, nothing is above the field and there is nothing to be
     /// confused with.
     private var theEditCardOwnsTheSurface: Bool {
-        onDemandEditCoordinator.phase != .pickApp
+        effectiveComposerMode == .edit
+            && onDemandEditCoordinator.phase != .pickApp
             && onDemandEditCoordinator.phase != .describe
     }
 
@@ -1718,12 +2090,7 @@ struct OverlayEyeInputBarView: View {
     @ViewBuilder
     private var whateverTheExchangeIsUpTo: some View {
         if exchange.theSuggestionChipsShouldBeOffered {
-            // Openers like "what's on my screen?" under an edit card would be
-            // three invitations to change the subject, stacked under the thing
-            // Iris is actually waiting on.
-            if !theEditCardOwnsTheSurface {
-                suggestionChips
-            }
+            EmptyView()
         } else if theEditCardOwnsTheSurface && exchange.wasRestoredFromAnEarlierSitting {
             // SUPPRESSED, and this is the whole reason the "restored" flag
             // exists. Reopening the bar brings back the last general-chat
@@ -1745,7 +2112,7 @@ struct OverlayEyeInputBarView: View {
             // has to be visibly a different thing from the edit above it.
             VStack(alignment: .leading, spacing: 4) {
                 Text("Chat with Iris")
-                    .font(.system(size: 9.5, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(DS.Colors.textTertiary)
                     .textCase(.uppercase)
                     .padding(.leading, 2)
@@ -1756,28 +2123,80 @@ struct OverlayEyeInputBarView: View {
         }
     }
 
-    /// Stacked rather than laid out in a row: a row of chips either overflows a
-    /// 320pt bar or has to be truncated to fit it, and a suggestion the reader
-    /// cannot finish reading is not a suggestion.
-    ///
-    /// Each chip carries its own glass shell rather than sharing one card. A
-    /// card would be the panel chrome this bar is meant not to have — but pale
-    /// text with nothing behind it is illegible the moment the desktop under it
-    /// is bright, so the backdrop goes on the chips themselves.
-    private var suggestionChips: some View {
+    /// Connection and task shortcuts share one predictable area. Unavailable
+    /// screen actions are replaced by a usable connection action, not a stack
+    /// of disabled invitations. Narrow panels can place the actions vertically.
+    private var quickActionBar: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if !anAppIsOpenForEditing && !anEditIsInFlight {
+                Text("On your screen")
+                    .font(DS.Typography.caption)
+                    .foregroundColor(DS.Colors.textSecondary)
+            }
+            if !accountService.canAnswerQuestions {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) { connectionAndAppActions }
+                    VStack(alignment: .leading, spacing: 8) { connectionAndAppActions }
+                }
+            } else if !anAppIsOpenForEditing && !anEditIsInFlight {
+                chooseAppShortcut
+            }
+            if accountService.canAnswerQuestions,
+               exchange.theSuggestionChipsShouldBeOffered,
+               !theEditCardOwnsTheSurface,
+               !onDemandEditCoordinator.isRecheckingSavedChanges {
+                suggestionChips
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var connectionAndAppActions: some View {
+        Button {
+            modelDetailsAreShowing = false
+            UserDefaults.standard.set("Connections", forKey: "irisSettingsSection")
+            NotificationCenter.default.post(name: .clickyShowPanel, object: nil)
+        } label: {
+            Label("Connect screen help", systemImage: "rectangle.and.text.magnifyingglass")
+                .font(DS.Typography.caption)
+        }
+        .irisTinyButton()
+        .help("Screen questions need a help connection. Codex connects separately for app edits.")
+        if !anAppIsOpenForEditing && !anEditIsInFlight {
+            chooseAppShortcut
+        }
+    }
+
+    private var chooseAppShortcut: some View {
+        Button {
+            modelDetailsAreShowing = false
+            UserDefaults.standard.set("Apps", forKey: "irisSettingsSection")
+            NotificationCenter.default.post(name: .clickyShowPanel, object: nil)
+        } label: {
+            Label("Edit an app", systemImage: "square.grid.2x2")
+                .font(DS.Typography.caption)
+        }
+        .irisTinyButton()
+        .accessibilityLabel("Choose app to edit")
+    }
+
+    private var suggestionChips: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 155), alignment: .leading)], alignment: .leading, spacing: 6) {
             ForEach(suggestionsToOffer, id: \.self) { suggestion in
                 Button {
                     send(suggestion)
                 } label: {
                     Text(suggestion)
-                        .lineLimit(1)
+                        .font(DS.Typography.caption)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .irisTinyButton()
-                .background(IrisShellBackground(cornerRadius: DS.CornerRadius.small))
+                .disabled(!accountService.canAnswerQuestions
+                    && OverlayEyeSuggestions.editInstructionKind(forMessage: suggestion) == nil)
             }
         }
-        .padding(.leading, 4)
     }
 
     /// The question and what came back from it, in one card that changes what
@@ -1786,7 +2205,7 @@ struct OverlayEyeInputBarView: View {
         VStack(alignment: .leading, spacing: 7) {
             if let questionTheReaderAsked = exchange.questionTheReaderAsked {
                 Text(questionTheReaderAsked)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 13, weight: .medium))
                     .foregroundColor(DS.Colors.quiet)
                     // The question is context for the answer, not the answer.
                     // Two lines is enough to recognise what you asked; more
@@ -1809,22 +2228,19 @@ struct OverlayEyeInputBarView: View {
         .background(IrisShellBackground(cornerRadius: DS.CornerRadius.large))
     }
 
-    /// The spinner and the sentence saying which part of the work is happening.
-    /// Both are driven by the same `assistantState` that spins the eye's own
-    /// track, so a spinning eye and an idle-looking bar cannot happen.
+    /// Only a current chat request animates. Pointing, idle or canceled work
+    /// cannot leave a misleading loading bar running.
     private var workingLine: some View {
-        HStack(spacing: 8) {
-            ProgressView()
-                .progressViewStyle(.circular)
-                .controlSize(.small)
-                .scaleEffect(0.62)
-                .frame(width: 13, height: 13)
-
-            Text(OverlayEyeSuggestions.lineShownWhileIrisIsWorking(
-                whileTheAssistantIs: companionManager.assistantState
-            ))
-            .font(.system(size: 12))
-            .foregroundColor(DS.Colors.muted)
+        Group {
+            if companionManager.chatResponseIsPending {
+                IrisChatLoadingBar(label: OverlayEyeSuggestions.lineShownWhileIrisIsWorking(
+                    whileTheAssistantIs: companionManager.assistantState
+                ))
+            } else {
+                Text("No response is loading. You can try again.")
+                    .font(DS.Typography.caption)
+                    .foregroundColor(DS.Colors.muted)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1845,7 +2261,7 @@ struct OverlayEyeInputBarView: View {
     private var whatThatQueryCost: some View {
         if let costText = spendLedger.mostRecentCallText {
             Text(costText)
-                .font(.system(size: 9.5))
+                .font(.system(size: 13))
                 .foregroundColor(DS.Colors.textTertiary)
                 .monospacedDigit()
                 .frame(maxWidth: .infinity, alignment: .trailing)
@@ -1856,7 +2272,7 @@ struct OverlayEyeInputBarView: View {
     private func answerArea(showing answerText: String) -> some View {
         ScrollView(.vertical) {
             Text(answerText)
-                .font(.system(size: 12.5))
+                .font(DS.Typography.body)
                 .foregroundColor(
                     exchange.whatIrisSaidBackIsAFailureMessage ? DS.Colors.red : DS.Colors.ink
                 )
@@ -1917,9 +2333,10 @@ struct OverlayEyeInputBarView: View {
         // `onSubmit` fires on Return whether or not the button is enabled, so
         // the guard the button already draws has to exist here too.
         guard theSendButtonIsLive else { return }
-        if anAppIsOpenForEditing, effectiveComposerMode == .edit {
+        if composerConnectionContext == .projectEdit {
             let request = typedMessage
-            typedMessage = ""
+            guard !onDemandEditCoordinator.isAssessingRequest,
+                  !onDemandEditCoordinator.undoNeedsRecovery else { return }
             if onDemandEditCoordinator.phase == .describe {
                 onDemandEditCoordinator.describeRequest(request, kind: editKind)
             } else if let slug = onDemandEditCoordinator.activeAppSlug,
@@ -1931,17 +2348,18 @@ struct OverlayEyeInputBarView: View {
                 // result. Going through the manager keeps the bar-raising and
                 // panel-dismissing side of a pick identical to every other way
                 // in.
-                companionManager.requestOnDemandEdit(
+                guard companionManager.requestOnDemandEdit(
                     forSlug: slug, name: name, stack: stack, preselectedKind: editKind
-                )
+                ) else { return }
                 onDemandEditCoordinator.describeRequest(request, kind: editKind)
             } else {
                 // Nothing picked yet: bind to the app in front and describe in
                 // one move, so the reader never has to discover a phrase.
-                _ = companionManager.beginOnDemandEditFromTheComposer(
+                guard companionManager.beginOnDemandEditFromTheComposer(
                     request: request, kind: editKind
-                )
+                ) else { return }
             }
+            typedMessage = ""
             return
         }
         send(typedMessage)
@@ -1961,7 +2379,7 @@ struct OverlayEyeInputBarView: View {
         // question. It must NOT register a chat exchange — no assistant answer
         // is coming for it, and the bar would otherwise sit waiting on one
         // forever.
-        if companionManager.beginOnDemandEditIfMessageIsAnEditInstruction(messageText) {
+        if effectiveComposerMode == .edit && companionManager.beginOnDemandEditIfMessageIsAnEditInstruction(messageText) {
             typedMessage = ""
             measuredAnswerTextHeight = 0
             // Keep the bar holding the keyboard — the edit card's describe field
@@ -1972,7 +2390,8 @@ struct OverlayEyeInputBarView: View {
             return
         }
 
-        companionManager.sendUserMessage(messageText)
+        guard accountService.canAnswerQuestions else { return }
+        companionManager.sendUserMessage(messageText, allowsEditRouting: false)
         exchange.registerTheReaderAsked(messageText)
         typedMessage = ""
         measuredAnswerTextHeight = 0
@@ -2003,5 +2422,70 @@ struct OverlayEyeInputBarView: View {
         DispatchQueue.main.async {
             theTextFieldHasKeyboardFocus = true
         }
+    }
+}
+
+/// One install status surface; the transcript and approval details live in its terminal.
+private struct IrisCompactInstallStatus: View {
+    @ObservedObject var runner: GuideAutopilotRunner
+    @ObservedObject var guide: GuideSessionController
+    let onShowTerminal: () -> Void
+
+    private var needsAttention: Bool {
+        if guide.autopilotHandedTheCurrentStepToTheReader { return true }
+        switch runner.state {
+        case .awaitingConfirmation, .awaitingReaderAtAPrompt, .surfacedToReader: return true
+        default: return false
+        }
+    }
+
+    private var status: String {
+        switch runner.state {
+        case .surfacedToReader: return "Install paused. A step failed."
+        case .awaitingConfirmation: return "Approval needed before continuing."
+        case .awaitingReaderAtAPrompt: return "Install paused at an interactive prompt."
+        case .finishedAllSteps: return "Finishing setup…"
+        case .stopped: return "Install stopped. Your place is saved."
+        default:
+            return guide.autopilotHandedTheCurrentStepToTheReader
+                ? "One step needs your help."
+                : (guide.stepTheReaderIsLookingAt?.title ?? "Preparing install…")
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Installing \(guide.guideBeingFollowed?.appName ?? "app")")
+                    .font(DS.Typography.label).lineLimit(1)
+                Spacer(minLength: 4)
+                if let branch = guide.selectedBranch, !branch.steps.isEmpty {
+                    Text("\(min(guide.currentStepIndex + 1, branch.steps.count))/\(branch.steps.count)")
+                        .font(DS.Typography.caption).foregroundColor(DS.Colors.textSecondary)
+                }
+            }
+            Text(status)
+                .font(DS.Typography.caption)
+                .foregroundColor(needsAttention ? DS.Colors.amber : DS.Colors.textSecondary)
+                .lineLimit(2)
+            HStack {
+                if guide.autopilotIsRunning {
+                    Button(needsAttention ? "Review step" : "Show terminal", action: onShowTerminal)
+                        .irisTinyButton()
+                } else {
+                    Button("Close") { guide.closeTheGuide() }
+                        .irisTinyButton()
+                }
+                Spacer(minLength: 0)
+                if guide.autopilotIsRunning {
+                    Button("Stop") { guide.abortOrCloseAutopilotFromTheEscapeHatch() }
+                        .irisTextButton(isDanger: true)
+                        .nativeTooltip("Stop this install and keep its place. App edits are unaffected.")
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(IrisShellBackground(cornerRadius: DS.CornerRadius.large))
     }
 }

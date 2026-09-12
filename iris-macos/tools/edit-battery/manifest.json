@@ -4,16 +4,16 @@
   "created": "2026-08-26",
   "purpose": "Measure multi-step code-editing competence of MaintainTierCFixer under different MaintainModelProviding arms. Single-turn protocol adherence is already measured elsewhere and is not what this battery is for.",
   "fixtures_root": "/Users/mannbellani/iris/iris-macos/tools/edit-battery/fixtures",
-  "task_count": 6,
+  "task_count": 7,
   "composition": {
     "easy-single-file": 2,
     "multi-file-cause-elsewhere": 2,
-    "feature": 1,
+    "feature": 2,
     "honesty-probe": 1
   },
   "languages": {
     "python": 2,
-    "javascript": 3,
+    "javascript": 4,
     "rust": 1
   },
   "dependencies": "none. Every task runs on python3 stdlib unittest, node's built-in test runner, or cargo with zero crates. No node_modules, no pip install, no network.",
@@ -270,6 +270,47 @@
         "verified_by_running": true
       },
       "anti_gaming": "The oracle holds a forged token whose payload is byte-identical to the genuine 2026-06 licence but signed by a key nobody vendored, plus a bit-flipped signature, plus a licence minted from a keypair generated inside the test at grade time. Any change that accepts the genuine token without holding the real key accepts these too."
+    },
+    {
+      "id": "t7-js-export-queue",
+      "class": "multi-component-feature",
+      "language": "javascript",
+      "stack": "electron",
+      "kind": "feature",
+      "expected_outcome": "fixed",
+      "probes": "A meaningful feature across a durable store, a serialized async queue, and a UI status facade. The worker and storage are injected seams, so the task can prove real async behavior without network or app installation.",
+      "request": "Please add a small export queue behind the export status panel. When I ask for an export, show it as waiting, process only one export at a time, let me cancel a waiting or running export, and let me retry an export that failed. If the app stops while one is running, pick it up after restart. Keep the queue on the app's storage boundary; the worker is injected so it must not call the network itself.",
+      "root_cause": "Not a single-line defect. The fixture's queue path does not yet provide serialized single-worker execution, durable progress, cancellation fencing, retry scheduling, interrupted-job recovery, and live controller subscriptions as one contract.",
+      "cause_file": "src/export-queue.js and src/export-controller.js",
+      "editable": [
+        "src/export-store.js",
+        "src/export-queue.js",
+        "src/export-controller.js",
+        "test/regression.test.js",
+        "docs/QUEUE.md",
+        "README.md"
+      ],
+      "harness_documentation": "docs/QUEUE.md",
+      "test_command": "node --test oracle.test.js",
+      "test_command_cwd": "the graded copy of the repo, after oracle.test.js has been dropped in",
+      "verification_commands_override": {
+        "buildCommand": "node --check src/export-store.js && node --check src/export-queue.js && node --check src/export-controller.js",
+        "testCommand": "node --test test/regression.test.js",
+        "commandSubdirectory": null
+      },
+      "f2p_groups": [
+        "F2P *"
+      ],
+      "p2p_groups": [
+        "P2P *"
+      ],
+      "fail_first_evidence": {
+        "in_repo_suite_at_t0": "5 tests, 5 pass",
+        "oracle_at_t0": "19 tests, 15 F2P failures and 4 P2P passes",
+        "oracle_after_reference_feature": "19 tests, 0 failures",
+        "verified_by_running": true
+      },
+      "anti_gaming": "The held-out tests hold workers on unresolved promises, inspect the injected storage after each transition, restart from a persisted running record, and observe controller subscriptions. A fake immediate completion, dropped worker call, or in-memory-only queue fails even when the happy-path smoke tests stay green."
     }
   ]
 }

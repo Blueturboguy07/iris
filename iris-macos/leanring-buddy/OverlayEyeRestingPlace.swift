@@ -17,6 +17,21 @@
 
 import Foundation
 
+/// Pointer locations come from the fixed overlay, never the moving eye's frame.
+/// Keeping both anchors immutable prevents accumulated movement and edge jumps.
+nonisolated struct OverlayEyeDragSession {
+    let initialHome: CGPoint
+    let initialPointer: CGPoint
+
+    func home(forPointer pointer: CGPoint, onScreenOfSize screenSize: CGSize) -> CGPoint {
+        OverlayEyeRestingPlace.clamped(
+            CGPoint(x: initialHome.x + pointer.x - initialPointer.x,
+                    y: initialHome.y + pointer.y - initialPointer.y),
+            toScreenOfSize: screenSize
+        )
+    }
+}
+
 /// The eye's home, remembered across launches.
 ///
 /// Stores a point in the SwiftUI coordinate space of the screen the eye rests

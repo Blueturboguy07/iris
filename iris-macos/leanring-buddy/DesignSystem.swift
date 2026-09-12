@@ -3,10 +3,9 @@
 //  leanring-buddy
 //
 //  Iris's design system. Every token here is transcribed from the Tauri pill's
-//  stylesheet (`iris-desktop/ui/styles.css`), which is the visual spec for
-//  Iris on every platform: a near-black glass surface, one periwinkle accent,
-//  ink-on-white primary buttons, and small, tight typography. If a value here
-//  disagrees with styles.css, styles.css wins.
+//  stylesheet (`iris-desktop/ui/styles.css`). The native test branch refines
+//  readability here: stronger secondary text and semantic typography, while
+//  preserving the eye, dark surfaces, and one recognizable accent.
 //
 
 import SwiftUI
@@ -28,9 +27,9 @@ enum DS {
         // (--surface-raised / --surface-hover), so layers pick up the
         // surface underneath instead of drifting toward a different hue.
 
-        /// The shell fill: `--surface: rgba(14, 14, 16, 0.94)`.
+        /// The shell fill: `--surface: rgba(14, 14, 16, 0.90)`.
         /// Slightly translucent so the backdrop blur reads through.
-        static let surface = Color(red: 14 / 255, green: 14 / 255, blue: 16 / 255).opacity(0.94)
+        static let surface = Color(red: 14 / 255, green: 14 / 255, blue: 16 / 255).opacity(0.90)
 
         /// For a surface that floats over whatever the reader happens to have
         /// open, rather than over Iris's own chrome.
@@ -77,11 +76,11 @@ enum DS {
         /// `--ink: #f7f7f8` — primary text.
         static let ink = Color(hex: "#F7F7F8")
 
-        /// `--muted: rgba(247,247,248,0.56)` — body copy, descriptions.
-        static let muted = ink.opacity(0.56)
+        /// Secondary text raised to 74% opacity for native overlay readability.
+        static let muted = ink.opacity(0.74)
 
-        /// `--quiet: rgba(247,247,248,0.34)` — step counters, timestamps, hints.
-        static let quiet = ink.opacity(0.34)
+        /// Tertiary text at 56% opacity. Never use this for critical warnings.
+        static let quiet = ink.opacity(0.56)
 
         /// Text on an ink-filled primary button: `.primary-action { color: #101013 }`.
         static let textOnInk = Color(hex: "#101013")
@@ -91,9 +90,9 @@ enum DS {
 
         // ── Accent and semantic colors ───────────────────────────────
 
-        /// `--accent: #6f8cff` — the one Iris accent. Indicators, progress,
+        /// Native accent #8ca9ff for indicators, progress,
         /// links, the eye's iris. Never a button fill (primary buttons are ink).
-        static let accent = Color(hex: "#6F8CFF")
+        static let accent = Color(hex: "#8CA9FF")
 
         /// `--accent-hover: #819aff`.
         static let accentHover = Color(hex: "#819AFF")
@@ -106,6 +105,23 @@ enum DS {
 
         /// `--red: #ff737d` — errors, destructive actions.
         static let red = Color(hex: "#FF737D")
+
+        // The eye renderers use these fixed website colors. Panel tokens may
+        // adapt to the native appearance without changing the eye itself.
+        static let eyeAccent = Color(hex: "#8CA9FF")
+        static let eyeGreen = Color(hex: "#58D5A5")
+        static let eyeQuiet = Color(hex: "#F7F7F8").opacity(0.56)
+
+        // Panel-only semantic colors keep controls readable while the shared
+        // eye tokens above remain stable for the overlay and panel eye.
+        static let panelAccent = accent
+        static let panelAccentHover = accentHover
+        static let panelSuccess = green
+        static let panelWarning = amber
+        static let panelDanger = red
+        static let panelQuiet = quiet
+        static let primaryActionHover = Color.white
+        static let shellGloss = Color.white.opacity(0.10)
 
         // ── The eye ──────────────────────────────────────────────────
 
@@ -148,7 +164,7 @@ enum DS {
         /// The pointing cursor on the screen overlay is the Iris accent —
         /// the same periwinkle as the eye's iris, so the thing flying around
         /// the screen is recognizably a piece of Iris.
-        static let overlayCursorBlue = accent
+        static let overlayCursorBlue = eyeAccent
 
         // ── Disabled State ───────────────────────────────────────────
 
@@ -161,6 +177,13 @@ enum DS {
         static var disabledText: Color {
             ink.opacity(0.38)
         }
+    }
+
+    enum Typography {
+        static let body = Font.system(size: 15, weight: .regular)
+        static let label = Font.system(size: 14, weight: .medium)
+        static let caption = Font.system(size: 13, weight: .regular)
+        static let heading = Font.system(size: 18, weight: .semibold)
     }
 
     // MARK: - Spacing (for reference, not enforced)
@@ -179,15 +202,15 @@ enum DS {
 
     enum CornerRadius {
         /// Tiny buttons, tool marks (`.tiny-button` 8px).
-        static let small: CGFloat = 8
+        static let small: CGFloat = 5
         /// Primary action pills (`.primary-action` 11px).
-        static let medium: CGFloat = 11
+        static let medium: CGFloat = 6
         /// Inputs, command blocks, cards (`.command-block` 12px).
-        static let large: CGFloat = 12
+        static let large: CGFloat = 8
         /// Sheets (`.settings-panel__sheet` 14px).
-        static let extraLarge: CGFloat = 14
+        static let extraLarge: CGFloat = 8
         /// The panel shell itself (`.app-shell` 16px).
-        static let shell: CGFloat = 16
+        static let shell: CGFloat = 10
         /// Pill-shaped elements.
         static let pill: CGFloat = .infinity
     }
@@ -219,10 +242,35 @@ enum DS {
 
 // MARK: - Iris Button Styles
 
-/// The primary action: an ink-white pill with near-black text, exactly
-/// `.primary-action` — hover brightens to pure white and lifts 1pt.
-/// One per view maximum.
+/// Selection stays a thin blue outline, not a blue panel behind every control.
+struct IrisSettingsSectionStyle: ButtonStyle {
+    let isSelected: Bool
+    @State private var isHovered = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundColor(isSelected ? DS.Colors.ink : DS.Colors.muted)
+            .frame(minHeight: 30)
+            .background(
+                RoundedRectangle(cornerRadius: DS.CornerRadius.small)
+                    .fill(isHovered || configuration.isPressed
+                          ? DS.Colors.surfaceHover : DS.Colors.surfaceRaised)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: DS.CornerRadius.small)
+                    .strokeBorder(isSelected ? DS.Colors.panelAccent : DS.Colors.line,
+                                  lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: DS.CornerRadius.small))
+            .onHover { isHovered = $0 }
+            .pointerCursor()
+    }
+}
+
+/// The primary action inverts the reading colors in either appearance.
+/// Hover preserves that contrast. Use one primary action per view.
 struct IrisPrimaryPillStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
     var isFullWidth: Bool = true
     /// Compact fits inline rows (Grant, Save); regular is the 36pt-tall CTA.
     var isCompact: Bool = false
@@ -231,44 +279,53 @@ struct IrisPrimaryPillStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: isCompact ? 10 : 11, weight: .bold))
-            .foregroundColor(DS.Colors.textOnInk)
+            .font(.system(size: isCompact ? 13 : 14, weight: .semibold))
+            .foregroundColor(isEnabled ? DS.Colors.textOnInk : DS.Colors.textSecondary)
             .frame(maxWidth: isFullWidth ? .infinity : nil)
-            .frame(minHeight: isCompact ? 24 : 36)
+            .frame(minHeight: isCompact ? 28 : 36)
             .padding(.horizontal, isCompact ? 10 : 15)
             .background(
                 RoundedRectangle(cornerRadius: isCompact ? DS.CornerRadius.small : DS.CornerRadius.medium, style: .continuous)
-                    .fill(isHovered ? Color.white : DS.Colors.ink)
+                    .fill(isEnabled
+                          ? (isHovered && !configuration.isPressed
+                             ? DS.Colors.primaryActionHover : DS.Colors.ink)
+                          : DS.Colors.disabledBackground)
             )
-            .offset(y: isHovered && !configuration.isPressed ? -1 : 0)
+            .overlay(
+                RoundedRectangle(cornerRadius: isCompact ? DS.CornerRadius.small : DS.CornerRadius.medium, style: .continuous)
+                    .strokeBorder(DS.Colors.lineStrong.opacity(isEnabled ? 0.72 : 0.35), lineWidth: 1)
+            )
             .scaleEffect(configuration.isPressed ? 0.985 : 1.0)
             .animation(DS.Motion.quick, value: configuration.isPressed)
             .animation(DS.Motion.quick, value: isHovered)
             .onHover { hovering in
                 isHovered = hovering
             }
-            .pointerCursor()
+            .opacity(isEnabled ? 1 : 0.6)
+            .pointerCursor(isEnabled: isEnabled)
     }
 }
 
 /// `.tiny-button`: a small raised chip with a hairline border. Supporting
 /// actions that sit inside rows — Copy, Pause, Sign out, Find App.
 struct IrisTinyButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
     @State private var isHovered = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 9, weight: .semibold))
+            .font(DS.Typography.label)
             .foregroundColor(DS.Colors.ink)
-            .frame(minHeight: 24)
+            .frame(minHeight: 30)
             .padding(.horizontal, 10)
             .background(
                 RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
-                    .fill(isHovered || configuration.isPressed ? DS.Colors.surfaceHover : DS.Colors.surfaceRaised)
+                    .fill(isHovered || configuration.isPressed
+                          ? Color(hex: "#353538") : Color(hex: "#29292C"))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
-                    .strokeBorder(DS.Colors.line, lineWidth: 1)
+                    .strokeBorder(DS.Colors.lineStrong, lineWidth: 1)
             )
             .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
             .animation(DS.Motion.quick, value: configuration.isPressed)
@@ -276,14 +333,18 @@ struct IrisTinyButtonStyle: ButtonStyle {
             .onHover { hovering in
                 isHovered = hovering
             }
-            .pointerCursor()
+            .opacity(isEnabled ? 1 : 0.45)
+            .contentShape(RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous))
+            .pointerCursor(isEnabled: isEnabled)
     }
 }
 
 /// `.text-button`: no background on any state; muted text that turns to ink.
 struct IrisTextButtonStyle: ButtonStyle {
-    var fontSize: CGFloat = 9
+    var fontSize: CGFloat = 12
     var isDanger: Bool = false
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var isHovered = false
 
@@ -292,19 +353,29 @@ struct IrisTextButtonStyle: ButtonStyle {
             .font(.system(size: fontSize, weight: .medium))
             .foregroundColor(
                 isDanger
-                    ? (isHovered || configuration.isPressed ? DS.Colors.red : DS.Colors.red.opacity(0.72))
+                    ? (isEnabled && (isHovered || configuration.isPressed) ? DS.Colors.ink : DS.Colors.red)
                     : (isHovered || configuration.isPressed ? DS.Colors.ink : DS.Colors.muted)
             )
-            .animation(DS.Motion.quick, value: configuration.isPressed)
-            .animation(DS.Motion.quick, value: isHovered)
+            .padding(.horizontal, isDanger ? 7 : 0)
+            .padding(.vertical, isDanger ? 4 : 0)
+            .background {
+                if isDanger {
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(DS.Colors.red.opacity(isEnabled && configuration.isPressed ? 0.32 : (isEnabled && isHovered ? 0.19 : 0.06)))
+                }
+            }
+            .contentShape(Rectangle())
+            .animation(reduceMotion ? nil : DS.Motion.quick, value: configuration.isPressed)
+            .animation(reduceMotion ? nil : DS.Motion.quick, value: isHovered)
             .onHover { hovering in
                 isHovered = hovering
             }
-            .pointerCursor()
+            .opacity(isEnabled ? 1 : 0.45)
+            .pointerCursor(isEnabled: isEnabled)
     }
 }
 
-/// `.icon-button`: a 28pt quiet square that shows a soft fill on hover.
+/// `.icon-button`: a compact square with a quiet boundary and hover fill.
 struct IrisIconButtonStyle: ButtonStyle {
     var size: CGFloat = 28
 
@@ -316,13 +387,17 @@ struct IrisIconButtonStyle: ButtonStyle {
             .foregroundColor(isHovered || configuration.isPressed ? DS.Colors.ink : DS.Colors.muted)
             .frame(width: size, height: size)
             .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(isHovered || configuration.isPressed ? DS.Colors.surfaceHover : Color.clear)
+                RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
+                    .fill(isHovered || configuration.isPressed ? DS.Colors.surfaceHover : DS.Colors.surfaceRaised)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
+                    .strokeBorder(DS.Colors.line, lineWidth: 1)
             )
             .scaleEffect(configuration.isPressed ? 0.93 : 1.0)
             .animation(DS.Motion.quick, value: configuration.isPressed)
             .animation(DS.Motion.quick, value: isHovered)
-            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous))
             .onHover { hovering in
                 isHovered = hovering
             }
@@ -344,7 +419,7 @@ extension View {
     }
 
     /// The bare text button (`.text-button`).
-    func irisTextButton(fontSize: CGFloat = 9, isDanger: Bool = false) -> some View {
+    func irisTextButton(fontSize: CGFloat = 12, isDanger: Bool = false) -> some View {
         self.buttonStyle(IrisTextButtonStyle(fontSize: fontSize, isDanger: isDanger))
     }
 
@@ -366,11 +441,24 @@ extension View {
 
 // MARK: - The Panel Shell
 
+private struct IrisUnifiedPanelKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var irisUsesUnifiedPanel: Bool {
+        get { self[IrisUnifiedPanelKey.self] }
+        set { self[IrisUnifiedPanelKey.self] = newValue }
+    }
+}
+
 /// The Iris glass shell (`.app-shell`): a translucent near-black fill over a
 /// backdrop blur, a periwinkle radial glow bleeding in from the top-left, a
 /// hairline border, and a deep soft shadow. Every floating Iris surface wears
 /// this — the menu bar panel today, the collapsed pill later.
 struct IrisShellBackground: View {
+    @Environment(\.irisUsesUnifiedPanel) private var usesUnifiedPanel
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     var cornerRadius: CGFloat = DS.CornerRadius.shell
 
     /// What sits between the blur and the content.
@@ -383,15 +471,24 @@ struct IrisShellBackground: View {
     var surface: Color = DS.Colors.surface
 
     var body: some View {
+        if usesUnifiedPanel {
+            Color.clear
+        } else {
+            standaloneShell
+        }
+    }
+
+    private var standaloneShell: some View {
         ZStack {
-            PanelBackdropBlurView()
+            if !reduceTransparency {
+                PanelBackdropBlurView()
+            }
 
             Rectangle()
-                .fill(surface)
+                .fill(reduceTransparency ? DS.Colors.background : surface)
 
-            // radial-gradient(circle at 16% -20%, rgba(111,140,255,0.12), transparent 44%)
             RadialGradient(
-                colors: [DS.Colors.accent.opacity(0.12), .clear],
+                colors: [DS.Colors.accent.opacity(0.045), .clear],
                 center: UnitPoint(x: 0.16, y: -0.2),
                 startRadius: 0,
                 endRadius: 260
@@ -402,7 +499,6 @@ struct IrisShellBackground: View {
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .strokeBorder(DS.Colors.shellBorder, lineWidth: 1)
         )
-        // box-shadow: 0 22px 70px rgba(0,0,0,0.45)
         .shadow(color: Color.black.opacity(0.45), radius: 35, x: 0, y: 22)
         .shadow(color: Color.black.opacity(0.28), radius: 5, x: 0, y: 3)
     }
@@ -535,6 +631,16 @@ extension View {
 // MARK: - Color Utilities
 
 extension Color {
+    /// Resolve with the hosting view's native appearance, including previews.
+    init(irisLight: String, dark: String) {
+        let lightColor = NSColor(Color(hex: irisLight))
+        let darkColor = NSColor(Color(hex: dark))
+        self.init(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                ? darkColor : lightColor
+        })
+    }
+
     /// Create a Color from a hex string like "#FF5733" or "FF5733".
     init(hex: String) {
         let hexSanitized = hex.trimmingCharacters(in: .whitespacesAndNewlines)

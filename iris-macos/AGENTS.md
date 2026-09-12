@@ -5,6 +5,12 @@
 
 ## Overview
 
+Account follow-up: installed build 25.16 retains the compact 25.15 UI and adds checked session persistence, typed Keychain read failures, single-flight refresh and stale-result guards. 153 isolated tests and native compilation passed. Actual launch reports saved-account Keychain read denial (-25293), not a missing token. The user's explicit saved-account Keychain approval and authenticated restart acceptance remain open. Never automate passwords or enable background authentication prompts. See IMPLEMENTATION_STATUS.md for evidence.
+
+Latest installed build: 25.15, September 5. The user rejected the 25.13 redesign, then requested the compact UI restoration, an eye drag fix and the existing engine fixes. Build 25.15 restores the dark compact composer, separate History/New chat controls and original eye, retaining app icons, readable text and request-specific loading state. Do not reintroduce the rejected unified shell or adaptive palette. Fixed overlay-space dragging, animation-free release and a common-mode pointer timer address snap-back. 134 usability tests and six inert chat-action tests passed; GUI build, native same-screen drags, edge return, close and restart position were checked. Cross-display drag and live model/edit capability are not accepted by these checks. Harness research remains separate and unmerged. See IMPLEMENTATION_STATUS.md for evidence.
+
+September 5 current UI direction: the user approved native implementation after reviewing the workflow prototypes. Keep the existing eye artwork, geometry and motion, with its fixed colors independent of the lighter panel palette. The earlier 25.12 hold is superseded by candidate 25.13. Do not make additional standalone prototypes unless requested. Current installation and acceptance evidence is in the separately maintained implementation-status record.
+
 Iris — the desktop assistant for publik. A text-first fork of Clicky by Farza (see NOTICE / LICENSE.upstream). macOS menu bar companion app. Lives entirely in the macOS status bar (no dock icon, no main window). Clicking the menu bar icon — or pressing the global summon hotkey (ctrl+option) — toggles a custom floating panel with a text input. The typed message + a screenshot of the user's screen(s) go to Claude; the response is shown as text in the panel. An eye overlay — Iris's eye, the same one the website draws — rides beside the pointer, watches it, and can fly to and point at UI elements Claude references on any connected monitor.
 
 Voice features (AssemblyAI/OpenAI/Apple Speech transcription, ElevenLabs TTS) and PostHog analytics were removed in the fork.
@@ -12,6 +18,235 @@ Voice features (AssemblyAI/OpenAI/Apple Speech transcription, ElevenLabs TTS) an
 Nothing sensitive ships in the app binary. The assistant reaches a model by exactly one of two routes: publik's funded endpoint (a Supabase-authenticated passthrough, where publik holds the Anthropic key) or the user's own Anthropic key stored in their Keychain. See "Assistant transports" below.
 
 ## Architecture
+
+### Isolated harness lab only
+
+September 11 follow-through candidate makes the captured verification routes
+visible before Test editing, without adding a model call or granting behavior
+coverage. Interrupted Undo also distinguishes actual delivered/restored app
+payloads from receipt phase. An exact pending marker, source identity and full
+matching backup can reconcile a swap that finished before its receipt write;
+explicit resume then skips the completed app swap. Ordinary saved receipts
+still cannot infer that recovery. See CURRENT_ACCEPTANCE.md for installed versus
+source-only evidence.
+
+The September 11 review-context fix includes registered authored native helper
+sources, not just filenames containing .test or .spec, in final behavior review
+and saved-change recheck. Code admission now defers those immutable fixture
+bodies to final review so product source and dependencies retain space; this
+does not credit native coverage or permit delivery. Manual test admission keeps
+the prior evidence selection. The existing confined file reader and 24-file/64 KiB
+limits still apply. Toolchain, generated, binary and config paths are excluded.
+The independent transfer oracle remains separate from physical UI acceptance.
+
+The next source candidate carries a transient, bounded code-admission handoff
+into native final review: exact diff and selected-file digests, fresh confined
+file reads and explicit omissions. Final review prioritizes complete native
+assertion bodies instead of repeating the admission context. It retains strict
+coverage parsing and blocks missing evidence or concrete defects. No new model
+call, persisted state or larger source-context limit is introduced. Installed
+and live acceptance remain separately recorded in CURRENT_ACCEPTANCE.md.
+
+September 11 candidate separates general Ask from app Edit in the existing
+composer. Two bounded in-memory drafts and attachment sets preserve unfinished
+edit work when New chat enters general help. Connection loss never changes Ask
+into Edit, and general chat omits implicit edit-task context. The candidate also
+adds a five-minute catalog cache lifetime and explicit refresh, counts-only
+usage attribution, bounded retry-review memory and non-destructive backup
+admission. These source changes are not installed-app acceptance; see
+`research/harness-v2/INTEGRATION_20260911.md` at the lab root.
+
+September 11 follow-through derives coverage obligations from exact answered
+product questions in the existing context projector. Stable question-derived
+IDs and fail-closed collisions keep them separate from original planner
+criteria. They remain transient; saved briefs/evidence and native admission
+semantics are unchanged. No additional planning call is made, and the existing
+32 KB projection cap applies. Current build and live acceptance remain separate
+in `research/harness-v2/CURRENT_ACCEPTANCE.md` at the lab root.
+
+Trial 13 (September 10) passed code tests but independent review found populated
+table deletion on Backspace; Iris refused installation and the original note
+was observed intact. Do not call word count accepted. It also exposed stale
+command deduplication after a real source edit. Keep lifetime investigation
+history separate from commands executed against unchanged source. Identical
+structured writes must not alter timestamps or count as progress. The bounded
+freshness fix and its inert regression do not establish complex-feature quality.
+Current build and native acceptance are recorded in
+`research/harness-v2/CURRENT_ACCEPTANCE.md` at the repository root.
+
+Trial 12 follow-up adds one diagnostic confined-suite run after the first actual
+repair write, while editing capacity remains. Its 30-second limit and exact
+pre-resolved command do not admit native execution or waive final verification.
+The same scrub-before-selection diagnostic excerpt preserves a useful early
+line and final tail inside 2,000 characters. Executable regressions exercise
+repair feedback, Stop after write, final-review reserve and absent-suite guards.
+These checks are not native feature acceptance; see CURRENT_ACCEPTANCE.md.
+
+Current September 10 acceptance supersedes historical pending statements below:
+Iris Test `21484d19` completed native PlantGPT saved-change recheck, manual-test
+delivery, relaunch and restart-selected Undo, alongside the earlier NitroAI
+lifecycle acceptance. Recheck pins the retained staged source and uses fresh
+build/review without maker or repair calls. Restart Undo validates the durable
+record, receipt, registry and app/source identities before explicit Retry;
+same-branch recovery detaches at the baseline while retaining the edit branch.
+Graceful relaunch handles an already-running restored app without force quit.
+This does not prove complex-feature reliability. See CURRENT_ACCEPTANCE.md
+and LIVE_CAMPAIGN_RESULTS.md under the lab's research/harness-v2 directory.
+
+| Recovery source | Approximate lines | Purpose |
+| --- | --- | --- |
+| `PendingEditCandidateIdentity.swift` | 236 | Pins retained staged source, index, paths, branch and base before recheck. |
+| `MaintainSavedChangeRechecker.swift` | 603 | Existing candidate build/review/commit path with no new maker edits. |
+| `InterruptedUndoResumeIdentity.swift` | 200 | Read-only binding of exact interrupted Test Undo source and app payloads. |
+
+September 9 recovery candidate: `SavedEditDeliveryIdentity.swift` pins delivery
+retries to the exact clean saved branch and commit, without another model edit.
+`AppDeliveryReceiptStore.swift` records prepared/installed/restored app-file
+delivery locations durably; prepared is not installed, and app-file restoration
+does not imply restored source, documents, or successful behavior. The collapsed
+`SavedAppVersionsSection.swift` exposes these records after restart. Checked
+`PatchQueue.recordChecked` failures prevent automatic delivery. Standalone
+receipt/delivery/retry checks and actual native acceptance remain distinct.
+
+Installed-delivery routes split quit from launch so replacement waits for the
+old process to exit. A refused quit retains the existing force-quit consent.
+Launch failure reports prior-app recovery only after a successful reopening;
+failed recovery stays explicit. A restored backup clears the edited-copy
+installed flag. The next Iris Test candidate wires exact registered fixture
+replacement and receipt-bound restore through `IrisTestAppDelivery.swift`.
+No normal-app lookup is allowed. This source change is not yet installed or
+accepted through the actual UI; see `research/harness-v2/LIVE_CAMPAIGN_RESULTS.md`
+from the worktree root for current evidence.
+
+September 10 integration adds source-aware receipts with streamed app-payload
+digests, restart-selected Undo, and separate quit/restore/relaunch callbacks.
+The delivery service and coordinator share the same receipt store. Test apps
+are resolved by their exact registry paths, and their stack is detected rather
+than assumed to be Electron. `HarnessModelSession` measures each serialized
+candidate before admission; edit/repair requests that would consume the
+independent-review allowance yield to verification without spending a call.
+Intake records distinguish product choices from implementation questions and
+preserve user decisions across refinements. None of these source/build checks
+alone proves successful installed-app delivery or restored user behavior.
+
+Failed model runs check actual porcelain status before claiming unchanged
+source. A review-held incomplete-edit record survives dismissal and restart.
+`FailedEditReviewArchive.swift` preserves its exact metadata before a new clean
+run replaces the active record; it does not archive the source or app itself.
+Opening runtime screenshots are sent once per edit, with relevant observations
+retained as text. Later attachments are preserved and actual sent bytes remain
+fully metered. Git warnings are not valid porcelain file records.
+Independent review prioritizes complete test files within the collector's
+existing 64 KiB ceiling, labels a diff that exceeds its 64 KiB handoff cap,
+and carries bounded observed test output. A pending operator-declared native
+lane is not a passed test, nor an editor-authored disabled test. Code admission
+and final runtime acceptance remain distinct requirements.
+
+September 10 follow-up keeps reviewer diagnostics in the existing bounded repair
+loop. Only findings from the current rejected admission/final review may enter
+repair; cancellation, registry changes and native-suite failures cannot reuse
+stale findings. Scrubbing precedes truncation. One-hop source context interleaves
+imports across changed files without increasing the 24-file/64 KiB ceilings.
+These regressions do not themselves prove live feature installation or Undo.
+
+September 10 live acceptance: the 9315aa46 Test candidate generated a visible
+NitroAI fixture label change, packaged and replaced that isolated installed app,
+and relaunched it. Root observed the new labels and preserved note through
+computer use. After quitting and reopening Iris Test, Saved app versions Undo
+restored the original app and clean source baseline and reopened the original
+labels with the note intact. That run exposed stale forward-delivery wording
+after Undo. Candidate 63ed1676 includes distinct pending/restored presentation
+with state regressions, but its successful Undo message still needs fresh
+computer-use acceptance. This one Electron label trial is not complex-feature
+or second-stack acceptance.
+
+The next Test-only candidate adds deterministic selected-answer presentation
+from the existing revisioned task decisions, with no extra model call. Its
+explicit manual-test preview is restricted to exact registered feature targets
+without a resolved test command or native declaration, successful build and
+clean review. Missing behavior coverage stays unverified and the automatic
+delivery gate is unchanged. Preview commit and registry identity are rechecked
+at click time and through packaging before quit. Not now retains the branch;
+generic retry cannot silently drop the candidate's destination binding. This
+source route requires native acceptance before claiming second-stack delivery.
+
+The maker's existing command recap now permits in-sandbox test commands and
+requires criterion-level executed evidence before DONE. Per-app run memory may
+store an optional, scrubbed 600-character last verification failure; legacy
+records remain readable and are not backfilled. Historical failure evidence
+does not establish current source state. The full memory prompt retains its
+1,500-character ceiling and reports only records actually serialized.
+
+Nontechnical intake asks consequential product choices before optional details,
+keeps credentials separate unless explicitly requested, and uses repository
+evidence for technical decisions. Vague requests are not approval to expand the
+scope to every subsystem. Real model question quality must be observed separately
+from deterministic clarification state tests.
+`RepoRecipeShippingEvidence.swift` uses conservative, read-only Electron
+entrypoint and packaging declarations to keep leftover Tauri scaffolding from
+selecting the wrong verification recipe. Explicit competing packaging routes
+retain ambiguity; this is not proof that either app can be packaged or launched.
+
+`tools/harness-feature-host` compiles a headless fixture host with
+`IRIS_HARNESS_HEADLESS`. It uses the real planner/provider/editor without
+constructing application, account, recovery or publishing services. The flag
+isolates tracing, temporary paths and shell execution for the test host only;
+it is not a normal-app preference. `HarnessFixtureEnvironment.swift` supplies
+the explicit private scratch path because Foundation may ignore TMPDIR.
+See that host's README for the allowed fixture and preflight/grade boundaries.
+Never treat its source-level feature check as a native app installation.
+
+The lab adds bounded written-answer refinement through `HarnessFeatureWorkflow`
+and `HarnessBehaviorAssessment.swift` (about 100 lines). The latter records
+reviewer-supported test references per acceptance criterion, not physical UI
+proof. One budgeted repair can investigate missing coverage. Experimental
+automatic delivery also requires the exact reviewed diff revision. The shared
+coordinator owns its edit task through recovery; Cancel cannot reset a live edit
+into another app. See `research/harness-v2/IMPLEMENTATION.md` for current evidence.
+
+Scope-changing clarification stays pending until an exact-ID user decision.
+Approval replaces obsolete criteria, limits, milestones and model assumptions;
+rejection records that the earlier contract wins over a conflicting answer.
+`HarnessExecutionJournal.swift` retains bounded executor observations, never
+acceptance claims. `HarnessConversationProjection.swift` removes only historical
+patch payloads confirmed by actual structured-edit and changed-file events.
+It preserves user messages, failed edits, images and the latest two replies.
+Byte accounting is not a token or cost measurement. Both remain lab-route only.
+The lab provider preserves the final model call for independent review. The
+executor may enter ordinary verification at that boundary without model DONE;
+it earns no acceptance credit and must not retry a failed suite using the
+reserve. Real-executor inert checks live in `HarnessReviewReserveChecks.swift`.
+For a captured native declaration it reserves two calls: strict code admission,
+then final behavior review after observed native results. Admission never earns
+behavior coverage or L6 credit. `HarnessNativeVerificationSequence.swift` checks
+cancellation and exact reviewed source around native execution and final review.
+It authorizes no new command or permission and does not reserve input bytes.
+`HarnessNativeReviewChecks.swift` exercises that sequence with inert callbacks.
+
+Free-text answers remain unresolved until the existing refinement reply names
+their pending IDs in `resolvedQuestionIDs`. Options are local decisions;
+uncertain text is not approval. Changed answers advance the revision so old
+evidence cannot satisfy a changed choice. Keep this in the existing workflow,
+not another planner or UI panel. Live question quality and deterministic state
+gates are separate checks.
+
+Codex subprocesses own a process group. Input uses a per-descriptor SIGPIPE
+guard and nonblocking, cancellable writes. Output readers have a bounded exit
+wait; detached helpers cause a reported failure, not a success claim. The
+offline production-path checks are in `tools/codex-provider-process-tests`.
+Verification diagnostics are redacted before the final output cap. The jail
+allows signals only to the same sandbox so test runners can stop their workers.
+
+Iris Test can declare separate confined and native verification lanes for a
+registered staged project. `IrisTestVerificationPlan.swift` captures that exact
+operator declaration before editing. `IrisTestNativeVerification.swift` uses
+fixed argv, checked executable/fixture hashes, a stripped environment and a
+deadline. The native lane runs only after clean independent review, and source
+must still match the reviewed diff afterward. Both lanes are required before
+the suite is reported green. This is not an arbitrary-command retry outside
+the jail. Native apps are same-user processes, not OS-contained; do not claim
+the shell's filesystem or network restrictions apply to them. The operator's
+trusted test declaration and checks are separate from model-authored code.
 
 - **App Type**: Menu bar-only (`LSUIElement=true`), no dock icon or main window
 - **Framework**: SwiftUI (macOS native) with AppKit bridging for menu bar panel and cursor overlay
@@ -151,6 +386,7 @@ Also from Publik Test 2, a requested SETTING: **"Edit terminal → Start minimiz
 
 | File | Lines | Purpose |
 |------|-------|---------|
+| `HarnessNativeVerificationSequence.swift` | ~460 | Declared native check ordering, bounded route context, source-bound admission handoff and registered helper-source selection. Strict source admission, cancellation/revision checks, native execution and final evidence review. No command authorization or behavior oracle. |
 | `leanring_buddyApp.swift` | ~157 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. Receives every `iris://` link via `application(_:open:)`, parses it with `IrisDeepLinkParser`, and hands a guide link to `GuideSessionController`. |
 | `CompanionManager.swift` | ~1673 | Central state machine. Owns summon hotkey monitoring, screen capture, the `AccountService`, the Claude API, overlay management, maintain mode, and the on-demand edit coordinator. Tracks assistant state (idle/capturing/thinking/pointing), conversation history, model selection, and cursor visibility. Coordinates the typed message → screenshot → Claude → text response → pointing pipeline via `sendUserMessage`, and maps transport failures to user-visible text. |
 | `MenuBarPanelManager.swift` | ~302 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/toggle/position), installs click-outside-to-dismiss monitor. Observes `.clickyTogglePanel` posted on summon hotkey press, `.clickyShowPanel` posted when a guide link arrives, and `.clickyResizePanelToContent` posted when the panel's SwiftUI content changes height on its own. |
@@ -171,7 +407,7 @@ Also from Publik Test 2, a requested SETTING: **"Edit terminal → Start minimiz
 | `EditTerminalStartMinimizedPreference.swift` | ~55 | The persisted opt-in behind the "Edit terminal → Start minimized" setting (`UserDefaults`, `nonisolated`, mirrors `AutopilotAutonomyGrant`). When on, `reactToOnDemandEditPhase(.running)` skips the centered takeover so an on-demand edit starts minimized (the running card's "Show terminal" button reopens it). Scoped to edits, not guides (guides park on manual steps and keep a terminal inline). |
 | `SelectionTextField.swift` | ~470 | Images into the bar: the cmd-V interception (a zero-size view claiming the key equivalent before the field editor), `OverlayEyePastedImageReader` (pasteboard, drag pasteboard, and file readers; bounded to 1280px / 1.5MB PNG-else-JPEG), and `OverlayEyePastedImageAttachment`, the bounded list (four) of images riding the next message, taken — not read — by the send path. |
 | `OverlayEyeInputBarPanelManager.swift` | ~120 | The thumbnail row above the field: one thumbnail with its own × per attached image, and the caption saying the screen goes too. `EmptyView` when nothing is attached. |
-| `OverlayEyeInputBar.swift` | ~1940 | The bar that opens under the eye and the whole exchange inside it: a compact Sonnet/Opus model picker (bound to `companionManager.selectedModel`, mirroring the settings picker) on a thin row above the field, then the field, the chips, the question echo, the working line, the scrolling answer, the failure sentence in the same slot, and the close button. Its own `.nonactivatingPanel` so it can take keystrokes without activating Iris and without the full-screen overlay ever needing to become key — and so it can grow with an answer without touching the overlay's click-through gate. Owns the keyboard hand-back on send. Sends through `CompanionManager.sendUserMessage` — no second pipeline, and no hand-off to the menu bar panel. |
+| `OverlayEyeInputBar.swift` | ~2360 | Eye conversation and context-aware app composer in its own nonactivating panel. Unified shell, dedicated History view, confirmed New chat with unsent work, contextual task actions and pending-request presentation. Navigation preserves drafts and does not change overlay click-through. |
 | `OverlayIrisEyeView.swift` | ~730 | The on-screen eye, transcribed from the website (`components/iris/IrisEye.tsx` plus the `.iris-eye*` rules in `app/globals.css`): track, shell, blinking lid, striated iris, pupil and glint. Also `IrisEyePupilGeometry`, the pure maths for where the iris sits — AppKit screen coordinates in, SwiftUI offsets out, one y flip, clamped so the pupil never leaves the lid — and `IrisEyeGazeTracker`, which decides whether to watch the pointer or fall back to the idle wander. Also `OverlaySettingsGearView`, the gear the eye becomes while the input bar is open — same diameter, same shell, same shadow, so the swap reads as one object changing what it offers. Distinct from `IrisEyeView.swift`, which is the smaller panel-header eye from the Tauri shell. |
 | `CompanionResponseOverlay.swift` | ~217 | SwiftUI view for a cursor-following response text bubble. Currently unused by the pipeline (responses render in the panel) but kept compiling. |
 | `CompanionScreenCaptureUtility.swift` | ~132 | Multi-monitor screenshot capture using ScreenCaptureKit. Returns labeled image data for each connected display. |
@@ -184,7 +420,8 @@ Also from Publik Test 2, a requested SETTING: **"Edit terminal → Start minimiz
 | `AccountService.swift` | ~797 | Supabase auth with no SDK: PKCE OAuth in the system browser (`ASWebAuthenticationSession`), email+password, and refresh-token rotation. Publishes signed-in state; owns the user's BYO key, validated on entry with a `count_tokens` call. Reuses `DeepLinkParser` for the `iris://auth/callback` case. |
 | `KeychainStore.swift` | ~160 | The only code that touches the Keychain. Stores a small fixed set of secrets under service `com.publikhq.iris`: the BYO Anthropic key, the Claude Code OAuth token, the OpenAI key, the Supabase refresh token, and the GitHub token pair. Never logs any. (Claude Code's OWN login lives under a different service, `Claude Code-credentials`, read only by `ClaudeCodeLogin`'s import.) |
 | `ElementLocationDetector.swift` | ~335 | Detects UI element locations in screenshots for cursor pointing. |
-| `DesignSystem.swift` | ~460 | Iris design tokens transcribed from `iris-desktop/ui/styles.css` (the visual spec): the dark glass shell, the `#6f8cff` accent, ink-on-dark primary pills, motion curves, and the Iris button styles (`irisPrimaryPill`, `irisTinyButton`, `irisTextButton`, `irisIconButton`) plus `IrisShellBackground`. If a value here disagrees with styles.css, styles.css wins. |
+| `DesignSystem.swift` | ~700 | Native pearl/slate panel tokens, compact control styles and unified-panel environment. Fixed eye colors are separate from adaptive panel colors to preserve the existing eye. |
+| `IrisChatLoadingBar.swift` | ~81 | Stateless indeterminate blue activity line with bounded redraw schedule and static Reduce Motion fallback. Mount only for an actual pending request; no percentage or simulated completion. Preview contains no app/account state. |
 | `IrisEyeView.swift` | ~140 | The animated Iris eye from `.iris-eye`: blinking lid, pointer-following iris, mood satellite (green while watching/done, ring tint while thinking, slit while paused), and an optional progress ring used while a guide is open. Shown in the panel header; the menu bar icon is its static twin. |
 | `WindowPositionManager.swift` | ~312 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. Also `launchNewInstance(ofApplicationAt:)` — the target-bundle-keyed "start a fresh instance" primitive (`relaunchToApplyPermissions` is its self-relaunch special case) that `AppRelaunchService` launches an edited clone build through. |
 | `OnDemandEditCoordinator.swift` | ~3800 | The user-initiated on-demand edit phase machine (pick → describe → clarify/plan → consent → run → preview keep/discard → deliver-over-installed → relaunch → done), all safety rails live-checked; injected seams for the request probe, the engine call, fork backup, packaging, over-install delivery (`deliverEditedAppOverInstalledApp` / `restoreInstalledAppFromBackup`), relaunch, and public publish. A FEATURE run injects `featureVisibilityGuidance` so the requested behavior is visible by default, never buried behind an unrequested off-by-default toggle (founder, Sep 2 2026). The describe step runs `FeatureEditRequestProbe` off-path (published `isAssessingRequest`, generation-guarded, 20s fail-open watchdog) so the two model-derived §7 triggers are live. A mid-run credential rejection maps to a settings-offering failure (`mappedFailure`, now static + unit-tested). The up-front scope refusal and the Tier C step budget were removed by founder decision (Aug 20 2026) — the loop runs until DONE or a genuine stall, under a distant runaway backstop, with the sent conversation windowed on long runs. Since Aug 21 2026 it also streams the engine's live progress (`presentEngineProgress`) into the terminal + status line and owns the reader-stop latch (`stopRunningEdit` / `readerAskedToStopTheRun`), presenting a stop as a calm "nothing was changed" ending. |
@@ -205,6 +442,11 @@ Also from Publik Test 2, a requested SETTING: **"Edit terminal → Start minimiz
 | `MaintainFixCommit.swift` | ~86 | The one place a verified tree becomes a commit on a fresh branch: branch naming + commit script + structured trailer block (no `Co-Authored-By`), parameterized by change id and trailer vocabulary. Shared by `RecipeReplayEngine`, the crash path, and on-demand. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
 | `worker/src/index.ts` | ~142 | Cloudflare Worker proxy, kept as a wire-format reference. Only `/chat` (Claude) is used by the app. |
+| `DeliveredEditUndoRecovery.swift` | ~51 | In-memory Undo checkpoints and the checked source-restore command. Retry skips completed stages; failures retain recovery information. Dirty or moved source is refused, and the edit branch is retained. Isolated driver and disposable Git fixtures do not establish native app-restoration or restart recovery. |
+| `DeliveredEditUndoRecoveryStore.swift` | ~105 | Saves minimal metadata before Undo, refuses overwrite and exposes interrupted/corrupt records for review. Uncertain bundle swaps are never automatically replayed. |
+| `DeliveredEditUndoArchive.swift` | ~149 | Stop Undo archives exact bounded record bytes before clearing the active marker. Valid archives protect affected slugs and overlapping app/clone/backup paths; unrelated targets remain usable. Unknown targets fail closed. Stop never restores an app or moves a backup. |
+| `SavedUndoRecoverySection.swift` | ~37 | Persistent read-only access to stopped-Undo records in General settings. Does not delete archives or mark recovery complete. |
+| `PatchQueueCheckedRemoval.swift` | ~51 | Checked, exact-record queue removal for Undo. Verifies identity and absence, refuses conflicting paths, and preserves a visible failure for retry. Other queue callers retain their existing semantics. |
 
 ## Build & Run
 

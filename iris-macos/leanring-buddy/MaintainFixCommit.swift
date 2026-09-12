@@ -88,9 +88,17 @@ enum MaintainFixCommit {
     /// makes the caller's revert-and-report-honestly path correct.
     static func commitOnBranch(
         plan: MaintainFixCommitPlan,
-        runner: MaintainShellRunner
+        runner: MaintainShellRunner,
+        preservingCurrentBranch: Bool = false,
+        validateBeforeCommit: (@MainActor () async -> Bool)? = nil
     ) async -> String? {
-        let branchName = branchName(prefix: plan.branchPrefix, changeId: plan.changeId)
+        let branchName: String
+        if preservingCurrentBranch {
+            guard let current = await currentBranchName(runner: runner) else { return nil }
+            branchName = current
+        } else {
+            branchName = Self.branchName(prefix: plan.branchPrefix, changeId: plan.changeId)
+        }
         // Subject, a blank line, then the trailer block — the exact shape the
         // provenance and founder-review checks parse.
         let commitMessage = ([plan.subject, ""] + plan.trailerLines).joined(separator: "\n")
@@ -98,29 +106,71 @@ enum MaintainFixCommit {
         // Step one: get onto the branch, and prove it. Nothing is committed
         // until this holds, so a failed checkout can no longer leak a commit
         // onto whichever branch the clone was already on.
-        _ = try? await runner.run(
-            "git checkout -b '\(branchName)' 2>/dev/null || git checkout '\(branchName)'",
-            deadline: 60
-        )
+        if !preservingCurrentBranch {
+            let checkoutResult: MaintainCommandResult
+            do {
+                checkoutResult = try await runner.run(
+                    "git checkout -b '\(branchName)' 2>/dev/null || git checkout '\(branchName)'",
+                    deadline: 60
+                )
+            } catch {
+                irisTrace("maintain: branch checkout could not run - " + Self.sanitizedDiagnostic(String(describing: error)))
+                return nil
+            }
+            guard checkoutResult.succeeded else {
+                irisTrace("maintain: branch checkout failed exit=" + String(checkoutResult.exitCode)
+                    + " timedOut=" + String(checkoutResult.timedOut)
+                    + " diagnostic=" + Self.sanitizedDiagnostic(checkoutResult.outputTail))
+                return nil
+            }
+        }
         guard let branchNow = await currentBranchName(runner: runner), branchNow == branchName else {
             irisTrace("maintain: could not get onto \(branchName) — nothing committed")
             return nil
         }
 
         // Step two: commit, now that where it will land is known.
-        let commitScript = "git add -A && git commit -m "
+        let commitInvocation = runner.isTestProcessPolicy
+            ? "git -c user.name='Iris Test' -c user.email='iris-test@localhost' commit --no-gpg-sign -m "
+            : "git commit -m "
+        // A resumed candidate already has an exact staged identity. Do not
+        // switch branches or add later working files into that saved change.
+        let commitScript = (preservingCurrentBranch ? "" : "git add -A && ") + commitInvocation
             + "'\(commitMessage.replacingOccurrences(of: "'", with: "'\\''"))' --quiet"
 
-        let headBeforeCommit = await currentHeadCommitHash(runner: runner)
-        _ = try? await runner.run(commitScript, deadline: 60)
-        let headAfterCommit = await currentHeadCommitHash(runner: runner)
-
-        // An unborn HEAD (a repo with no commits yet) reads as nil on both
-        // sides, and nil == nil would look like "did not move" — but a first
-        // commit DOES move it, from nil to a hash, so the inequality is the
-        // right test in every case including that one.
-        guard headAfterCommit != headBeforeCommit, headAfterCommit != nil else {
-            irisTrace("maintain: commit on \(branchName) did NOT create a commit — HEAD did not move")
+        let headBeforeCommit = await currentHeadCommitState(runner: runner)
+        if case .unreadable = headBeforeCommit {
+            irisTrace("maintain: could not read HEAD before committing on " + branchName)
+            return nil
+        }
+        if let validateBeforeCommit, !(await validateBeforeCommit()) { return nil }
+        let commitResult: MaintainCommandResult
+        do {
+            commitResult = try await runner.run(commitScript, deadline: 60)
+        } catch {
+            irisTrace("maintain: commit could not run on " + branchName + " - "
+                + Self.sanitizedDiagnostic(String(describing: error)))
+            return nil
+        }
+        guard commitResult.succeeded else {
+            irisTrace("maintain: commit failed on " + branchName
+                + " exit=" + String(commitResult.exitCode)
+                + " timedOut=" + String(commitResult.timedOut)
+                + " diagnostic=" + Self.sanitizedDiagnostic(commitResult.outputTail))
+            return nil
+        }
+        let headAfterCommit = await currentHeadCommitState(runner: runner)
+        guard case .commit(let headAfterHash) = headAfterCommit else {
+            irisTrace("maintain: commit on \(branchName) could not verify the resulting HEAD")
+            return nil
+        }
+        switch headBeforeCommit {
+        case .commit(let headBeforeHash) where headAfterHash == headBeforeHash:
+            irisTrace("maintain: commit on \(branchName) did NOT create a commit - HEAD did not move")
+            return nil
+        case .commit, .unborn:
+            break
+        case .unreadable:
             return nil
         }
         return branchName
@@ -132,19 +182,87 @@ enum MaintainFixCommit {
     /// branch, which is exactly the state a fresh `checkout -b` leaves a repo
     /// with no commits in.
     private static func currentBranchName(runner: MaintainShellRunner) async -> String? {
-        guard let result = try? await runner.run("git symbolic-ref --short HEAD", deadline: 30),
-              result.succeeded else { return nil }
-        let name = result.outputTail.trimmingCharacters(in: .whitespacesAndNewlines)
-        return name.isEmpty ? nil : name
+        do {
+            let result = try await runner.run("git symbolic-ref --short HEAD", deadline: 30)
+            guard result.succeeded else {
+                irisTrace("maintain: branch read failed exit=" + String(result.exitCode)
+                    + " timedOut=" + String(result.timedOut)
+                    + " diagnostic=" + sanitizedDiagnostic(result.outputTail))
+                return nil
+            }
+            let name = result.outputTail.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else {
+                irisTrace("maintain: branch read returned no branch")
+                return nil
+            }
+            return name
+        } catch {
+            irisTrace("maintain: branch read could not run - " + sanitizedDiagnostic(String(describing: error)))
+            return nil
+        }
     }
 
-    /// The current HEAD commit hash, or nil when there is none to read (an
-    /// unborn HEAD, or a git invocation that failed outright).
-    private static func currentHeadCommitHash(runner: MaintainShellRunner) async -> String? {
-        guard let result = try? await runner.run("git rev-parse HEAD", deadline: 30),
-              result.succeeded else { return nil }
-        let hash = result.outputTail.trimmingCharacters(in: .whitespacesAndNewlines)
-        return hash.isEmpty ? nil : hash
+    private enum HeadCommitState {
+        case commit(String)
+        case unborn
+        case unreadable
+    }
+
+    /// Reads the current committed HEAD. An unborn branch is allowed for the
+    /// first commit, while any other unreadable state refuses success.
+    private static func currentHeadCommitState(runner: MaintainShellRunner) async -> HeadCommitState {
+        do {
+            let result = try await runner.run("git rev-parse --verify 'HEAD^{commit}'", deadline: 30)
+            if result.timedOut {
+                irisTrace("maintain: HEAD read timed out")
+                return .unreadable
+            }
+            if result.succeeded {
+                let hash = result.outputTail.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !hash.isEmpty else {
+                    irisTrace("maintain: HEAD read returned no commit")
+                    return .unreadable
+                }
+                return .commit(hash)
+            }
+
+            let symbolicRefResult = try await runner.run("git symbolic-ref --quiet HEAD", deadline: 30)
+            guard symbolicRefResult.succeeded, !symbolicRefResult.timedOut else {
+                irisTrace("maintain: symbolic HEAD read failed exit=" + String(symbolicRefResult.exitCode)
+                    + " timedOut=" + String(symbolicRefResult.timedOut)
+                    + " diagnostic=" + sanitizedDiagnostic(symbolicRefResult.outputTail))
+                return .unreadable
+            }
+            let symbolicRef = symbolicRefResult.outputTail.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard symbolicRef.hasPrefix("refs/"), !symbolicRef.contains("\n"), !symbolicRef.contains("\r") else {
+                irisTrace("maintain: symbolic HEAD read returned an invalid reference")
+                return .unreadable
+            }
+
+            let referenceResult = try await runner.run(
+                "git show-ref --verify --quiet " + shellSingleQuoted(symbolicRef), deadline: 30)
+            if referenceResult.exitCode == 1, !referenceResult.timedOut {
+                return .unborn
+            }
+            irisTrace("maintain: HEAD reference probe refused exit=" + String(referenceResult.exitCode)
+                + " timedOut=" + String(referenceResult.timedOut)
+                + " diagnostic=" + sanitizedDiagnostic(referenceResult.outputTail))
+            return .unreadable
+        } catch {
+            irisTrace("maintain: HEAD read could not run - " + sanitizedDiagnostic(String(describing: error)))
+            return .unreadable
+        }
+    }
+
+    private static func sanitizedDiagnostic(_ rawText: String) -> String {
+        let scrubbed = GuideAutopilotOutputBuffer.scrubbed(rawText)
+        let singleLine = scrubbed.split(whereSeparator: { $0.isNewline }).joined(separator: " ")
+        let bounded = String(singleLine.trimmingCharacters(in: .whitespacesAndNewlines).prefix(240))
+        return bounded.isEmpty ? "no diagnostic" : bounded
+    }
+
+    private static func shellSingleQuoted(_ rawText: String) -> String {
+        "'" + rawText.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     /// The branch name a change lands on. Kept public and pure so a caller

@@ -48,6 +48,9 @@ struct OverlayEyeInputBarDraft: Equatable {
     /// path ignores it.
     var editKind: OnDemandEditKind = .bugFix
 
+    /// The catalog slug this edit draft belongs to. Ask drafts leave this nil.
+    var editAppSlug: String?
+
     /// Whether there is anything worth restoring. Whitespace-only is treated as
     /// empty, so a stray space the reader left behind never reopens the bar onto
     /// a "draft" that is really blank.
@@ -64,6 +67,49 @@ struct OverlayEyeInputBarDraft: Equatable {
 /// happened to show it.
 @MainActor
 final class OverlayEyeInputBarDraftStore {
+    enum Mode: Equatable { case edit, ask }
+    private(set) var mode: Mode = .ask
+    private var inactiveDraft = OverlayEyeInputBarDraft()
+
+    /// The one edit draft, whether it is the active composer or parked behind
+    /// the Ask mode. It is deliberately one value, not a per-app collection.
+    private var editDraft: OverlayEyeInputBarDraft {
+        mode == .edit ? draft : inactiveDraft
+    }
+
+    var generalHelpHasDraft: Bool {
+        (mode == .ask ? draft : inactiveDraft).thereIsSomethingToRestore
+    }
+
+    /// A settings retarget must not move nonempty edit text to another app.
+    /// This is a read-only check; the caller decides how to explain or confirm
+    /// the conflict before it changes the coordinator.
+    func editDraftConflicts(withAppSlug appSlug: String, hasAttachments: Bool = false) -> Bool {
+        let requestedSlug = appSlug.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !requestedSlug.isEmpty,
+              (editDraft.thereIsSomethingToRestore || hasAttachments),
+              let existingSlug = editDraft.editAppSlug?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !existingSlug.isEmpty
+        else { return false }
+        return existingSlug != requestedSlug
+    }
+
+    /// Binds the active edit draft to the selected catalog app after the
+    /// coordinator has accepted that selection.
+    func associateEditDraft(withAppSlug appSlug: String) {
+        let normalizedSlug = appSlug.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedSlug.isEmpty else { return }
+        if mode == .edit {
+            draft.editAppSlug = normalizedSlug
+        } else {
+            inactiveDraft.editAppSlug = normalizedSlug
+        }
+    }
+
+    func clearGeneralHelp() {
+        if mode == .ask { draft = OverlayEyeInputBarDraft() }
+        else { inactiveDraft = OverlayEyeInputBarDraft() }
+    }
 
     /// The current draft, or the empty draft when there is nothing to restore.
     private(set) var draft = OverlayEyeInputBarDraft()
@@ -76,7 +122,28 @@ final class OverlayEyeInputBarDraftStore {
     /// so the store always mirrors the live field — which is what makes sending
     /// (`text` → "") also clear the store, with no second code path.
     func remember(_ draft: OverlayEyeInputBarDraft) {
-        self.draft = draft
+        var draftToRemember = draft
+        if draftToRemember.editAppSlug == nil {
+            draftToRemember.editAppSlug = self.draft.editAppSlug
+        }
+        self.draft = draftToRemember
+    }
+
+    /// Two bounded in-memory drafts prevent a general question from becoming
+    /// an app edit when the reader switches modes or reopens the panel.
+    @discardableResult
+    func switchMode(to next: Mode, currentDraft: OverlayEyeInputBarDraft) -> OverlayEyeInputBarDraft {
+        var draftToStore = currentDraft
+        if draftToStore.editAppSlug == nil {
+            draftToStore.editAppSlug = draft.editAppSlug
+        }
+        draft = draftToStore
+        guard mode != next else { return draft }
+        let previous = draft
+        draft = inactiveDraft
+        inactiveDraft = previous
+        mode = next
+        return draft
     }
 
     /// The draft a freshly-opened bar should start its composer from. Empty when

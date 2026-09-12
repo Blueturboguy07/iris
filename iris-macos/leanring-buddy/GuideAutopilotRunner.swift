@@ -79,6 +79,349 @@ struct GuideAutopilotGuideContext {
     /// guide that installs no tool, and every caller written before this
     /// existed, keep working unchanged.
     var commandTheGuidePublishesToInstallEachTool: [String: String] = [:]
+    /// The source identity published with this guide. Older tests and locally
+    /// constructed contexts may leave these nil, which keeps their refusal
+    /// diagnosis honest instead of inventing an expected repository.
+    var sourceOwner: String? = nil
+    var sourceRepo: String? = nil
+    var sourceCommit: String? = nil
+}
+
+/// Fresh, read-only Git facts collected after a source-pin command refused.
+/// A nil field means that particular probe was not confirmed. An empty
+/// porcelain string is different: Git answered successfully and reported no
+/// changed paths.
+nonisolated struct GuideAutopilotSourceCheckoutMetadata: Equatable, Sendable {
+    let head: String?
+    let origin: String?
+    let porcelainOutput: String?
+    let statusOutputWasTruncated: Bool
+
+    static let unknown = Self(
+        head: nil, origin: nil, porcelainOutput: nil, statusOutputWasTruncated: false
+    )
+}
+
+/// A source-pin command found a checkout, but its own clean-copy guard refused
+/// to continue. The initial refusal is derived from the command and output
+/// already captured for that step. A separate bounded, read-only probe can add
+/// fresh origin, HEAD, and porcelain facts without changing the refusal.
+nonisolated struct GuideAutopilotSourceCheckoutRefusal: Equatable, Sendable {
+    let verifiedWorkingDirectory: String
+    let safeRelativeChangedPaths: [String]
+
+    private static let maximumChangedPathsToShow = 16
+    private static let porcelainStatusCharacters = Set(" MADRCU?!")
+    private static let maximumProbeOutputCharacters = 32_768
+
+    private static let readOnlyGitPrefix =
+        "GIT_CONFIG_NOSYSTEM=1 GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 "
+        + "git -c core.fsmonitor=false -c core.untrackedCache=false "
+        + "-c core.hooksPath=/dev/null -c credential.helper="
+
+    /// This is intentionally a fixed, code-authored command set. It reads
+    /// only the repository's origin, HEAD, and porcelain status. The existing
+    /// `MaintainShellRunner` supplies the real timeout and bounded output path;
+    /// this method never changes its process policy, so Test keeps its own
+    /// registry and sandbox rules.
+    static func readFreshMetadata(in workingDirectory: String) async -> GuideAutopilotSourceCheckoutMetadata {
+        guard let validatedWorkingDirectory = try? GitInspectionService.allowedRepositoryPath(workingDirectory),
+              let runner = try? MaintainShellRunner(repoRootPath: validatedWorkingDirectory) else {
+            return .unknown
+        }
+
+        async let headResult = runner.run(
+            "\(readOnlyGitPrefix) rev-parse --verify HEAD^{commit}", deadline: 5
+        )
+        async let originResult = runner.run(
+            "\(readOnlyGitPrefix) remote get-url origin", deadline: 5
+        )
+        async let statusResult = runner.run(
+            "\(readOnlyGitPrefix) status --porcelain=v1 --untracked-files=all",
+            deadline: 5
+        )
+
+        let head = Self.validatedProbeText(from: try? await headResult)
+        let origin = Self.validatedProbeText(from: try? await originResult)
+        let status = Self.statusProbeText(from: try? await statusResult)
+        return GuideAutopilotSourceCheckoutMetadata(
+            head: Self.validCommitIdentifier(head),
+            origin: origin?.isEmpty == true ? nil : origin,
+            porcelainOutput: status.output,
+            statusOutputWasTruncated: status.wasTruncated
+        )
+    }
+
+    private static func validatedProbeText(from result: MaintainCommandResult?) -> String? {
+        guard let result, result.succeeded else { return nil }
+        let text = String(result.outputTail.prefix(maximumProbeOutputCharacters))
+        return text.split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+            .map(String.init)
+            .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func statusProbeText(
+        from result: MaintainCommandResult?
+    ) -> (output: String?, wasTruncated: Bool) {
+        guard let result, result.succeeded else { return (nil, false) }
+        return (
+            String(result.outputTail.prefix(maximumProbeOutputCharacters)),
+            result.bytesDroppedBeforeTail > 0
+                || result.outputTail.count > maximumProbeOutputCharacters
+        )
+    }
+
+    private static func validCommitIdentifier(_ text: String?) -> String? {
+        guard let text, GitInspectionService.isValidCommitIdentifier(text) else { return nil }
+        return text
+    }
+
+    static func detect(
+        command: String,
+        exitStatus: Int32,
+        scrubbedOutputTail: String,
+        workingDirectory: String
+    ) -> Self? {
+        guard exitStatus == 1,
+              looksLikeASourcePinGuard(command),
+              scrubbedOutputTail.lowercased().contains("not a clean copy"),
+              let verifiedWorkingDirectory = safeAbsoluteWorkingDirectory(workingDirectory)
+        else { return nil }
+
+        return Self(
+            verifiedWorkingDirectory: verifiedWorkingDirectory,
+            safeRelativeChangedPaths: changedPathsFromPorcelainOutput(scrubbedOutputTail)
+        )
+    }
+
+    /// The path came from the shell session's completed `$PWD` marker, rather
+    /// than from guide text. Keep only a plain absolute path before showing it
+    /// in a reader-facing diagnosis.
+    private static func safeAbsoluteWorkingDirectory(_ path: String) -> String? {
+        guard path.hasPrefix("/"), path != "/", !path.contains("//"),
+              !path.split(separator: "/").contains(".."),
+              !path.unicodeScalars.contains(where: { scalar in
+                  scalar.value < 0x20 || scalar.value == 0x7F
+              })
+        else { return nil }
+        return path
+    }
+
+    /// A source-pin guard checks the origin, checks porcelain, and only then
+    /// checks out its reviewed revision. Requiring all three fragments keeps a
+    /// normal failed build or an unrelated `git status` from being mislabeled.
+    private static func looksLikeASourcePinGuard(_ command: String) -> Bool {
+        let normalizedCommand = command
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+            .lowercased()
+        return normalizedCommand.contains("git config --get remote.origin.url")
+            && normalizedCommand.contains("git status --porcelain")
+            && normalizedCommand.contains("git checkout")
+    }
+
+    /// Git porcelain paths are optional here. The published guard currently
+    /// pipes porcelain into `grep -q`, so it reports the refusal without the
+    /// filenames. When a guide does print them, accept only unquoted,
+    /// relative, traversal-free paths already present in that output.
+    private static func changedPathsFromPorcelainOutput(_ output: String) -> [String] {
+        var paths = Set<String>()
+        for line in output.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+            let characters = Array(line)
+            guard characters.count >= 4,
+                  porcelainStatusCharacters.contains(characters[0]),
+                  porcelainStatusCharacters.contains(characters[1]),
+                  characters[2] == " " else { continue }
+
+            let path = String(line.dropFirst(3))
+            guard isSafeRelativePath(path) else { continue }
+            paths.insert(path)
+            if paths.count >= maximumChangedPathsToShow { break }
+        }
+        return paths.sorted()
+    }
+
+    private static func isSafeRelativePath(_ path: String) -> Bool {
+        guard !path.isEmpty,
+              !path.hasPrefix("/"), !path.hasPrefix("~"),
+              !path.contains("//"), !path.contains("->"),
+              !path.contains("\\"), !path.contains("\""), !path.contains("'"),
+              !path.unicodeScalars.contains(where: { scalar in
+                  scalar.value < 0x20 || scalar.value == 0x7F
+              }),
+              !path.split(separator: "/").contains("..") else { return false }
+        return true
+    }
+
+    var readerFacingDiagnosis: String {
+        diagnosis(using: .unknown, expectedSourceOwner: nil, expectedSourceRepo: nil, expectedSourceCommit: nil)
+    }
+
+    func diagnosis(
+        using metadata: GuideAutopilotSourceCheckoutMetadata,
+        expectedSourceOwner: String?,
+        expectedSourceRepo: String?,
+        expectedSourceCommit: String?
+    ) -> String {
+        var diagnosis = "The source check stopped in \(verifiedWorkingDirectory). "
+            + "The folder is named \(actualFolderName). Its clean-copy check refused to continue."
+
+        diagnosis += " " + originFinding(
+            metadata.origin, expectedSourceOwner: expectedSourceOwner, expectedSourceRepo: expectedSourceRepo
+        )
+        diagnosis += " " + revisionFinding(metadata.head, expectedSourceCommit: expectedSourceCommit)
+
+        let freshChangedEntries = Self.changedEntriesFromPorcelainOutput(metadata.porcelainOutput ?? "")
+        if metadata.porcelainOutput == nil {
+            diagnosis += " Fresh Git status could not be confirmed, so its changed paths are unconfirmed."
+        } else if metadata.statusOutputWasTruncated {
+            if freshChangedEntries.isEmpty {
+                diagnosis += " Fresh Git status was truncated or had no safely named paths, so a clean state is unconfirmed."
+            } else {
+                diagnosis += " " + changedPathFinding(
+                    freshChangedEntries, truncated: true
+                )
+            }
+        } else if freshChangedEntries.isEmpty {
+            if metadata.porcelainOutput?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+                diagnosis += " Fresh Git status reports no changed paths, but that does not waive this refusal."
+            } else {
+                diagnosis += " Fresh Git status returned output, but no safe changed paths could be named."
+            }
+        } else {
+            diagnosis += " " + changedPathFinding(
+                freshChangedEntries, truncated: metadata.statusOutputWasTruncated
+            )
+        }
+
+        if metadata.porcelainOutput == nil, !safeRelativeChangedPaths.isEmpty {
+            diagnosis += " The refusal output named these bounded paths: "
+                + safeRelativeChangedPaths.joined(separator: ", ") + "."
+        } else if metadata.porcelainOutput == nil {
+            diagnosis += " The refusal output did not expose the individual changed filenames."
+        }
+
+        diagnosis += " Iris will not reset, move, stash, or replace anything there. "
+            + "Review the folder yourself, then press Try again."
+        return diagnosis
+    }
+
+    private var actualFolderName: String {
+        (verifiedWorkingDirectory as NSString).lastPathComponent
+    }
+
+    private func originFinding(
+        _ actualOrigin: String?,
+        expectedSourceOwner: String?,
+        expectedSourceRepo: String?
+    ) -> String {
+        guard let expectedSourceOwner, let expectedSourceRepo,
+              let expected = Self.canonicalRepositoryIdentifier("\(expectedSourceOwner)/\(expectedSourceRepo)") else {
+            return "The guide's expected source origin is unconfirmed."
+        }
+        guard let actualOrigin else {
+            return "The source origin is unconfirmed; Iris could not read it safely."
+        }
+        guard let actual = Self.canonicalRepositoryIdentifier(actualOrigin) else {
+            return "The source origin could not be confirmed against the guide source; Iris could not identify it safely (expected \(expected))."
+        }
+        if actual.caseInsensitiveCompare(expected) == .orderedSame {
+            return "The source origin matches \(expected)."
+        }
+        return "The source origin does not match the guide source: found \(actual), expected \(expected)."
+    }
+
+    private func revisionFinding(_ actualHead: String?, expectedSourceCommit: String?) -> String {
+        guard let expectedSourceCommit else {
+            return "The guide did not publish a pinned revision, so the revision is unconfirmed."
+        }
+        guard let actualHead else {
+            return "The guide revision is unconfirmed; Iris could not read a valid HEAD."
+        }
+        if actualHead.caseInsensitiveCompare(expectedSourceCommit) == .orderedSame {
+            return "The folder revision matches the guide pin \(expectedSourceCommit)."
+        }
+        return "The folder revision does not match the guide pin: found \(actualHead), expected \(expectedSourceCommit)."
+    }
+
+    private func changedPathFinding(
+        _ entries: [(statusCode: String, path: String)], truncated: Bool
+    ) -> String {
+        let finderMetadata = entries.map(\.path).filter(Self.isFinderMetadata)
+        let trackedChanges = entries
+            .filter { !$0.statusCode.contains("?") && !Self.isFinderMetadata($0.path) }
+            .map(\.path)
+        let untrackedSource = entries
+            .filter { $0.statusCode.contains("?") && !Self.isFinderMetadata($0.path) }
+            .map(\.path)
+        var findings: [String] = []
+        if !trackedChanges.isEmpty { findings.append("tracked changes: \(trackedChanges.joined(separator: ", "))") }
+        if !untrackedSource.isEmpty { findings.append("untracked source paths: \(untrackedSource.joined(separator: ", "))") }
+        if !finderMetadata.isEmpty { findings.append("Finder metadata: \(finderMetadata.joined(separator: ", "))") }
+        if findings.isEmpty { findings.append("changed paths were present but could not be safely named") }
+        if truncated { findings.append("status output was truncated") }
+        return "Fresh Git status reports " + findings.joined(separator: "; ") + "."
+    }
+
+    private static func canonicalRepositoryIdentifier(_ value: String) -> String? {
+        var candidate = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if candidate.hasPrefix("git@"), let separator = candidate.firstIndex(of: ":") {
+            let host = candidate[candidate.index(candidate.startIndex, offsetBy: 4)..<separator]
+            guard host.caseInsensitiveCompare("github.com") == .orderedSame
+                || host.caseInsensitiveCompare("www.github.com") == .orderedSame else {
+                return nil
+            }
+            candidate = String(candidate[candidate.index(after: separator)...])
+        } else if let url = URL(string: candidate), let host = url.host, !host.isEmpty {
+            guard host.caseInsensitiveCompare("github.com") == .orderedSame
+                || host.caseInsensitiveCompare("www.github.com") == .orderedSame else {
+                return nil
+            }
+            candidate = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        }
+        candidate = candidate.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if candidate.hasSuffix(".git") { candidate.removeLast(4) }
+        let components = candidate.split(separator: "/").map(String.init)
+        guard components.count >= 2,
+              components.allSatisfy({ component in
+                  !component.isEmpty && component.unicodeScalars.allSatisfy {
+                      $0.isASCII && (
+                          (48...57).contains($0.value)
+                          || (65...90).contains($0.value)
+                          || (97...122).contains($0.value)
+                          || $0.value == 46 || $0.value == 95 || $0.value == 45
+                      )
+                  }
+              }) else { return nil }
+        return components.joined(separator: "/")
+    }
+
+    private static func changedEntriesFromPorcelainOutput(
+        _ output: String
+    ) -> [(statusCode: String, path: String)] {
+        var entries: [(statusCode: String, path: String)] = []
+        for line in output.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+            let characters = Array(line)
+            guard characters.count >= 4,
+                  porcelainStatusCharacters.contains(characters[0]),
+                  porcelainStatusCharacters.contains(characters[1]),
+                  characters[2] == " " else { continue }
+            let path = String(line.dropFirst(3))
+            guard isSafeRelativePath(path) else { continue }
+            entries.append((String(characters[0...1]), path))
+            if entries.count >= maximumChangedPathsToShow { break }
+        }
+        return entries
+    }
+
+    private static func isFinderMetadata(_ path: String) -> Bool {
+        let filename = (path as NSString).lastPathComponent
+        return filename == ".DS_Store" || filename == ".localized"
+            || filename.hasPrefix("._") || filename == "Icon\r"
+            || filename == ".Spotlight-V100" || filename == ".Trashes"
+            || filename == ".fseventsd"
+    }
 }
 
 /// Who is paying for the model calls this install's fix ladder makes — and,
@@ -245,6 +588,15 @@ struct GuideAutopilotFixLadderFunding {
 // `OnDemandEditRunner` for a user-initiated edit — and reuse the same renderer.
 @MainActor
 final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting {
+    /// Package-manager executables that a published guide may install itself.
+    /// `ToolVersionService` intentionally owns version probes, but its current
+    /// table does not include Yarn even though published guides can install it.
+    /// Keep this recovery exception closed to the package-manager shapes the
+    /// command analyzer already recognizes, rather than treating an arbitrary
+    /// `toolVersion` label from the wire as executable.
+    private static let guidePublishedPackageManagerExecutables: Set<String> = [
+        "npm", "pnpm", "yarn", "bun"
+    ]
 
     // MARK: - Budgets (see docs/iris-assistant-protocol.md §8)
 
@@ -310,6 +662,10 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
     /// The perceived-pace floor. Real execution is untouched; this only holds a
     /// fast command's result line so the install reads as deliberate work.
     private let pacing: GuideAutopilotPacing
+    /// A single injected read-only probe keeps the refusal path testable with
+    /// disposable metadata. Production uses the fixed probe above; tests do
+    /// not run commands against the reader's repository.
+    private let sourceMetadataReader: @Sendable (String) async -> GuideAutopilotSourceCheckoutMetadata
 
     // MARK: - Budget counters
 
@@ -326,6 +682,31 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
     /// `maximumConsecutiveStepsTheLadderMaySpendOnWithoutGettingOneRunning`):
     /// consecutive steps Iris spent model calls on and still handed back.
     private var consecutiveStepsTheLadderSpentOnWithoutGettingThemRunning = 0
+    /// Every execute call owns one generation. A fresh metadata read must not
+    /// display after a newer retry or a stopped session took ownership.
+    private var activeStepGeneration = 0
+
+    /// The side session has one serial command lane too. A long-running
+    /// command returns control to the runner before its process exits, so its
+    /// ownership has to live separately from `isExecutingACommand`. The UUID
+    /// means a late completion from an explicitly cancelled server cannot
+    /// release a newer server that already took the lane.
+    private struct LongRunningCommandOwnership: Sendable, Equatable {
+        let id: UUID
+        let stepIndex: Int
+        let stepGeneration: Int
+        let command: String
+    }
+
+    private var longRunningCommandOwnership: LongRunningCommandOwnership?
+    /// A runner is single-use from the controller's point of view. This guard
+    /// closes the admission window while `endSession` is awaiting either
+    /// shell teardown; a stale fire-and-forget task must not dispatch into a
+    /// session that is already being closed.
+    private var sessionEndWasRequested = false
+    /// Abort is asynchronous too. Keep a retry from acquiring the side lane
+    /// between its immediate owner invalidation and the cancellation calls.
+    private var longRunningAbortIsInProgress = false
 
     // MARK: - The pending-confirmation continuation
 
@@ -345,13 +726,35 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
     private static let stoppedByTheReaderDiagnosis =
         "You stopped this step. Take it from here, or continue past it."
 
+    private static let terminalSessionRestartedDiagnosis =
+        "Iris's terminal ended unexpectedly while this step was running and a fresh terminal is ready. "
+        + "Iris did not replay the command. Tap Try again if you want to run it once more."
+
+    private static let terminalSessionFailureDiagnosis =
+        "Iris's terminal could not stay available for this step. The command was not replayed. "
+        + "Choose End and start this install again, or follow this step yourself."
+
+    private static let terminalSessionBusyDiagnosis =
+        "Iris's terminal is still finishing another operation. This command was not run again. "
+        + "Wait for the terminal to settle, then tap Try again."
+
+    private static let longRunningSessionTimedOutDiagnosis =
+        "Iris stopped this run-from-source command after it took too long. "
+        + "It was not replayed. Tap Try again if you want to start it once more."
+
+    private static let longRunningSessionInterruptedDiagnosis =
+        "This run-from-source command was interrupted before it finished. "
+        + "Iris did not replay it. Tap Try again if you want to start it once more."
+
     init(
         shellSession: GuideAutopilotShellSessionDriving,
         longRunningSession: GuideAutopilotShellSessionDriving,
         fixProposer: GuideAutopilotFixProposing,
         guideContext: GuideAutopilotGuideContext,
         pacing: GuideAutopilotPacing = .humanPaced,
-        fixLadderFunding: GuideAutopilotFixLadderFunding = .publiksFundedTier
+        fixLadderFunding: GuideAutopilotFixLadderFunding = .publiksFundedTier,
+        sourceMetadataReader: @escaping @Sendable (String) async -> GuideAutopilotSourceCheckoutMetadata =
+            GuideAutopilotSourceCheckoutRefusal.readFreshMetadata
     ) {
         self.shellSession = shellSession
         self.longRunningSession = longRunningSession
@@ -359,19 +762,13 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         self.fixLadderFunding = fixLadderFunding
         self.guideContext = guideContext
         self.pacing = pacing
+        self.sourceMetadataReader = sourceMetadataReader
         shellSession.onOutputLine = { [weak self] line in
             self?.transcript.append(.output(line: line))
         }
-        // The dev-server session's real output — its ready banner included —
-        // has to reach the same transcript, or the takeover terminal a reader
-        // watches (and the screen the WatchLoop's `visual` check reads) is left
-        // showing nothing but the static "is starting from source" line
-        // forever, however long the server has actually been up. Before this,
-        // only `shellSession` was wired, so a dev-server step's own output
-        // never appeared anywhere: `curl` could prove the app was serving
-        // within 90 seconds while the screen the reader and the watch loop
-        // both saw never changed, and a step whose only completion signal is
-        // `visual` then has no way to ever fire.
+        // The side session runs dev servers. Its real output, including a
+        // ready banner, belongs in the same terminal transcript as ordinary
+        // guide commands so the takeover and watch loop observe actual work.
         longRunningSession.onOutputLine = { [weak self] line in
             self?.transcript.append(.output(line: line))
         }
@@ -380,10 +777,19 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
     // MARK: - Session lifecycle
 
     func startSession() async -> Bool {
-        await shellSession.start()
+        guard !sessionEndWasRequested else { return false }
+        let started = await shellSession.start()
+        guard !sessionEndWasRequested else { return false }
+        return started
     }
 
     func endSession() async {
+        sessionEndWasRequested = true
+        activeStepGeneration += 1
+        // Invalidate admission synchronously, before the first await. The
+        // side-session task can otherwise run while the main shell teardown is
+        // suspended and start a stale dev server.
+        longRunningCommandOwnership = nil
         confirmationContinuation?.resume(returning: false)
         confirmationContinuation = nil
         await shellSession.endSession()
@@ -411,17 +817,50 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
     ///
     /// Sent straight to the session rather than through `runApproved`, for the
     /// same reason `moveInto`'s `cd` is: this is machinery, not work the reader
-    /// is waiting to watch, so it must not spend the pacing floor. Its outcome
-    /// is deliberately unexamined — whether the tool is there now is answered
-    /// by the step that follows, not by this.
-    func reloadTheReadersEnvironmentIntoTheShell() async {
+    /// is waiting to watch, so it must not spend the pacing floor. A retry must
+    /// not send its command into a shell whose refresh failed or is still busy.
+    @discardableResult
+    func reloadTheReadersEnvironmentIntoTheShell() async -> Bool {
+        // A surfaced-step retry has no ordinary `runApproved` wrapper around
+        // this refresh, so expose the refresh as active work to the takeover
+        // UI. Preserve the enclosing command's state when this helper is
+        // reached from `runApproved` after a package-manager install.
+        let wasExecutingACommand = isExecutingACommand
+        isExecutingACommand = true
+        defer { isExecutingACommand = wasExecutingACommand }
         guard let approved = GuideAutopilotRiskAssessment.approve(
             GuideAutopilotShellSession.reloadTheReadersEnvironmentCommand
-        ) else { return }
+        ) else { return false }
         // A cold dotfile stack legitimately takes seconds (nvm, compinit), so
         // it gets the same budget a fresh shell's startup gets.
-        _ = await shellSession.run(
-            approved, deadline: GuideAutopilotShellSession.readyDeadline
+        for attempt in 0...1 {
+            let outcome = await shellSession.run(
+                approved, deadline: GuideAutopilotShellSession.readyDeadline
+            )
+            guard !Task.isCancelled else { return false }
+            switch outcome {
+            case .succeeded:
+                return true
+            case .terminalSessionRestarted where attempt == 0:
+                // Re-sourcing the environment is bounded, idempotent setup.
+                // If the shell died while doing it, the replacement shell is
+                // ready but has not seen the refresh yet, so give it one try.
+                continue
+            default:
+                return false
+            }
+        }
+        return false
+    }
+
+    func prepareToRetrySurfacedStep(stepIndex: Int) {
+        state = .running(stepIndex: stepIndex)
+    }
+
+    func surfaceEnvironmentReloadFailure(command: String) {
+        _ = surface(
+            diagnosis: "Iris couldn't prepare the terminal for another attempt. This step has not been retried. Stop this install and choose Let Iris run it to start a fresh terminal.",
+            command: command
         )
     }
 
@@ -432,10 +871,27 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         stepIndex: Int,
         totalSteps: Int
     ) async -> GuideAutopilotStepResult {
+        guard !sessionEndWasRequested, !longRunningAbortIsInProgress else {
+            return .stopped
+        }
         guard let command = step.command else { return .succeeded }
+
+        // Do not advance the UI step generation merely because a second
+        // long-running request arrived while the first is still starting. The
+        // ownership token is the generation for this serial side-session lane;
+        // rejecting here leaves the original launch eligible to finish.
+        // Sensitive steps bypass this diagnosis so the raw command never
+        // reaches the surfaced state, even when the side session is busy.
+        if step.watch?.sensitive != true,
+           GuideAutopilotCommandShape.holdsTheShellOpen(command),
+           longRunningCommandOwnership != nil {
+            return surface(diagnosis: Self.terminalSessionBusyDiagnosis, command: command)
+        }
 
         // A fresh step is fresh consent: a stop pressed on the previous step
         // must not silently kill this one.
+        activeStepGeneration += 1
+        let stepGeneration = activeStepGeneration
         theReaderAskedToStopThisStep = false
 
         // A sensitive step is never typed into a shell — an API key would
@@ -455,15 +911,28 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         // Dev servers never return; run in the side session and let the
         // WatchLoop decide "done" from the step's watch block.
         if GuideAutopilotCommandShape.holdsTheShellOpen(command) {
-            return await startLongRunning(step: step, command: command)
+            return await startLongRunning(
+                step: step, stepIndex: stepIndex,
+                stepGeneration: stepGeneration, command: command
+            )
         }
 
         // Put the shell where the step says it runs, before it runs. A step
         // that declares nothing is left exactly where the shell already is —
         // that is every already-published guide, and it must not change.
-        if let folder = step.workingDirectory,
-           !(await moveInto(folder, using: shellSession)) {
-            return surface(diagnosis: Self.folderRefusalDiagnosis(folder), command: command)
+        if let folder = step.workingDirectory {
+            switch await moveInto(folder, using: shellSession) {
+            case .succeeded:
+                break
+            case .folderRefused:
+                return surface(diagnosis: Self.folderRefusalDiagnosis(folder), command: command)
+            case .terminalSessionRestarted:
+                return surface(diagnosis: Self.terminalSessionRestartedDiagnosis, command: command)
+            case .sessionBusy:
+                return surface(diagnosis: Self.terminalSessionBusyDiagnosis, command: command)
+            case .sessionFailed:
+                return surface(diagnosis: Self.terminalSessionFailureDiagnosis, command: command)
+            }
         }
 
         transcript.append(.commandFromTheGuide(text: command))
@@ -480,19 +949,50 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
             return .skippedByReader
         case .stopped:
             return .stopped
-        case .terminalSessionHadToRestart:
-            // Not a command failure the ladder could ever fix — the shell is
-            // already back (see `GuideAutopilotShellSession.noteShellExited`)
-            // and the honest, complete answer is just to run this step again,
-            // so this skips the model ladder entirely and surfaces straight
-            // to the reader with a retry offer.
+        case .terminalSessionRestarted:
             return surface(diagnosis: Self.terminalSessionRestartedDiagnosis, command: command)
+        case .sessionBusy:
+            return surface(diagnosis: Self.terminalSessionBusyDiagnosis, command: command)
+        case .sessionFailed:
+            return surface(diagnosis: Self.terminalSessionFailureDiagnosis, command: command)
         case .failed(let exitStatus, let workingDirectory):
+            if let sourceCheckoutRefusal = GuideAutopilotSourceCheckoutRefusal.detect(
+                command: command,
+                exitStatus: exitStatus,
+                scrubbedOutputTail: shellSession.tailForTheModel(),
+                workingDirectory: workingDirectory
+            ) {
+                // A clean-copy refusal is a deterministic reader-owned state,
+                // not a repair opportunity. Surface it before the model ladder
+                // so Iris never proposes a stash, reset, move, or reclone.
+                let sourceMetadata = await sourceMetadataReader(
+                    sourceCheckoutRefusal.verifiedWorkingDirectory
+                )
+                guard !Task.isCancelled,
+                      activeStepGeneration == stepGeneration,
+                      !theReaderAskedToStopThisStep,
+                      ownsRunningStep(stepIndex: stepIndex) else {
+                    return .stopped
+                }
+                let diagnosis = sourceCheckoutRefusal.diagnosis(
+                    using: sourceMetadata,
+                    expectedSourceOwner: guideContext.sourceOwner,
+                    expectedSourceRepo: guideContext.sourceRepo,
+                    expectedSourceCommit: guideContext.sourceCommit
+                )
+                transcript.append(.explanation(text: diagnosis))
+                return surface(diagnosis: diagnosis, command: command)
+            }
             return await runFailureLadder(
                 step: step, command: command,
                 exitStatus: exitStatus, workingDirectory: workingDirectory
             )
         }
+    }
+
+    private func ownsRunningStep(stepIndex: Int) -> Bool {
+        guard case .running(let currentStepIndex) = state else { return false }
+        return currentStepIndex == stepIndex
     }
 
     // MARK: - Running a guide command through the gate
@@ -502,31 +1002,18 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         case failed(exitStatus: Int32, workingDirectory: String)
         case skippedByReader
         case stopped
-        /// The pty shell itself died mid-command — a real crash, or the
-        /// deadline escalation's Ctrl-D reaching a shell that had already gone
-        /// idle because the command's own completion marker was missed —
-        /// rather than the command running and exiting non-zero.
-        /// `GuideAutopilotShellSession` always rebuilds a fresh shell the
-        /// instant this happens (see `noteShellExited`), so by the time this
-        /// case is even seen there is a live session again; nothing about
-        /// THIS command succeeded or failed, so there is nothing a
-        /// model-proposed fix could reason about. Before this case existed,
-        /// `.sessionFailed` fell straight through to the generic `.stopped`
-        /// outcome, and the drive loop treats `.stopped` as "nothing more to
-        /// drive" — it silently ended the whole install with no explanation
-        /// and no way to retry, which is the field report this fixes:
-        /// "silently and permanently stalls ... no error, no advance".
-        case terminalSessionHadToRestart
+        case terminalSessionRestarted
+        case sessionBusy
+        case sessionFailed
     }
 
-    /// What the reader is told when a step's command comes back as
-    /// `.terminalSessionHadToRestart`. Named separately from the ladder's own
-    /// diagnoses because this is not a command failure the ladder could ever
-    /// fix — the terminal is already back, and the honest, complete answer is
-    /// just to run the same step again.
-    private static let terminalSessionRestartedDiagnosis =
-        "Iris's terminal session ended unexpectedly partway through this step and had to restart. "
-        + "Nothing was lost — tap Try again to re-run this step now that it's back."
+    private enum WorkingDirectoryMoveOutcome {
+        case succeeded
+        case folderRefused
+        case terminalSessionRestarted
+        case sessionBusy
+        case sessionFailed
+    }
 
     /// `workingDirectory` is where this command will really run — the folder
     /// the step declared, or the one the shell is already in. The gate needs
@@ -576,6 +1063,14 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         case .succeeded(let workingDirectory):
             await holdSoTheCommandReadsAsWork(elapsed: duration)
             transcript.append(.exitStatus(code: 0, duration: duration))
+            if GuideAutopilotCommandShape.installsAGlobalPackageManagerBinary(command.text) {
+                // A package manager is a child process. Even when `npm install
+                // -g yarn` exits zero, the parent shell keeps the PATH and
+                // command lookup state it had before the install. Refresh it
+                // before the next guide step so `yarn install` is looked up in
+                // the same persistent shell that just performed the install.
+                await reloadTheReadersEnvironmentIntoTheShell()
+            }
             _ = workingDirectory
             return .succeeded
         case .failed(let exitStatus, let workingDirectory):
@@ -607,10 +1102,11 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
             ))
             return .skippedByReader
         case .sessionFailed:
-            transcript.append(.explanation(
-                text: "Iris's terminal session ended unexpectedly and had to restart."
-            ))
-            return .terminalSessionHadToRestart
+            return .sessionFailed
+        case .sessionBusy:
+            return .sessionBusy
+        case .terminalSessionRestarted:
+            return .terminalSessionRestarted
         }
     }
 
@@ -703,20 +1199,27 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
             break
         case .stopped:
             return .stopped
-        case .terminalSessionHadToRestart:
-            // The shell died and rebuilt mid tool-install rather than the
-            // install itself failing — fall through to the normal ladder
-            // rather than pretending this attempt ran and lost.
-            return nil
         case .failed, .skippedByReader:
             return nil
+        case .terminalSessionRestarted:
+            return surface(diagnosis: Self.terminalSessionRestartedDiagnosis, command: command)
+        case .sessionBusy:
+            return surface(diagnosis: Self.terminalSessionBusyDiagnosis, command: command)
+        case .sessionFailed:
+            return surface(diagnosis: Self.terminalSessionFailureDiagnosis, command: command)
         }
 
         // This session is one shell, started before the tool existed: it holds
         // the PATH of that moment and a command hash table that has already
-        // looked this tool up and not found it. Without the reload the retry
-        // below fails exactly the way the step just did.
-        await reloadTheReadersEnvironmentIntoTheShell()
+        // looked this tool up and not found it. A global package-manager
+        // installer already refreshed the shell in runApproved; other guide
+        // installers still need the existing retry-path refresh here.
+        if !GuideAutopilotCommandShape.installsAGlobalPackageManagerBinary(installCommand) {
+            guard await reloadTheReadersEnvironmentIntoTheShell() else {
+                surfaceEnvironmentReloadFailure(command: command)
+                return .surfacedToReader
+            }
+        }
 
         transcript.append(.commandFromTheGuide(text: command))
         switch await runGuideCommand(
@@ -726,7 +1229,13 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         case .succeeded: return .succeeded
         case .stopped: return .stopped
         case .skippedByReader: return .skippedByReader
-        case .failed, .terminalSessionHadToRestart: return nil
+        case .failed: return nil
+        case .terminalSessionRestarted:
+            return surface(diagnosis: Self.terminalSessionRestartedDiagnosis, command: command)
+        case .sessionBusy:
+            return surface(diagnosis: Self.terminalSessionBusyDiagnosis, command: command)
+        case .sessionFailed:
+            return surface(diagnosis: Self.terminalSessionFailureDiagnosis, command: command)
         }
     }
 
@@ -738,9 +1247,12 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         _ command: String
     ) -> (missingTool: String, installCommand: String)? {
         for programName in GuideAutopilotCommandShape.programsEachLineWouldRun(command) {
-            guard ToolVersionService.toolSpecification(for: programName) != nil,
+            let normalizedProgramName = programName.lowercased()
+            guard ToolVersionService.toolSpecification(for: programName) != nil
+                    || Self.guidePublishedPackageManagerExecutables.contains(normalizedProgramName),
                   let installCommand =
                     guideContext.commandTheGuidePublishesToInstallEachTool[programName]
+                        ?? guideContext.commandTheGuidePublishesToInstallEachTool[normalizedProgramName]
             else { continue }
             return (missingTool: programName, installCommand: installCommand)
         }
@@ -827,6 +1339,12 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
                 case .skippedByReader:
                     priorAttempts.append("reader declined the fix: \(fixCommand)")
                     continue
+                case .terminalSessionRestarted:
+                    return surface(diagnosis: Self.terminalSessionRestartedDiagnosis, command: command)
+                case .sessionBusy:
+                    return surface(diagnosis: Self.terminalSessionBusyDiagnosis, command: command)
+                case .sessionFailed:
+                    return surface(diagnosis: Self.terminalSessionFailureDiagnosis, command: command)
                 case .ran(let fixSucceeded):
                     priorAttempts.append(
                         "\(fixCommand) → \(fixSucceeded ? "ran" : "also failed")"
@@ -844,7 +1362,13 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
                     case .succeeded: return .succeeded
                     case .stopped: return .stopped
                     case .skippedByReader: return .skippedByReader
-                    case .failed, .terminalSessionHadToRestart: continue   // next rung
+                    case .failed: continue   // next rung
+                    case .terminalSessionRestarted:
+                        return surface(diagnosis: Self.terminalSessionRestartedDiagnosis, command: command)
+                    case .sessionBusy:
+                        return surface(diagnosis: Self.terminalSessionBusyDiagnosis, command: command)
+                    case .sessionFailed:
+                        return surface(diagnosis: Self.terminalSessionFailureDiagnosis, command: command)
                     }
                 }
             }
@@ -856,6 +1380,9 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         case ran(fixSucceeded: Bool)
         case skippedByReader
         case stopped
+        case terminalSessionRestarted
+        case sessionBusy
+        case sessionFailed
     }
 
     private func applyFixCommand(
@@ -879,7 +1406,7 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
             ) else {
                 return .stopped
             }
-            return .ran(fixSucceeded: await runFixApproved(approved))
+            return await runFixApproved(approved)
         case .needsAConfirmTap(let reason):
             let approvedToRun = await askTheReaderToConfirm(
                 command: fixCommand, reason: reason, isFromAFix: true
@@ -890,7 +1417,7 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
                   ) else {
                 return .skippedByReader
             }
-            return .ran(fixSucceeded: await runFixApproved(approved))
+            return await runFixApproved(approved)
         case .refusedOutright(let reason):
             transcript.append(.explanation(
                 text: "Iris won't run that repair automatically: \(reason.plainLanguageSummary)"
@@ -899,7 +1426,7 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         }
     }
 
-    private func runFixApproved(_ command: GuideAutopilotApprovedCommand) async -> Bool {
+    private func runFixApproved(_ command: GuideAutopilotApprovedCommand) async -> FixApplication {
         isExecutingACommand = true
         defer { isExecutingACommand = false }
         let startedAt = Date()
@@ -908,14 +1435,26 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         await holdSoTheCommandReadsAsWork(elapsed: duration)
         if case .succeeded = outcome {
             transcript.append(.exitStatus(code: 0, duration: duration))
-            return true
+            return .ran(fixSucceeded: true)
         }
         if case .failed(let code, _) = outcome {
             transcript.append(.exitStatus(code: code, duration: duration))
         }
+        switch outcome {
+        case .terminalSessionRestarted:
+            return .terminalSessionRestarted
+        case .sessionBusy:
+            return .sessionBusy
+        case .sessionFailed:
+            return .sessionFailed
+        case .cancelled where theReaderAskedToStopThisStep:
+            return .stopped
+        default:
+            break
+        }
         // A fix's own failure does not consume a rung — it fails this rung
         // and the loop moves on.
-        return false
+        return .ran(fixSucceeded: false)
     }
 
     /// Holds the "running" state on screen for the pacing floor after a fast
@@ -1013,42 +1552,55 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
     private func moveInto(
         _ folder: String,
         using session: GuideAutopilotShellSessionDriving
-    ) async -> Bool {
+    ) async -> WorkingDirectoryMoveOutcome {
         guard !Self.isASystemFolder(folder) else {
             transcript.append(.explanation(text: Self.systemFolderDiagnosis(folder)))
-            return false
+            return .folderRefused
         }
         guard Self.isAPlainFolder(folder),
               let approved = GuideAutopilotRiskAssessment.approve("cd \(folder)") else {
             transcript.append(.explanation(text: Self.wrongFolderDiagnosis(folder)))
-            return false
+            return .folderRefused
         }
-        let outcome = await session.run(approved, deadline: Self.folderMoveDeadline)
-        if case .succeeded = outcome {
-            return true
-        }
-        if case .sessionFailed = outcome {
-            // The shell just died and — since
-            // `GuideAutopilotShellSession.noteShellExited` — has ALREADY
-            // rebuilt itself, so this `cd` never actually reached the folder
-            // at all; it was answered by a session that was mid-restart, not
-            // by the folder being missing. Give the fresh shell its own try
-            // before blaming the folder. Without this, "Iris couldn't move
-            // into ~/Simplicity" fired on a session that simply had to
-            // restart — and fired again, identically, on "Try again",
-            // because the retry landed on the same misdiagnosis with nothing
-            // to tell the reader the terminal, not the folder, was the
-            // problem.
-            let retryOutcome = await session.run(approved, deadline: Self.folderMoveDeadline)
-            if case .succeeded = retryOutcome {
-                return true
+
+        let firstOutcome = await session.run(approved, deadline: Self.folderMoveDeadline)
+        switch firstOutcome {
+        case .succeeded:
+            return .succeeded
+        case .terminalSessionRestarted:
+            // The fresh shell restored the last known cwd, but it did not run
+            // this step's cd. Re-establish the declared folder once before the
+            // real command. A second restart is surfaced rather than retried
+            // again, keeping even this idempotent setup action bounded.
+            switch await session.run(approved, deadline: Self.folderMoveDeadline) {
+            case .succeeded:
+                return .succeeded
+            case .terminalSessionRestarted:
+                return .terminalSessionRestarted
+            case .sessionBusy:
+                return .sessionBusy
+            case .sessionFailed:
+                return .sessionFailed
+            case .failed:
+                break
+            case .cancelled, .timedOut, .seemsToBeAskingAQuestion:
+                return .sessionFailed
             }
+        case .sessionBusy:
+            return .sessionBusy
+        case .sessionFailed:
+            return .sessionFailed
+        case .failed:
+            break
+        case .cancelled, .timedOut, .seemsToBeAskingAQuestion:
+            return .sessionFailed
         }
+
         // zsh has already printed its own "cd: no such file or directory:
         // …" into the transcript, which is the sentence a reader can act
-        // on; this adds the part zsh cannot know — which step to go back to.
+        // on; this adds the part zsh cannot know: which step to go back to.
         transcript.append(.explanation(text: Self.wrongFolderDiagnosis(folder)))
-        return false
+        return .folderRefused
     }
 
     /// A `cd` is instant; anything longer means the shell is wedged, and
@@ -1140,7 +1692,21 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
 
     // MARK: - Dev servers
 
-    private func startLongRunning(step: IrisGuideStep, command: String) async -> GuideAutopilotStepResult {
+    private func startLongRunning(
+        step: IrisGuideStep,
+        stepIndex: Int,
+        stepGeneration: Int,
+        command: String
+    ) async -> GuideAutopilotStepResult {
+        // A dev server keeps the side session's command lane occupied even
+        // though `executeStepCommand` returns as soon as the process starts.
+        // Check before any await so a second long-running step cannot slip in
+        // while the first one is still being launched. This also covers steps
+        // with no workingDirectory, where there is no hidden `cd` we can use
+        // as a busy probe.
+        guard longRunningCommandOwnership == nil else {
+            return surface(diagnosis: Self.terminalSessionBusyDiagnosis, command: command)
+        }
         // The side session is about to be moved into the step's folder, so
         // that is the folder this command will run in — assess it there.
         let folder = step.workingDirectory ?? longRunningSession.currentWorkingDirectory
@@ -1152,28 +1718,172 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
             ))
             return .skippedByReader
         }
+        guard !Task.isCancelled, !theReaderAskedToStopThisStep,
+              activeStepGeneration == stepGeneration else {
+            return .stopped
+        }
+        let ownership = LongRunningCommandOwnership(
+            id: UUID(), stepIndex: stepIndex,
+            stepGeneration: stepGeneration, command: command
+        )
+        longRunningCommandOwnership = ownership
         transcript.append(.commandFromTheGuide(text: command))
         if !(await longRunningSession.start()) {
+            guard ownsLongRunningSetup(ownership) else {
+                releaseLongRunningCommandOwnership(ownership.id)
+                return .stopped
+            }
+            releaseLongRunningCommandOwnership(ownership.id)
+            return surface(diagnosis: Self.terminalSessionFailureDiagnosis, command: command)
+        }
+        guard ownsLongRunningSetup(ownership) else {
+            releaseLongRunningCommandOwnership(ownership.id)
             return .stopped
         }
         // The side session is its own shell and has never seen the guide's
         // `cd` steps, so a dev server is the case where an undeclared folder
         // hurt most: `pnpm dev` in the home folder, every time. It gets the
         // same move the main session gets.
-        if let folder = step.workingDirectory,
-           !(await moveInto(folder, using: longRunningSession)) {
-            return surface(diagnosis: Self.folderRefusalDiagnosis(folder), command: command)
+        if let folder = step.workingDirectory {
+            switch await moveInto(folder, using: longRunningSession) {
+            case .succeeded:
+                break
+            case .folderRefused:
+                guard ownsLongRunningSetup(ownership) else {
+                    releaseLongRunningCommandOwnership(ownership.id)
+                    return .stopped
+                }
+                releaseLongRunningCommandOwnership(ownership.id)
+                return surface(diagnosis: Self.folderRefusalDiagnosis(folder), command: command)
+            case .terminalSessionRestarted:
+                guard ownsLongRunningSetup(ownership) else {
+                    releaseLongRunningCommandOwnership(ownership.id)
+                    return .stopped
+                }
+                releaseLongRunningCommandOwnership(ownership.id)
+                return surface(diagnosis: Self.terminalSessionRestartedDiagnosis, command: command)
+            case .sessionBusy:
+                guard ownsLongRunningSetup(ownership) else {
+                    releaseLongRunningCommandOwnership(ownership.id)
+                    return .stopped
+                }
+                releaseLongRunningCommandOwnership(ownership.id)
+                return surface(diagnosis: Self.terminalSessionBusyDiagnosis, command: command)
+            case .sessionFailed:
+                guard ownsLongRunningSetup(ownership) else {
+                    releaseLongRunningCommandOwnership(ownership.id)
+                    return .stopped
+                }
+                releaseLongRunningCommandOwnership(ownership.id)
+                return surface(diagnosis: Self.terminalSessionFailureDiagnosis, command: command)
+            }
         }
-        // Fire and don't await: a dev server never returns. If it dies within
-        // ~10s that is a real failure, but v1 lets the WatchLoop and the
-        // reader notice; the transcript shows it running.
-        Task { [longRunningSession] in
-            _ = await longRunningSession.run(approved, deadline: GuideAutopilotShellSession.defaultCommandDeadline)
+        guard ownsLongRunningSetup(ownership) else {
+            releaseLongRunningCommandOwnership(ownership.id)
+            return .stopped
+        }
+        // Fire and don't await: a dev server never returns. The driving
+        // protocol has no separate "admitted" callback, so the result below
+        // remains optimistic until `run` reports its first terminal outcome;
+        // a late busy/start failure is still surfaced for this step and is
+        // never replayed. If the process dies within ~10s, v1 otherwise lets
+        // the WatchLoop and the reader notice; the transcript shows it running.
+        Task { [weak self, longRunningSession] in
+            guard let self,
+                  !self.sessionEndWasRequested,
+                  !self.longRunningAbortIsInProgress,
+                  self.longRunningCommandOwnership?.id == ownership.id,
+                  !self.theReaderAskedToStopThisStep else {
+                self?.releaseLongRunningCommandOwnership(ownership.id)
+                return
+            }
+            let outcome = await longRunningSession.run(
+                approved, deadline: GuideAutopilotShellSession.defaultCommandDeadline
+            )
+            self.longRunningCommandDidFinish(ownership, outcome: outcome)
         }
         transcript.append(.explanation(
             text: "\(guideContext.appName) is starting from source. The red button stops it and hands the step to you."
         ))
         return .longRunningStarted
+    }
+
+    private func ownsLongRunningSetup(_ ownership: LongRunningCommandOwnership) -> Bool {
+        !Task.isCancelled
+            && !sessionEndWasRequested
+            && !longRunningAbortIsInProgress
+            && !theReaderAskedToStopThisStep
+            && activeStepGeneration == ownership.stepGeneration
+            && longRunningCommandOwnership?.id == ownership.id
+    }
+
+    /// Releases the side-session lane only for the owner that acquired it.
+    /// An interactive prompt deliberately remains owned: the shell's prompt
+    /// detector has returned early while the process is still alive, and only
+    /// an explicit abort/end can release it.
+    private func longRunningCommandDidFinish(
+        _ ownership: LongRunningCommandOwnership,
+        outcome: GuideAutopilotCommandOutcome
+    ) {
+        guard longRunningCommandOwnership?.id == ownership.id else {
+            irisTrace("autopilot: ignored stale long-running completion")
+            return
+        }
+        if case .seemsToBeAskingAQuestion = outcome {
+            return
+        }
+
+        longRunningCommandOwnership = nil
+
+        // The normal start path has already returned `.longRunningStarted`.
+        // If an external caller nevertheless occupied the side session between
+        // our start and run, make that late rejection visible while this step
+        // still owns the runner. Never overwrite a newer step's state.
+        switch outcome {
+        case .sessionBusy:
+            guard lateOutcomeStillBelongsToCurrentStep(ownership) else {
+                return
+            }
+            _ = surface(diagnosis: Self.terminalSessionBusyDiagnosis, command: ownership.command)
+        case .sessionFailed:
+            guard lateOutcomeStillBelongsToCurrentStep(ownership) else {
+                return
+            }
+            _ = surface(diagnosis: Self.terminalSessionFailureDiagnosis, command: ownership.command)
+        case .terminalSessionRestarted:
+            guard lateOutcomeStillBelongsToCurrentStep(ownership) else {
+                return
+            }
+            _ = surface(diagnosis: Self.terminalSessionRestartedDiagnosis, command: ownership.command)
+        case .timedOut:
+            guard lateOutcomeStillBelongsToCurrentStep(ownership) else {
+                return
+            }
+            _ = surface(diagnosis: Self.longRunningSessionTimedOutDiagnosis, command: ownership.command)
+        case .cancelled:
+            guard lateOutcomeStillBelongsToCurrentStep(ownership) else {
+                return
+            }
+            _ = surface(diagnosis: Self.longRunningSessionInterruptedDiagnosis, command: ownership.command)
+        default:
+            break
+        }
+    }
+
+    private func lateOutcomeStillBelongsToCurrentStep(
+        _ ownership: LongRunningCommandOwnership
+    ) -> Bool {
+        guard !theReaderAskedToStopThisStep,
+              !sessionEndWasRequested,
+              !longRunningAbortIsInProgress,
+              activeStepGeneration == ownership.stepGeneration,
+              case .running(let stepIndex) = state else { return false }
+        return stepIndex == ownership.stepIndex
+    }
+
+    private func releaseLongRunningCommandOwnership(_ id: UUID) {
+        guard longRunningCommandOwnership?.id == id else { return }
+        longRunningCommandOwnership = nil
     }
 
     // MARK: - The confirm handshake
@@ -1217,7 +1927,14 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
     /// running anything more. The step lands on the surfaced "Your turn" row,
     /// so the install continues on the reader's terms rather than dying.
     func abortTheCurrentStepBecauseTheReaderAskedToStop() async {
+        guard !longRunningAbortIsInProgress else { return }
+        longRunningAbortIsInProgress = true
+        defer { longRunningAbortIsInProgress = false }
         theReaderAskedToStopThisStep = true
+        // Invalidate side-session admission before the first await. The
+        // command task may otherwise enter `run` while the main-session cancel
+        // is suspended.
+        longRunningCommandOwnership = nil
         transcript.append(.explanation(
             text: "Stopping this step — you take it from here."
         ))

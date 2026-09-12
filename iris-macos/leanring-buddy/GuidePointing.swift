@@ -62,6 +62,8 @@ nonisolated enum GuidePointRefusal: Equatable, Sendable {
     case theStepIsSensitive
     /// Looked, and genuinely could not find it.
     case couldNotFindIt(descriptor: String)
+    /// Looking failed, so absence of a returned point is not an absent control.
+    case pointingUnavailable(message: String)
 
     var userFacingMessage: String? {
         switch self {
@@ -75,6 +77,8 @@ nonisolated enum GuidePointRefusal: Equatable, Sendable {
             return nil // Deliberate, and explaining it every time would be noise.
         case .couldNotFindIt:
             return "I can't find it on screen — it may be scrolled out of view."
+        case .pointingUnavailable(let message):
+            return message
         }
     }
 }

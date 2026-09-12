@@ -151,6 +151,38 @@ private final class StillRunner: ObservableObject, AutopilotTerminalPresenting {
 
     // MARK: - Where a resize lands
 
+    @Test func theInitialTakeoverFitsTheUsableFrameOnASecondaryDisplay() {
+        // A secondary display can have a non-zero virtual-desktop origin and a
+        // visibleFrame inset by the menu bar or Dock. Initial geometry must be
+        // centered in that usable rectangle, not in the raw screen frame.
+        let visible = CGRect(x: 900, y: -40, width: 1478, height: 944)
+        let centered = GuideAutopilotTakeoverController.centeredFrameWithinVisibleFrame(
+            visible,
+            preferredSize: CGSize(width: 760, height: 480),
+            margins: CGSize(width: 60, height: 80)
+        )
+
+        #expect(centered == CGRect(x: 1259, y: 192, width: 760, height: 480))
+        #expect(centered.minX >= visible.minX + 60)
+        #expect(centered.maxX <= visible.maxX - 60)
+        #expect(centered.minY >= visible.minY + 80)
+        #expect(centered.maxY <= visible.maxY - 80)
+    }
+
+    @Test func theInitialTakeoverShrinksRatherThanLeavingASmallDisplay() {
+        let visible = CGRect(x: 40, y: 30, width: 500, height: 300)
+        let centered = GuideAutopilotTakeoverController.centeredFrameWithinVisibleFrame(
+            visible,
+            preferredSize: CGSize(width: 760, height: 480),
+            margins: CGSize(width: 60, height: 80)
+        )
+
+        #expect(centered == CGRect(x: 100, y: 110, width: 380, height: 140))
+        #expect(visible.contains(CGPoint(x: centered.minX, y: centered.minY)))
+        #expect(centered.maxX <= visible.maxX)
+        #expect(centered.maxY <= visible.maxY)
+    }
+
     @Test func aResizeMovesTheGrabbedEdgeAndAnchorsTheOthers() {
         let start = CGRect(x: 1000, y: 100, width: 400, height: 340)
 

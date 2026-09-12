@@ -90,9 +90,27 @@ import Testing
 
     /// Build a minimal `.app`-shaped directory whose Info.plist marker records a
     /// version, so a swap can be proven by reading which version is at a path.
-    private static func makeFakeBundle(at path: String, marker: String) {
+    private static func makeFakeBundle(
+        at path: String, marker: String, bundleIdentifier: String = "com.fixture.demo"
+    ) {
         let contents = (path as NSString).appendingPathComponent("Contents")
-        try? FileManager.default.createDirectory(atPath: contents, withIntermediateDirectories: true)
+        let executableName = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+            .replacingOccurrences(of: " ", with: "")
+        let executablePath = (contents as NSString).appendingPathComponent("MacOS/\(executableName)")
+        try? FileManager.default.createDirectory(
+            atPath: (executablePath as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true
+        )
+        let info: [String: Any] = [
+            "CFBundleIdentifier": bundleIdentifier,
+            "CFBundleExecutable": executableName,
+            "CFBundleName": URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent,
+        ]
+        if let data = try? PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0) {
+            try? data.write(to: URL(fileURLWithPath: contents).appendingPathComponent("Info.plist"))
+        }
+        try? Data("#!/bin/sh\nexit 0\n".utf8).write(to: URL(fileURLWithPath: executablePath))
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executablePath)
         FileManager.default.createFile(
             atPath: (contents as NSString).appendingPathComponent("marker.txt"),
             contents: Data(marker.utf8)
@@ -143,6 +161,42 @@ import Testing
         #expect(Self.markerOfBundle(at: installedPath) == "installed-v1")
     }
 
+    /// A private recovery store is honored by the real swap primitive, so a
+    /// harness can keep its Undo protection separate from Iris's normal store.
+    @Test func swappingABundleUsesAnInjectedUndoRecoveryStore() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iris-delivery-private-recovery-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let installedPath = root.appendingPathComponent("Applications/Demo.app").path
+        let freshBuildPath = root.appendingPathComponent("clone/build/Demo.app").path
+        let snapshotPath = root.appendingPathComponent("backups/Demo.app").path
+        Self.makeFakeBundle(at: installedPath, marker: "installed-v1")
+        Self.makeFakeBundle(at: freshBuildPath, marker: "fresh-v2")
+
+        let privateStore = DeliveredEditUndoRecoveryStore(
+            recordURL: root.appendingPathComponent("state/delivered-undo-recovery.json")
+        )
+        try FileManager.default.createDirectory(
+            at: privateStore.archiveDirectoryURL,
+            withIntermediateDirectories: true
+        )
+        let unreadableArchive = privateStore.archiveDirectoryURL
+            .appendingPathComponent("unreadable.json")
+        try Data("not-json".utf8).write(to: unreadableArchive)
+
+        let result = AppRelaunchService.atomicallyReplaceBundle(
+            installedPath: installedPath,
+            withBundleAt: freshBuildPath,
+            snapshotTo: snapshotPath,
+            undoRecoveryStore: privateStore
+        )
+        #expect(!result.isSuccess)
+        #expect(Self.markerOfBundle(at: installedPath) == "installed-v1")
+        #expect(Self.markerOfBundle(at: freshBuildPath) == "fresh-v2")
+        #expect(!FileManager.default.fileExists(atPath: snapshotPath))
+    }
+
     /// The delivery entry point, run for real against a bundle id that no app on
     /// this machine claims: there is nothing installed to replace, so it reports
     /// that honestly (the caller then launches the build-dir artifact) rather
@@ -154,10 +208,11 @@ import Testing
         defer { try? FileManager.default.removeItem(at: root) }
         let clonePath = root.appendingPathComponent("clone").path
         let freshBuildPath = root.appendingPathComponent("clone/build/Nope.app").path
-        Self.makeFakeBundle(at: freshBuildPath, marker: "fresh")
+        let bundleIdentifier = "com.iris.test.definitely-not-installed-\(UUID().uuidString)"
+        Self.makeFakeBundle(at: freshBuildPath, marker: "fresh", bundleIdentifier: bundleIdentifier)
 
         let result = await AppRelaunchService().installFreshBuildOverInstalledApp(
-            macBundleId: "com.iris.test.definitely-not-installed-\(UUID().uuidString)",
+            macBundleId: bundleIdentifier,
             freshBuildArtifactPath: freshBuildPath,
             clonePath: clonePath
         )

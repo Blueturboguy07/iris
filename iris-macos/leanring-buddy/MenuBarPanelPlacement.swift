@@ -30,10 +30,11 @@ final class MenuBarPanelPlacement: @unchecked Sendable {
     private static let originYKey = "iris:panel:originY"
     private static let widthKey = "iris:panel:width"
     private static let heightKey = "iris:panel:height"
+    private static let compactWidthMigrationKey = "iris:panel:compactWidthMigrationV1"
 
     /// Narrow enough to read as a dropdown, wide enough for the account rows.
-    /// The SwiftUI body was authored at 320.
-    static let narrowestWidth: CGFloat = 300
+    /// The compact layout stays readable at 376 points and can expand if needed.
+    static let narrowestWidth: CGFloat = 376
     static let widestWidth: CGFloat = 560
     static let shortestHeight: CGFloat = 260
     static let tallestHeight: CGFloat = 900
@@ -45,6 +46,15 @@ final class MenuBarPanelPlacement: @unchecked Sendable {
 
     init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
+        // Only the prior default width changes, once. Preserve custom widths,
+        // the reader's chosen height, and their panel position.
+        if !userDefaults.bool(forKey: Self.compactWidthMigrationKey) {
+            if userDefaults.object(forKey: Self.widthKey) != nil,
+               userDefaults.double(forKey: Self.widthKey) == 420 {
+                userDefaults.set(Double(Self.narrowestWidth), forKey: Self.widthKey)
+            }
+            userDefaults.set(true, forKey: Self.compactWidthMigrationKey)
+        }
     }
 
     /// The size the reader chose, or nil to keep sizing from the content.
@@ -73,12 +83,15 @@ final class MenuBarPanelPlacement: @unchecked Sendable {
     var readerHasPlacedItThemselves: Bool { storedOrigin != nil }
 
     func remember(origin: CGPoint) {
+        guard origin.x.isFinite, origin.y.isFinite, storedOrigin != origin else { return }
         userDefaults.set(Double(origin.x), forKey: Self.originXKey)
         userDefaults.set(Double(origin.y), forKey: Self.originYKey)
     }
 
     func remember(size: CGSize) {
+        guard size.width.isFinite, size.height.isFinite else { return }
         let clamped = Self.clampedSize(size)
+        guard storedSize != clamped else { return }
         userDefaults.set(Double(clamped.width), forKey: Self.widthKey)
         userDefaults.set(Double(clamped.height), forKey: Self.heightKey)
     }

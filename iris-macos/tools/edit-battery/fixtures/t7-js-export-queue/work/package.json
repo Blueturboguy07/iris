@@ -1,0 +1,8 @@
+{
+  "name": "export-queue-fixture",
+  "private": true,
+  "scripts": {
+    "build": "node --check src/export-store.js && node --check src/export-queue.js && node --check src/export-controller.js",
+    "test": "node --test test/regression.test.js"
+  }
+}

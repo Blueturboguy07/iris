@@ -15,6 +15,12 @@ import Testing
 
 struct GuidePointingLadderTests {
 
+    @Test func failedModelRequestDoesNotClaimTheControlWasMissing() {
+        let refusal = GuidePointRefusal.pointingUnavailable(message: "Pointing is unavailable. Check your connection.")
+        #expect(refusal.userFacingMessage == "Pointing is unavailable. Check your connection.")
+        #expect(refusal.userFacingMessage?.contains("scrolled") == false)
+    }
+
     private func step(
         kind: IrisStepKind,
         command: String? = nil,

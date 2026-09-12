@@ -836,8 +836,139 @@ final class CompanionManager: ObservableObject {
             IrisOverlayModalAlert.liftAboveTheEyeOverlay(alert)
             return alert.runModal() == .alertFirstButtonReturn
         }
+        runner.openTheInstallGuideForApp = { [weak self] appNameOrSlug in
+            guard let self else {
+                return ChatActionGuideOpenReport(
+                    guideWasOpened: false,
+                    messageForTheModel: "Iris is shutting down, so no guide was opened."
+                )
+            }
+            return await self.openInstallGuideFromChat(matching: appNameOrSlug)
+        }
         return runner
     }()
+
+    // MARK: - Chat opening an install guide
+
+    /// The chat tool's body: turn what the reader called an app into a catalog
+    /// entry, open its guide at the eye, and say what happened in words the
+    /// model can pass on.
+    ///
+    /// Matching is deliberately forgiving in one direction only. An exact slug,
+    /// guide slug or name wins outright; failing that, a single entry whose
+    /// name or slug CONTAINS the text wins ("simplic" → Simplicity). Two or
+    /// more containing it is a miss, reported with the candidates, because
+    /// opening the wrong app's guide is worse than asking. On any miss the
+    /// report carries every app that has a guide, so the model's next sentence
+    /// can offer real options rather than a guess.
+    func openInstallGuideFromChat(matching appNameOrSlug: String) async -> ChatActionGuideOpenReport {
+        // The catalog is fetched lazily by the panel; chat may run first.
+        if appInventoryService.inventoryEntries.isEmpty {
+            await appInventoryService.refreshInventoryIfStale()
+        }
+        let catalogEntries = appInventoryService.inventoryEntries
+        let appsWithGuides = catalogEntries.filter { $0.hasAnInstallGuide }
+        let listOfAppsWithGuides = appsWithGuides
+            .map { "\($0.name) (\($0.slug))" }
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+            .joined(separator: ", ")
+
+        guard !catalogEntries.isEmpty else {
+            let reason = appInventoryService.lastRefreshFailureMessage ?? "publik's catalog has not loaded yet"
+            return ChatActionGuideOpenReport(
+                guideWasOpened: false,
+                messageForTheModel: "Iris could not read publik's app catalog (\(reason)), so no guide was opened. Ask the reader to try again in a moment."
+            )
+        }
+
+        guard let matchedEntry = Self.catalogEntry(matching: appNameOrSlug, in: catalogEntries) else {
+            let closeCandidates = Self.catalogEntries(containing: appNameOrSlug, in: catalogEntries)
+            let ambiguity = closeCandidates.count > 1
+                ? " It could mean any of: \(closeCandidates.map { "\($0.name) (\($0.slug))" }.joined(separator: ", ")) — ask which."
+                : ""
+            return ChatActionGuideOpenReport(
+                guideWasOpened: false,
+                messageForTheModel: "No publik app matches \"\(appNameOrSlug)\", so no guide was opened.\(ambiguity) Apps Iris has an install guide for right now: \(listOfAppsWithGuides.isEmpty ? "none" : listOfAppsWithGuides)."
+            )
+        }
+
+        guard let guideSlug = matchedEntry.guideSlug else {
+            return ChatActionGuideOpenReport(
+                guideWasOpened: false,
+                messageForTheModel: "publik lists \(matchedEntry.name) but has not published an install guide for it yet, so nothing was opened. The reader can read about it at https://publikhq.com/\(matchedEntry.slug). Apps Iris can install right now: \(listOfAppsWithGuides.isEmpty ? "none" : listOfAppsWithGuides)."
+            )
+        }
+
+        irisTrace("chat/guide: opening \(guideSlug) for the reader")
+        await guideSessionController.openLatestVersionOfGuide(slug: guideSlug)
+
+        switch guideSessionController.loadState {
+        case .guideIsOpen:
+            return ChatActionGuideOpenReport(
+                guideWasOpened: true,
+                messageForTheModel: """
+                Opened the install guide for \(matchedEntry.name) — it is on screen now, as a card at the \
+                eye. The reader can follow it step by step, or press "Let Iris run it" to have Iris do \
+                the install. Tell them it is open and where to look; do not repeat the steps in your reply.
+                """
+            )
+        case .guideCouldNotBeLoaded(_, let userFacingMessage):
+            return ChatActionGuideOpenReport(
+                guideWasOpened: false,
+                messageForTheModel: "Iris tried to open the guide for \(matchedEntry.name) and publik answered: \(userFacingMessage) Nothing is open. Tell the reader that, in those words."
+            )
+        case .guideIsLoading:
+            return ChatActionGuideOpenReport(
+                guideWasOpened: true,
+                messageForTheModel: "The guide for \(matchedEntry.name) is still loading at the eye. Tell the reader it is on its way."
+            )
+        case .noGuideIsOpen:
+            return ChatActionGuideOpenReport(
+                guideWasOpened: false,
+                messageForTheModel: "Iris could not open the guide for \(matchedEntry.name) and has no reason to give. Nothing is open."
+            )
+        }
+    }
+
+    /// Exact match first (slug, guide slug, or name, case- and
+    /// whitespace-insensitive), then a UNIQUE containing match. Nil when there
+    /// is no match or more than one.
+    nonisolated static func catalogEntry(
+        matching appNameOrSlug: String,
+        in catalogEntries: [CatalogAppInventoryEntry]
+    ) -> CatalogAppInventoryEntry? {
+        let wanted = Self.normalizedForMatching(appNameOrSlug)
+        guard !wanted.isEmpty else { return nil }
+        if let exactMatch = catalogEntries.first(where: { entry in
+            Self.normalizedForMatching(entry.slug) == wanted
+                || Self.normalizedForMatching(entry.name) == wanted
+                || entry.guideSlug.map(Self.normalizedForMatching) == wanted
+        }) {
+            return exactMatch
+        }
+        let containing = Self.catalogEntries(containing: appNameOrSlug, in: catalogEntries)
+        return containing.count == 1 ? containing[0] : nil
+    }
+
+    nonisolated static func catalogEntries(
+        containing appNameOrSlug: String,
+        in catalogEntries: [CatalogAppInventoryEntry]
+    ) -> [CatalogAppInventoryEntry] {
+        let wanted = Self.normalizedForMatching(appNameOrSlug)
+        guard !wanted.isEmpty else { return [] }
+        return catalogEntries.filter { entry in
+            Self.normalizedForMatching(entry.name).contains(wanted)
+                || Self.normalizedForMatching(entry.slug).contains(wanted)
+        }
+    }
+
+    /// Lowercased, diacritics stripped, and every run of spaces, hyphens and
+    /// underscores removed — so "Nut AI", "nut-ai" and "nutai" all meet.
+    nonisolated private static func normalizedForMatching(_ text: String) -> String {
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+            .lowercased()
+            .filter { !$0.isWhitespace && $0 != "-" && $0 != "_" }
+    }
 
     /// Turns a failed request into what the panel says, and — when the funded
     /// tier reports the session is gone — into a refresh-or-sign-out on the
@@ -1413,6 +1544,62 @@ final class CompanionManager: ObservableObject {
                 openTheFinishedApp()
             }
         }
+
+        guideSessionController.surfaceTheGuideCardAtTheEye = { [weak self] in
+            self?.bringTheEyeBarForwardToShowTheOpenGuide()
+        }
+    }
+
+    /// Bring the eye's overlay and bar forward so a just-opened guide's card is
+    /// in front of the reader, and drop the settings dropdown if it was up.
+    /// Mirrors `requestOnDemandEdit`'s surfacing: the guide card lives at the eye
+    /// (`OverlayEyeGuideCard`), so the overlay has to be visible and the bar has
+    /// to be open, whichever entry point opened the guide — the settings panel's
+    /// "Follow an install guide" picker, or an `iris://guide/…` link. The picker
+    /// used to surface nothing at all, so a successful load appeared to do
+    /// nothing; this is what makes it visible.
+    private func bringTheEyeBarForwardToShowTheOpenGuide() {
+        transientHideTask?.cancel()
+        transientHideTask = nil
+        if !isOverlayVisible {
+            overlayWindowManager.hasShownOverlayBefore = true
+            overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+            isOverlayVisible = true
+        }
+        NotificationCenter.default.post(name: .clickySummonAskBar, object: nil)
+        NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+    }
+
+    /// The reason the most recent `iris://` link was turned away, shown as a
+    /// small transient banner at the top of the eye bar, or nil when there is
+    /// nothing to say.
+    ///
+    /// Before this, `handleIncomingDeepLink`'s `.failure` case only printed
+    /// `rejection.rejectionMessage` to the console — real for a hand-typed or
+    /// stale link (a bookmark missing `?version=`, a copy-paste that dropped a
+    /// query parameter) and invisible to anyone not tailing logs: the tap
+    /// landed, nothing moved, and the reader was told nothing, which is the
+    /// exact silent-failure shape this codebase's own comments call out
+    /// elsewhere (`autopilotBlockedExplanation`). This mirrors that precedent
+    /// rather than the guide card's inline text, because a rejected link never
+    /// gets far enough to have a guide card to show it in.
+    @Published private(set) var deepLinkRejectionExplanation: String?
+    private var deepLinkRejectionDismissalTask: Task<Void, Never>?
+    private static let deepLinkRejectionVisibleDuration: Duration = .seconds(6)
+
+    /// Called for every `iris://` link `IrisDeepLinkParser.parse` refuses.
+    /// Brings the eye forward — a rejected link is otherwise invisible even to
+    /// a reader staring at their screen, since nothing else about to happen —
+    /// and shows the parser's own sentence for a few seconds.
+    func presentDeepLinkRejection(_ explanation: String) {
+        bringTheEyeBarForwardToShowTheOpenGuide()
+        deepLinkRejectionDismissalTask?.cancel()
+        deepLinkRejectionExplanation = explanation
+        deepLinkRejectionDismissalTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.deepLinkRejectionVisibleDuration)
+            guard !Task.isCancelled else { return }
+            self?.deepLinkRejectionExplanation = nil
+        }
     }
 
     /// Raises the centered terminal takeover for the run autopilot just started.
@@ -1545,6 +1732,7 @@ final class CompanionManager: ObservableObject {
         guideSessionController.sendTheEyeTo = nil
         guideSessionController.stopPointingTheEye = nil
         guideSessionController.onGuideCompleted = nil
+        guideSessionController.surfaceTheGuideCardAtTheEye = nil
         guideSessionController.onAutopilotDidStart = nil
         guideSessionController.onAutopilotDidStop = nil
         pendingAutopilotManualGate = nil
@@ -2316,11 +2504,12 @@ final class CompanionManager: ObservableObject {
     WHAT YOU CAN DO — reach for these before telling anyone to do something by hand:
     - run_a_command_in_the_terminal runs ONE shell command on this mac and gives you its real exit code and real output. use it whenever the honest answer depends on what the machine actually says.
     - put_text_on_the_clipboard puts text on their clipboard. use it when something is more useful pasted than read.
+    - open_an_install_guide puts a publik app's install guide on screen, as a card at the eye. call it the moment they want to install, set up, get or try a publik app — pass the app as they named it, no slug needed. iris matches it against the live catalog; on a miss the result lists every app iris has a guide for, so offer those rather than guessing. never say a guide is open unless the result said so.
     - search the web when the answer would otherwise be stale or guessed — an install command, a version, an error you don't recognise.
     - point at anything on screen (see pointing, below).
 
-    WHAT IRIS DOES THAT YOU SHOULD HAND OFF TO. you can't install or edit apps from this conversation, but iris can, and the reader opened iris precisely so they wouldn't have to do it themselves. so name iris's own path FIRST, before any manual instructions:
-    - installing an app: on a publik page, "Install and customize" opens the guide IN THE BROWSER — it is a web button and it does not start iris. inside that guide, "Open in Iris" / "Let Iris install it" (before starting) or "Let Iris take over" (partway through) is what hands the install to iris. once iris has it, "let iris run it" runs the whole thing hands-off. name the one that matches where they actually are.
+    WHAT IRIS DOES THAT YOU SHOULD HAND OFF TO. you can open an install guide from this conversation (above); you can't edit apps from it, but iris can, and the reader opened iris precisely so they wouldn't have to do it themselves. so name iris's own path FIRST, before any manual instructions:
+    - installing an app: call open_an_install_guide. once the guide is at the eye, "let iris run it" runs the whole thing hands-off. if they are instead already inside a guide IN THE BROWSER on a publik page, "Open in Iris" / "Let Iris install it" (before starting) or "Let Iris take over" (partway through) hands that install to iris — "Install and customize" on the page itself is a web button and does not start iris.
     - changing an app they already have: "fix a bug in…" or "add a feature to…" on the eye bar. iris edits their local source itself.
     never walk someone through steps by hand when one of these would do it for them. if you genuinely can't tell which applies, say what you'd need to know.
 

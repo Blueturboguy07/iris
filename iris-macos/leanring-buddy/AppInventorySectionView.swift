@@ -48,18 +48,16 @@ nonisolated enum CatalogAppDiscovery {
     /// on this Mac — narrowed to what matches the search text and sorted
     /// alphabetically for display.
     ///
-    /// Unknown platform support may appear in a deliberate search, labeled as
-    /// unconfirmed. It never becomes a starter recommendation. Installation
-    /// detection remains separate from platform compatibility.
+    /// An app whose install state is `unknown` (publik has no bundle id for it,
+    /// so Iris genuinely cannot tell whether it is installed) is still offered:
+    /// the worst case is opening the publik page for something the reader
+    /// already has, which is harmless, and hiding it would make a searchable app
+    /// un-findable for no reason.
     static func discoverableApps(
         fromInventory inventoryEntries: [CatalogAppInventoryEntry],
         matchingSearchText searchText: String
     ) -> [CatalogAppInventoryEntry] {
-        let notAlreadyInstalled = inventoryEntries.filter {
-            CatalogMacDiscoveryPolicy.mayShowInDeliberateSearch(
-                isInstalled: $0.isInstalled, compatibility: $0.macCompatibility
-            )
-        }
+        let notAlreadyInstalled = inventoryEntries.filter { !$0.isInstalled }
         let matching = appsMatching(searchText, within: notAlreadyInstalled)
         return matching.sorted { leftEntry, rightEntry in
             leftEntry.name.localizedCaseInsensitiveCompare(rightEntry.name) == .orderedAscending
@@ -74,11 +72,7 @@ nonisolated enum CatalogAppDiscovery {
         fromInventory inventoryEntries: [CatalogAppInventoryEntry],
         limit: Int = numberOfStarterSuggestions
     ) -> [CatalogAppInventoryEntry] {
-        let notAlreadyInstalled = inventoryEntries.filter {
-            CatalogMacDiscoveryPolicy.maySuggest(
-                isInstalled: $0.isInstalled, compatibility: $0.macCompatibility
-            )
-        }
+        let notAlreadyInstalled = inventoryEntries.filter { !$0.isInstalled }
         let ordered = notAlreadyInstalled.sorted { leftEntry, rightEntry in
             let leftHasARelease = leftEntry.latestReleaseTag != nil
             let rightHasARelease = rightEntry.latestReleaseTag != nil
@@ -125,49 +119,19 @@ struct AppInventorySectionView: View {
     /// opens the edit card at the eye. Defaulted to a no-op so a preview or a
     /// caller that does not offer editing still builds.
     var onEditApp: (CatalogAppInventoryEntry) -> Void = { _ in }
-    /// The existing on-demand edit flow, injected by the settings owner so the
-    /// edit affordance can follow its live phase. Optional for focused previews
-    /// and test callers that only exercise inventory rendering.
-    var onDemandEditCoordinator: OnDemandEditCoordinator? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Your apps")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(DS.Colors.textSecondary)
-
-                Spacer(minLength: 4)
-
-                Button("Refresh") {
-                    Task { await appInventoryService.refreshInventory(forceCatalogFetch: true) }
-                }
-                .irisTinyButton()
-                .disabled(appInventoryService.isRefreshing)
-                .accessibilityLabel("Refresh app list")
-                .help("Refresh the app catalog and installed-app status.")
-            }
-
-            if !appInventoryService.inventoryEntries.isEmpty,
-               let lastRefreshFailureMessage = appInventoryService.lastRefreshFailureMessage {
-                Text("Catalog refresh unavailable. Showing the last known app list. \(lastRefreshFailureMessage)")
-                    .font(DS.Typography.caption)
-                    .foregroundColor(DS.Colors.amber)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            Text("Your publik apps")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(DS.Colors.textSecondary)
 
             if installedEntries.isEmpty {
                 Text(emptyStateMessage)
-                    .font(.system(size: 13))
+                    .font(.system(size: 11))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                if installedEntries.contains(where: \.isLocallyEditable) {
-                    Text("Choose Edit this app, then describe what you want to change.")
-                        .font(DS.Typography.caption)
-                        .foregroundColor(DS.Colors.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(installedEntries) { installedEntry in
                         installedAppRow(for: installedEntry)
@@ -177,17 +141,6 @@ struct AppInventorySectionView: View {
         }
         .task {
             await appInventoryService.refreshInventoryIfStale()
-            while !Task.isCancelled {
-                do {
-                    try await Task.sleep(
-                        for: .seconds(AppInventoryService.minimumSecondsBetweenAutomaticRefreshes)
-                    )
-                } catch {
-                    return
-                }
-                guard !Task.isCancelled else { return }
-                await appInventoryService.refreshInventoryIfStale()
-            }
         }
         .onAppear {
             appInventoryService.startWatchingTheFrontmostApp()
@@ -211,20 +164,19 @@ struct AppInventorySectionView: View {
         if let lastRefreshFailureMessage = appInventoryService.lastRefreshFailureMessage {
             return lastRefreshFailureMessage
         }
-        if appInventoryService.isRefreshing || appInventoryService.lastSuccessfulRefreshCompletedAt == nil {
-            return "Looking for supported apps on this Mac…"
+        if appInventoryService.isRefreshing || appInventoryService.inventoryEntries.isEmpty {
+            return "Looking for publik apps on this Mac…"
         }
-        return "No supported apps found yet. Explore a Mac app below to get started."
+        return "No publik apps found on this Mac yet."
     }
 
     @ViewBuilder
     private func installedAppRow(for installedEntry: CatalogAppInventoryEntry) -> some View {
         HStack(spacing: 8) {
-            CatalogAppIconView(entry: installedEntry)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
                     Text(installedEntry.name)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundColor(DS.Colors.textPrimary)
 
                     // A quiet marker on the app the user is actually looking at,
@@ -232,20 +184,20 @@ struct AppInventorySectionView: View {
                     // than about a catalog.
                     if appInventoryService.frontmostCatalogAppSlug == installedEntry.slug {
                         Text("in front")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.system(size: 9, weight: .semibold))
                             .foregroundColor(DS.Colors.textTertiary)
                     }
                 }
 
                 Text(versionLine(for: installedEntry))
-                    .font(.system(size: 13))
+                    .font(.system(size: 10))
                     .foregroundColor(DS.Colors.textTertiary)
 
                 // What the app said when it was asked, or why it could not
                 // answer. Only ever shown for an app that is actually running.
                 if let liveStatusLine = liveStatusLine(for: installedEntry) {
                     Text(liveStatusLine)
-                        .font(.system(size: 13))
+                        .font(.system(size: 10))
                         .foregroundColor(DS.Colors.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -271,21 +223,13 @@ struct AppInventorySectionView: View {
             // never renders this. The provenance is advisory here and re-checked
             // LIVE when the reader actually starts an edit.
             if installedEntry.isLocallyEditable {
-                if let onDemandEditCoordinator {
-                    InstalledAppEditAction(
-                        entry: installedEntry,
-                        coordinator: onDemandEditCoordinator,
-                        onEditApp: onEditApp
-                    )
-                } else {
-                    Button(action: {
-                        onEditApp(installedEntry)
-                    }) {
-                        Text("Edit this app")
-                    }
-                    .irisTinyButton()
-                    .help("Describe a problem to fix or something you want to add to \(installedEntry.name).")
+                Button(action: {
+                    onEditApp(installedEntry)
+                }) {
+                    Text("Edit this app")
                 }
+                .irisTinyButton()
+                .help("Tell Iris what to change in \(installedEntry.name). It edits your local source under your own model key.")
             }
 
             if case .updateIsAvailable(let latestReleaseTag) = installedEntry.updateAvailability {
@@ -295,7 +239,7 @@ struct AppInventorySectionView: View {
                     Text("Update to \(latestReleaseTag)")
                 }
                 .irisPrimaryPill(isFullWidth: false, isCompact: true)
-                .help("Opens the update page in your browser. This button does not install the update.")
+                .help("Opens \(installedEntry.name) on publik. Iris never installs anything itself.")
             }
         }
         .padding(.horizontal, 10)
@@ -346,46 +290,6 @@ struct AppInventorySectionView: View {
     }
 }
 
-/// The installed-app edit action observes the one coordinator that owns the
-/// flow. Keeping this as a child view makes the disabled state update when the
-/// existing coordinator changes phase without changing the inventory service or
-/// creating a second edit flow.
-private struct InstalledAppEditAction: View {
-    let entry: CatalogAppInventoryEntry
-    @ObservedObject var coordinator: OnDemandEditCoordinator
-    let onEditApp: (CatalogAppInventoryEntry) -> Void
-
-    private var editIsAvailable: Bool {
-        coordinator.canPickAnotherApp
-    }
-
-    var body: some View {
-        VStack(alignment: .trailing, spacing: 2) {
-            Button(action: {
-                onEditApp(entry)
-            }) {
-                Text("Edit this app")
-            }
-            .irisTinyButton()
-            .disabled(!editIsAvailable)
-            .help(editIsAvailable
-                ? "Describe a problem to fix or something you want to add to \(entry.name)."
-                : "Finish or stop the current edit first.")
-            .accessibilityHint(editIsAvailable
-                ? "Describe a problem to fix or something you want to add."
-                : "Finish or stop the current edit first.")
-
-            if !editIsAvailable {
-                Text("Finish or stop the current edit first.")
-                    .font(.system(size: 10))
-                    .foregroundColor(DS.Colors.textTertiary)
-                    .multilineTextAlignment(.trailing)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-}
-
 // MARK: - Discover more apps
 
 /// The "discover more apps" section of the settings panel: a search field over
@@ -401,24 +305,32 @@ private struct InstalledAppEditAction: View {
 struct DiscoverAppsSectionView: View {
     @ObservedObject var appInventoryService: AppInventoryService
 
+    /// The reader tapped "Install with Iris" on an app: open its install guide
+    /// at the eye. Wired by `CompanionPanelView` to the guide session. Only
+    /// offered for an entry whose catalog row names a guide, so the button is
+    /// never a dead end. Defaulted to a no-op so a preview still builds.
+    var onInstallWithIris: (CatalogAppInventoryEntry) -> Void = { _ in }
+
     /// What the reader has typed. Filtering is done in memory over the
     /// already-fetched catalog, so it is instant and needs no network.
     @State private var searchText: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Find apps for Mac")
-                .font(.system(size: 13, weight: .semibold))
+            Text("Discover apps")
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(DS.Colors.textSecondary)
 
             searchField
 
-            Text("Choose an app to see its details and installation options in your browser.")
-                .font(DS.Typography.caption)
-                .foregroundColor(DS.Colors.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-
             content
+        }
+        .task {
+            // The installed-apps section above triggers the same refresh; this
+            // is here so the discovery surface still fills in when it is the
+            // thing on screen. `refreshInventoryIfStale` collapses the two into
+            // a single fetch, so having both costs nothing.
+            await appInventoryService.refreshInventoryIfStale()
         }
     }
 
@@ -427,18 +339,18 @@ struct DiscoverAppsSectionView: View {
     private var searchField: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundColor(DS.Colors.textTertiary)
 
-            TextField("Search apps by name", text: $searchText)
+            TextField("Search publik apps", text: $searchText)
                 .textFieldStyle(.plain)
-                .font(.system(size: 13))
+                .font(.system(size: 12))
                 .foregroundColor(DS.Colors.ink)
 
             if !searchText.isEmpty {
                 Button(action: { searchText = "" }) {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 13))
+                        .font(.system(size: 12))
                         .foregroundColor(DS.Colors.textTertiary)
                 }
                 .buttonStyle(.plain)
@@ -468,7 +380,7 @@ struct DiscoverAppsSectionView: View {
             // The catalog has not arrived yet — still loading, or the network is
             // down. Either way there is nothing honest to filter.
             Text(catalogUnavailableMessage)
-                .font(.system(size: 13))
+                .font(.system(size: 11))
                 .foregroundColor(DS.Colors.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
         } else if trimmedSearchText.isEmpty {
@@ -496,14 +408,15 @@ struct DiscoverAppsSectionView: View {
             fromInventory: appInventoryService.inventoryEntries
         )
         if starterSuggestions.isEmpty {
-            Text("No more confirmed Mac apps to suggest. Search to check another app's compatibility.")
-                .font(.system(size: 13))
+            // Every catalog app is already installed. A pleasant dead end.
+            Text("You've installed every publik app for Mac. Search to find them again.")
+                .font(.system(size: 11))
                 .foregroundColor(DS.Colors.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
             VStack(alignment: .leading, spacing: 6) {
                 Text("START HERE")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 9, weight: .semibold))
                     .tracking(0.8)
                     .foregroundColor(DS.Colors.quiet)
 
@@ -523,8 +436,8 @@ struct DiscoverAppsSectionView: View {
             matchingSearchText: trimmedSearchText
         )
         if matchingEntries.isEmpty {
-            Text("No Mac apps match \u{201C}\(trimmedSearchText)\u{201D}.")
-                .font(.system(size: 13))
+            Text("No apps match \u{201C}\(trimmedSearchText)\u{201D}.")
+                .font(.system(size: 11))
                 .foregroundColor(DS.Colors.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
@@ -537,7 +450,7 @@ struct DiscoverAppsSectionView: View {
 
                 if hiddenCount > 0 {
                     Text("\(hiddenCount) more — keep typing to narrow it down.")
-                        .font(.system(size: 13))
+                        .font(.system(size: 10))
                         .foregroundColor(DS.Colors.textTertiary)
                         .padding(.top, 2)
                 }
@@ -547,53 +460,70 @@ struct DiscoverAppsSectionView: View {
 
     // MARK: One app
 
+    /// Two controls side by side rather than one button wrapping the row: a
+    /// SwiftUI `Button` nested inside another `Button` hands the inner tap to
+    /// the outer one, so "Install with Iris" would have opened the browser.
+    /// The name and subtitle open the publik page as they always did; the
+    /// pill on the right opens the install guide here, at the eye.
     private func discoverAppRow(for discoverableEntry: CatalogAppInventoryEntry) -> some View {
-        Button(action: { openPublikPage(for: discoverableEntry) }) {
-            HStack(spacing: 8) {
-                CatalogAppIconView(entry: discoverableEntry)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(discoverableEntry.name)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(DS.Colors.textPrimary)
+        HStack(spacing: 8) {
+            Button(action: { openPublikPage(for: discoverableEntry) }) {
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(discoverableEntry.name)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(DS.Colors.textPrimary)
 
-                    Text(subtitle(for: discoverableEntry))
-                        .font(.system(size: 13))
+                        Text(subtitle(for: discoverableEntry))
+                            .font(.system(size: 10))
+                            .foregroundColor(DS.Colors.textTertiary)
+                    }
+
+                    Spacer(minLength: 4)
+
+                    // A quiet "opens in your browser" cue, so tapping is understood
+                    // to leave Iris rather than install something in place.
+                    Image(systemName: "arrow.up.forward")
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(DS.Colors.textTertiary)
                 }
-
-                Spacer(minLength: 4)
-
-                // A quiet "opens in your browser" cue, so tapping is understood
-                // to leave Iris rather than install something in place.
-                Image(systemName: "arrow.up.forward")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(DS.Colors.textTertiary)
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
-                    .fill(Color.white.opacity(0.045))
-            )
-            .contentShape(RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous))
+            .buttonStyle(.plain)
+            .pointerCursor()
+            .help("Open \(discoverableEntry.name) on publik in your browser.")
+
+            // Only when publik actually serves a guide for this app. An app
+            // without one keeps its browser-only row rather than a button that
+            // would land on "Publik has not published a guide for this app yet."
+            if discoverableEntry.hasAnInstallGuide {
+                Button(action: { onInstallWithIris(discoverableEntry) }) {
+                    Text("Install with Iris")
+                }
+                .irisPrimaryPill(isFullWidth: false, isCompact: true)
+                .help("Opens the step-by-step install guide for \(discoverableEntry.name) here in Iris. You can follow it yourself or let Iris run it.")
+            }
         }
-        .buttonStyle(.plain)
-        .pointerCursor()
-        .help("View \(discoverableEntry.name) and its installation options in your browser. This button does not install it.")
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
+                .fill(Color.white.opacity(0.045))
+        )
     }
 
     /// A published release tag reads as "there is something to install today";
     /// its absence still gets a row, because the publik page is worth reaching
-    /// even for an app whose release has not landed.
+    /// even for an app whose release has not landed. An app with a guide says
+    /// so, because that is the difference between "read about it" and "Iris
+    /// can put it on this Mac".
     private func subtitle(for discoverableEntry: CatalogAppInventoryEntry) -> String {
-        guard discoverableEntry.macCompatibility.isConfirmedForThisMac else {
-            return "Mac compatibility not confirmed · view details"
-        }
+        let installability = discoverableEntry.hasAnInstallGuide ? "guide available" : "view on publik"
         if let latestReleaseTag = discoverableEntry.latestReleaseTag {
-            return "\(discoverableEntry.macCompatibility.discoveryDescription) · \(latestReleaseTag)"
+            return "\(latestReleaseTag) · \(installability)"
         }
-        return discoverableEntry.macCompatibility.discoveryDescription
+        return installability.prefix(1).uppercased() + installability.dropFirst()
     }
 
     private func openPublikPage(for discoverableEntry: CatalogAppInventoryEntry) {

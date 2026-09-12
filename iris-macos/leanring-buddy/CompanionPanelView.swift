@@ -18,30 +18,8 @@
 
 import SwiftUI
 
-/// Pure presentation policy for the denied Accessibility state. The view keeps
-/// the real AX check as its source of truth; this only decides whether compact
-/// repair guidance and its two independent destinations should be shown.
-nonisolated enum AccessibilityPermissionRecovery {
-    enum Action: String, CaseIterable, Hashable {
-        case openSettings = "Open Settings"
-        case showIris = "Show Iris"
-    }
-
-    static let disclosureTitle = "Already enabled?"
-    static let repairInstructions = "If Iris is already listed but still says it is not granted, select the old Iris entry, click the minus button, click the plus button, choose this copy of Iris, then turn it on."
-
-    static func shouldShowRepairInstructions(isGranted: Bool) -> Bool {
-        !isGranted
-    }
-
-    static func actions(isGranted: Bool) -> [Action] {
-        isGranted ? [] : Array(Action.allCases)
-    }
-}
-
 struct CompanionPanelView: View {
     @ObservedObject var companionManager: CompanionManager
-    private let closeSettingsWindow: (() -> Void)?
 
     /// What the reader's own key has spent. Observed separately so the total
     /// re-renders the moment a call finishes rather than on the next unrelated
@@ -60,8 +38,9 @@ struct CompanionPanelView: View {
     /// does rather than on the next unrelated state change.
     @ObservedObject var appInventoryService: AppInventoryService
 
-    // Keep settings static while dragging. The desktop eye still tracks normally.
-    private let eyeLook: CGSize = .zero
+    /// Where the pointer is inside the panel, so the eye can glance toward it.
+    /// Zero (looking straight ahead) whenever the pointer is elsewhere.
+    @State private var eyeLook: CGSize = .zero
 
     /// Mirrors the persisted "Let Iris take control" grant so the settings row
     /// re-renders when the reader toggles it here. Seeded from the real grant
@@ -74,8 +53,6 @@ struct CompanionPanelView: View {
     /// and never repopulated — a saved key is never echoed back into the UI.
     @State private var anthropicAPIKeyInput: String = ""
     @State private var isShowingEmailAndPasswordSignIn: Bool = false
-    @State private var reconnectingSavedAccess = false
-    @State private var savedAccessMessage: String?
     @State private var emailAddressInput: String = ""
     @State private var passwordInput: String = ""
 
@@ -105,8 +82,6 @@ struct CompanionPanelView: View {
     /// and the reader has not seen it — and is re-openable from the "See how Iris
     /// works" link below. See `IrisSetupHelperWalkthrough` / `FirstRunSetupHelper`.
     @State private var isShowingSetupHelper = false
-    private enum SettingsPage: String, CaseIterable { case general = "General", connections = "Connections", apps = "Apps" }
-    @AppStorage("irisSettingsSection") private var settingsPage: SettingsPage = .general
     @State private var setupHelperWalkthrough = IrisSetupHelperWalkthrough()
     /// Persists that the reader has met the helper, so it never nags twice.
     /// A stored value rather than a fresh one each render so the seen flag is
@@ -117,9 +92,8 @@ struct CompanionPanelView: View {
     /// asked the system to reduce motion gets the same content with no movement.
     @Environment(\.accessibilityReduceMotion) private var readerAskedToReduceMotion
 
-    init(companionManager: CompanionManager, closeSettingsWindow: (() -> Void)? = nil) {
+    init(companionManager: CompanionManager) {
         self.companionManager = companionManager
-        self.closeSettingsWindow = closeSettingsWindow
         _accountService = ObservedObject(wrappedValue: companionManager.accountService)
         _guideSessionController = ObservedObject(wrappedValue: companionManager.guideSessionController)
         _appInventoryService = ObservedObject(wrappedValue: companionManager.appInventoryService)
@@ -155,41 +129,19 @@ struct CompanionPanelView: View {
             // indication anything was there. A reader reported it as the
             // settings being cut off, which is exactly what it was. The Quit
             // button lives in the footer, so that at least stayed reachable.
-            ScrollViewReader { settingsScrollProxy in
-                ScrollView(.vertical) {
-                    Group {
-                        settingsAndAccountContent
-                            .transition(DS.Motion.contentTransition)
-                    }
-                    .id("iris.settings.top")
-                    .animation(DS.Motion.contentIn, value: guideSessionController.loadState.isShowingSomethingAboutAGuide)
-                    .padding(.bottom, 12)
+            ScrollView(.vertical) {
+                Group {
+                    settingsAndAccountContent
+                        .transition(DS.Motion.contentTransition)
                 }
-                .scrollIndicators(.automatic)
-                // A route or replay must reveal its first action, not reuse
-                // the previous page's scroll offset. Wait for the new content
-                // to lay out, and avoid adding motion to this navigation.
-                .onChange(of: settingsPage) { _, _ in
-                    DispatchQueue.main.async {
-                        settingsScrollProxy.scrollTo("iris.settings.top", anchor: .top)
-                    }
-                }
-                .onChange(of: shouldRenderTheSetupHelperCard) { _, isShowing in
-                    guard isShowing else { return }
-                    DispatchQueue.main.async {
-                        settingsScrollProxy.scrollTo("iris.settings.top", anchor: .top)
-                    }
-                }
-                .onReceive(NotificationCenter.default.publisher(for: .clickyShowPanel)) { _ in
-                    DispatchQueue.main.async {
-                        settingsScrollProxy.scrollTo("iris.settings.top", anchor: .top)
-                    }
-                }
+                .animation(DS.Motion.contentIn, value: guideSessionController.loadState.isShowingSomethingAboutAGuide)
+                .padding(.bottom, 12)
             }
+            .scrollIndicators(.automatic)
             // A ScrollView needs a bound or it grows to fit its content and
             // scrolls nothing. This caps the panel below the shortest laptop
             // display's usable height.
-            .frame(maxHeight: 330)
+            .frame(maxHeight: 520)
 
             Divider()
                 .background(DS.Colors.line)
@@ -198,8 +150,22 @@ struct CompanionPanelView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
         }
-        .frame(minWidth: 376, maxWidth: .infinity)
+        .frame(width: 320)
         .background(panelBackground)
+        // The eye follows the pointer around the panel, the way the pill's
+        // `--look-x/--look-y` did. Straight ahead when the pointer leaves.
+        .onContinuousHover { hoverPhase in
+            switch hoverPhase {
+            case .active(let pointerLocation):
+                let eyeCenter = CGPoint(x: 26.5, y: 22)
+                let deltaX = pointerLocation.x - eyeCenter.x
+                let deltaY = pointerLocation.y - eyeCenter.y
+                let distance = max(1, (deltaX * deltaX + deltaY * deltaY).squareRoot())
+                eyeLook = CGSize(width: deltaX / distance * 2, height: deltaY / distance * 2)
+            case .ended:
+                eyeLook = .zero
+            }
+        }
         // The floating panel measures its content only when it is shown, so
         // swapping the chat view for a guide — or moving between steps of
         // different lengths — has to ask for a re-fit, or the new content
@@ -215,15 +181,25 @@ struct CompanionPanelView: View {
         .onChange(of: appInventoryService.installedEntriesForDisplay.count) { _, _ in
             NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
         }
-        .onChange(of: settingsPage) { _, _ in
-            NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
-        }
         // The first time the panel opens fully set up, meet the reader with the
         // brief how-to they could not otherwise guess. Marks itself seen the
         // instant it presents, so it shows once and never ambushes them again.
         .onAppear {
             autoPresentTheSetupHelperIfThisIsTheFirstReadyLaunch()
-            Task { await accountService.restorePreviousSessionIfPossible() }
+            // Re-measure the panel to its real content once SwiftUI has actually
+            // mounted and laid this view out. On a cold launch the panel is
+            // positioned and shown (`positionPanelBelowStatusItem`) the same
+            // runloop turn its hosting view is created, before the content has a
+            // fitting size — so it comes up at the fallback 380pt height, which
+            // clips everything below the fold of the scroll view (the guide
+            // picker, the installed apps, the account section) with no visible
+            // scrollbar. The reported "degraded" panel after a relaunch. The
+            // resize path already exists for content that grows later; firing it
+            // once here, on the next runloop turn so layout has settled, sizes
+            // the panel to the whole home instead of the pre-layout default.
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+            }
         }
     }
 
@@ -256,51 +232,76 @@ struct CompanionPanelView: View {
                 .transition(readerAskedToReduceMotion ? .identity : DS.Motion.contentTransition)
             }
 
-            if !companionManager.hasCompletedOnboarding || !companionManager.allPermissionsGranted {
-                permissionsCopySection
-                    .padding(.top, 16)
-                    .padding(.horizontal, 16)
-            }
+            permissionsCopySection
+                .padding(.top, 16)
+                .padding(.horizontal, 16)
 
-            // Account recovery must remain reachable when an unrelated macOS
-            // permission is unavailable. Feature checks still enforce access.
-            if companionManager.hasCompletedOnboarding {
-                settingsSectionPicker
-                .padding(.top, DS.Spacing.md)
-                .padding(.horizontal, DS.Spacing.lg)
-                .padding(.bottom, DS.Spacing.md)
-
-                VStack(alignment: .leading, spacing: DS.Spacing.lg) {
-                    switch settingsPage {
-                    case .general:
-                        modelPickerRow
-                        Divider()
-                        autopilotAutonomyRow
-                        editTerminalMinimizeRow
-                        permissionsCopySection
-                        SavedUndoRecoverySection(coordinator: companionManager.onDemandEditCoordinator)
-                        SavedAppVersionsSection(onUndoReceipt: { receipt in
-                            companionManager.requestUndoSavedAppVersion(receipt)
-                        })
-                    case .connections:
-                        accountSection
-                    case .apps:
-                        AppInventorySectionView(
-                            appInventoryService: appInventoryService,
-                            appLinkService: companionManager.appLinkService,
-                            onEditApp: { companionManager.requestOnDemandEdit(forEntry: $0) },
-                            onDemandEditCoordinator: companionManager.onDemandEditCoordinator
-                        )
-                        DiscoverAppsSectionView(appInventoryService: appInventoryService)
-                        DisclosureGroup("Open a guide by name") {
-                            GuideSlugEntryView(guideSessionController: guideSessionController)
-                                .padding(.top, DS.Spacing.sm)
-                        }
-                        .font(DS.Typography.caption)
-                        .foregroundColor(DS.Colors.textSecondary)
-                    }
+            if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
+                if !isShowingSetupHelper {
+                    setupHelperReopenLink
+                        .padding(.top, 8)
+                        .padding(.horizontal, 16)
                 }
-                .padding(.horizontal, DS.Spacing.lg)
+
+                Spacer()
+                    .frame(height: 12)
+
+                modelPickerRow
+                    .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 10)
+
+                autopilotAutonomyRow
+                    .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 10)
+
+                editTerminalMinimizeRow
+                    .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 14)
+
+                GuideSlugEntryView(guideSessionController: guideSessionController)
+                    .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 14)
+
+                AppInventorySectionView(
+                    appInventoryService: appInventoryService,
+                    appLinkService: companionManager.appLinkService,
+                    onEditApp: { installedEntry in
+                        companionManager.requestOnDemandEdit(forEntry: installedEntry)
+                    }
+                )
+                    .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 14)
+
+                // "It is hard to know which repos to install after the first
+                // one." The installed apps are above; this is where the reader
+                // finds the rest of the catalog and picks the next one.
+                DiscoverAppsSectionView(
+                    appInventoryService: appInventoryService,
+                    onInstallWithIris: { discoverableEntry in
+                        // The catalog names the guide's slug; it is the app's
+                        // own slug for every listing today, but the catalog is
+                        // the authority if that ever differs.
+                        let guideSlugToOpen = discoverableEntry.guideSlug ?? discoverableEntry.slug
+                        Task { await guideSessionController.openLatestVersionOfGuide(slug: guideSlugToOpen) }
+                    }
+                )
+                    .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 14)
+
+                accountSection
+                    .padding(.horizontal, 16)
             }
 
             if !companionManager.allPermissionsGranted {
@@ -321,21 +322,6 @@ struct CompanionPanelView: View {
         }
     }
 
-    private var settingsSectionPicker: some View {
-        HStack(spacing: DS.Spacing.xs) {
-            ForEach(SettingsPage.allCases, id: \.self) { page in
-                Button { settingsPage = page } label: {
-                    Text(page.rawValue)
-                        .font(DS.Typography.label)
-                        .frame(maxWidth: .infinity, minHeight: 30)
-                }
-                .buttonStyle(IrisSettingsSectionStyle(isSelected: settingsPage == page))
-                .accessibilityLabel("Settings section: \(page.rawValue)")
-                .accessibilityAddTraits(settingsPage == page ? .isSelected : [])
-            }
-        }
-    }
-
     // MARK: - Setup helper
 
     /// The card shows only when it is meant to AND the panel is in its ready
@@ -345,6 +331,18 @@ struct CompanionPanelView: View {
         isShowingSetupHelper
             && companionManager.hasCompletedOnboarding
             && companionManager.allPermissionsGranted
+    }
+
+    /// The quiet way back into the walkthrough once it has been dismissed.
+    private var setupHelperReopenLink: some View {
+        Button(action: { openTheSetupHelperFromSettings() }) {
+            HStack(spacing: 5) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 9, weight: .medium))
+                Text("See how Iris works")
+            }
+        }
+        .irisTextButton(fontSize: 11)
     }
 
     /// Presents the helper the first time the panel opens fully set up. Reading
@@ -377,7 +375,6 @@ struct CompanionPanelView: View {
     private func advanceOrFinishTheSetupHelper() {
         if setupHelperWalkthrough.isOnLastStep {
             dismissTheSetupHelper()
-            settingsPage = .apps
         } else {
             withSetupHelperMotion { setupHelperWalkthrough.advanceToTheNextStep() }
             NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
@@ -415,27 +412,23 @@ struct CompanionPanelView: View {
         HStack(spacing: 8) {
             IrisEyeView(mood: eyeMood, look: eyeLook, progress: eyeProgressRing)
 
-            Text(IrisTestEnvironment.displayName)
-                .font(.system(size: 13, weight: .bold))
+            Text("Iris")
+                .font(.system(size: 12, weight: .bold))
                 .tracking(-0.2)
                 .foregroundColor(DS.Colors.ink)
 
             Text("·")
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 10, weight: .medium))
                 .foregroundColor(DS.Colors.quiet)
             Text(statusText)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 10, weight: .medium))
                 .foregroundColor(DS.Colors.quiet)
                 .lineLimit(1)
 
             Spacer()
 
             Button(action: {
-                if let closeSettingsWindow {
-                    closeSettingsWindow()
-                } else {
-                    NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
-                }
+                NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
             }) {
                 Image(systemName: "xmark")
             }
@@ -452,23 +445,23 @@ struct CompanionPanelView: View {
     private var permissionsCopySection: some View {
         if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
             Text("Press Control+Option anytime to open Iris.")
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 12, weight: .medium))
                 .foregroundColor(DS.Colors.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else if companionManager.allPermissionsGranted {
             Text("You're all set. Hit Start to meet Iris.")
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 12, weight: .medium))
                 .foregroundColor(DS.Colors.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else if companionManager.hasCompletedOnboarding {
             // Permissions were revoked after onboarding — tell user to re-grant
             VStack(alignment: .leading, spacing: 6) {
                 Text("Permissions needed")
-                    .font(.system(size: 13, weight: .bold))
+                    .font(.system(size: 12, weight: .bold))
                     .foregroundColor(DS.Colors.textSecondary)
 
-                Text("Some permissions are missing. Review the controls below to restore the features you need.")
-                    .font(.system(size: 13))
+                Text("Some permissions were revoked. Grant all three below to keep using Iris.")
+                    .font(.system(size: 11))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -476,17 +469,17 @@ struct CompanionPanelView: View {
         } else {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Hi, I'm Iris.")
-                    .font(.system(size: 13, weight: .bold))
+                    .font(.system(size: 12, weight: .bold))
                     .foregroundColor(DS.Colors.textSecondary)
 
                 Text("A companion that lives in your menu bar and helps you learn stuff as you use your computer.")
-                    .font(.system(size: 13))
+                    .font(.system(size: 11))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text("Iris uses screenshots for screen questions, active guides and supported app-edit checks. You can pause guide watching from the guide.")
-                    .font(.system(size: 13))
-                    .foregroundColor(DS.Colors.textSecondary)
+                Text("Nothing runs in the background. Iris only takes a screenshot when you ask it a question, so you can grant these permissions in peace.")
+                    .font(.system(size: 11))
+                    .foregroundColor(Color(red: 0.9, green: 0.4, blue: 0.4))
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -512,7 +505,7 @@ struct CompanionPanelView: View {
     private var settingsSection: some View {
         VStack(spacing: 2) {
             Text("PERMISSIONS")
-                .font(.system(size: 13, weight: .semibold))
+                .font(.system(size: 9, weight: .semibold))
                 .tracking(0.8)
                 .foregroundColor(DS.Colors.quiet)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -531,63 +524,51 @@ struct CompanionPanelView: View {
 
     private var accessibilityPermissionRow: some View {
         let isGranted = companionManager.hasAccessibilityPermission
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                HStack(spacing: 8) {
-                    Image(systemName: "hand.raised")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
-                        .frame(width: 16)
+        return HStack {
+            HStack(spacing: 8) {
+                Image(systemName: "hand.raised")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
+                    .frame(width: 16)
 
-                    Text("Accessibility")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(DS.Colors.textSecondary)
-                }
-
-                Spacer()
-
-                if isGranted {
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(DS.Colors.success)
-                            .frame(width: 6, height: 6)
-                        Text("Granted")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(DS.Colors.success)
-                    }
-                } else {
-                    HStack(spacing: 6) {
-                        Button(action: {
-                            // Triggers the system accessibility prompt (AXIsProcessTrustedWithOptions)
-                            // on first attempt, then opens System Settings on subsequent attempts.
-                            WindowPositionManager.requestAccessibilityPermission()
-                        }) {
-                            Text(AccessibilityPermissionRecovery.Action.openSettings.rawValue)
-                        }
-                        .irisPrimaryPill(isFullWidth: false, isCompact: true)
-
-                        Button(action: {
-                            // Reveals the running copy in Finder. Settings is a
-                            // separate action so one click cannot race two app activations.
-                            WindowPositionManager.revealAppInFinder()
-                        }) {
-                            Text(AccessibilityPermissionRecovery.Action.showIris.rawValue)
-                        }
-                        .irisTinyButton()
-                    }
-                }
+                Text("Accessibility")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
             }
 
-            if AccessibilityPermissionRecovery.shouldShowRepairInstructions(isGranted: isGranted) {
-                DisclosureGroup(AccessibilityPermissionRecovery.disclosureTitle) {
-                    Text(AccessibilityPermissionRecovery.repairInstructions)
-                        .font(.system(size: 12))
-                        .foregroundColor(DS.Colors.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.top, 3)
+            Spacer()
+
+            if isGranted {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(DS.Colors.success)
+                        .frame(width: 6, height: 6)
+                    Text("Granted")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(DS.Colors.success)
                 }
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(DS.Colors.textSecondary)
+            } else {
+                HStack(spacing: 6) {
+                    Button(action: {
+                        // Triggers the system accessibility prompt (AXIsProcessTrustedWithOptions)
+                        // on first attempt, then opens System Settings on subsequent attempts.
+                        WindowPositionManager.requestAccessibilityPermission()
+                    }) {
+                        Text("Grant")
+                    }
+                    .irisPrimaryPill(isFullWidth: false, isCompact: true)
+
+                    Button(action: {
+                        // Reveals the app in Finder so the user can drag it into
+                        // the Accessibility list if it doesn't appear automatically
+                        // (common with unsigned dev builds).
+                        WindowPositionManager.revealAppInFinder()
+                        WindowPositionManager.openAccessibilitySettings()
+                    }) {
+                        Text("Find App")
+                    }
+                    .irisTinyButton()
+                }
             }
         }
         .padding(.vertical, 6)
@@ -604,7 +585,7 @@ struct CompanionPanelView: View {
         return HStack {
             HStack(spacing: 8) {
                 Image(systemName: "rectangle.dashed.badge.record")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
                     .frame(width: 16)
 
@@ -618,7 +599,7 @@ struct CompanionPanelView: View {
                          : awaitingRestart
                             ? "Granted it? macOS applies this on restart"
                             : "Only takes a screenshot when you ask a question")
-                        .font(.system(size: 13))
+                        .font(.system(size: 10))
                         .foregroundColor(DS.Colors.textTertiary)
                 }
             }
@@ -631,7 +612,7 @@ struct CompanionPanelView: View {
                         .fill(DS.Colors.success)
                         .frame(width: 6, height: 6)
                     Text("Granted")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundColor(DS.Colors.success)
                 }
             } else {
@@ -658,7 +639,7 @@ struct CompanionPanelView: View {
         return HStack {
             HStack(spacing: 8) {
                 Image(systemName: "eye")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
                     .frame(width: 16)
 
@@ -675,7 +656,7 @@ struct CompanionPanelView: View {
                         .fill(DS.Colors.success)
                         .frame(width: 6, height: 6)
                     Text("Granted")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundColor(DS.Colors.success)
                 }
             } else {
@@ -711,12 +692,12 @@ struct CompanionPanelView: View {
         VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Installs")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(DS.Colors.muted)
                 Text(autopilotAutonomyGranted
                      ? "Iris runs installs itself. It never runs anything that could erase your disk."
                      : "Iris asks before each step it wants to run.")
-                    .font(.system(size: 13))
+                    .font(.system(size: 9))
                     .foregroundColor(DS.Colors.muted.opacity(0.7))
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -729,7 +710,7 @@ struct CompanionPanelView: View {
                     NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 13))
+                .font(.system(size: 9))
                 .foregroundColor(DS.Colors.muted.opacity(0.8))
             }
 
@@ -755,19 +736,21 @@ struct CompanionPanelView: View {
         .padding(.vertical, 4)
     }
 
-    /// Start terminal workflows minimized. This is the two-named-buttons shape
-    /// Publik Test 2 asked for, so the current setting and its effect are both
-    /// explicit on screen. It applies to installs and on-demand edits.
+    /// "Start edits with the terminal minimized" — the settings toggle Publik
+    /// Test 2 asked for. Same two-named-buttons shape as the autonomy row, for
+    /// the same reason: what is true and what tapping would do are separate
+    /// things on screen. Scoped to on-demand edits (see
+    /// `EditTerminalStartMinimizedPreference`).
     private var editTerminalMinimizeRow: some View {
         VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Terminal behavior")
-                    .font(.system(size: 13, weight: .semibold))
+                Text("Edit terminal")
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(DS.Colors.muted)
                 Text(editTerminalStartsMinimized
-                     ? "Installs and edits run without the terminal taking over your screen. Open it anytime with “Show terminal”."
-                     : "Installs and edits open the terminal so you can watch them work.")
-                    .font(.system(size: 13))
+                     ? "Edits run without the terminal taking over your screen. Open it anytime with “Show terminal”."
+                     : "Editing an app opens the terminal so you can watch it work.")
+                    .font(.system(size: 9))
                     .foregroundColor(DS.Colors.muted.opacity(0.7))
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -801,7 +784,7 @@ struct CompanionPanelView: View {
     ) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                .font(.system(size: 10, weight: isSelected ? .semibold : .regular))
                 .foregroundColor(isSelected ? DS.Colors.ink : DS.Colors.muted)
                 .padding(.horizontal, 10)
                 .frame(minHeight: 24)
@@ -833,33 +816,24 @@ struct CompanionPanelView: View {
     private var modelPickerRow: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text("Screen help")
-                    .font(.system(size: 13, weight: .semibold))
+                Text("Chat model")
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(DS.Colors.muted)
 
                 Spacer()
 
                 HStack(spacing: 3) {
-                    if accountService.signedInAccount != nil {
-                        Text("Included with publik")
-                            .font(DS.Typography.label)
-                            .foregroundColor(DS.Colors.ink)
-                    } else if accountService.canAnswerQuestions {
-                        modelOptionButton(label: "Sonnet", modelID: "claude-sonnet-4-6")
-                        modelOptionButton(label: "Opus", modelID: "claude-opus-4-6")
-                    } else {
-                        Button("Set up") { settingsPage = .connections }
-                            .irisTextButton(fontSize: 13)
-                    }
+                    modelOptionButton(label: "Sonnet", modelID: "claude-sonnet-4-6")
+                    modelOptionButton(label: "Opus", modelID: "claude-opus-4-6")
                 }
                 .padding(3)
                 .background(
-                    RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .fill(Color.white.opacity(0.055))
                 )
             }
             Text(whoServesWhichHalf)
-                .font(.system(size: 13))
+                .font(.system(size: 9.5))
                 .foregroundColor(DS.Colors.quiet)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -870,16 +844,10 @@ struct CompanionPanelView: View {
     /// apps, because they are genuinely different and can be connected at once.
     private var whoServesWhichHalf: String {
         let editProvider = MaintainModelProviderResolver.firstAvailable()?.displayName
-        if !accountService.canAnswerQuestions {
-            if let editProvider {
-                return "\(editProvider) is ready for app edits. Screen help needs its own connection."
-            }
-            return "Connect screen help in Connections."
-        }
         guard let editProvider else {
             return "Answers only. No provider is connected for editing apps yet."
         }
-        return "Answers only. App edits run on \(editProvider)."
+        return "Answers only — editing apps runs on \(editProvider)."
     }
 
     private func modelOptionButton(label: String, modelID: String) -> some View {
@@ -888,7 +856,7 @@ struct CompanionPanelView: View {
             companionManager.setSelectedModel(modelID)
         }) {
             Text(label)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 9, weight: .medium))
                 .foregroundColor(isSelected ? DS.Colors.ink : DS.Colors.muted)
                 .padding(.horizontal, 10)
                 .frame(minHeight: 22)
@@ -912,44 +880,11 @@ struct CompanionPanelView: View {
     /// after typing a question.
     private var accountSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Account for screen help")
-                .font(.system(size: 13, weight: .semibold))
+            Text("ACCOUNT")
+                .font(.system(size: 9, weight: .semibold))
+                .tracking(0.8)
                 .foregroundColor(DS.Colors.quiet)
                 .frame(maxWidth: .infinity, alignment: .leading)
-
-            if accountService.isRestoringSession {
-                Text("Reconnecting your saved account…")
-                    .font(DS.Typography.caption)
-                    .foregroundColor(DS.Colors.quiet)
-            }
-
-            if let message = accountService.sessionPersistenceMessage {
-                Text(message)
-                    .font(DS.Typography.caption)
-                    .foregroundColor(DS.Colors.destructiveText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            if accountService.sessionPersistenceMessage != nil || accountService.signInFailureMessage != nil {
-                Button(accountService.savedSessionRetryLabel) {
-                    Task { await accountService.retrySavedSessionAction() }
-                }
-                .irisTinyButton()
-                .disabled(accountService.isRestoringSession || accountService.isSignInInProgress)
-                if accountService.needsSavedLoginAuthorization || accountService.sessionPersistenceMessage != nil {
-                    Text("In the macOS prompt, choose Always Allow for Iris. Allow works only once. Enter your Mac password only in that system prompt.")
-                        .font(DS.Typography.caption)
-                        .foregroundColor(DS.Colors.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-
-            if accountService.signedInAccount != nil, let message = accountService.signInFailureMessage {
-                Text(message)
-                    .font(DS.Typography.caption)
-                    .foregroundColor(DS.Colors.destructiveText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
 
             if accountService.signedInAccount != nil {
                 signedInAccountRow
@@ -958,40 +893,6 @@ struct CompanionPanelView: View {
             }
 
             spendRow
-            savedAccessReconnectRow
-        }
-    }
-
-    private var savedAccessReconnectRow: some View {
-        VStack(alignment: .leading, spacing: DS.Spacing.sm) {
-            Menu("Reconnect saved access…") {
-                ForEach(KeychainSecretKind.allCases, id: \.rawValue) { kind in
-                    Button(kind.reconnectLabel) {
-                        reconnectingSavedAccess = true
-                        Task { @MainActor in
-                            defer { reconnectingSavedAccess = false }
-                            if kind == .supabaseRefreshToken {
-                                let restored = await accountService.reconnectSavedSession()
-                                savedAccessMessage = restored
-                                    ? "Your saved account is connected."
-                                    : "Your account is not fully reconnected. See the account message above."
-                                return
-                            }
-                            let readable = KeychainStore.reconnectSavedSecret(ofKind: kind)
-                            accountService.refreshSavedCredentialState()
-                            savedAccessMessage = readable
-                                ? "Access checked for \(kind.reconnectLabel). If it still appears disconnected, use its sign-in control."
-                                : "No access to \(kind.reconnectLabel). Nothing was deleted. You can try its sign-in control when ready."
-                        }
-                    }
-                }
-            }
-            .font(DS.Typography.label)
-            .disabled(reconnectingSavedAccess)
-            Text(savedAccessMessage ?? "Background checks do not ask for passwords. After switching builds, reconnect only the saved login you need.")
-                .font(DS.Typography.caption)
-                .foregroundColor(DS.Colors.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -1005,13 +906,13 @@ struct CompanionPanelView: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
                     Text("Spent on your own key")
-                        .font(.system(size: 13))
+                        .font(.system(size: 11))
                         .foregroundColor(DS.Colors.textTertiary)
 
                     Spacer()
 
                     Text(spendLedger.totalSpentText)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundColor(DS.Colors.textSecondary)
                         .monospacedDigit()
 
@@ -1025,7 +926,7 @@ struct CompanionPanelView: View {
                 Text(spendLedger.someCallsCouldNotBePriced
                     ? "\(spendLedger.totalCalls) queries. Some used a model Iris has no price for, so the real figure is higher."
                     : "\(spendLedger.totalCalls) queries, priced at published rates. Your provider's bill is the real one.")
-                    .font(.system(size: 13))
+                    .font(.system(size: 10))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1045,7 +946,7 @@ struct CompanionPanelView: View {
                         .frame(width: 6, height: 6)
 
                     Text(signedInAccount.displayName)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundColor(DS.Colors.textSecondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -1061,7 +962,7 @@ struct CompanionPanelView: View {
                 }
 
                 Text("Answers are on publik while you're signed in.")
-                    .font(.system(size: 13))
+                    .font(.system(size: 10))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
 
@@ -1073,7 +974,7 @@ struct CompanionPanelView: View {
                 // here too, not only when signed out. This is where the on-demand
                 // edit refusal's "Open settings" button lands a signed-in reader.
                 Text("To edit apps, connect your own model")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundColor(DS.Colors.textSecondary)
 
                 bringYourOwnCredentialSection
@@ -1088,7 +989,6 @@ struct CompanionPanelView: View {
             HStack(spacing: 8) {
                 signInProviderButton(provider: .google)
                 signInProviderButton(provider: .github)
-                Spacer(minLength: 0)
             }
 
             Button(action: {
@@ -1098,7 +998,7 @@ struct CompanionPanelView: View {
                      ? "Use a provider instead"
                      : "Sign in with an email and password")
             }
-            .irisTextButton(fontSize: 13)
+            .irisTextButton(fontSize: 10)
 
             if isShowingEmailAndPasswordSignIn {
                 emailAndPasswordSignInFields
@@ -1106,7 +1006,7 @@ struct CompanionPanelView: View {
 
             if let signInFailureMessage = accountService.signInFailureMessage {
                 Text(signInFailureMessage)
-                    .font(.system(size: 13))
+                    .font(.system(size: 10))
                     .foregroundColor(DS.Colors.destructiveText)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1124,10 +1024,9 @@ struct CompanionPanelView: View {
                 await accountService.signIn(withProvider: provider)
             }
         }) {
-            Text(provider.displayName)
+            Text("Sign in with \(provider.displayName)")
         }
-        .irisTinyButton()
-        .accessibilityLabel("Sign in with \(provider.displayName)")
+        .irisPrimaryPill()
         .disabled(accountService.isSignInInProgress)
         .opacity(accountService.isSignInInProgress ? 0.55 : 1.0)
     }
@@ -1136,32 +1035,32 @@ struct CompanionPanelView: View {
         VStack(alignment: .leading, spacing: 6) {
             TextField("you@example.com", text: $emailAddressInput)
                 .textFieldStyle(.plain)
-                .font(.system(size: 13))
+                .font(.system(size: 12))
                 .foregroundColor(DS.Colors.ink)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
                 .background(
-                    RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .fill(DS.Colors.surfaceRaised)
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .strokeBorder(DS.Colors.line, lineWidth: 1)
                 )
 
             HStack(spacing: 8) {
                 SecureField("Password", text: $passwordInput)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 13))
+                    .font(.system(size: 12))
                     .foregroundColor(DS.Colors.ink)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                     .background(
-                        RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .fill(DS.Colors.surfaceRaised)
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .strokeBorder(DS.Colors.line, lineWidth: 1)
                     )
                     .onSubmit {
@@ -1198,11 +1097,11 @@ struct CompanionPanelView: View {
         if accountService.hasStoredAnthropicAPIKey {
             HStack(spacing: 8) {
                 Image(systemName: "key.fill")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundColor(DS.Colors.textTertiary)
 
                 Text("Using your Anthropic key")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundColor(DS.Colors.textSecondary)
 
                 Spacer()
@@ -1212,12 +1111,12 @@ struct CompanionPanelView: View {
                 }) {
                     Text("Remove")
                 }
-                .irisTextButton(fontSize: 13, isDanger: true)
+                .irisTextButton(fontSize: 10, isDanger: true)
             }
         } else {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Or use your own Anthropic key")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundColor(DS.Colors.textSecondary)
 
                 HStack(spacing: 8) {
@@ -1226,16 +1125,16 @@ struct CompanionPanelView: View {
                     // exactly the thing this app should not photograph.
                     SecureField("sk-ant-…", text: $anthropicAPIKeyInput)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 13))
+                        .font(.system(size: 12))
                         .foregroundColor(DS.Colors.ink)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
                         .background(
-                            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
                                 .fill(DS.Colors.surfaceRaised)
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
                                 .strokeBorder(DS.Colors.line, lineWidth: 1)
                         )
                         .onSubmit {
@@ -1254,13 +1153,13 @@ struct CompanionPanelView: View {
 
                 if let anthropicAPIKeyFailureMessage = accountService.anthropicAPIKeyFailureMessage {
                     Text(anthropicAPIKeyFailureMessage)
-                        .font(.system(size: 13))
+                        .font(.system(size: 10))
                         .foregroundColor(DS.Colors.destructiveText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                Text("Stored in your Keychain. Sent only to api.anthropic.com, never to publik.")
-                    .font(.system(size: 13))
+                Text("Stored in your Keychain and sent only to api.anthropic.com — never to publik.")
+                    .font(.system(size: 10))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1293,11 +1192,11 @@ struct CompanionPanelView: View {
         if accountService.hasConnectedClaudeCodeLogin {
             HStack(spacing: 8) {
                 Image(systemName: "terminal.fill")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundColor(DS.Colors.textTertiary)
 
                 Text("Connected via Claude Code")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundColor(DS.Colors.textSecondary)
 
                 Spacer()
@@ -1308,12 +1207,12 @@ struct CompanionPanelView: View {
                 }) {
                     Text("Disconnect")
                 }
-                .irisTextButton(fontSize: 13, isDanger: true)
+                .irisTextButton(fontSize: 10, isDanger: true)
             }
         } else {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Or sign in with a CLI")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundColor(DS.Colors.textSecondary)
 
                 HStack(spacing: 8) {
@@ -1330,13 +1229,13 @@ struct CompanionPanelView: View {
 
                 if let claudeCodeImportMessage {
                     Text(claudeCodeImportMessage)
-                        .font(.system(size: 13))
+                        .font(.system(size: 10))
                         .foregroundColor(DS.Colors.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                Text("Uses your Claude Code login via `claude setup-token`. Sent only to api.anthropic.com. Third-party use can be rate-limited; an API key is another option.")
-                    .font(.system(size: 13))
+                Text("Uses your Claude Code login (via `claude setup-token`), sent only to api.anthropic.com. A Claude subscription token can be rate-limited for third-party use — a pasted API key is the most reliable option.")
+                    .font(.system(size: 10))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1351,26 +1250,26 @@ struct CompanionPanelView: View {
             switch claudeCodeSetupSession.phase {
             case .claudeNotFound:
                 Text("Claude Code isn't installed where Iris can find it. Install it, run `claude login`, or paste an API key above.")
-                    .font(.system(size: 13))
+                    .font(.system(size: 10))
                     .foregroundColor(DS.Colors.destructiveText)
                     .fixedSize(horizontal: false, vertical: true)
             case .running:
                 Text("Complete the sign-in Claude Code opened in your browser. Iris captures the token automatically.")
-                    .font(.system(size: 13))
+                    .font(.system(size: 10))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             case .captured:
                 Text("Connected! Iris will use your Claude Code login.")
-                    .font(.system(size: 13))
+                    .font(.system(size: 10))
                     .foregroundColor(DS.Colors.success)
             case .finishedWithoutToken:
                 Text("That finished without a token. Try again, or paste an API key above.")
-                    .font(.system(size: 13))
+                    .font(.system(size: 10))
                     .foregroundColor(DS.Colors.destructiveText)
                     .fixedSize(horizontal: false, vertical: true)
             case .failed(let reason):
                 Text(reason)
-                    .font(.system(size: 13))
+                    .font(.system(size: 10))
                     .foregroundColor(DS.Colors.destructiveText)
                     .fixedSize(horizontal: false, vertical: true)
             case .idle:
@@ -1380,7 +1279,7 @@ struct CompanionPanelView: View {
             if !claudeCodeSetupSession.visibleTranscript.isEmpty {
                 ScrollView {
                     Text(claudeCodeSetupSession.visibleTranscript)
-                        .font(.system(size: 13, design: .monospaced))
+                        .font(.system(size: 9.5, design: .monospaced))
                         .foregroundColor(DS.Colors.textSecondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .textSelection(.enabled)
@@ -1397,7 +1296,7 @@ struct CompanionPanelView: View {
                 HStack(spacing: 8) {
                     TextField("Type here if the CLI asks for input…", text: $claudeCodeSetupInput)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 13))
+                        .font(.system(size: 11))
                         .foregroundColor(DS.Colors.ink)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 5)
@@ -1419,7 +1318,7 @@ struct CompanionPanelView: View {
                 Button(action: { endClaudeCodeSetup() }) {
                     Text(claudeCodeSetupSession.phase == .captured ? "Done" : "Cancel")
                 }
-                .irisTextButton(fontSize: 13)
+                .irisTextButton(fontSize: 10)
             }
         }
         .onChange(of: claudeCodeSetupSession.phase) { _, newPhase in
@@ -1438,13 +1337,13 @@ struct CompanionPanelView: View {
         if accountService.hasConnectedCodexLogin {
             HStack(spacing: 8) {
                 Image(systemName: "terminal.fill")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundColor(DS.Colors.textTertiary)
 
                 Text(accountService.codexLoginState == .signedInWithAPIKey
                      ? "Connected via Codex (API key)"
                      : "Connected via Codex")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundColor(DS.Colors.textSecondary)
 
                 Spacer()
@@ -1452,7 +1351,7 @@ struct CompanionPanelView: View {
                 Button(action: { accountService.disconnectCodexLogin() }) {
                     Text("Disconnect")
                 }
-                .irisTextButton(fontSize: 13, isDanger: true)
+                .irisTextButton(fontSize: 10, isDanger: true)
             }
         } else if accountService.codexLoginState == .codexNotInstalled {
             // Deliberately does NOT lead with "Iris can't find it". The first
@@ -1462,7 +1361,7 @@ struct CompanionPanelView: View {
             // was looking in the wrong places. Now that bundled Codex is found,
             // the honest remaining case is "the tool genuinely isn't here".
             Text("Iris couldn't find the Codex command-line tool on this Mac. If you have the ChatGPT app, updating it to a recent version includes Codex. Otherwise install it with `npm i -g @openai/codex`.")
-                .font(.system(size: 13))
+                .font(.system(size: 10))
                 .foregroundColor(DS.Colors.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
@@ -1472,8 +1371,8 @@ struct CompanionPanelView: View {
                 }
                 .irisTinyButton()
 
-                Text("Uses your ChatGPT account through the Codex CLI. The CLI keeps your login; Iris never stores it. Powers app editing, not screen help.")
-                    .font(.system(size: 13))
+                Text("Uses your ChatGPT account through the Codex CLI, which keeps the credential itself — Iris never stores it. Powers app editing, not chat. A ChatGPT subscription used by a third-party app is a gray area and can be rate-limited; a pasted key is the unambiguous option.")
+                    .font(.system(size: 10))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1488,26 +1387,26 @@ struct CompanionPanelView: View {
             switch codexSignInSession.phase {
             case .codexNotFound:
                 Text("Iris couldn't find the `codex` command. Install it with `npm i -g @openai/codex` and try again.")
-                    .font(.system(size: 13))
+                    .font(.system(size: 10))
                     .foregroundColor(DS.Colors.destructiveText)
                     .fixedSize(horizontal: false, vertical: true)
             case .running:
                 Text("Complete the sign-in Codex opened in your browser. Iris is watching for it to land.")
-                    .font(.system(size: 13))
+                    .font(.system(size: 10))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             case .connected:
                 Text("Connected! Iris will use your Codex login for app editing.")
-                    .font(.system(size: 13))
+                    .font(.system(size: 10))
                     .foregroundColor(DS.Colors.success)
             case .finishedWithoutLogin:
                 Text("That finished without signing in. Try again, or paste an API key above.")
-                    .font(.system(size: 13))
+                    .font(.system(size: 10))
                     .foregroundColor(DS.Colors.destructiveText)
                     .fixedSize(horizontal: false, vertical: true)
             case .failed(let reason):
                 Text(reason)
-                    .font(.system(size: 13))
+                    .font(.system(size: 10))
                     .foregroundColor(DS.Colors.destructiveText)
                     .fixedSize(horizontal: false, vertical: true)
             case .idle:
@@ -1517,7 +1416,7 @@ struct CompanionPanelView: View {
             if !codexSignInSession.visibleTranscript.isEmpty {
                 ScrollView {
                     Text(codexSignInSession.visibleTranscript)
-                        .font(.system(size: 13, design: .monospaced))
+                        .font(.system(size: 9.5, design: .monospaced))
                         .foregroundColor(DS.Colors.textSecondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .textSelection(.enabled)
@@ -1534,7 +1433,7 @@ struct CompanionPanelView: View {
                 HStack(spacing: 8) {
                     TextField("Type here if the CLI asks for input…", text: $codexSignInInput)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 13))
+                        .font(.system(size: 11))
                         .foregroundColor(DS.Colors.ink)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 5)
@@ -1556,7 +1455,7 @@ struct CompanionPanelView: View {
                 Button(action: { endCodexSignIn() }) {
                     Text(codexSignInSession.isRunning ? "Cancel" : "Done")
                 }
-                .irisTextButton(fontSize: 13)
+                .irisTextButton(fontSize: 10)
             }
         }
         .onChange(of: codexSignInSession.phase) { _, _ in
@@ -1621,9 +1520,9 @@ struct CompanionPanelView: View {
         case .noClaudeCodeLoginFound:
             claudeCodeImportMessage = "No Claude Code login found. Run `claude login`, or use Sign in with Claude Code."
         case .couldNotReadKeychain:
-            claudeCodeImportMessage = "Iris couldn't read the Claude Code login. Keychain access may not have been allowed."
+            claudeCodeImportMessage = "Iris couldn't read the Claude Code login — you may have denied the Keychain prompt."
         case .loginHadNoUsableToken:
-            claudeCodeImportMessage = "That Claude Code login has no usable token. Try Sign in with Claude Code."
+            claudeCodeImportMessage = "That Claude Code login has no token Iris can use — try Sign in with Claude Code."
         }
     }
 
@@ -1651,25 +1550,25 @@ struct CompanionPanelView: View {
             }) {
                 HStack(spacing: 5) {
                     Image(systemName: "power")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 9, weight: .medium))
                     Text("Quit Iris")
                 }
             }
-            .irisTextButton(fontSize: 13)
+            .irisTextButton(fontSize: 10)
 
             if companionManager.hasCompletedOnboarding {
                 Spacer()
 
                 Button(action: {
-                    openTheSetupHelperFromSettings()
+                    companionManager.replayOnboarding()
                 }) {
                     HStack(spacing: 5) {
                         Image(systemName: "play.circle")
-                            .font(.system(size: 13, weight: .medium))
-                        Text("Quick tour")
+                            .font(.system(size: 9, weight: .medium))
+                        Text("Watch Onboarding Again")
                     }
                 }
-                .irisTextButton(fontSize: 13)
+                .irisTextButton(fontSize: 10)
             }
         }
     }
@@ -1759,7 +1658,7 @@ private struct IrisSetupHelperCard: View {
                         .fixedSize(horizontal: false, vertical: true)
 
                     Text(walkthrough.currentStep.body)
-                        .font(.system(size: 13))
+                        .font(.system(size: 11.5))
                         .foregroundColor(DS.Colors.textSecondary)
                         .lineSpacing(1.5)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1774,7 +1673,7 @@ private struct IrisSetupHelperCard: View {
 
             actionsRow
         }
-        .padding(12)
+        .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
@@ -1785,20 +1684,21 @@ private struct IrisSetupHelperCard: View {
             // accent as the eye's iris, the detail that marks this out as the
             // one welcoming surface in a panel of settings.
             RoundedRectangle(cornerRadius: DS.CornerRadius.large, style: .continuous)
-                .strokeBorder(DS.Colors.lineStrong, lineWidth: 1)
+                .strokeBorder(DS.Colors.accent.opacity(0.22), lineWidth: 1)
         )
     }
 
     private var eyebrowRow: some View {
         HStack {
-            Text("New to Iris")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(DS.Colors.textSecondary)
+            Text("NEW TO IRIS")
+                .font(.system(size: 9, weight: .semibold))
+                .tracking(0.8)
+                .foregroundColor(DS.Colors.accent.opacity(0.85))
 
             Spacer()
 
             Text(walkthrough.progressLabel)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 9, weight: .medium))
                 .foregroundColor(DS.Colors.quiet)
                 .monospacedDigit()
         }
@@ -1834,7 +1734,7 @@ private struct IrisSetupHelperCard: View {
     private var actionsRow: some View {
         HStack(spacing: 8) {
             Button("Skip", action: onSkip)
-                .irisTextButton(fontSize: 13)
+                .irisTextButton(fontSize: 10)
 
             Spacer(minLength: 8)
 
@@ -1844,10 +1744,10 @@ private struct IrisSetupHelperCard: View {
 
             if !walkthrough.isOnFirstStep {
                 Button("Back", action: onBack)
-                    .irisTextButton(fontSize: 13)
+                    .irisTextButton(fontSize: 10)
             }
 
-            Button(walkthrough.isOnLastStep ? "Browse apps" : walkthrough.primaryActionLabel, action: onPrimaryAction)
+            Button(walkthrough.primaryActionLabel, action: onPrimaryAction)
                 .irisPrimaryPill(isFullWidth: false, isCompact: true)
         }
     }

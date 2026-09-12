@@ -88,6 +88,20 @@ final class ScriptedWatchLoopLocalSignalSource: WatchLoopLocalSignalSource {
     var accessibilityLabelsOnScreen: Set<String> = []
     var secureEventInputIsActive = false
 
+    /// What `fingerprintOfStoredCredential(ofKind:)` answers for each secret
+    /// kind, as a plain string a test can set directly rather than a real
+    /// SHA-256 digest — the loop only ever compares two readings for equality,
+    /// so a test fixture stands in for "the Keychain now holds X" just as well
+    /// as a real hash does. Absent from the dictionary (or an explicit `nil`
+    /// value) both mean "nothing stored".
+    var storedCredentialFingerprintsByKind: [KeychainSecretKind: String?] = [:]
+    private(set) var numberOfCredentialFingerprintReads = 0
+
+    func fingerprintOfStoredCredential(ofKind secretKind: KeychainSecretKind) -> String? {
+        numberOfCredentialFingerprintReads += 1
+        return storedCredentialFingerprintsByKind[secretKind, default: nil]
+    }
+
     private(set) var numberOfToolChecks = 0
     private(set) var numberOfGitInspections = 0
 

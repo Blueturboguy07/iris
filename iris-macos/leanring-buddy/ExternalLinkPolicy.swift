@@ -60,6 +60,17 @@ enum ExternalLinkPolicy {
         "chromewebstore.google.com",
         "docs.google.com",
         "blueturboguy07.github.io",
+        // anthropic-api-key guide's "Open the console" step (2026-09-06 fix
+        // round). console.anthropic.com was missing here entirely, so the
+        // step-1 host check always failed and the button rendered as a
+        // silently-disabled `.openLinkIsUnavailable` control (see the case's
+        // own doc comment above) instead of opening anything — read from a
+        // screenshot as "the Open button does nothing." Both hosts are listed
+        // because Anthropic now 302s console.anthropic.com to
+        // platform.claude.com; keeping the old host too means a future
+        // redirect-back does not silently re-break this guide.
+        "console.anthropic.com",
+        "platform.claude.com",
     ]
 
     /// The two hosts a developer running the publik site locally needs, which

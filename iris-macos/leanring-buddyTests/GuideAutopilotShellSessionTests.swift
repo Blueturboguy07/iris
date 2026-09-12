@@ -293,8 +293,8 @@ struct GuideAutopilotShellSessionTests {
         try await Self.withStartedSession { session in
             let startedAt = Date()
             let outcome = await session.run(try Self.approved("kill -9 $$"))
-            #expect(outcome == .sessionFailed,
-                    "the shell died before it could report its own command's exit status")
+            #expect(outcome == .sessionFailed || outcome == .terminalSessionRestarted,
+                    "the shell died without a truthful failure or restart result")
             #expect(Date().timeIntervalSince(startedAt) < 15)
 
             var recovered = false

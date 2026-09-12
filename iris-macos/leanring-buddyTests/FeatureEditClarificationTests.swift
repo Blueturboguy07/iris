@@ -2,7 +2,7 @@
 //  FeatureEditClarificationTests.swift
 //  leanring-buddyTests
 //
-//  The §10.3 table for the clarification protocol: each of the four §7
+//  The §10.3 table for the clarification protocol: each of the five §7
 //  triggers fires exactly its one question, and — just as load-bearing — the
 //  PROCEED cases return no questions at all, because an engine that over-asks
 //  is the nagging §7 was designed to prevent. Pure logic, no processes.
@@ -73,6 +73,20 @@ import Testing
         #expect(questions.first?.trigger == .irreversibleOrCostlyAction)
         // A hard-to-undo act must offer a way OUT, not only ways forward.
         #expect(questions.first?.options.contains(where: { $0.lowercased().contains("stop") }) == true)
+    }
+
+    @Test func anUnavailableSafetyProbeAsksOneReversiblePostureQuestion() {
+        let questions = FeatureEditClarificationLogic.questions(
+            forRequest: "make the storage better",
+            requestLooksAmbiguous: false,
+            recipeIsUnknown: false,
+            runtimeShape: .pureLocalApp,
+            impliesIrreversibleAction: false,
+            requestProbeUnavailable: true
+        )
+        #expect(questions.count == 1)
+        #expect(questions.first?.trigger == .safetyClassificationUnavailable)
+        #expect(questions.first?.options.first?.lowercased().contains("additive") == true)
     }
 
     // MARK: - Trigger 3: required info absent from the repo (unknown recipe)

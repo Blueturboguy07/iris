@@ -196,7 +196,7 @@ final class OnDemandEditCoordinator: ObservableObject {
 
     /// The batched clarification questions (plan §7) the reader answers before
     /// the plan is drawn. Empty unless `phase == .clarifying`. Populated ONLY by
-    /// `FeatureEditClarificationLogic.questions(...)`, whose closed set of four
+    /// `FeatureEditClarificationLogic.questions(...)`, whose closed set of five
     /// triggers is what keeps this to a couple of high-value questions rather
     /// than a nagging interrogation.
     @Published private(set) var clarificationQuestions: [ClarificationQuestion] = []
@@ -1532,7 +1532,8 @@ final class OnDemandEditCoordinator: ObservableObject {
             requestLooksAmbiguous: verdict.requestLooksAmbiguous,
             recipeIsUnknown: !(derivedRepoRecipe?.hasABuildableRecipe ?? false),
             runtimeShape: derivedRuntimeShape ?? .unknown,
-            impliesIrreversibleAction: verdict.impliesIrreversibleAction
+            impliesIrreversibleAction: verdict.impliesIrreversibleAction,
+            requestProbeUnavailable: verdict.requestProbeUnavailable
         )
 
         if clarificationQuestionBatch.isEmpty {

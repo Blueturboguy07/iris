@@ -145,12 +145,14 @@ private final class ScriptedProbeProvider: MaintainModelProviding {
         #expect(verdict.impliesIrreversibleAction)
     }
 
-    @Test func aThrowingProviderFailsOpenToAllQuiet() async {
+    @Test func aThrowingProviderStaysNonBlockingButMarksProbeUnavailable() async {
         let provider = ScriptedProbeProvider([], throwing: AssistantTransportError.bringYourOwnKeyRejected)
         let verdict = await FeatureEditRequestProbe.probe(
             scrubbedRequest: "anything", repoMapSummary: "", provider: provider
         )
-        #expect(verdict == .allQuiet)
+        #expect(!verdict.requestLooksAmbiguous)
+        #expect(!verdict.impliesIrreversibleAction)
+        #expect(verdict.requestProbeUnavailable)
     }
 
     @Test func oneUnusablePassStillCarriesTheOthersIrreversibleFlagButNeverAmbiguity() async {
@@ -165,6 +167,7 @@ private final class ScriptedProbeProvider: MaintainModelProviding {
         // both passes — but a parsed irreversibility flag is still real.
         #expect(!verdict.requestLooksAmbiguous)
         #expect(verdict.impliesIrreversibleAction)
+        #expect(verdict.requestProbeUnavailable)
     }
 
     @Test func anUnusableJudgeFailsOpenToNotAmbiguous() async {
@@ -177,6 +180,7 @@ private final class ScriptedProbeProvider: MaintainModelProviding {
             scrubbedRequest: "add export", repoMapSummary: "", provider: provider
         )
         #expect(!verdict.requestLooksAmbiguous)
+        #expect(verdict.requestProbeUnavailable)
     }
 }
 

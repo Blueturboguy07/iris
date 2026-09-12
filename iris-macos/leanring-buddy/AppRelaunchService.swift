@@ -517,6 +517,11 @@ final class AppRelaunchService {
         guard FileManager.default.fileExists(atPath: freshBuildArtifactPath) else {
             return .ineligible(reason: "the freshly built app is no longer on disk")
         }
+        guard Self.isLaunchableMacAppBundle(
+            atPath: freshBuildArtifactPath
+        ) else {
+            return .ineligible(reason: "the freshly built app is not a launchable macOS bundle")
+        }
         guard Self.artifactBundleIdentifier(atPath: freshBuildArtifactPath) == trimmedBundleId else {
             return .ineligible(reason: "the built app does not match this project's app identity; your running app was left alone")
         }
@@ -564,6 +569,11 @@ final class AppRelaunchService {
         let artifactURL = URL(fileURLWithPath: freshBuildArtifactPath)
         guard FileManager.default.fileExists(atPath: freshBuildArtifactPath) else {
             return .ineligible(reason: "the freshly built app is no longer on disk")
+        }
+        guard Self.isLaunchableMacAppBundle(
+            atPath: freshBuildArtifactPath
+        ) else {
+            return .ineligible(reason: "the freshly built app is not a launchable macOS bundle")
         }
         guard Self.artifactBundleIdentifier(atPath: freshBuildArtifactPath) == trimmedBundleId else {
             return .ineligible(reason: "the built app does not match this project's app identity; your running app was left alone")
@@ -702,6 +712,11 @@ final class AppRelaunchService {
               FileManager.default.fileExists(atPath: freshBuildArtifactPath) else {
             return .deliveryFailed(reason: "the freshly built app is not on disk to install")
         }
+        guard Self.isLaunchableMacAppBundle(
+            atPath: freshBuildArtifactPath
+        ) else {
+            return .deliveryFailed(reason: "the freshly built app is not a launchable macOS bundle; your installed app was left alone")
+        }
         guard Self.artifactBundleIdentifier(atPath: freshBuildArtifactPath) == bundleId else {
             return .deliveryFailed(reason: "the built app does not match this project's app identity; your installed app was left alone")
         }
@@ -710,6 +725,11 @@ final class AppRelaunchService {
             forBundleId: bundleId, appBundleName: appBundleName, excludingClonePath: clonePath
         ) else {
             return .noInstalledCopyToReplace
+        }
+        guard Self.isLaunchableMacAppBundle(
+            atPath: installedPath
+        ) else {
+            return .deliveryFailed(reason: "the installed app is not a launchable macOS bundle; your installed app was left alone")
         }
         // Read both signing identities BEFORE the swap, so the disclosure is
         // about the app being replaced rather than the one that replaced it.
@@ -808,6 +828,8 @@ final class AppRelaunchService {
         beforeReplacement: @escaping @Sendable () -> Bool = { true }
     ) async -> Bool {
         guard beforeReplacement(),
+              Self.isLaunchableMacAppBundle(atPath: backupPath),
+              Self.isLaunchableMacAppBundle(atPath: installedPath),
               let identifier = Self.artifactBundleIdentifier(atPath: backupPath),
               Self.artifactBundleIdentifier(atPath: installedPath) == identifier,
               NSRunningApplication.runningApplications(withBundleIdentifier: identifier).isEmpty else { return false }
@@ -898,6 +920,43 @@ final class AppRelaunchService {
               let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
         else { return nil }
         return info["CFBundleIdentifier"] as? String
+    }
+
+    /// A bundle identifier is not enough to launch an app. A stale or partial
+    /// copy can retain its Info.plist while its executable is missing, which
+    /// makes a delivery look successful until macOS refuses to open it. Keep
+    /// this predicate shared by package, install, relaunch, restore, and the
+    /// isolated Test registry so every lifecycle stage means the same thing.
+    nonisolated static func isLaunchableMacAppBundle(
+        atPath path: String,
+        expectedBundleIdentifier: String? = nil
+    ) -> Bool {
+        guard path.hasPrefix("/"), path.hasSuffix(".app"),
+              URL(fileURLWithPath: path).standardizedFileURL.path == path else { return false }
+        var bundleMetadata = stat()
+        guard lstat(path, &bundleMetadata) == 0,
+              (bundleMetadata.st_mode & S_IFMT) == S_IFDIR else { return false }
+        let infoPath = path + "/Contents/Info.plist"
+        guard let data = FileManager.default.contents(atPath: infoPath),
+              let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let bundleIdentifier = info["CFBundleIdentifier"] as? String,
+              !bundleIdentifier.isEmpty,
+              expectedBundleIdentifier.map({ $0 == bundleIdentifier }) ?? true,
+              let executable = info["CFBundleExecutable"] as? String,
+              !executable.isEmpty,
+              executable != ".", executable != "..",
+              !executable.contains("/"),
+              !executable.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+            return false
+        }
+        let executablePath = path + "/Contents/MacOS/" + executable
+        let resolvedExecutable = URL(fileURLWithPath: executablePath).resolvingSymlinksInPath().path
+        guard resolvedExecutable.hasPrefix(path + "/"),
+              FileManager.default.isExecutableFile(atPath: executablePath) else { return false }
+        var executableMetadata = stat()
+        guard lstat(executablePath, &executableMetadata) == 0,
+              (executableMetadata.st_mode & S_IFMT) == S_IFREG else { return false }
+        return true
     }
 
     // Not private so the live filesystem round-trip test can drive the real

@@ -545,6 +545,38 @@ struct AppDeliveryChecks {
         )
 
         let service = AppRelaunchService()
+        let malformedArtifact = fixtureRoot.appendingPathComponent("malformed/Malformed.app")
+        try FileManager.default.createDirectory(
+            at: malformedArtifact.appendingPathComponent("Contents"), withIntermediateDirectories: true
+        )
+        let malformedInfo = try PropertyListSerialization.data(
+            fromPropertyList: [
+                "CFBundleIdentifier": "com.fixture.expected",
+                "CFBundleExecutable": "Malformed",
+            ], format: .xml, options: 0
+        )
+        try malformedInfo.write(to: malformedArtifact.appendingPathComponent("Contents/Info.plist"))
+        let malformedQuit = await service.terminateRunningInstanceBeforeDelivery(
+            macBundleId: "com.fixture.expected",
+            freshBuildArtifactPath: malformedArtifact.path,
+            allowForceQuit: false
+        )
+        if case .ineligible(let reason) = malformedQuit {
+            try require(reason.contains("launchable"), "malformed artifact refusal was not disclosed")
+        } else {
+            throw AppDeliveryCheckError.failed("same-ID malformed artifact reached quit")
+        }
+        let malformedInstall = await service.installFreshBuildOverInstalledApp(
+            macBundleId: "com.fixture.expected",
+            freshBuildArtifactPath: malformedArtifact.path,
+            clonePath: fixtureRoot.appendingPathComponent("clone").path
+        )
+        if case .deliveryFailed(let reason) = malformedInstall {
+            try require(reason.contains("launchable"), "malformed install refusal was not disclosed")
+        } else {
+            throw AppDeliveryCheckError.failed("same-ID malformed artifact reached install")
+        }
+        pass("Same-ID malformed bundles are refused before quit or replacement")
         let sameNameWrongApp = fixtureRoot.appendingPathComponent("wrong-installed/Actual.app")
         try makeBundle(at: sameNameWrongApp, bundleIdentifier: "com.fixture.wrong", marker: "must-survive")
         try require(AppRelaunchService.chooseInstalledBundlePath(

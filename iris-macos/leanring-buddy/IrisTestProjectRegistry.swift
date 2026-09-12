@@ -195,7 +195,10 @@ nonisolated enum IrisTestProjectRegistry {
             within: URL(fileURLWithPath: project.clonePath)
         )
         guard stableApplication || freshBuild else { return false }
-        return Bundle(path: applicationURL.path)?.bundleIdentifier == project.bundleIdentifier
+        return AppRelaunchService.isLaunchableMacAppBundle(
+            atPath: applicationURL.path,
+            expectedBundleIdentifier: project.bundleIdentifier
+        )
     }
 
     private static func permitsRegisteredBuild(_ applicationURL: URL, for project: Project) -> Bool {
@@ -206,7 +209,10 @@ nonisolated enum IrisTestProjectRegistry {
         ) else {
             return false
         }
-        return Bundle(path: applicationURL.path)?.bundleIdentifier == project.bundleIdentifier
+        return AppRelaunchService.isLaunchableMacAppBundle(
+            atPath: applicationURL.path,
+            expectedBundleIdentifier: project.bundleIdentifier
+        )
     }
 
     private static func permitsExactApplication(

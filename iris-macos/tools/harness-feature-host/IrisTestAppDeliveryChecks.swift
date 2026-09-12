@@ -16,8 +16,16 @@ struct IrisTestAppDeliveryChecks {
         let backup = backups.appendingPathComponent("one/Notes.app")
         let identifier = "com.publikhq.iris.test.notes"
         func bundle(_ path: URL, _ bundleIdentifier: String) throws {
-            try files.createDirectory(at: path.appendingPathComponent("Contents"), withIntermediateDirectories: true)
-            try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": bundleIdentifier],
+            let executableName = path.deletingPathExtension().lastPathComponent.replacingOccurrences(of: " ", with: "")
+            let executable = path.appendingPathComponent("Contents/MacOS/\(executableName)")
+            try files.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+            try files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+            try PropertyListSerialization.data(fromPropertyList: [
+                "CFBundleIdentifier": bundleIdentifier,
+                "CFBundleExecutable": executableName,
+                "CFBundleName": path.deletingPathExtension().lastPathComponent,
+            ],
                 format: .xml, options: 0).write(to: path.appendingPathComponent("Contents/Info.plist"))
         }
         try bundle(installed, identifier); try bundle(artifact, identifier); try bundle(backup, identifier)
@@ -73,6 +81,24 @@ struct IrisTestAppDeliveryChecks {
         try require(!permitsInstall(artifact.path), "symlink artifact admitted")
         try files.removeItem(at: artifact)
         try files.moveItem(at: savedArtifact, to: artifact)
+
+        let malformed = clone.appendingPathComponent("release/Malformed.app")
+        try files.createDirectory(at: malformed.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+        try PropertyListSerialization.data(fromPropertyList: [
+            "CFBundleIdentifier": identifier,
+            "CFBundleExecutable": "Malformed",
+        ], format: .xml, options: 0).write(to: malformed.appendingPathComponent("Contents/Info.plist"))
+        let malformedProject = IrisTestProjectRegistry.Project(
+            slug: "malformed", name: "Malformed", clonePath: clone.path,
+            applicationPath: installed.path, buildArtifactPath: malformed.path,
+            bundleIdentifier: identifier, pinnedCommit: String(repeating: "b", count: 40)
+        )
+        try require(
+            !IrisTestAppDelivery.permitsInstall(
+                project: malformedProject, artifactPath: malformed.path, projectsDirectory: projects
+            ),
+            "same-ID artifact without an executable was admitted"
+        )
         print("PASS symlink artifact refused even with matching bundle identity")
 
         func receipt(_ phase: AppDeliveryReceipt.Phase, _ backupPath: String = backup.path) -> AppDeliveryReceiptStore.Entry {

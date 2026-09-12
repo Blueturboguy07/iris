@@ -138,8 +138,12 @@ enum IrisTestAppDelivery {
                     atPath: project.applicationPath
                 )
             )
-            && AppRelaunchService.artifactBundleIdentifier(atPath: project.buildArtifactPath)
-                == project.bundleIdentifier
+            && AppRelaunchService.isLaunchableMacAppBundle(
+                atPath: project.applicationPath, expectedBundleIdentifier: project.bundleIdentifier
+            )
+            && AppRelaunchService.isLaunchableMacAppBundle(
+                atPath: project.buildArtifactPath, expectedBundleIdentifier: project.bundleIdentifier
+            )
     }
 
     nonisolated static var backupDirectory: URL {
@@ -153,7 +157,12 @@ enum IrisTestAppDelivery {
             applicationBundleIdentifier: AppRelaunchService.artifactBundleIdentifier(atPath: project.applicationPath))
             && artifactPath == project.buildArtifactPath
             && IrisTestProjectRegistry.contains(artifactPath, within: URL(fileURLWithPath: project.clonePath))
-            && AppRelaunchService.artifactBundleIdentifier(atPath: artifactPath) == project.bundleIdentifier
+            && AppRelaunchService.isLaunchableMacAppBundle(
+                atPath: project.applicationPath, expectedBundleIdentifier: project.bundleIdentifier
+            )
+            && AppRelaunchService.isLaunchableMacAppBundle(
+                atPath: artifactPath, expectedBundleIdentifier: project.bundleIdentifier
+            )
     }
 
     nonisolated static func permitsRestore(
@@ -164,7 +173,12 @@ enum IrisTestAppDelivery {
               IrisTestProjectRegistry.isValidProject(project, within: projectsDirectory,
                 applicationBundleIdentifier: AppRelaunchService.artifactBundleIdentifier(atPath: installedPath)),
               IrisTestProjectRegistry.contains(backupPath, within: backupDirectory),
-              AppRelaunchService.artifactBundleIdentifier(atPath: backupPath) == project.bundleIdentifier else { return false }
+              AppRelaunchService.isLaunchableMacAppBundle(
+                  atPath: installedPath, expectedBundleIdentifier: project.bundleIdentifier
+              ),
+              AppRelaunchService.isLaunchableMacAppBundle(
+                  atPath: backupPath, expectedBundleIdentifier: project.bundleIdentifier
+              ) else { return false }
         return receipts.contains { entry in
             guard case .valid(let receipt) = entry else { return false }
             return receipt.phase == .installed && receipt.bundleIdentifier == project.bundleIdentifier

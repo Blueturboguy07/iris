@@ -58,17 +58,21 @@ struct IrisTestProjectRegistryChecks {
         try fileManager.createDirectory(at: validBuildArtifact, withIntermediateDirectories: true)
 
         func writeBundleInfo(_ applicationURL: URL, bundleIdentifier: String) throws {
-            let infoPlist = applicationURL.appendingPathComponent("Contents/Info.plist")
-            try fileManager.createDirectory(
-                at: infoPlist.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
+            let executableName = applicationURL.deletingPathExtension().lastPathComponent.replacingOccurrences(of: " ", with: "")
+            let executable = applicationURL.appendingPathComponent("Contents/MacOS/\(executableName)")
+            try fileManager.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+            try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
             let infoPlistData = try PropertyListSerialization.data(
-                fromPropertyList: ["CFBundleIdentifier": bundleIdentifier],
+                fromPropertyList: [
+                    "CFBundleIdentifier": bundleIdentifier,
+                    "CFBundleExecutable": executableName,
+                    "CFBundleName": applicationURL.deletingPathExtension().lastPathComponent,
+                ],
                 format: .xml,
                 options: 0
             )
-            try infoPlistData.write(to: infoPlist)
+            try infoPlistData.write(to: applicationURL.appendingPathComponent("Contents/Info.plist"))
         }
 
         try writeBundleInfo(validApplication, bundleIdentifier: validBundleIdentifier)
@@ -444,6 +448,22 @@ struct IrisTestProjectRegistryChecks {
             !IrisTestProjectRegistry.permitsArtifact(validBuildArtifact.appendingPathComponent("Contents/MacOS/IrisNotes").path,
                                                      for: valid),
             "nested executable path was accepted as the registered build artifact"
+        )
+        let malformedArtifact = validClone.appendingPathComponent("release/mac-arm64/Malformed.app")
+        try fileManager.createDirectory(at: malformedArtifact.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+        let malformedInfo = try PropertyListSerialization.data(
+            fromPropertyList: [
+                "CFBundleIdentifier": validBundleIdentifier,
+                "CFBundleExecutable": "Malformed",
+            ], format: .xml, options: 0
+        )
+        try malformedInfo.write(to: malformedArtifact.appendingPathComponent("Contents/Info.plist"))
+        let malformedProject = project(
+            slug: "malformed", buildArtifactPath: malformedArtifact.path
+        )
+        try check(
+            !IrisTestProjectRegistry.permitsArtifact(malformedArtifact.path, for: malformedProject),
+            "same-ID artifact without an executable was accepted"
         )
         print("PASS duplicate rejection: slug, bundle ID, clone path, stable app path and build path")
         print("PASS artifact gate: exact fresh build, stable/fresh running apps, canonical bundle, nested and symlink rejection")

@@ -46,13 +46,14 @@ UI. A passing fixture or source check is recorded separately from native use.
 
 ## Installed candidate and fresh checks, September 12 UTC
 
-The candidate is installed and launched as **Iris Test**, bundle identifier
-`com.publikhq.iris.test`. Its debug-library SHA-256 is
-`a36df7b183ca1e7ba522555f0285850a04c543b7e15ad9ea71c46598483e564f`.
-Xcode GUI build `107B8AB8-E075-405C-A69B-EC97F658C30B` succeeded with zero errors
-and 135 warnings. The warnings remain unresolved; this is not a warning-free
-release. Deep strict signature verification passed, and the local designated
-signing requirement is unchanged.
+The upstream-merged candidate is installed and launched as **Iris Test**, bundle
+identifier `com.publikhq.iris.test`. Its debug-library SHA-256 is
+`f93ad13c5bde47a5ac0cec6639ed61c310f7c8bc73b6c5997372fdb5dcbff44f`.
+Xcode GUI build `B8A92C4F-E55B-40D3-9AED-174D06481A67` succeeded with zero
+errors and 136 warnings. The warnings remain unresolved; this is not a
+warning-free release. Deep strict signature verification passed, and the local
+designated signing requirement is unchanged. The prior integrated candidate
+remains recoverable at `/private/tmp/iris-test-before-upstream-ls1Nhj`.
 
 Regular Iris was not replaced. Its debug-library SHA-256 remains
 `34f3cf4f202973486eeebc8d927925121e37aa719b723c50520719063b0e32c2`.
@@ -63,8 +64,11 @@ Fresh checks:
 
 - The final 175-source headless native module compiled. Source aggregate:
   `129b03b583a6c3ec7118a574e703512e940e594254301a0c4804a5d36661b2b6`.
-- Guide/controller/shell regressions: 66 tests in 5 suites passed, including
-  actual disposable PTY processes and held asynchronous ownership cases.
+- The upstream-merged 175-source headless native module compiled with 262
+  warnings. Guide/controller/shell regressions: 68 tests in 5 suites passed,
+  including actual disposable PTY processes and held asynchronous ownership
+  cases. The merged build preserves the ownership and timeout fixes and adds the
+  catalog-guide/recovery changes from upstream.
 - Harness package: 110 tests in 5 suites passed. Usability package: 134 tests
   in 17 suites passed. Those suites were rerun during final integration; the
   subsequent timeout change touches only Runner and its focused guide tests.
@@ -91,6 +95,10 @@ Actual computer use after installation, with screenshots inspected:
 6. Opened General settings. Start minimized remained selected. Expanded and
    scrolled Saved app versions: the NitroAI and PlantGPT restored records and
    previous-file availability remained visible after Iris Test replacement.
+7. On the upstream-merged build, Settings also exposed the guide-name field,
+   Mac app catalog rows and the explicit Ask-me-each-step / Run-installs-for-me
+   controls. Iris Test still refuses marketplace installation, as intended for
+   this isolated target.
 
 This proves those installed control transitions and retained records. It does
 not prove a new complex feature, a fresh full installer run, terminal-minimized

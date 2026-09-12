@@ -1,43 +1,32 @@
-# Review status matrix
+# Current review status matrix
 
-The status column describes the strongest evidence available for the reviewed
-9fb baseline and bounded installer correction. A source or fixture result never
-upgrades a row to installed behavior by itself.
+As of September 12, 08:15 UTC, through code `92609f9`. Latest installed Test hash: `5e2a0d454367171b48c8f65915447d6694a29551be578c2ea1b06c1e1978fcb2`, independently rechecked. Earlier rows retain their own run boundaries. Full details are in [INTEGRATED_CANDIDATE.md](INTEGRATED_CANDIDATE.md).
 
-| Area | Evidence class | Status | Review meaning |
-| --- | --- | --- | --- |
-| Swift/native source build | Component | Passed | Fresh host compilation completed without errors. Warnings remain. This is not feature acceptance. |
-| Standalone usability package on the public snapshot | Component | Build failed | A newly shared receipt helper calls `scrubbedVerificationOutputTail`, but the isolated package does not include its production definition. The native app/module builds; this package wiring needs a separate fix. Do not report the old usability count as a fresh pass. |
-| Harness and defensive checks | Component | Passed for the recorded suites | Confinement, identity, review-boundary, input-budget, image, retention, and receipt checks passed in controlled hosts. This is not an exhaustive security audit. |
-| Restart-safe Undo primitives | Controlled native fixture | Passed for named cases | Durable receipt, payload identity, source identity, interrupted-swap, dirty-source, and changed-backup cases were exercised in disposable Test fixtures. A forced crash through the real UI was not exercised. |
-| Installer/artifact discovery correction | Controlled package and swap | Passed for tested layouts | `release/mac*` discovery, executable/bundle checks, stale-artifact refusal, and disposable replacement worked. Custom output layouts remain unproven. |
-| NitroAI folder-scoped search | Installed native UI | Passed, narrow | Trial 17 exercised matching, folder isolation, empty results, clear, relaunch, Iris restart, and Saved app versions Undo. It is one small feature. |
-| PlantGPT project search | Installed native UI | Passed, narrow and historical | Trial 11 exercised a small update, relaunch, restart Undo, and preserved project data. It does not establish complex feature generation. |
-| Current 9fb UI smoke | Installed Test UI | Partial | Composer, registered app selection, saved-version records, and picker/general-chat boundaries were observed. Keychain-blocked chat and live complex behavior remain open. |
-| Transfer intake and clarification | Installed Test UI | Observed | The notes/folders scope and preservation choices reached a readable plan in later trials. This proves intake only. |
-| Transfer code admission | Independent review | Rejected in trials 18-21 | Review found lost provenance, order-sensitive matching, ambiguous retained-copy duplication, and missing consumer context. No candidate cleared admission. |
-| Transfer native oracle | Controlled native route | Negative readiness only | Seven baseline checks ran: six passed and the expected transfer export control was absent. No positive transfer path ran. |
-| Transfer package/install/relaunch | Installed feature | Not run | No transfer candidate was installed after review. |
-| Transfer restart Undo | Installed feature | Not run | There is no complex-transfer receipt or post-transfer Undo to verify. |
-| Repair-input reserve | Deterministic and live scheduling evidence | Passed as a harness mechanism | Old/new replay showed the new reserve refuses before transport when needed, then admits a charged repair and both mandatory native review bounds within the unchanged limits. Trial 21 used repair calls, but review still rejected the feature. |
-| Existing app data on rejected transfer | Installed Test UI | Preserved | Failed transfer trials left the prior app and baseline notes visible. This is safe non-delivery, not successful import. |
-| Normal Iris and normal profiles | Safety boundary | Preserved | The reviewed campaign stayed in Iris Test and registered disposable targets. No normal-app replacement or normal-profile migration is claimed. |
-| Kneecap installation | Operational WIP | Unresolved | A dirty-source/clean-copy refusal was observed. Retry/resume is being fixed. No phone or signed-release acceptance exists. |
+| Area | Evidence class | Current status and limit |
+| --- | --- | --- |
+| Upstream integration | Git and build | Conflicts resolved; PR is OPEN, DRAFT and MERGEABLE against `945d135`. No merge into main or release. |
+| Iris Test build | Build/installed artifact | Latest Test build installed and launched. Warnings remain; normal Iris unchanged. |
+| Standalone usability wiring | Component | Initial snapshot failure fixed in `dc0dd62`; subsequent report records 134 tests/17 suites passing. |
+| Harness and defensive checks | Component | Recorded suites pass, including later harness 112/5. They do not establish successful live model behavior or exhaustive security coverage. |
+| Installer retry and shell ownership | Controlled controller/PTY plus native controls | Targeted regressions and real PTY tests pass. Native retry-window controls showed Working and Stop; full marketplace install remains unverified. |
+| Kneecap source state | Read-only actual repository facts | Expected home copy exists with correct origin and pinned HEAD; lockfile and Finder metadata changes trigger refusal. Preserve changes. This is not installation or phone acceptance. |
+| Ask/Edit and draft transitions | Actual Iris Test UI | Draft separation, target-change confirmation/Cancel and history-clear Cancel observed on the identified installed integration runs. |
+| Current settings and saved-version display | Actual Iris Test UI | Settings and retained restored records observed after Test replacement. Displayed availability is not a new Undo execution. |
+| Saved-login and permission continuity | Actual startup failure | Keychain read failure remains. Instructions and matching signatures do not prove it resolved. |
+| Earlier NitroAI search | Historical actual UI | Narrow search, relaunch, restart and Undo passed. Search was deliberately undone; no current transfer feature is installed. |
+| Earlier PlantGPT search/lifecycle | Historical actual UI | Narrow update/relaunch/restart Undo preserved project data. Not complex feature proof. |
+| New disposable QA app lifecycle | Actual UI plus later failure | Dashboard reached, but subsequent relaunch failed with missing helper/invalid app metadata. Shared launchability checks were hardened; fresh successful full lifecycle remains unproven. |
+| Recovery primitives | Controlled disposable fixtures | Named receipt, identity, interrupted-swap, dirty-source and changed-backup cases passed. Forced UI crash and recovery after a new accepted complex change were not observed. |
+| Backup cleanup | Component helper; product WIP | Obsolete restored-copy cleanup has defensive fixture checks and protects shared/ambiguous references. No app UI/automatic caller yet; no valuable backup removed. Successive deliveries are not generally bounded. |
+| Review-context selection | Component | Bounded possible-consumer selection tested under unchanged context limits. No measured live feature-success or dollar-cost improvement. |
+| Transfer intake | Actual Test UI | Scope, choices and readable plan observed. Intake only. |
+| Transfer correctness | Independent review rejection | Trials 18–21 rejected provenance/order/repeated-copy defects. No accepted transfer, install or post-transfer Undo. |
+| Transfer oracle | Controlled negative readiness | Baseline tests reached the absent export control; no positive transfer path completed. |
+| Spatial and concurrent workflows | WIP | Accurate visible highlights and overlapping install/edit behavior remain unaccepted. |
+| Normal Iris/user data | Scope boundary | No normal-app upgrade, discarded user edits or valuable backup cleanup in the recorded work. |
 
-## Evidence vocabulary
+## How to interpret this matrix
 
-- **Installed native UI** means actual controls in the isolated Iris Test app
-  were used and the result was observed.
-- **Controlled native fixture** means a linked host or disposable app/profile
-  exercised a specific state boundary. It is stronger than a pure unit test,
-  but it is not a user feature journey.
-- **Component** means source, package, or deterministic checks without the
-  requested installed behavior.
-- **WIP** means the route is not complete enough to support an acceptance claim.
+**Actual UI** means real controls were operated through computer use; **controlled fixture/component** evidence locates and prevents particular failures. Neither implies an unperformed user journey. The source commit, installed binary and individual test run are separate identities.
 
-## Merge gate
-
-The matrix remains red because the requested complex transfer has no native
-success, no installed candidate, no restart persistence result, and no
-restart-selected Undo result. A green source build, green defensive suite,
-or a successful installer swap cannot clear those missing rows.
+The branch is mechanically mergeable but remains a draft for product review. Select changes using their stated evidence and limitations. No successful complex transfer, general automatic retention, physical phone install, new complete Undo cycle or comprehensive permission-continuity result is claimed. Historical first-snapshot failures remain available at immutable `e79b401`; this matrix supersedes their presentation as current failures.

@@ -68,20 +68,21 @@ Iris data.
 
 ## Installed candidate and fresh checks, September 12 UTC
 
-The previously installed integration candidate is launched as **Iris Test**,
+The fresh follow-up integration candidate is installed and launched as **Iris
+Test**,
 bundle identifier `com.publikhq.iris.test`. Its debug-library SHA-256 is
-`5e2a0d454367171b48c8f65915447d6694a29551be578c2ea1b06c1e1978fcb2`, Mach-O
-UUID `38BDF46A-96BA-3745-AF75-FFED76FB3CBB`. Xcode GUI build completed with
+`2186fd84c07b38dcfdf8942f0b88d4bc4e61e0600a04637047346115cc81e304`, Mach-O
+UUID `F09A3B7A-0F49-3332-AC8A-B49554FCA20D`. Xcode GUI build completed with
 zero errors and the existing warning set; this is not a warning-free release.
 The prior installed candidate is recoverable at
-`/private/tmp/iris-test-before-20260912-final.837trM`.
+`/private/tmp/iris-test-before-cleanup-ui.20260912-014457`.
 
 Regular Iris was not replaced. Its debug-library SHA-256 remains
 `34f3cf4f202973486eeebc8d927925121e37aa719b723c50520719063b0e32c2`.
 No target-app installation or valuable backup cleanup was performed in this
-integration pass. The new cleanup UI was built and exercised from the exact
-fresh Xcode Test product in DerivedData; the older `/Applications/Iris Test.app`
-copy was not replaced during this follow-up.
+integration pass. The fresh Xcode Test product was copied to
+`/Applications/Iris Test.app` only after the old Test bundle was moved to the
+recoverable backup above. Normal Iris was not replaced.
 
 Fresh checks:
 

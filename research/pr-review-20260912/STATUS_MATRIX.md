@@ -1,16 +1,16 @@
 # Current review status matrix
 
 As of September 12, 01:45 Pacific, through the follow-up source/build work on
-the review branch. The latest installed Test hash remains
-`5e2a0d454367171b48c8f65915447d6694a29551be578c2ea1b06c1e1978fcb2`,
-independently rechecked; the new cleanup UI was exercised from a fresh Xcode
-Test product but was not copied over the installed app. Earlier rows retain
-their own run boundaries. Full details are in [INTEGRATED_CANDIDATE.md](INTEGRATED_CANDIDATE.md).
+the review branch. The latest installed Test debug-library hash is
+`2186fd84c07b38dcfdf8942f0b88d4bc4e61e0600a04637047346115cc81e304`; the new
+cleanup UI was exercised and then copied into the installed Test bundle. The
+previous Test bundle remains recoverable. Earlier rows retain their own run
+boundaries. Full details are in [INTEGRATED_CANDIDATE.md](INTEGRATED_CANDIDATE.md).
 
 | Area | Evidence class | Current status and limit |
 | --- | --- | --- |
 | Upstream integration | Git and build | Conflicts resolved; PR is OPEN, DRAFT and MERGEABLE against `945d135`. No merge into main or release. |
-| Iris Test build | Build/installed artifact | Existing installed Test build remains launched and unchanged in this follow-up; the fresh source build also completed with warnings and was inspected separately. Normal Iris unchanged. |
+| Iris Test build | Build/installed artifact | Fresh Test build installed and launched; warnings remain. Normal Iris unchanged. |
 | Standalone usability wiring | Component | Initial snapshot failure fixed in `dc0dd62`; subsequent report records 134 tests/17 suites passing. |
 | Harness and defensive checks | Component | Recorded suites pass, including later harness 112/5. They do not establish successful live model behavior or exhaustive security coverage. |
 | Installer retry and shell ownership | Controlled controller/PTY plus native controls | Targeted regressions and real PTY tests pass. Native retry-window controls showed Working and Stop; full marketplace install remains unverified. |

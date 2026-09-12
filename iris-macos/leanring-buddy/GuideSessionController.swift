@@ -422,6 +422,11 @@ final class GuideSessionController: ObservableObject {
     /// apps list" instead of leaving them on a card.
     var onGuideCompleted: ((IrisGuide, IrisGuideBranch) -> Void)?
 
+    /// Brings the overlay forward when a guide is opened from Settings or a
+    /// deep link. The controller owns guide state, while the companion owns the
+    /// window, so the cross-layer action remains an injected closure.
+    var surfaceTheGuideCardAtTheEye: (() -> Void)?
+
     /// Fired when autopilot begins and ends, so `CompanionManager` can raise and
     /// tear down the centered terminal takeover. Injected like the eye closures
     /// so this controller stays ignorant of overlays and panels.
@@ -982,6 +987,7 @@ final class GuideSessionController: ObservableObject {
         let generationForThisOpen = guideSessionGeneration
         tearDownWhicheverGuideSessionIsCurrentlyOpen()
         loadState = .guideIsLoading(slug: slug)
+        surfaceTheGuideCardAtTheEye?()
         guideBeingFollowed = nil
         selectedBranch = nil
         currentStepIndex = 0

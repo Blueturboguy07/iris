@@ -2,6 +2,8 @@
 
 Status: **not merge-ready**.
 
+Follow-ups after frozen snapshot `e79b401`: [installer retry ownership](FOLLOWUP_RETRY_OWNERSHIP.md) and [standalone package wiring](FOLLOWUP_PACKAGE_WIRING.md). The latter now passes 134 tests. The baseline findings below remain historical; these follow-ups do not establish full installer or complex-feature acceptance.
+
 This package contains the source snapshot behind the currently installed Iris
 Test artifact, plus separately labeled follow-up commits when available. The
 first snapshot's 174 compiled native source files match the recorded tested

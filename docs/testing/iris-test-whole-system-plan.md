@@ -121,11 +121,13 @@ untrusted model output. It does not attempt to access other users, evade
 platform safeguards, or turn an untrusted output into a permission to publish
 or install.
 
-One known follow-up remains: the optional model-derived ambiguity and
-irreversibility probe currently fails open when its provider reply is missing
-or malformed. Until that policy is changed and tested, the harness must not
-describe the probe as a guarantee that a destructive request was clarified.
-The ordinary consent, command and delivery gates still apply.
+The optional model-derived ambiguity and irreversibility probe now records
+provider failure or malformed output as an unavailable signal. That signal is
+non-blocking but adds one deterministic question offering an additive,
+reversible posture; an explicit irreversibility result still takes precedence.
+This closes the silent gap without turning a provider outage into a refusal.
+Live model question quality remains an acceptance item, and the ordinary
+consent, command and delivery gates still apply.
 
 ## Agent work contract
 

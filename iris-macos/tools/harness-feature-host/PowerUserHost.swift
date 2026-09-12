@@ -119,7 +119,14 @@ import AppKit
             let result = await service.packageFreshBuildFromClone(clonePath: work.path, appStack: .electron)
             print("PACKAGE: " + String(describing: result))
             guard case .artifactReady(let path, _) = result,
-                  path.hasPrefix(work.path + "/"), Bundle(path: path)?.bundleIdentifier == bundleID else {
+                  path.hasPrefix(work.path + "/"),
+                  Bundle(path: path)?.bundleIdentifier == bundleID,
+                  AppRelaunchService.newestLaunchableAppBundle(
+                      forStack: .electron,
+                      clonePath: work.path,
+                      producedAtOrAfter: .distantPast,
+                      expectedBundleIdentifier: bundleID
+                  ) == URL(fileURLWithPath: path).resolvingSymlinksInPath().path else {
                 throw Failure.boundary("no safe QA artifact")
             }
             try Data(path.utf8).write(to: root.appendingPathComponent("artifacts/package-path.txt"))
@@ -131,6 +138,12 @@ import AppKit
             guard fresh.resolvingSymlinksInPath().path == fresh.path,
                   installed.resolvingSymlinksInPath().path == installed.path,
                   Bundle(url: fresh)?.bundleIdentifier == bundleID,
+                  AppRelaunchService.newestLaunchableAppBundle(
+                      forStack: .electron,
+                      clonePath: work.path,
+                      producedAtOrAfter: .distantPast,
+                      expectedBundleIdentifier: bundleID
+                  ) == fresh.path,
                   Bundle(url: installed)?.bundleIdentifier == bundleID,
                   NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty else {
                 throw Failure.boundary("only stopped QA app may be replaced")

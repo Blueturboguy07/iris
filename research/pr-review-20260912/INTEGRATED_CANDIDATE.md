@@ -109,6 +109,12 @@ Actual computer use after installation, with screenshots inspected:
    actions, search and the empty-library state were visible. This is evidence
    of a real disposable app launch and UI reachability, not proof that a new
    feature was delivered by Iris.
+9. After quitting that fixture, a direct relaunch attempt failed with the
+   Electron fatal error `Unable to find helper app`; inspection showed the
+   swapped disposable bundle had no valid `Contents/Info.plist`. This is a
+   campaign failure, not a successful lifecycle result. The power-user host
+   now reuses the production launchability predicate for package and swap
+   admission, so a malformed artifact is refused before replacement.
 
 This proves those installed control transitions and retained records. It does
 not prove a new complex feature, a fresh full installer run, terminal-minimized
@@ -142,6 +148,9 @@ The earlier recorded narrow native lifecycle successes remain separate.
    because it contained a broad marker. The classifier now requires explicit
    diagnostic phrasing for those tokens, with regression coverage for both
    source-like success and real `Error:` output.
+7. The disposable campaign host accepted a bundle by identity alone during
+   swap. Its package and swap paths now require the same Info.plist,
+   executable and freshness checks used by production artifact discovery.
 
 ## Verification interpretation
 

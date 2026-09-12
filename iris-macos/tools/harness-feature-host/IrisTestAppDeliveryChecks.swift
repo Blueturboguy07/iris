@@ -40,6 +40,33 @@ struct IrisTestAppDeliveryChecks {
         try bundle(artifact, identifier)
         print("PASS exact fixture, sibling artifact and wrong-identity boundaries")
 
+        let launchable = clone.appendingPathComponent("release/mac-arm64/Notes.app")
+        let launchableExecutable = launchable.appendingPathComponent("Contents/MacOS/Notes")
+        try bundle(launchable, identifier)
+        try files.createDirectory(at: launchableExecutable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("fixture executable".utf8).write(to: launchableExecutable)
+        try files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launchableExecutable.path)
+        try require(
+            AppRelaunchService.newestLaunchableAppBundle(
+                forStack: .electron,
+                clonePath: clone.path,
+                producedAtOrAfter: .distantPast,
+                expectedBundleIdentifier: identifier
+            ) == launchable.path,
+            "valid launchable artifact was not discovered"
+        )
+        try files.removeItem(at: launchable.appendingPathComponent("Contents/Info.plist"))
+        try require(
+            AppRelaunchService.newestLaunchableAppBundle(
+                forStack: .electron,
+                clonePath: clone.path,
+                producedAtOrAfter: .distantPast,
+                expectedBundleIdentifier: identifier
+            ) == nil,
+            "malformed launch artifact was admitted"
+        )
+        print("PASS launchability discovery refuses a bundle without Info.plist")
+
         let savedArtifact = clone.appendingPathComponent("release/Preserved.app")
         try files.moveItem(at: artifact, to: savedArtifact)
         try files.createSymbolicLink(at: artifact, withDestinationURL: savedArtifact)

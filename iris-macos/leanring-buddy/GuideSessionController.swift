@@ -349,6 +349,8 @@ final class GuideSessionController: ObservableObject {
     /// True while the drive loop is running, so the watch-loop resume path
     /// cannot start a second concurrent loop.
     private var autopilotIsDriving = false
+    private var surfacedStepRetryID: UUID?
+    private var surfacedStepRetryTask: Task<Void, Never>?
 
     /// Which step the takeover is parked on, waiting for the reader to say they
     /// did it — the "I did it — continue" bar's step, and nil whenever that bar
@@ -1550,6 +1552,9 @@ final class GuideSessionController: ObservableObject {
     }
 
     func stopAutopilot() {
+        surfacedStepRetryID = nil
+        surfacedStepRetryTask?.cancel()
+        surfacedStepRetryTask = nil
         autopilotIsRunning = false
         runnerSessionHasStarted = false
         autopilotIsShownAsTakeover = false
@@ -1618,9 +1623,13 @@ final class GuideSessionController: ObservableObject {
     /// it is tapped.
     func retryTheSurfacedStep() {
         guard autopilotIsRunning, !autopilotIsDriving,
+              surfacedStepRetryID == nil, autopilotHandedTheCurrentStepToTheReader,
               let runner = autopilotRunner,
               let branch = selectedBranch,
               currentStepIndex < branch.steps.count else { return }
+        // Acquire ownership before the first suspension or a second button tap.
+        let retryID = UUID()
+        surfacedStepRetryID = retryID
         // Iris owns the step again for the duration of the retry, so the watch
         // loop stands down and cannot also advance it.
         autopilotHandedTheCurrentStepToTheReader = false
@@ -1628,11 +1637,21 @@ final class GuideSessionController: ObservableObject {
         let step = branch.steps[currentStepIndex]
         let stepIndex = currentStepIndex
         let totalSteps = branch.steps.count
-        Task {
-            await runner.reloadTheReadersEnvironmentIntoTheShell()
+        runner.prepareToRetrySurfacedStep(stepIndex: stepIndex)
+        surfacedStepRetryTask = Task {
+            let environmentReloaded = await runner.reloadTheReadersEnvironmentIntoTheShell()
+            guard ownsSurfacedStepRetry(retryID, runner: runner, branch: branch, step: step, stepIndex: stepIndex) else { return }
+            guard environmentReloaded else {
+                finishSurfacedStepRetry(retryID)
+                runner.surfaceEnvironmentReloadFailure(command: step.command ?? "")
+                handTheCurrentStepBackToTheReader()
+                return
+            }
             let result = await runner.executeStepCommand(
                 step: step, stepIndex: stepIndex, totalSteps: totalSteps
             )
+            guard ownsSurfacedStepRetry(retryID, runner: runner, branch: branch, step: step, stepIndex: stepIndex) else { return }
+            finishSurfacedStepRetry(retryID)
             numberOfCommandsAutopilotHasExecuted += 1
             switch result {
             case .succeeded:
@@ -1645,10 +1664,28 @@ final class GuideSessionController: ObservableObject {
         }
     }
 
+    private func ownsSurfacedStepRetry(
+        _ retryID: UUID,
+        runner: GuideAutopilotRunner,
+        branch: IrisGuideBranch,
+        step: IrisGuideStep,
+        stepIndex: Int
+    ) -> Bool {
+        !Task.isCancelled && surfacedStepRetryID == retryID && autopilotIsRunning
+            && autopilotRunner === runner && selectedBranch?.branchKey == branch.branchKey
+            && currentStepIndex == stepIndex && currentStep?.id == step.id
+    }
+
+    private func finishSurfacedStepRetry(_ retryID: UUID) {
+        guard surfacedStepRetryID == retryID else { return }
+        surfacedStepRetryID = nil
+        surfacedStepRetryTask = nil
+    }
+
     /// The reader tapped "Continue" on a step Iris surfaced — they are choosing
     /// to move past it. Skip it and let Iris run the remaining steps.
     func skipTheSurfacedStepAndContinue() {
-        guard autopilotIsRunning else { return }
+        guard autopilotIsRunning, surfacedStepRetryID == nil else { return }
         autopilotHandedTheCurrentStepToTheReader = false
         advanceToTheNextStep()
     }
@@ -1880,7 +1917,9 @@ final class GuideSessionController: ObservableObject {
         runner: GuideAutopilotRunner,
         branch: IrisGuideBranch
     ) async {
-        guard !autopilotIsDriving else { return }
+        guard !autopilotIsDriving, surfacedStepRetryID == nil,
+              autopilotIsRunning, autopilotRunner === runner,
+              selectedBranch?.branchKey == branch.branchKey else { return }
         autopilotIsDriving = true
         defer { autopilotIsDriving = false }
 
@@ -2230,7 +2269,7 @@ final class GuideSessionController: ObservableObject {
     /// The driving guard makes this a no-op if the drive loop is already
     /// running (an executed-step advance), so it never double-drives.
     func resumeAutopilotAfterAdvance() {
-        guard autopilotIsRunning, !autopilotIsDriving,
+        guard autopilotIsRunning, !autopilotIsDriving, surfacedStepRetryID == nil,
               let runner = autopilotRunner, let branch = selectedBranch else { return }
         Task { await self.driveAutopilotFromTheCurrentStep(runner: runner, branch: branch) }
     }
@@ -2935,6 +2974,11 @@ final class GuideSessionController: ObservableObject {
     /// tool check still running for the step being left behind — otherwise its
     /// result would land in the next step's rows.
     private func cancelAnyWorkFromThePreviousStep() {
+        if surfacedStepRetryID != nil {
+            // Navigating away cancels this retry, not another step's work.
+            // The reader can resume explicitly from the newly selected step.
+            stopAutopilot()
+        }
         copyConfirmationDismissalTask?.cancel()
         copyConfirmationDismissalTask = nil
         toolCheckTask?.cancel()

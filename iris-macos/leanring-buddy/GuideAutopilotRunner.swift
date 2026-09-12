@@ -513,17 +513,38 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
     ///
     /// Sent straight to the session rather than through `runApproved`, for the
     /// same reason `moveInto`'s `cd` is: this is machinery, not work the reader
-    /// is waiting to watch, so it must not spend the pacing floor. Its outcome
-    /// is deliberately unexamined — whether the tool is there now is answered
-    /// by the step that follows, not by this.
-    func reloadTheReadersEnvironmentIntoTheShell() async {
+    /// is waiting to watch, so it must not spend the pacing floor. A retry must
+    /// not send its command into a shell whose refresh failed or is still busy.
+    @discardableResult
+    func reloadTheReadersEnvironmentIntoTheShell() async -> Bool {
+        // A surfaced-step retry has no ordinary `runApproved` wrapper around
+        // this refresh, so expose the refresh as active work to the takeover
+        // UI. Preserve the enclosing command's state when this helper is
+        // reached from `runApproved` after a package-manager install.
+        let wasExecutingACommand = isExecutingACommand
+        isExecutingACommand = true
+        defer { isExecutingACommand = wasExecutingACommand }
         guard let approved = GuideAutopilotRiskAssessment.approve(
             GuideAutopilotShellSession.reloadTheReadersEnvironmentCommand
-        ) else { return }
+        ) else { return false }
         // A cold dotfile stack legitimately takes seconds (nvm, compinit), so
         // it gets the same budget a fresh shell's startup gets.
-        _ = await shellSession.run(
+        let outcome = await shellSession.run(
             approved, deadline: GuideAutopilotShellSession.readyDeadline
+        )
+        guard !Task.isCancelled else { return false }
+        if case .succeeded = outcome { return true }
+        return false
+    }
+
+    func prepareToRetrySurfacedStep(stepIndex: Int) {
+        state = .running(stepIndex: stepIndex)
+    }
+
+    func surfaceEnvironmentReloadFailure(command: String) {
+        _ = surface(
+            diagnosis: "Iris couldn't prepare the terminal for another attempt. This step has not been retried. Stop this install and choose Let Iris run it to start a fresh terminal.",
+            command: command
         )
     }
 

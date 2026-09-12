@@ -10,7 +10,11 @@
 
 import Foundation
 import Testing
+#if IRIS_HARNESS_STANDALONE
+@testable import IrisHarnessNative
+#else
 @testable import Iris
+#endif
 
 @MainActor
 struct GuideSessionControllerRetryConcurrencyTests {
@@ -19,8 +23,8 @@ struct GuideSessionControllerRetryConcurrencyTests {
 
     /// The refresh command is a real runner call, but its result is held until
     /// the test releases it. Ordinary guide commands are recorded and the
-    /// retry command fails twice, which makes both the first surfaced attempt
-    /// and a later fresh run deterministic.
+    /// retry failure count is configurable so each race can choose its own
+    /// deterministic outcome.
     @MainActor
     final class SuspendedRetryShell: GuideAutopilotShellSessionDriving {
         var onOutputLine: ((String) -> Void)?
@@ -31,9 +35,19 @@ struct GuideSessionControllerRetryConcurrencyTests {
         private(set) var refreshRequestCount = 0
         private(set) var retryCommandAttempts = 0
         private(set) var pendingRefreshCount = 0
+        private(set) var pendingRetryCommandCount = 0
         var releaseRefreshesWhenEnded = true
+        var suspendRetryCommands = false
 
         private var pendingRefreshes: [CheckedContinuation<GuideAutopilotCommandOutcome, Never>] = []
+        private var pendingRetryCommands: [
+            (CheckedContinuation<GuideAutopilotCommandOutcome, Never>, GuideAutopilotCommandOutcome)
+        ] = []
+        private let failuresBeforeSuccess: Int
+
+        init(failuresBeforeSuccess: Int = 1) {
+            self.failuresBeforeSuccess = max(0, failuresBeforeSuccess)
+        }
 
         func start() async -> Bool { true }
 
@@ -54,11 +68,17 @@ struct GuideSessionControllerRetryConcurrencyTests {
             commandsRun.append(command.text)
             if command.text == "retry-command" {
                 retryCommandAttempts += 1
-                if retryCommandAttempts <= 2 {
-                    return .failed(
+                let outcome: GuideAutopilotCommandOutcome = retryCommandAttempts <= failuresBeforeSuccess
+                    ? .failed(
                         exitStatus: 1,
                         workingDirectory: currentWorkingDirectory
-                    )
+                      )
+                    : .succeeded(workingDirectory: currentWorkingDirectory)
+                guard suspendRetryCommands else { return outcome }
+                pendingRetryCommandCount += 1
+                return await withCheckedContinuation {
+                    (continuation: CheckedContinuation<GuideAutopilotCommandOutcome, Never>) in
+                    pendingRetryCommands.append((continuation, outcome))
                 }
             }
             return .succeeded(workingDirectory: currentWorkingDirectory)
@@ -87,9 +107,19 @@ struct GuideSessionControllerRetryConcurrencyTests {
             continuation.resume(returning: outcome)
         }
 
+        func releaseNextRetryCommand() {
+            guard !pendingRetryCommands.isEmpty else { return }
+            let pending = pendingRetryCommands.removeFirst()
+            pendingRetryCommandCount -= 1
+            pending.0.resume(returning: pending.1)
+        }
+
         func releaseAllRefreshes() {
             while !pendingRefreshes.isEmpty {
                 releaseNextRefresh()
+            }
+            while !pendingRetryCommands.isEmpty {
+                releaseNextRetryCommand()
             }
         }
     }
@@ -250,7 +280,10 @@ struct GuideSessionControllerRetryConcurrencyTests {
 
     @Test("an old retry completion cannot clear a newer retry")
     func staleRetryCompletionCannotReleaseNewRetryOwnership() async throws {
-        let fixture = try Self.makeFixture(releaseRefreshesWhenEnded: false)
+        let fixture = try Self.makeFixture(
+            failuresBeforeSuccess: 2,
+            releaseRefreshesWhenEnded: false
+        )
         defer {
             fixture.shell.releaseAllRefreshes()
             fixture.controller.stopAutopilot()
@@ -295,12 +328,81 @@ struct GuideSessionControllerRetryConcurrencyTests {
                 "two surfaced failures plus only the newer retry command are expected")
     }
 
+    @Test("a failed environment refresh does not run the retry command")
+    func failedRefreshDoesNotExecuteRetryCommand() async throws {
+        let fixture = try Self.makeFixture()
+        defer {
+            fixture.shell.releaseAllRefreshes()
+            fixture.controller.stopAutopilot()
+            fixture.defaults.removePersistentDomain(forName: fixture.suiteName)
+        }
+        try await Self.surfaceTheRetryStep(in: fixture.controller)
+
+        fixture.controller.retryTheSurfacedStep()
+        #expect(await Self.pump { fixture.shell.pendingRefreshCount == 1 })
+        fixture.shell.releaseNextRefresh(
+            with: .failed(
+                exitStatus: 1,
+                workingDirectory: fixture.shell.currentWorkingDirectory
+            )
+        )
+
+        let handedBack = await Self.pump {
+            fixture.controller.autopilotHandedTheCurrentStepToTheReader
+        }
+        #expect(handedBack, "a failed refresh should return the step to the reader")
+        #expect(fixture.shell.retryCommandAttempts == 1,
+                "the original failure is the only retry-command attempt")
+        #expect(fixture.controller.currentStepIndex == 1)
+    }
+
+    @Test("a retry publishes running command state while its command is in flight")
+    func retryPublishesRunningCommandState() async throws {
+        let fixture = try Self.makeFixture()
+        defer {
+            fixture.shell.releaseAllRefreshes()
+            fixture.controller.stopAutopilot()
+            fixture.defaults.removePersistentDomain(forName: fixture.suiteName)
+        }
+        try await Self.surfaceTheRetryStep(in: fixture.controller)
+
+        fixture.shell.suspendRetryCommands = true
+        fixture.controller.retryTheSurfacedStep()
+        #expect(await Self.pump { fixture.shell.pendingRefreshCount == 1 })
+        if let runner = fixture.controller.autopilotRunner {
+            #expect(runner.state == .running(stepIndex: 1))
+            #expect(runner.isExecutingACommand)
+        } else {
+            #expect(Bool(false), "the active runner must expose refresh work")
+        }
+        fixture.shell.releaseNextRefresh()
+
+        let commandInFlight = await Self.pump {
+            fixture.shell.pendingRetryCommandCount == 1
+                && fixture.controller.autopilotRunner?.isExecutingACommand == true
+        }
+        #expect(commandInFlight, "the retry command should remain observable while suspended")
+        if let runner = fixture.controller.autopilotRunner {
+            #expect(runner.state == .running(stepIndex: 1))
+            #expect(runner.isExecutingACommand)
+        } else {
+            #expect(Bool(false), "the active runner must remain available during retry")
+        }
+
+        fixture.shell.releaseNextRetryCommand()
+        let finished = await Self.pump {
+            fixture.controller.readerHasFinishedTheGuide
+        }
+        #expect(finished, "releasing the command should complete the fixture")
+    }
+
     // MARK: - Fixture
 
     private static func makeFixture(
+        failuresBeforeSuccess: Int = 1,
         releaseRefreshesWhenEnded: Bool = true
     ) throws -> Fixture {
-        let shell = SuspendedRetryShell()
+        let shell = SuspendedRetryShell(failuresBeforeSuccess: failuresBeforeSuccess)
         shell.releaseRefreshesWhenEnded = releaseRefreshesWhenEnded
         let suiteName = "iris.guide.retry-concurrency.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
@@ -357,6 +459,31 @@ struct GuideSessionControllerRetryConcurrencyTests {
         return condition()
     }
 }
+
+#if GUIDE_RETRY_WINDOW_PROBE
+/// Bridge used only by the manual window probe. It keeps the probe on the same
+/// controller and suspended shell fixture as the executable regressions.
+@MainActor
+struct GuideRetryWindowProbeFixture {
+    let controller: GuideSessionController
+    let shell: GuideSessionControllerRetryConcurrencyTests.SuspendedRetryShell
+    let defaults: UserDefaults
+    let suiteName: String
+}
+
+extension GuideSessionControllerRetryConcurrencyTests {
+    @MainActor
+    static func makeWindowProbeFixture() throws -> GuideRetryWindowProbeFixture {
+        let fixture = try makeFixture(releaseRefreshesWhenEnded: false)
+        return GuideRetryWindowProbeFixture(
+            controller: fixture.controller,
+            shell: fixture.shell,
+            defaults: fixture.defaults,
+            suiteName: fixture.suiteName
+        )
+    }
+}
+#endif
 
 /// Serves a two-step desktop guide from memory. URLSession still exercises the
 /// GuideService/controller loading path, but no network request can escape this

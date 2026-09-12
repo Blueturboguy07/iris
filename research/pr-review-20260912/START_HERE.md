@@ -2,7 +2,10 @@
 
 Current status, September 12 at 08:15 UTC: **draft for review, with upstream conflicts resolved**. GitHub reports the branch mergeable against `945d135`. Mergeability is not release readiness; no PR merge or release has occurred.
 
-This index reflects code through `92609f9`. The latest installed Iris Test debug-library SHA-256 was independently rechecked as `5e2a0d454367171b48c8f65915447d6694a29551be578c2ea1b06c1e1978fcb2`. Regular Iris remains unchanged. Later commits must identify their own source, build and installed evidence rather than inherit every earlier result.
+This index reflects code through `4640056`. The latest installed Iris Test
+debug-library SHA-256 is `2186fd84c07b38dcfdf8942f0b88d4bc4e61e0600a04637047346115cc81e304`.
+Regular Iris remains unchanged. Later commits must identify their own source,
+build and installed evidence rather than inherit every earlier result.
 
 ## What a reviewer can use now
 
@@ -16,7 +19,12 @@ This index reflects code through `92609f9`. The latest installed Iris Test debug
 
 - No accepted complex notes/folders transfer. Candidates were rejected before installation, and the paid repeat campaign is stopped.
 - Full Kneecap marketplace installation and physical phone deployment are unverified. Iris Test deliberately refuses marketplace autopilot. Existing user checkouts and local edits are protected.
-- Backup cleanup currently has an explicit Test-only helper but no app UI or automatic lifecycle caller. Successive successful deliveries still retain backups. A safe preview/confirmation path is the remaining product task; general automatic storage bounds are not solved.
+- Backup cleanup now has an explicit Test-only, one-project preview and
+  confirmation flow. The real UI removed one disposable obsolete backup while
+  retaining recent/newest and existing rollback records, and restart preserved
+  the truthful unavailable record. There is still no automatic lifecycle caller
+  and successive successful deliveries remain retained; general automatic
+  storage bounds are not solved.
 - A disposable NitroAI QA app reached its dashboard, then failed a later relaunch with a missing helper/invalid app metadata. Launchability checks were strengthened afterward. Do not count the failed relaunch as a successful lifecycle pass.
 - Saved-login Keychain access still failed on this machine. Recovery instructions do not establish fixed credential or permission continuity. Precise spatial highlighting and concurrent installation/editing remain unaccepted.
 - Build warnings remain. A matching signature, successful build or mergeable Git branch does not cover these missing behaviors.

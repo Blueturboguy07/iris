@@ -142,10 +142,25 @@ Actual computer use after installation, with screenshots inspected:
    campaign failure, not a successful lifecycle result. The power-user host
    now reuses the production launchability predicate for package and swap
    admission, so a malformed artifact is refused before replacement.
+11. Seeded only disposable Test-owned NitroAI receipts: one old candidate,
+    recent and newest protected copies, and a shared-reference pair. The
+    shared-reference pair caused the first confirmation to stop safely with no
+    deletion, demonstrating fail-closed ambiguity handling.
+12. After moving that ambiguity fixture to a recoverable `/private/tmp`
+    location, the refreshed preview showed one removable old backup. Confirming
+    the real destructive action removed exactly that disposable payload; the UI
+    reported one removal and retained protected/recent copies.
+13. A restart of Iris Test preserved the receipt history, showed the cleaned
+    record as unavailable, and reported no older eligible backups. The remaining
+    synthetic fixtures were moved out of the Test profile afterward. The removed
+    payload was approximately 352 MiB logically by comparison with its identical
+    surviving hard-linked fixture; no physical free-space delta is claimed.
 
 This proves those installed control transitions and retained records. It does
 not prove a new complex feature, a fresh full installer run, terminal-minimized
-behavior during a concurrent install/edit, or a new update/relaunch/Undo cycle.
+behavior during a concurrent install/edit, or a new update/relaunch/Undo cycle
+for a feature edit. It does prove the explicit Test-only cleanup journey and
+restart persistence described above.
 The rebuilt app still reported a machine-local Keychain read failure
 (`status=-25293`) on startup; Settings now gives the plain-language
 “Always Allow” recovery instruction, but this pass does not claim the

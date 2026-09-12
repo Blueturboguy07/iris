@@ -53,8 +53,10 @@ Iris data.
   It was retained as a recoverable local application backup when the integrated
   candidate below replaced only Iris Test.
 - Backup cleanup is explicit and is not automatically called by installation,
-  delivery, Undo or the UI. Successive installed deliveries still retain their
-  backups. This is not a general automatic storage-growth solution.
+  delivery or Undo. Iris Test Settings now exposes a one-project-at-a-time
+  preview and confirmation flow; normal Iris does not expose it. Successive
+  installed deliveries still retain their backups. This is not a general
+  automatic storage-growth solution.
 - Cleanup checks cannot make a separate recovery writer or external filesystem
   mutation atomic with receipt deletion. Mid-pass unlink failure has not been
   forced in a deterministic test. No valuable profile cleanup was attempted.
@@ -66,7 +68,7 @@ Iris data.
 
 ## Installed candidate and fresh checks, September 12 UTC
 
-The final integration candidate is installed and launched as **Iris Test**,
+The previously installed integration candidate is launched as **Iris Test**,
 bundle identifier `com.publikhq.iris.test`. Its debug-library SHA-256 is
 `5e2a0d454367171b48c8f65915447d6694a29551be578c2ea1b06c1e1978fcb2`, Mach-O
 UUID `38BDF46A-96BA-3745-AF75-FFED76FB3CBB`. Xcode GUI build completed with
@@ -77,7 +79,9 @@ The prior installed candidate is recoverable at
 Regular Iris was not replaced. Its debug-library SHA-256 remains
 `34f3cf4f202973486eeebc8d927925121e37aa719b723c50520719063b0e32c2`.
 No target-app installation or valuable backup cleanup was performed in this
-integration pass.
+integration pass. The new cleanup UI was built and exercised from the exact
+fresh Xcode Test product in DerivedData; the older `/Applications/Iris Test.app`
+copy was not replaced during this follow-up.
 
 Fresh checks:
 
@@ -95,10 +99,12 @@ Fresh checks:
   The final module's defensive checks passed: candidate policy 7 groups,
   candidate boundary 2 groups and image-input boundary 2 groups. These are
   confined tests, not proof that all attacks are prevented.
-- Standalone backup retention 7 groups, registry 6 groups, source refusal
-  3 groups, repository context 13 groups, Test app delivery 3 groups and saved
-  version lifecycle checks passed against the preceding combined module.
-  Those production paths were unchanged by the final Runner timeout fix.
+- Standalone backup retention 7 groups, registry 6 groups, Test app delivery 3
+  groups, and saved version lifecycle checks passed against the current
+  combined module. The canonical shared-scratch correction in the delivery
+  fixture removes a test-only `/private/tmp` alias failure; it does not loosen
+  production path checks. Repository context and source-refusal checks remain
+  recorded from the preceding combined module.
 
 Actual computer use after installation, with screenshots inspected:
 
@@ -118,13 +124,18 @@ Actual computer use after installation, with screenshots inspected:
    Mac app catalog rows and the explicit Ask-me-each-step / Run-installs-for-me
    controls. Iris Test still refuses marketplace installation, as intended for
    this isolated target.
-8. A separate registered NitroAI Iris QA fixture was launched through
+8. On the exact fresh Xcode Test product, expanded Saved app versions showed
+   the Test-app picker and the conservative “Review cleanup…” action. The
+   confirmation explained that recent, newest, recovery-protected and
+   unreadable copies are kept, and Cancel returned to the records without
+   deleting anything.
+9. A separate registered NitroAI Iris QA fixture was launched through
    computer use after its prior disposable swap. The real onboarding screen
    was completed to the app dashboard, where Dashboard, Settings, note-source
    actions, search and the empty-library state were visible. This is evidence
    of a real disposable app launch and UI reachability, not proof that a new
    feature was delivered by Iris.
-9. After quitting that fixture, a direct relaunch attempt failed with the
+10. After quitting that fixture, a direct relaunch attempt failed with the
    Electron fatal error `Unable to find helper app`; inspection showed the
    swapped disposable bundle had no valid `Contents/Info.plist`. This is a
    campaign failure, not a successful lifecycle result. The power-user host

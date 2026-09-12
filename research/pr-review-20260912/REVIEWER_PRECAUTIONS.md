@@ -61,7 +61,11 @@ component suites separately. A successful GUI build is not a suite run.
    state must refuse without automatic replay.
 6. Preserve the previous Test bundle and recovery records during review. Do not
    prune backups, delete receipts, reset source, reclone a target, or manually
-   patch a generated feature to make a check pass.
+   patch a generated feature to make a check pass. The sole cleanup exception
+   is the explicit Iris Test Settings flow: select one registered Test app,
+   read its preview, and confirm the destructive action at the point of use.
+   It must never be used from normal Iris, for an unregistered project, or as
+   a substitute for retaining a rollback copy.
 
 The checked-in campaign helpers are reviewable technical WIP, not a turnkey
 fixture installer. Portable helpers require explicit fixture locations and

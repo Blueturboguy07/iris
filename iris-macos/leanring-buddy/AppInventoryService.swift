@@ -40,10 +40,13 @@ nonisolated struct CatalogAppDescriptor: Decodable, Equatable, Sendable {
     /// The newest published release tag, e.g. `v0.1.1`. Null when the app has
     /// no releases, or when publik's catalog sync has not run yet.
     let latestReleaseTag: String?
+    /// The published guide slug, when this catalog entry has an Iris install
+    /// guide. Nil keeps older catalog responses compatible.
+    let guideSlug: String? = nil
     var macCompatibility: CatalogMacCompatibility = .unknown
 
     private enum CodingKeys: String, CodingKey {
-        case slug, name, macBundleId, latestReleaseTag
+        case slug, name, macBundleId, latestReleaseTag, guideSlug
     }
 }
 
@@ -378,6 +381,7 @@ nonisolated struct CatalogAppInventoryEntry: Identifiable, Equatable, Sendable {
     let name: String
     let macBundleId: String?
     let latestReleaseTag: String?
+    let guideSlug: String? = nil
     let installationState: CatalogAppInstallationState
     let updateAvailability: CatalogAppUpdateAvailability
     /// Advisory only: whether this app's source is one Iris may edit locally —
@@ -407,6 +411,10 @@ nonisolated struct CatalogAppInventoryEntry: Identifiable, Equatable, Sendable {
             return installedVersion
         }
         return nil
+    }
+
+    var hasAnInstallGuide: Bool {
+        guideSlug != nil
     }
 
     var hasAnUpdateAvailable: Bool {
@@ -669,6 +677,7 @@ final class AppInventoryService: ObservableObject {
                 name: catalogDescriptor.name,
                 macBundleId: catalogDescriptor.macBundleId,
                 latestReleaseTag: catalogDescriptor.latestReleaseTag,
+                guideSlug: catalogDescriptor.guideSlug,
                 installationState: installationState,
                 updateAvailability: updateAvailability(
                     forInstallationState: installationState,

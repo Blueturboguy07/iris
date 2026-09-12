@@ -2,7 +2,7 @@
 
 Current status, September 12 at 08:15 UTC: **draft for review, with upstream conflicts resolved**. GitHub reports the branch mergeable against `945d135`. Mergeability is not release readiness; no PR merge or release has occurred.
 
-This index reflects code through `4640056`. The latest installed Iris Test
+This index reflects code through `9267ebf`. The latest installed Iris Test
 debug-library SHA-256 is `2186fd84c07b38dcfdf8942f0b88d4bc4e61e0600a04637047346115cc81e304`.
 Regular Iris remains unchanged. Later commits must identify their own source,
 build and installed evidence rather than inherit every earlier result.

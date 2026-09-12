@@ -50,14 +50,13 @@ in [`docs/testing/iris-test-whole-system-plan.md`](../../docs/testing/iris-test-
 
 ## Installed candidate and fresh checks, September 12 UTC
 
-The upstream-merged candidate is installed and launched as **Iris Test**, bundle
-identifier `com.publikhq.iris.test`. Its debug-library SHA-256 is
-`f93ad13c5bde47a5ac0cec6639ed61c310f7c8bc73b6c5997372fdb5dcbff44f`.
-Xcode GUI build `B8A92C4F-E55B-40D3-9AED-174D06481A67` succeeded with zero
-errors and 136 warnings. The warnings remain unresolved; this is not a
-warning-free release. Deep strict signature verification passed, and the local
-designated signing requirement is unchanged. The prior integrated candidate
-remains recoverable at `/private/tmp/iris-test-before-upstream-ls1Nhj`.
+The final integration candidate is installed and launched as **Iris Test**,
+bundle identifier `com.publikhq.iris.test`. Its debug-library SHA-256 is
+`5e2a0d454367171b48c8f65915447d6694a29551be578c2ea1b06c1e1978fcb2`, Mach-O
+UUID `38BDF46A-96BA-3745-AF75-FFED76FB3CBB`. Xcode GUI build completed with
+zero errors and the existing warning set; this is not a warning-free release.
+The prior installed candidate is recoverable at
+`/private/tmp/iris-test-before-20260912-final.837trM`.
 
 Regular Iris was not replaced. Its debug-library SHA-256 remains
 `34f3cf4f202973486eeebc8d927925121e37aa719b723c50520719063b0e32c2`.
@@ -151,6 +150,12 @@ The earlier recorded narrow native lifecycle successes remain separate.
 7. The disposable campaign host accepted a bundle by identity alone during
    swap. Its package and swap paths now require the same Info.plist,
    executable and freshness checks used by production artifact discovery.
+8. Optional request-probe failures no longer disappear as a silent all-quiet
+   result. They remain non-blocking but produce one deterministic,
+   plain-language reversible-posture question; explicit irreversibility still
+   takes precedence.
+9. Run-log and memory records now sanitize control characters, credential-shaped
+   values, newlines, and hostile app slugs at both storage and prompt egress.
 
 ## Verification interpretation
 

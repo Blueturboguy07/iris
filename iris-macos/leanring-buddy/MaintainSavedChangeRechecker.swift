@@ -223,10 +223,11 @@ enum MaintainSavedChangeRechecker {
             let changedDirectories = Set(
                 reviewPaths.map { ($0 as NSString).deletingLastPathComponent }
             )
-            let neighbors = FeatureEditRepoMap.buildFileSymbolSummaries(
+            let mappedSourcePaths = FeatureEditRepoMap.buildFileSymbolSummaries(
                 repoRootPath: clonePath,
                 fileScanLimit: 100
-            ).map(\.repoRelativePath).filter {
+            ).map(\.repoRelativePath)
+            let neighbors = mappedSourcePaths.filter {
                 changedDirectories.contains(($0 as NSString).deletingLastPathComponent)
             }
             let repositoryContext = FeatureEditRepositoryContext.collectReviewContext(
@@ -235,6 +236,7 @@ enum MaintainSavedChangeRechecker {
                 declaredNativeTestPaths: declaredNativeTestPaths,
                 changedPaths: reviewPaths,
                 sameDirectoryNeighborPaths: neighbors,
+                candidateSourcePaths: mappedSourcePaths,
                 isNativeFinalReview: isNativeFinalReview,
                 maxFileCount: 24,
                 maxBytes: 64 * 1024

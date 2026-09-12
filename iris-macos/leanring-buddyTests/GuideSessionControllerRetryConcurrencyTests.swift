@@ -36,9 +36,12 @@ struct GuideSessionControllerRetryConcurrencyTests {
         private(set) var retryCommandAttempts = 0
         private(set) var pendingRefreshCount = 0
         private(set) var pendingRetryCommandCount = 0
+        private(set) var pendingStartCount = 0
         var releaseRefreshesWhenEnded = true
         var suspendRetryCommands = false
+        var suspendNextStart = false
 
+        private var pendingStarts: [CheckedContinuation<Bool, Never>] = []
         private var pendingRefreshes: [CheckedContinuation<GuideAutopilotCommandOutcome, Never>] = []
         private var pendingRetryCommands: [
             (CheckedContinuation<GuideAutopilotCommandOutcome, Never>, GuideAutopilotCommandOutcome)
@@ -49,7 +52,15 @@ struct GuideSessionControllerRetryConcurrencyTests {
             self.failuresBeforeSuccess = max(0, failuresBeforeSuccess)
         }
 
-        func start() async -> Bool { true }
+        func start() async -> Bool {
+            guard suspendNextStart else { return true }
+            suspendNextStart = false
+            pendingStartCount += 1
+            return await withCheckedContinuation {
+                (continuation: CheckedContinuation<Bool, Never>) in
+                pendingStarts.append(continuation)
+            }
+        }
 
         func run(
             _ command: GuideAutopilotApprovedCommand,
@@ -107,6 +118,13 @@ struct GuideSessionControllerRetryConcurrencyTests {
             continuation.resume(returning: outcome)
         }
 
+        func releaseNextStart() {
+            guard !pendingStarts.isEmpty else { return }
+            let continuation = pendingStarts.removeFirst()
+            pendingStartCount -= 1
+            continuation.resume(returning: true)
+        }
+
         func releaseNextRetryCommand() {
             guard !pendingRetryCommands.isEmpty else { return }
             let pending = pendingRetryCommands.removeFirst()
@@ -115,6 +133,9 @@ struct GuideSessionControllerRetryConcurrencyTests {
         }
 
         func releaseAllRefreshes() {
+            while !pendingStarts.isEmpty {
+                releaseNextStart()
+            }
             while !pendingRefreshes.isEmpty {
                 releaseNextRefresh()
             }
@@ -326,6 +347,99 @@ struct GuideSessionControllerRetryConcurrencyTests {
         #expect(finished, "the newer retry should remain live after the stale one settles")
         #expect(fixture.shell.retryCommandAttempts == 3,
                 "two surfaced failures plus only the newer retry command are expected")
+    }
+
+    @Test("a late command from a stopped runner cannot advance or unlock its replacement")
+    func lateCommandFromStoppedRunnerCannotAdvanceReplacementRun() async throws {
+        let fixture = try Self.makeFixture(
+            failuresBeforeSuccess: 1,
+            releaseRefreshesWhenEnded: false
+        )
+        defer {
+            fixture.shell.releaseAllRefreshes()
+            fixture.controller.stopAutopilot()
+            fixture.defaults.removePersistentDomain(forName: fixture.suiteName)
+        }
+        try await Self.surfaceTheRetryStep(in: fixture.controller)
+
+        // Keep the first runner's successful retry command suspended even after
+        // Stop. A later completion from that runner must not touch the run that
+        // replaces it.
+        fixture.shell.suspendRetryCommands = true
+        fixture.controller.retryTheSurfacedStep()
+        #expect(await Self.pump { fixture.shell.pendingRefreshCount == 1 })
+        fixture.shell.releaseNextRefresh()
+        #expect(await Self.pump { fixture.shell.pendingRetryCommandCount == 1 })
+
+        fixture.controller.stopAutopilot()
+        #expect(await Self.pump { fixture.controller.autopilotRunner == nil })
+
+        // Start a new runner on the same surfaced step. Its command is also
+        // suspended, so the old completion has a live replacement lock to
+        // preserve. Both attempts are successful; only the replacement may
+        // advance the guide.
+        fixture.controller.startAutopilot()
+        #expect(await Self.pump {
+            fixture.shell.pendingRetryCommandCount == 2
+                && fixture.controller.autopilotRunner?.isExecutingACommand == true
+        })
+        #expect(fixture.controller.currentStepIndex == 1)
+        #expect(fixture.shell.retryCommandAttempts == 3)
+
+        fixture.shell.releaseNextRetryCommand()
+        #expect(await Self.pump { fixture.shell.pendingRetryCommandCount == 1 })
+        #expect(
+            fixture.controller.currentStepIndex == 1,
+            "the old runner's completion must not advance the replacement guide"
+        )
+        #expect(
+            fixture.controller.autopilotRunner?.isExecutingACommand == true,
+            "the old completion must not clear the replacement runner's command lock"
+        )
+
+        fixture.shell.releaseNextRetryCommand()
+        #expect(await Self.pump { fixture.controller.readerHasFinishedTheGuide })
+    }
+
+    @Test("a late start from a stopped runner cannot clear its replacement drive")
+    func lateStartFromStoppedRunnerCannotClearReplacementDrive() async throws {
+        let fixture = try Self.makeFixture(
+            failuresBeforeSuccess: 1,
+            releaseRefreshesWhenEnded: false
+        )
+        defer {
+            fixture.shell.releaseAllRefreshes()
+            fixture.controller.stopAutopilot()
+            fixture.defaults.removePersistentDomain(forName: fixture.suiteName)
+        }
+        try await Self.surfaceTheRetryStep(in: fixture.controller)
+
+        // Runner A is suspended in startSession and then stopped. Runner B
+        // starts on the same surfaced step while A's start is still pending.
+        fixture.controller.stopAutopilot()
+        fixture.shell.suspendNextStart = true
+        fixture.controller.startAutopilot()
+        #expect(await Self.pump { fixture.shell.pendingStartCount == 1 })
+        fixture.controller.stopAutopilot()
+
+        fixture.shell.suspendRetryCommands = true
+        fixture.controller.startAutopilot()
+        #expect(await Self.pump {
+            fixture.shell.pendingRetryCommandCount == 1
+                && fixture.controller.autopilotRunner?.isExecutingACommand == true
+        })
+
+        fixture.shell.releaseNextStart()
+        #expect(await Self.pump { fixture.shell.pendingStartCount == 0 })
+        #expect(fixture.controller.currentStepIndex == 1)
+        #expect(
+            fixture.controller.autopilotRunner?.isExecutingACommand == true,
+            "the stale start completion must not clear the replacement drive"
+        )
+        #expect(fixture.shell.retryCommandAttempts == 2)
+
+        fixture.shell.releaseNextRetryCommand()
+        #expect(await Self.pump { fixture.controller.readerHasFinishedTheGuide })
     }
 
     @Test("a failed environment refresh does not run the retry command")

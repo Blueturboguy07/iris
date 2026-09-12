@@ -792,7 +792,11 @@ struct OverlayEyeInputBarView: View {
                 } else if let guidePresentation {
                     OverlayEyeGuideCard(
                         presentation: guidePresentation,
-                        onPrimaryAction: { guideSessionController.performPrimaryAction() },
+                        onPrimaryAction: {
+                            guideSessionController.performPrimaryAction(
+                                expectedCurrentStepId: guidePresentation.stepId
+                            )
+                        },
                         onSecondaryAction: { guideSessionController.advanceToTheNextStep() },
                         onBack: { guideSessionController.returnToThePreviousStep() },
                         onClose: { guideSessionController.closeTheGuide() },
@@ -1041,6 +1045,7 @@ struct OverlayEyeInputBarView: View {
     private var guidePresentation: OverlayEyeGuideStepPresentation? {
         guard
             guideSessionController.loadState.isShowingSomethingAboutAGuide,
+            !guideSessionController.readerHasFinishedTheGuide,
             let guide = guideSessionController.guideBeingFollowed,
             let step = guideSessionController.stepTheReaderIsLookingAt,
             let branch = guideSessionController.selectedBranch
@@ -1053,6 +1058,7 @@ struct OverlayEyeInputBarView: View {
         let readerIsOnARealStep = totalSteps > 0 && guideSessionController.currentStepIndex < totalSteps
 
         return OverlayEyeGuideStepPresentation(
+            stepId: step.id,
             appName: guide.appName,
             stepTitle: step.title,
             stepBody: step.body,

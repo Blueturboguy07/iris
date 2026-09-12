@@ -1997,9 +1997,10 @@ final class MaintainTierCFixer {
                 if provider is HarnessPhaseAwareModelProviding {
                     let changedPaths = await Self.changedFilePaths(runner: runner)
                     let changedDirectories = Set(changedPaths.map { ($0 as NSString).deletingLastPathComponent })
-                    let neighbors = FeatureEditRepoMap.buildFileSymbolSummaries(
+                    let mappedSourcePaths = FeatureEditRepoMap.buildFileSymbolSummaries(
                         repoRootPath: clonePath, fileScanLimit: 100
-                    ).map(\.repoRelativePath).filter {
+                    ).map(\.repoRelativePath)
+                    let neighbors = mappedSourcePaths.filter {
                         changedDirectories.contains(($0 as NSString).deletingLastPathComponent)
                     }
                     // Keep complete tests first, then changed sources and one
@@ -2016,6 +2017,7 @@ final class MaintainTierCFixer {
                         repoRootPath: clonePath, changedTestPaths: testPaths,
                         declaredNativeTestPaths: declaredTests, changedPaths: changedPaths,
                         sameDirectoryNeighborPaths: neighbors,
+                        candidateSourcePaths: mappedSourcePaths,
                         preferredDependencySourceByPath: FeatureEditRepositoryContext.addedDependencySourceByPath(
                             in: Self.boundedReviewDiff(unifiedDiff)),
                         isNativeFinalReview: isNativeFinalReview,

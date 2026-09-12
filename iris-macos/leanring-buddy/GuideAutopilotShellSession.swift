@@ -138,7 +138,18 @@ enum GuideAutopilotCommandOutcome: Equatable, Sendable {
     /// Output stopped mid-line and the tail reads like a question. The
     /// command is still running; the runner surfaces this to the reader.
     case seemsToBeAskingAQuestion(tail: String)
-    /// The session itself is unusable (spawn failed, shell died).
+    /// The command could not be assigned because another command or shell
+    /// startup is still using the serial session queue. This is deliberately
+    /// separate from a dead shell: callers must not describe a busy rejection
+    /// as a recovered terminal or spend the model ladder on it.
+    case sessionBusy
+    /// The shell died while this command was in flight, and a fresh shell
+    /// became ready within the bounded recovery allowance. The command is
+    /// never replayed; the caller may offer an explicit retry.
+    case terminalSessionRestarted
+    /// The session itself is unusable (spawn failed, shell died, or bounded
+    /// recovery was exhausted). No claim that a replacement shell exists is
+    /// implied by this case.
     case sessionFailed
 }
 
@@ -172,6 +183,11 @@ extension GuideAutopilotShellSessionDriving {
 final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
 
     static let defaultCommandDeadline: TimeInterval = 900
+    /// A shell that dies is allowed a small number of replacement shells for
+    /// this guide session. The cap is intentionally session-wide: resetting it
+    /// after every successful command would turn a repeatedly crashing startup
+    /// into an unbounded respawn loop.
+    nonisolated static let maximumAutomaticShellRecoveryAttempts = 2
     /// A cold interactive shell legitimately takes a while on a machine with
     /// heavy dotfiles (nvm alone can add seconds, compinit more).
     static let readyDeadline: TimeInterval = 60
@@ -187,8 +203,16 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
 
     private let state: SessionState
 
-    init(startingDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path) {
-        state = SessionState(startingDirectory: startingDirectory)
+    /// The optional preamble delay is a deterministic PTY-test seam for
+    /// cancellation during startup. Production callers leave it at zero.
+    init(
+        startingDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        startupPreambleDelayForTesting: TimeInterval = 0
+    ) {
+        state = SessionState(
+            startingDirectory: startingDirectory,
+            startupPreambleDelayForTesting: startupPreambleDelayForTesting
+        )
         state.deliverOutputLine = { [weak self] line in
             Task { @MainActor [weak self] in self?.onOutputLine?(line) }
         }
@@ -244,6 +268,7 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
 
         private let queue = DispatchQueue(label: "iris.autopilot.shell-session")
         private let startingDirectory: String
+        private let startupPreambleDelayForTesting: TimeInterval
 
         private var terminal: GuideAutopilotPseudoTerminal?
         /// A mirror of `terminal` kept behind a lock so the escape hatch can
@@ -260,12 +285,20 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
         private var workingDirectory: String
         private var searchPath: String?
         private var shellHasExited = false
+        private var shellIsReady = false
+        private var shellStartupFailed = false
         private var markerToken: String?
-        private var finishRunning: ((GuideAutopilotCommandOutcome) -> Void)?
+        private var finishRunning: (@Sendable (GuideAutopilotCommandOutcome) -> Void)?
+        /// Separate from `finishRunning`: startup failure must be bounded
+        /// without being mistaken for a busy command, and ending a session
+        /// must resolve a pending startup continuation without rebuilding.
+        private var finishStarting: (@Sendable (Bool) -> Void)?
         private var lastOutputAt = Date.distantPast
         private var cancellationWasRequested = false
         private var alreadyDeliveredLineCount = 0
-        private var commandGeneration = 0
+        private var terminalGeneration = 0
+        private var automaticShellRecoveryAttempts = 0
+        private var sessionEndWasRequested = false
         /// Guards against the preamble being sent twice (start plus a rebuild).
         private var preambleHasBeenSent = false
         private var pendingReadyToken: String?
@@ -285,8 +318,9 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
         /// before every command; bounded so it cannot grow without limit.
         private var markerScanText = ""
 
-        init(startingDirectory: String) {
+        init(startingDirectory: String, startupPreambleDelayForTesting: TimeInterval) {
             self.startingDirectory = startingDirectory
+            self.startupPreambleDelayForTesting = max(0, startupPreambleDelayForTesting)
             self.workingDirectory = startingDirectory
         }
 
@@ -330,15 +364,36 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
 
         // MARK: Startup (on queue)
 
-        private func startShell(_ completion: @escaping @Sendable (Bool) -> Void) {
+        private func startShell(
+            restoringWorkingDirectory: String? = nil,
+            _ completion: @escaping @Sendable (Bool) -> Void
+        ) {
+            guard !sessionEndWasRequested else {
+                completion(false)
+                return
+            }
+            if terminal != nil {
+                // A second start request must not replace a live shell or
+                // create a second reader. The controller normally starts once,
+                // but this guard keeps a stale retry from duplicating a session.
+                completion(shellIsReady && !shellHasExited && !shellStartupFailed)
+                return
+            }
+
             let terminal = GuideAutopilotPseudoTerminal()
-            terminal.onOutput = { [weak self] bytes in
+            terminalGeneration += 1
+            let generation = terminalGeneration
+            terminal.onOutput = { [weak self, weak terminal] bytes in
                 // Already on the pty queue? No — the terminal has its own
                 // queue; hop onto ours so all state stays confined here.
-                self?.queue.async { self?.ingest(bytes) }
+                self?.queue.async {
+                    self?.ingest(bytes, from: terminal, generation: generation)
+                }
             }
             terminal.onProcessExit = { [weak self, weak terminal] _ in
-                self?.queue.async { self?.noteShellExited(from: terminal) }
+                self?.queue.async {
+                    self?.noteShellExited(from: terminal, generation: generation)
+                }
             }
 
             do {
@@ -359,6 +414,8 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             self.terminal = terminal
             rememberTerminalForImmediateKill(terminal)
             shellHasExited = false
+            shellIsReady = false
+            shellStartupFailed = false
             preambleHasBeenSent = false
             displayIsSuppressedUntilShellIsReady = true
             buffer.removeAll()
@@ -368,9 +425,8 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             let readyToken = Self.freshToken()
             pendingReadyToken = readyToken
             markerToken = readyToken
-            finishRunning = { outcome in
-                if case .succeeded = outcome { completion(true) } else { completion(false) }
-            }
+            finishStarting = completion
+            let directoryToRestore = restoringWorkingDirectory ?? startingDirectory
             scheduleDeadline(seconds: GuideAutopilotShellSession.readyDeadline, forToken: readyToken)
             // Send the preamble immediately, before ZLE has fully seized the
             // tty: written this early it lands in the tty input buffer and
@@ -379,7 +435,21 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             // echoing per-keystroke. Waiting for the prompt to appear first —
             // the intuitive thing — is precisely what lets ZLE grab each
             // character and wedge the injection.
-            sendPreamble()
+            if startupPreambleDelayForTesting > 0 {
+                queue.asyncAfter(deadline: .now() + startupPreambleDelayForTesting) { [weak self] in
+                    self?.sendPreamble(
+                        to: directoryToRestore,
+                        readyToken: readyToken,
+                        generation: generation
+                    )
+                }
+            } else {
+                sendPreamble(
+                    to: directoryToRestore,
+                    readyToken: readyToken,
+                    generation: generation
+                )
+            }
 
             // Fail-open backstop. The ready marker rides the preamble, which is
             // written while a `-l -i` shell's ZLE can still mangle it; on some
@@ -393,17 +463,22 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             // shell, but it must never be the reader's first experience.
             queue.asyncAfter(deadline: .now() + 4) { [weak self] in
                 guard let self else { return }
-                guard self.markerToken == readyToken, let readyCompletion = self.finishRunning else {
-                    irisTrace("shell: fail-open SKIPPED (ready already resolved: markerToken match=\(self.markerToken == readyToken), finishRunning set=\(self.finishRunning != nil))")
+                guard !self.sessionEndWasRequested,
+                      self.markerToken == readyToken,
+                      self.pendingReadyToken == readyToken,
+                      let readyCompletion = self.finishStarting else {
+                    irisTrace("shell: fail-open SKIPPED (ready already resolved: markerToken match=\(self.markerToken == readyToken), pendingReadyToken match=\(self.pendingReadyToken == readyToken), finishStarting set=\(self.finishStarting != nil))")
                     return
                 }
                 irisTrace("shell: FAIL-OPEN fired — ready marker missed, proceeding anyway")
                 self.displayIsSuppressedUntilShellIsReady = false
-                self.finishRunning = nil
+                self.shellIsReady = true
+                self.finishStarting = nil
+                self.pendingReadyToken = nil
                 self.markerToken = nil
                 self.buffer.removeAll()
                 self.alreadyDeliveredLineCount = 0
-                readyCompletion(.succeeded(workingDirectory: self.workingDirectory))
+                readyCompletion(true)
             }
         }
 
@@ -418,8 +493,20 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
         // under ZLE (its newline is Enter), turning it off; every line after
         // is read raw. We keep `-i` because it is what sources ~/.zshrc,
         // where version managers put the PATH the guides need.
-        private func sendPreamble() {
-            guard !preambleHasBeenSent, let token = pendingReadyToken, let terminal else { return }
+        private func sendPreamble(
+            to workingDirectory: String,
+            readyToken: String,
+            generation: Int
+        ) {
+            guard !sessionEndWasRequested,
+                  !preambleHasBeenSent,
+                  pendingReadyToken == readyToken,
+                  terminalGeneration == generation,
+                  let terminal else {
+                irisTrace("shell: ignored stale preamble for terminal generation \(generation)")
+                return
+            }
+            let token = readyToken
             preambleHasBeenSent = true
             // Discard the prompt noise so the ready marker is found in clean
             // output, and the first real command starts from an empty buffer.
@@ -434,7 +521,7 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             // third field, the real PATH, feeds tool-version lookups).
             terminal.write(
                 "export PAGER=cat GIT_PAGER=cat LESS=-FRX GIT_TERMINAL_PROMPT=0\n"
-                + "cd \(Self.shellQuoted(startingDirectory))\n"
+                + "cd \(Self.shellQuoted(workingDirectory))\n"
                 + "printf '\\n__IRIS_END_\(token)__ %d\\t%s\\t%s\\n' \"$?\" \"$PWD\" \"$PATH\"\n"
             )
             irisTrace("shell: preamble written, token=\(token)")
@@ -447,15 +534,20 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             deadline: TimeInterval,
             _ completion: @escaping @Sendable (GuideAutopilotCommandOutcome) -> Void
         ) {
-            irisTrace("shell: runCommand called, len=\(command.text.count), busy=\(self.finishRunning != nil), exited=\(self.shellHasExited)")
-            guard let terminal, !shellHasExited else {
+            irisTrace("shell: runCommand called, len=\(command.text.count), busy=\(self.finishRunning != nil || !self.shellIsReady), exited=\(self.shellHasExited)")
+            guard !sessionEndWasRequested else {
+                irisTrace("shell: runCommand → sessionFailed (session ended)")
+                completion(.sessionFailed)
+                return
+            }
+            guard let terminal, !shellHasExited, !shellStartupFailed else {
                 irisTrace("shell: runCommand → sessionFailed (no terminal / exited)")
                 completion(.sessionFailed)
                 return
             }
-            guard finishRunning == nil else {
-                irisTrace("shell: runCommand → sessionFailed (finishRunning still set — prior run never completed)")
-                completion(.sessionFailed)
+            guard finishRunning == nil, shellIsReady else {
+                irisTrace("shell: runCommand → sessionBusy (startup or prior run still active)")
+                completion(.sessionBusy)
                 return
             }
             if GuideAutopilotCommandShape.looksSyntacticallyIncomplete(command.text) {
@@ -489,7 +581,21 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
 
         // MARK: Ingestion and the marker (on queue)
 
-        private func ingest(_ bytes: [UInt8]) {
+        private func ingest(
+            _ bytes: [UInt8],
+            from sourceTerminal: GuideAutopilotPseudoTerminal?,
+            generation: Int
+        ) {
+            // A killed terminal can still have output and an exit callback
+            // queued on its reader thread after a replacement shell has been
+            // installed. Serial-queue ordering alone cannot reject that stale
+            // output, so retain both identity and generation checks here.
+            guard !sessionEndWasRequested,
+                  sourceTerminal === terminal,
+                  generation == terminalGeneration else {
+                irisTrace("shell: ignored stale output from an old terminal generation")
+                return
+            }
             lastOutputAt = Date()
             buffer.append(bytes)
             // Marker scan runs off a raw, \r-stripped copy — the display
@@ -525,7 +631,7 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
                 let afterMarker = markerScanText[range.upperBound...]
                 if afterMarker.first.map({ $0.isNumber || $0 == "-" }) == true,
                    let newline = afterMarker.firstIndex(of: "\n") {
-                    finishRun(withMarkerLine: String(afterMarker[..<newline]))
+                    finishRun(forToken: token, withMarkerLine: String(afterMarker[..<newline]))
                     return
                 }
                 searchStart = range.upperBound
@@ -559,7 +665,7 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             alreadyDeliveredLineCount = end
         }
 
-        private func finishRun(withMarkerLine markerLine: String) {
+        private func finishRun(forToken token: String, withMarkerLine markerLine: String) {
             // Flush any output that arrived in the same burst as the marker —
             // a short command's whole output can land with its sentinel, and
             // deliverNewLines holds back the final line until then.
@@ -567,7 +673,6 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             deliverNewLines(lines, upTo: lines.count)
             markerToken = nil
             alreadyDeliveredLineCount = 0
-            commandGeneration += 1
             let fields = markerLine.split(separator: "\t", maxSplits: 2)
             let exitStatus = fields.first.flatMap { Int32($0) } ?? -1
             irisTrace("shell: MARKER seen, fields=\(fields.count), exit=\(exitStatus), wasSuppressed=\(self.displayIsSuppressedUntilShellIsReady)")
@@ -579,7 +684,8 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
                 // tool-version lookups.
                 searchPath = String(fields[2])
             }
-            if displayIsSuppressedUntilShellIsReady {
+            let markerWasForStartup = pendingReadyToken == token
+            if markerWasForStartup {
                 // The FIRST completed marker is the preamble's "ready" marker:
                 // the shell is up and the setup noise is done echoing. Clear
                 // suppression here rather than only when a clean third (PATH)
@@ -590,6 +696,16 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
                 displayIsSuppressedUntilShellIsReady = false
                 buffer.removeAll()
                 alreadyDeliveredLineCount = 0
+                pendingReadyToken = nil
+                shellIsReady = exitStatus == 0
+                shellStartupFailed = exitStatus != 0
+            }
+
+            if markerWasForStartup {
+                let completion = finishStarting
+                finishStarting = nil
+                completion?(exitStatus == 0)
+                return
             }
 
             let completion = finishRunning
@@ -603,19 +719,94 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             }
         }
 
-        private func noteShellExited(from exitedTerminal: GuideAutopilotPseudoTerminal?) {
+        private func noteShellExited(
+            from exitedTerminal: GuideAutopilotPseudoTerminal?,
+            generation: Int
+        ) {
             // A late exit from a terminal we have already replaced must not mark
             // the fresh shell dead. The escape hatch SIGKILLs the old terminal
             // off-queue and then rebuilds; that old terminal's process-exit can
             // land on the queue after the new shell is already running, and
             // without this guard it would set `shellHasExited` on the new one.
-            guard exitedTerminal === terminal else { return }
+            guard !sessionEndWasRequested,
+                  exitedTerminal === terminal,
+                  generation == terminalGeneration else {
+                irisTrace("shell: ignored stale exit from an old terminal generation")
+                return
+            }
             shellHasExited = true
+            shellIsReady = false
             markerToken = nil
-            commandGeneration += 1
-            let completion = finishRunning
+            pendingReadyToken = nil
+            let commandCompletion = finishRunning
             finishRunning = nil
-            completion?(.sessionFailed)
+            let startupCompletion = finishStarting
+            finishStarting = nil
+            beginBoundedRecovery(
+                commandCompletion: commandCompletion,
+                startupCompletion: startupCompletion
+            )
+        }
+
+        /// Replaces a shell that exited without replaying the command that was
+        /// in flight. A replacement is useful for a later explicit retry, but
+        /// automatically repeating an install command here could duplicate a
+        /// non-idempotent action whose side effects happened before the shell
+        /// died. The recovery allowance is session-wide and startup failures
+        /// consume it too, which prevents a broken shell configuration from
+        /// causing an endless respawn loop.
+        private func beginBoundedRecovery(
+            commandCompletion: (@Sendable (GuideAutopilotCommandOutcome) -> Void)?,
+            startupCompletion: (@Sendable (Bool) -> Void)?
+        ) {
+            guard !sessionEndWasRequested else {
+                commandCompletion?(.sessionFailed)
+                startupCompletion?(false)
+                return
+            }
+
+            guard automaticShellRecoveryAttempts
+                    < GuideAutopilotShellSession.maximumAutomaticShellRecoveryAttempts else {
+                irisTrace("shell: automatic recovery allowance exhausted; leaving session unavailable")
+                discardCurrentTerminal()
+                commandCompletion?(.sessionFailed)
+                startupCompletion?(false)
+                return
+            }
+
+            automaticShellRecoveryAttempts += 1
+            let directoryToRestore = workingDirectory
+            discardCurrentTerminal()
+
+            startShell(restoringWorkingDirectory: directoryToRestore) { [weak self] started in
+                guard let self else { return }
+                guard !self.sessionEndWasRequested else {
+                    commandCompletion?(.sessionFailed)
+                    startupCompletion?(false)
+                    return
+                }
+                if let commandCompletion {
+                    commandCompletion(started ? .terminalSessionRestarted : .sessionFailed)
+                } else {
+                    startupCompletion?(started)
+                }
+            }
+        }
+
+        /// Detaches callbacks before killing a terminal. A reader thread can
+        /// still be unwinding after the kill; the callback's identity and
+        /// generation checks then make its final bytes harmless.
+        private func discardCurrentTerminal() {
+            terminal?.onOutput = nil
+            terminal?.onProcessExit = nil
+            terminal?.killProcessGroup()
+            terminal = nil
+            rememberTerminalForImmediateKill(nil)
+            shellHasExited = true
+            shellIsReady = false
+            shellStartupFailed = false
+            markerToken = nil
+            pendingReadyToken = nil
         }
 
         // MARK: Deadline, prompt detection, cancellation (on queue)
@@ -653,7 +844,7 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
                 let completion = finishRunning
                 finishRunning = nil
                 markerToken = nil
-                rebuildShell()
+                beginBoundedRecovery(commandCompletion: nil, startupCompletion: nil)
                 completion?(.timedOut)
                 return
             }
@@ -704,9 +895,13 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             // escape hatch has already handed the step back to the reader, so
             // there is nothing left in this shell to preserve.
             cancellationWasRequested = true
+            let pendingStartup = finishStarting
+            finishStarting = nil
             let pending = finishRunning
             finishRunning = nil
+            pendingStartup?(false)
             markerToken = nil
+            pendingReadyToken = nil
             // Belt-and-suspenders: kill the group here too in case a caller
             // reached cancel without the off-queue kill. `killProcessGroup` is a
             // no-op on an already-reaped pid.
@@ -715,20 +910,9 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             // Only a session that actually had a shell needs a fresh one; the
             // long-running session may never have been started for this step.
             if terminal != nil {
-                rebuildShell()
+                beginBoundedRecovery(commandCompletion: nil, startupCompletion: nil)
             }
             completion()
-        }
-
-        private func rebuildShell() {
-            // A discarded terminal's exit callback must not fire into the
-            // rebuilt session's state.
-            terminal?.onOutput = nil
-            terminal?.onProcessExit = nil
-            terminal?.killProcessGroup()
-            terminal = nil
-            rememberTerminalForImmediateKill(nil)
-            startShell { _ in }
         }
 
         /// Mirrors the live terminal into the lock-guarded handle the escape
@@ -754,6 +938,13 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
         }
 
         private func endShell(_ completion: @escaping @Sendable () -> Void) {
+            sessionEndWasRequested = true
+            if let finish = finishStarting {
+                finishStarting = nil
+                pendingReadyToken = nil
+                markerToken = nil
+                finish(false)
+            }
             if let finish = finishRunning {
                 finishRunning = nil
                 markerToken = nil
@@ -768,6 +959,8 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
             terminal = nil
             rememberTerminalForImmediateKill(nil)
             shellHasExited = true
+            shellIsReady = false
+            shellStartupFailed = false
             queue.asyncAfter(deadline: .now() + 0.5) {
                 terminalToClose?.killProcessGroup()
                 completion()
@@ -838,6 +1031,10 @@ final class GuideAutopilotShellSession: GuideAutopilotShellSessionDriving {
         unset _iris_rc
         unsetopt zle 2>/dev/null
         unsetopt prompt_cr prompt_sp 2>/dev/null
+        # A delayed or missed completion marker can make the deadline ladder
+        # send Ctrl-D after the command has already returned to this idle
+        # prompt. Keep that EOF from killing the persistent guide shell.
+        setopt ignoreeof 2>/dev/null
         stty -echo 2>/dev/null
         PS1='' PS2='' PROMPT='' RPROMPT=''
         """

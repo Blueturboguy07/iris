@@ -348,9 +348,14 @@ final class GuideSessionController: ObservableObject {
     @Published private(set) var autopilotRunner: GuideAutopilotRunner?
     /// True while the drive loop is running, so the watch-loop resume path
     /// cannot start a second concurrent loop.
-    private var autopilotIsDriving = false
+    private var autopilotDriveID: UUID?
+    private var autopilotIsDriving: Bool { autopilotDriveID != nil }
     private var surfacedStepRetryID: UUID?
     private var surfacedStepRetryTask: Task<Void, Never>?
+    /// Changes whenever a guide is opened, closed, or switched to another
+    /// branch. Async work may finish after cancellation, so this identity is
+    /// checked before an old operation can publish state for a newer session.
+    private var guideSessionGeneration = 0
 
     /// Which step the takeover is parked on, waiting for the reader to say they
     /// did it — the "I did it — continue" bar's step, and nil whenever that bar
@@ -973,7 +978,9 @@ final class GuideSessionController: ObservableObject {
                 userFacingMessage: "Iris Test is for editing separate test copies. Use regular Iris for marketplace installations.")
             return
         }
-        cancelAnyWorkFromThePreviousStep()
+        guideSessionGeneration &+= 1
+        let generationForThisOpen = guideSessionGeneration
+        tearDownWhicheverGuideSessionIsCurrentlyOpen()
         loadState = .guideIsLoading(slug: slug)
         guideBeingFollowed = nil
         selectedBranch = nil
@@ -986,6 +993,7 @@ final class GuideSessionController: ObservableObject {
         do {
             fetchedGuide = try await guideService.fetchGuide(slug: slug, version: requestedVersion)
         } catch let guideServiceError as GuideServiceError {
+            guard guideSessionGeneration == generationForThisOpen else { return }
             // Every status the route can answer with is already a distinct case
             // carrying its own sentence, so "this version is gone" never reads
             // as "you have no internet".
@@ -995,6 +1003,7 @@ final class GuideSessionController: ObservableObject {
             )
             return
         } catch {
+            guard guideSessionGeneration == generationForThisOpen else { return }
             loadState = .guideCouldNotBeLoaded(
                 slug: slug,
                 userFacingMessage: GuideServiceError
@@ -1003,6 +1012,8 @@ final class GuideSessionController: ObservableObject {
             )
             return
         }
+
+        guard guideSessionGeneration == generationForThisOpen else { return }
 
         // The version here is the guide's own, not the link's: they are equal by
         // the time `fetchGuide` returns (it 409s otherwise), and using the real
@@ -1052,21 +1063,46 @@ final class GuideSessionController: ObservableObject {
             readerHasFinishedTheGuide = false
             await persistProgressForTheCurrentPosition()
         } else {
-            await restoreSavedProgress(forBranch: resolvedHandoff.branch)
+            guard await restoreSavedProgress(
+                forBranch: resolvedHandoff.branch,
+                sessionGeneration: generationForThisOpen
+            ) else { return }
         }
+
+        guard guideSessionGeneration == generationForThisOpen else { return }
 
         prepareToolCheckRowsForTheCurrentStep()
 
         // The prerequisite scan runs while the panel still says "Loading", so
         // the reader is never shown step one of an install they cannot start
         // and then yanked out of it a moment later.
-        await enterSetupRecoveryIfAPrerequisiteIsMissing(forBranch: resolvedHandoff.branch)
+        await enterSetupRecoveryIfAPrerequisiteIsMissing(
+            forBranch: resolvedHandoff.branch,
+            sessionGeneration: generationForThisOpen
+        )
+
+        guard guideSessionGeneration == generationForThisOpen else { return }
 
         loadState = .guideIsOpen
         pointTheWatchLoopAtTheCurrentStep()
     }
 
     func closeTheGuide() {
+        guideSessionGeneration &+= 1
+        tearDownWhicheverGuideSessionIsCurrentlyOpen()
+        loadState = .noGuideIsOpen
+        guideBeingFollowed = nil
+        selectedBranch = nil
+        currentStepIndex = 0
+        readerHasFinishedTheGuide = false
+        toolCheckRows = []
+        setupRecoveryState = nil
+    }
+
+    /// Stops all work belonging to the currently open guide. Cancellation is
+    /// paired with the generation checks around async results because a
+    /// cancelled operation can still return from an already-started request.
+    private func tearDownWhicheverGuideSessionIsCurrentlyOpen() {
         cancelAnyWorkFromThePreviousStep()
         // A pointer request already in flight has to die with the guide.
         //
@@ -1089,14 +1125,9 @@ final class GuideSessionController: ObservableObject {
         explanationForIrisHavingStoppedPointingAtThisStep = nil
         stopPointingTheEye?()
         if autopilotIsRunning { stopAutopilot() }
+        setupRecheckTask?.cancel()
+        setupRecheckTask = nil
         watchLoop.stopWatching()
-        loadState = .noGuideIsOpen
-        guideBeingFollowed = nil
-        selectedBranch = nil
-        currentStepIndex = 0
-        readerHasFinishedTheGuide = false
-        toolCheckRows = []
-        setupRecoveryState = nil
     }
 
     // MARK: - Branch selection
@@ -1120,16 +1151,27 @@ final class GuideSessionController: ObservableObject {
               let branchTheReaderPicked = guide.branch(matchingBranchKey: branchKey) else {
             return
         }
+        guideSessionGeneration &+= 1
+        let generationForThisBranchSelection = guideSessionGeneration
+        if autopilotIsRunning { stopAutopilot() }
         cancelAnyWorkFromThePreviousStep()
         selectedBranch = branchTheReaderPicked
         setupRecoveryState = nil
         // Each branch remembers its own place: the same reader can be nine steps
         // into the Android build and not have started the iPhone one.
-        await restoreSavedProgress(forBranch: branchTheReaderPicked)
+        guard await restoreSavedProgress(
+            forBranch: branchTheReaderPicked,
+            sessionGeneration: generationForThisBranchSelection
+        ) else { return }
+        guard guideSessionGeneration == generationForThisBranchSelection else { return }
         prepareToolCheckRowsForTheCurrentStep()
         // Branches do not share prerequisites — the Android route needs a JDK
         // the iPhone route never asks about — so switching re-scans.
-        await enterSetupRecoveryIfAPrerequisiteIsMissing(forBranch: branchTheReaderPicked)
+        await enterSetupRecoveryIfAPrerequisiteIsMissing(
+            forBranch: branchTheReaderPicked,
+            sessionGeneration: generationForThisBranchSelection
+        )
+        guard guideSessionGeneration == generationForThisBranchSelection else { return }
         pointTheWatchLoopAtTheCurrentStep()
     }
 
@@ -1377,16 +1419,21 @@ final class GuideSessionController: ObservableObject {
     }
 
     /// Runs whatever the primary button is currently offering.
-    func performPrimaryAction() {
-        // Moving on, or acting on the step, hands the step back to the watch
-        // loop: the reader is no longer parked here on purpose.
-        readerDeliberatelyReturnedToThisStep = false
-        // And the note explaining a corrected position belongs to the step it
-        // was about; carried forward it would explain the wrong thing.
-        positionWasCorrectedExplanation = nil
+    func performPrimaryAction(expectedCurrentStepId: String? = nil) {
+        if let expectedCurrentStepId, !readerIsInSetupRecovery,
+           currentStep?.id != expectedCurrentStepId {
+            irisTrace(
+                "primary action: rendered for step \(expectedCurrentStepId) but the guide "
+                + "is now on \(currentStep?.id ?? "nil") - ignoring the stale tap"
+            )
+            return
+        }
         guard let primaryAction = primaryActionForTheCurrentStep else {
             return
         }
+        // Only a current action can release the reader's navigation latch.
+        readerDeliberatelyReturnedToThisStep = false
+        positionWasCorrectedExplanation = nil
         switch primaryAction {
         case .copyCommandToClipboard(let command, _):
             copyCommandToClipboard(command)
@@ -1524,6 +1571,7 @@ final class GuideSessionController: ObservableObject {
             autonomyGrant.grant()
         }
         autopilotBlockedExplanation = nil
+        readerDeliberatelyReturnedToThisStep = false
         let context = GuideAutopilotGuideContext(
             slug: guide.appSlug,
             version: guide.version,
@@ -1531,7 +1579,10 @@ final class GuideSessionController: ObservableObject {
             platformLabel: branch.label,
             hostsReachedByTheGuide: Self.hostsReachedBy(branch: branch),
             commandTheGuidePublishesToInstallEachTool:
-                Self.commandsThisGuidePublishesToInstallEachToolForAutopilot(branch: branch)
+                Self.commandsThisGuidePublishesToInstallEachToolForAutopilot(branch: branch),
+            sourceOwner: guide.sourceOwner,
+            sourceRepo: guide.sourceRepo,
+            sourceCommit: guide.sourceCommit
         )
         let runner = makeAutopilotRunner(context)
         autopilotRunner = runner
@@ -1552,6 +1603,7 @@ final class GuideSessionController: ObservableObject {
     }
 
     func stopAutopilot() {
+        autopilotDriveID = nil
         surfacedStepRetryID = nil
         surfacedStepRetryTask?.cancel()
         surfacedStepRetryTask = nil
@@ -1920,13 +1972,26 @@ final class GuideSessionController: ObservableObject {
         guard !autopilotIsDriving, surfacedStepRetryID == nil,
               autopilotIsRunning, autopilotRunner === runner,
               selectedBranch?.branchKey == branch.branchKey else { return }
-        autopilotIsDriving = true
-        defer { autopilotIsDriving = false }
+        let driveID = UUID()
+        autopilotDriveID = driveID
+        defer {
+            if autopilotDriveID == driveID { autopilotDriveID = nil }
+        }
+        func stillOwnsDrive() -> Bool {
+            autopilotDriveID == driveID && autopilotIsRunning
+                && autopilotRunner === runner
+                && selectedBranch?.branchKey == branch.branchKey
+        }
+        func stillOwnsStep(_ index: Int, having step: IrisGuideStep) -> Bool {
+            stillOwnsDrive() && theGuideIsStillOn(index, having: step)
+        }
 
         irisTrace("drive: entered, sessionStarted=\(self.runnerSessionHasStarted)")
         if !runnerSessionHasStarted {
             irisTrace("drive: awaiting startSession…")
-            guard await runner.startSession() else {
+            let sessionStarted = await runner.startSession()
+            guard stillOwnsDrive() else { return }
+            guard sessionStarted else {
                 irisTrace("drive: startSession FAILED → stopAutopilot")
                 stopAutopilot()
                 return
@@ -1935,7 +2000,7 @@ final class GuideSessionController: ObservableObject {
             runnerSessionHasStarted = true
         }
 
-        while autopilotIsRunning,
+        while stillOwnsDrive(),
               !readerHasFinishedTheGuide,
               currentStepIndex < branch.steps.count {
             // A fresh step is Iris's again until proven otherwise, so ownership
@@ -1981,12 +2046,12 @@ final class GuideSessionController: ObservableObject {
                 // second.
                 let everyWatchedToolIsPresent =
                     await everyToolThisStepWatchesForIsAlreadyPresent(step)
-                guard theGuideIsStillOn(stepIndexBeingDriven, having: step) else { continue }
+                guard stillOwnsStep(stepIndexBeingDriven, having: step) else { continue }
                 if everyWatchedToolIsPresent {
                     irisTrace("drive: \(step.id) already satisfied — advancing without opening anything")
                     await holdBetweenAutoAdvancedSteps()
                     guard autopilotIsRunning else { return }
-                    guard theGuideIsStillOn(stepIndexBeingDriven, having: step) else { continue }
+                    guard stillOwnsStep(stepIndexBeingDriven, having: step) else { continue }
                     advanceFromWithinAutopilot()
                     continue
                 }
@@ -2009,7 +2074,7 @@ final class GuideSessionController: ObservableObject {
                     await bringTheInstalledAppAStepWaitsForToTheFront?(bundleIdOfTheAppTheStepWaitsFor)
                     await holdBetweenAutoAdvancedSteps()
                     guard autopilotIsRunning else { return }
-                    guard theGuideIsStillOn(stepIndexBeingDriven, having: step) else { continue }
+                    guard stillOwnsStep(stepIndexBeingDriven, having: step) else { continue }
                     advanceFromWithinAutopilot()
                     continue
                 }
@@ -2027,7 +2092,7 @@ final class GuideSessionController: ObservableObject {
                     // on a blank terminal. Advance it ourselves after a beat.
                     await holdBetweenAutoAdvancedSteps()
                     guard autopilotIsRunning else { return }
-                    guard theGuideIsStillOn(stepIndexBeingDriven, having: step) else { continue }
+                    guard stillOwnsStep(stepIndexBeingDriven, having: step) else { continue }
                     advanceFromWithinAutopilot()
                     continue
                 }
@@ -2057,11 +2122,12 @@ final class GuideSessionController: ObservableObject {
                 step: step, stepIndex: stepIndexBeingDriven, totalSteps: branch.steps.count
             )
             irisTrace("drive: \(step.id) result=\(String(describing: result))")
+            guard stillOwnsDrive() else { return }
             numberOfCommandsAutopilotHasExecuted += 1
             // A command takes real time, and the watch loop can advance the
             // guide during it. Advancing again from the NEW index would skip a
             // step nobody ran, which is the same defect the gate hit.
-            guard theGuideIsStillOn(stepIndexBeingDriven, having: step) else { continue }
+            guard stillOwnsStep(stepIndexBeingDriven, having: step) else { continue }
             switch result {
             case .succeeded:
                 advanceFromWithinAutopilot()
@@ -2075,7 +2141,7 @@ final class GuideSessionController: ObservableObject {
                     // and stalling the whole install here.
                     await holdBetweenAutoAdvancedSteps()
                     guard autopilotIsRunning else { return }
-                    guard theGuideIsStillOn(stepIndexBeingDriven, having: step) else { continue }
+                    guard stillOwnsStep(stepIndexBeingDriven, having: step) else { continue }
                     advanceFromWithinAutopilot()
                     continue
                 }
@@ -2494,6 +2560,9 @@ final class GuideSessionController: ObservableObject {
         guard !toolNamesToCheck.isEmpty else {
             return
         }
+        let generationAtStart = guideSessionGeneration
+        let branchKeyAtStart = selectedBranch?.branchKey
+        let stepIDAtStart = currentStep?.id
         toolCheckTask?.cancel()
         toolChecksHaveBeenRunForThisStep = true
         toolCheckRows = toolNamesToCheck.map { toolName in
@@ -2502,7 +2571,10 @@ final class GuideSessionController: ObservableObject {
         toolCheckTask = Task { [weak self] in
             guard let self else { return }
             let rowsAfterChecking = await self.checkEveryTool(named: toolNamesToCheck)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled,
+                  self.guideSessionGeneration == generationAtStart,
+                  self.selectedBranch?.branchKey == branchKeyAtStart,
+                  self.currentStep?.id == stepIDAtStart else { return }
             self.toolCheckRows = rowsAfterChecking
         }
     }
@@ -2561,7 +2633,11 @@ final class GuideSessionController: ObservableObject {
 
     /// Runs the branch's prerequisite checks once, on the way in, and diverts
     /// the reader into the setup steps if anything they need is missing.
-    private func enterSetupRecoveryIfAPrerequisiteIsMissing(forBranch branch: IrisGuideBranch) async {
+    private func enterSetupRecoveryIfAPrerequisiteIsMissing(
+        forBranch branch: IrisGuideBranch,
+        sessionGeneration: Int
+    ) async {
+        guard guideSessionGeneration == sessionGeneration else { return }
         guard branch.unsupported == nil, !branch.setupSteps.isEmpty else {
             return
         }
@@ -2571,6 +2647,7 @@ final class GuideSessionController: ObservableObject {
         }
 
         let prerequisiteCheckRows = await checkEveryTool(named: prerequisiteToolNames)
+        guard guideSessionGeneration == sessionGeneration, !Task.isCancelled else { return }
         // A tool that could not be checked is not a tool that is missing. Iris
         // has no idea what is on the machine in that case, and marching the
         // reader through an install they may not need is the wrong guess.
@@ -2621,6 +2698,7 @@ final class GuideSessionController: ObservableObject {
         }
 
         setupRecheckTask?.cancel()
+        let generationForThisRecheck = guideSessionGeneration
         mutableSetupRecoveryState.aRecheckIsRunning = true
         mutableSetupRecoveryState.messageFromTheMostRecentRecheck = nil
         mutableSetupRecoveryState.prerequisiteCheckRows = toolNamesToCheckAgain.map { toolName in
@@ -2631,7 +2709,9 @@ final class GuideSessionController: ObservableObject {
         setupRecheckTask = Task { [weak self] in
             guard let self else { return }
             let rowsAfterChecking = await self.checkEveryTool(named: toolNamesToCheckAgain)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled,
+                  self.guideSessionGeneration == generationForThisRecheck,
+                  self.selectedBranch?.branchKey == branch.branchKey else { return }
             self.applyTheResultOfASetupRecheck(rowsAfterChecking, forBranch: branch)
         }
     }
@@ -2646,7 +2726,8 @@ final class GuideSessionController: ObservableObject {
         _ rowsAfterChecking: [GuideToolCheckRow],
         forBranch branch: IrisGuideBranch
     ) {
-        guard var mutableSetupRecoveryState = setupRecoveryState else { return }
+        guard selectedBranch?.branchKey == branch.branchKey,
+              var mutableSetupRecoveryState = setupRecoveryState else { return }
 
         let toolNamesStillMissing = rowsAfterChecking
             .filter { row in row.state == .notInstalled }
@@ -2983,14 +3064,20 @@ final class GuideSessionController: ObservableObject {
         copyConfirmationDismissalTask = nil
         toolCheckTask?.cancel()
         toolCheckTask = nil
+        setupRecheckTask?.cancel()
+        setupRecheckTask = nil
         transientCopyConfirmationText = nil
         readerHasTakenThisStepsAction = false
     }
 
     // MARK: - Progress
 
-    private func restoreSavedProgress(forBranch branch: IrisGuideBranch) async {
-        guard let guide = guideBeingFollowed else { return }
+    private func restoreSavedProgress(
+        forBranch branch: IrisGuideBranch,
+        sessionGeneration: Int
+    ) async -> Bool {
+        guard guideSessionGeneration == sessionGeneration,
+              let guide = guideBeingFollowed else { return false }
         // The version is no longer in the storage key — that is what made every
         // republish throw a reader back to step one. `GuideService.loadProgress`
         // re-derives the resume from the ID of the step they stopped on, and
@@ -3000,6 +3087,7 @@ final class GuideSessionController: ObservableObject {
             version: guide.version,
             branchKey: branch.branchKey
         )
+        guard guideSessionGeneration == sessionGeneration else { return false }
         let lastStepIndex = max(0, branch.steps.count - 1)
         var resumeIndex = min(max(0, savedProgress.stepIndex), lastStepIndex)
 
@@ -3038,7 +3126,8 @@ final class GuideSessionController: ObservableObject {
                 await self?.correctTheResumePositionIfTheMachineDisagrees(
                     branch: branchForTheCheck,
                     rememberedIndex: indexAtOpen,
-                    guideName: nameForTheCheck
+                    guideName: nameForTheCheck,
+                    sessionGeneration: sessionGeneration
                 )
             }
         }
@@ -3047,6 +3136,7 @@ final class GuideSessionController: ObservableObject {
         // a reader who opens a guide and quits without pressing anything still
         // expects Iris to know which guide they were in.
         rememberThisAsTheGuideTheReaderIsFollowing()
+        return true
     }
 
     /// The reality check behind a resume: every `git clone` step BEFORE the
@@ -3192,9 +3282,12 @@ final class GuideSessionController: ObservableObject {
     private func correctTheResumePositionIfTheMachineDisagrees(
         branch: IrisGuideBranch,
         rememberedIndex: Int,
-        guideName: String
+        guideName: String,
+        sessionGeneration: Int
     ) async {
-        guard rememberedIndex > 0, let askTheModelWhereTheReaderIs else { return }
+        guard guideSessionGeneration == sessionGeneration,
+              rememberedIndex > 0,
+              let askTheModelWhereTheReaderIs else { return }
         // An install that is already RUNNING owns its position, and there is no
         // point spending the reader's own model call on an opinion that will be
         // thrown away. Checked here and again after the reply lands, because
@@ -3205,6 +3298,7 @@ final class GuideSessionController: ObservableObject {
             return
         }
         let evidence = await gatherPositionEvidence(forBranch: branch)
+        guard guideSessionGeneration == sessionGeneration else { return }
         guard evidence.isWorthInterpreting else {
             irisTrace("position: nothing checkable for \(guideName) — leaving resume at \(rememberedIndex)")
             return
@@ -3221,6 +3315,7 @@ final class GuideSessionController: ObservableObject {
             irisTrace("position: no reply for \(guideName) — leaving resume at \(rememberedIndex)")
             return
         }
+        guard guideSessionGeneration == sessionGeneration else { return }
         guard let verdict = GuideActualPositionFinder.verdict(
             fromReply: reply, numberOfSteps: branch.steps.count
         ) else {

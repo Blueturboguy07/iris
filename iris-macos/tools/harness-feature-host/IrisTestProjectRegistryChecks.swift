@@ -17,7 +17,18 @@ struct IrisTestProjectRegistryChecks {
         let fileManager = FileManager.default
         // Use a fresh temporary parent and pass it explicitly to the pure
         // registry validator. No real registry or user checkout is read.
-        let fixtureParent = fileManager.temporaryDirectory
+        let configuredScratch = ProcessInfo.processInfo.environment["IRIS_HARNESS_SCRATCH"]
+            ?? "/Users/Shared"
+        let configuredURL = URL(fileURLWithPath: configuredScratch, isDirectory: true)
+        // Keep registry fixtures on a canonical path. Foundation's temporary
+        // directory is under /var here, and /private/tmp is aliased to /tmp;
+        // both would violate the registry's no-symlink path boundary.
+        let canonicalScratch = configuredURL.standardizedFileURL
+        guard canonicalScratch.path == configuredURL.path else {
+            throw IrisTestProjectRegistryCheckError.failed("IRIS_HARNESS_SCRATCH must use a canonical, non-aliased path")
+        }
+        let scratchURL = configuredURL
+        let fixtureParent = scratchURL
             .appendingPathComponent("iris-registry-parent-" + UUID().uuidString, isDirectory: true)
         let fixtureRoot = fixtureParent
             .appendingPathComponent("iris-registry-checks-" + UUID().uuidString)

@@ -25,6 +25,8 @@ import SwiftUI
 /// accidentally start driving the guide: it renders, and it reports what was
 /// pressed.
 nonisolated struct OverlayEyeGuideStepPresentation: Equatable, Sendable {
+    /// The rendered step identity used to reject a tap from an older card.
+    let stepId: String
     let appName: String
     let stepTitle: String
     let stepBody: String

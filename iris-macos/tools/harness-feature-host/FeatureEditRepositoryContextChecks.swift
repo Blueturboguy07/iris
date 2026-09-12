@@ -30,7 +30,85 @@ struct FeatureEditRepositoryContextChecks {
         print("PASS review context: diff and context byte bounds remain truthful")
         try enforcesFileCountAndDuplicateBounds()
         print("PASS review context: duplicate paths removed and 24-file bound enforced")
-        print("FEATURE EDIT REPOSITORY CONTEXT CHECKS PASS: 10 groups")
+        try prioritizesCrossDirectoryConsumersWithoutIncreasingThePromptBudget()
+        print("PASS review context: cross-directory consumers fit before unrelated dependencies")
+        try refusesUnsafeConsumerCandidatesAndBoundsDiscovery()
+        print("PASS review context: consumer candidates remain confined and count-bounded")
+        try boundsConsumerDiscoveryBytes()
+        print("PASS review context: reverse-source scan has a separate local byte ceiling")
+        print("FEATURE EDIT REPOSITORY CONTEXT CHECKS PASS: 13 groups")
+    }
+
+    @MainActor static func prioritizesCrossDirectoryConsumersWithoutIncreasingThePromptBudget() throws {
+        let root = try makeFixtureRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try write("src/data/store.ts", "import { helper } from './helper'; export const store = helper;", under: root)
+        try write("src/data/helper.ts", String(repeating: "// dependency\n", count: 90), under: root)
+        try write("src/screens/List.tsx", "import { store } from '../data/store'; export const list = store;", under: root)
+        try write("src/screens/Editor.tsx", "const store = require('../data/store.js'); export const editor = store;", under: root)
+        try write("tests/store.test.ts", "// unchanged assertions remain first", under: root)
+        let candidates = ["src/screens/List.tsx", "src/screens/Editor.tsx"]
+        let baseline = FeatureEditRepositoryContext.collectReviewContext(
+            repoRootPath: root.path, changedTestPaths: ["tests/store.test.ts"],
+            declaredNativeTestPaths: [], changedPaths: ["src/data/store.ts"],
+            sameDirectoryNeighborPaths: [], maxBytes: 256
+        )
+        let revised = FeatureEditRepositoryContext.collectReviewContext(
+            repoRootPath: root.path, changedTestPaths: ["tests/store.test.ts"],
+            declaredNativeTestPaths: [], changedPaths: ["src/data/store.ts"],
+            sameDirectoryNeighborPaths: [], candidateSourcePaths: candidates, maxBytes: 256
+        )
+        try require(!baseline.files.contains { candidates.contains($0.repoRelativePath) }, "baseline unexpectedly found reverse consumers")
+        try require(revised.files.map(\.repoRelativePath) == ["tests/store.test.ts", "src/data/store.ts"] + candidates,
+            "tests and changed source must stay first, followed by complete cross-directory consumers")
+        try require(revised.maxBytes == baseline.maxBytes && revised.includedByteCount <= 256,
+            "consumer selection raised the prompt budget")
+        try require(revised.hasUnseenRequestedContext, "the displaced dependency must remain explicitly unseen")
+    }
+
+    @MainActor static func refusesUnsafeConsumerCandidatesAndBoundsDiscovery() throws {
+        let root = try makeFixtureRoot()
+        let outside = try makeFixtureRoot()
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: outside)
+        }
+        try write("src/store.ts", "export const store = 1;", under: root)
+        try write("outside.ts", "import { store } from './store';", under: outside)
+        try FileManager.default.createSymbolicLink(
+            at: root.appendingPathComponent("src/linked.ts"),
+            withDestinationURL: outside.appendingPathComponent("outside.ts")
+        )
+        try write("src/late.ts", "import { store } from './store';", under: root)
+        let candidates = ["src/linked.ts", "../outside.ts", "/outside.ts"]
+            + (0..<97).map { "missing\($0).ts" } + ["src/late.ts"]
+        let context = FeatureEditRepositoryContext.collectReviewContext(
+            repoRootPath: root.path, changedTestPaths: [], declaredNativeTestPaths: [],
+            changedPaths: ["src/store.ts"], sameDirectoryNeighborPaths: [], candidateSourcePaths: candidates
+        )
+        try require(context.files.map(\.repoRelativePath) == ["src/store.ts"],
+            "unsafe source or a candidate beyond the 100-path scan entered review")
+    }
+
+    @MainActor static func boundsConsumerDiscoveryBytes() throws {
+        let root = try makeFixtureRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try write("src/store.ts", "export const store = 1;", under: root)
+        var candidates: [String] = []
+        for index in 0..<8 {
+            let path = "src/full\(index).ts"
+            try writeSizedSource(path, byteCount: 64 * 1024, under: root)
+            candidates.append(path)
+        }
+        try write("src/late.ts", "import { store } from './store';", under: root)
+        candidates.append("src/late.ts")
+        let context = FeatureEditRepositoryContext.collectReviewContext(
+            repoRootPath: root.path, changedTestPaths: [], declaredNativeTestPaths: [],
+            changedPaths: ["src/store.ts"], sameDirectoryNeighborPaths: [], candidateSourcePaths: candidates
+        )
+        try require(context.files.map(\.repoRelativePath) == ["src/store.ts"],
+            "consumer discovery read past its 512 KiB local ceiling")
+        try require(context.maxBytes == 64 * 1024, "local scan allowance changed the model prompt allowance")
     }
 
     @MainActor static func discoversParentDirectoryDependenciesInStableOrder() throws {

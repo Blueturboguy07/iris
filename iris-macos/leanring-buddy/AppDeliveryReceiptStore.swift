@@ -341,6 +341,14 @@ nonisolated struct AppDeliveryReceipt: Codable, Equatable, Sendable {
         return total
     }
 
+    /// Measure filesystem allocation without following symlinks. This is a
+    /// diagnostic value only; it is deliberately not described as free space.
+    static func allocatedByteCount(atPath path: String) -> UInt64? {
+        var total: UInt64 = 0
+        guard appendAllocatedByteCount(forPath: path, total: &total) else { return nil }
+        return total
+    }
+
     private static func appendLogicalByteCount(
         forPath path: String, total: inout UInt64, rejectingSymlinks: Bool
     ) -> Bool {
@@ -380,6 +388,23 @@ nonisolated struct AppDeliveryReceipt: Codable, Equatable, Sendable {
         }
         return true
     }
+
+    private static func appendAllocatedByteCount(forPath path: String, total: inout UInt64) -> Bool {
+        var metadata = stat()
+        guard lstat(path, &metadata) == 0, metadata.st_blocks >= 0 else { return false }
+        let blocks = UInt64(metadata.st_blocks)
+        guard blocks <= UInt64.max / 512, total <= UInt64.max - blocks * 512 else { return false }
+        total += blocks * 512
+        guard (metadata.st_mode & S_IFMT) == S_IFDIR,
+              let children = try? FileManager.default.contentsOfDirectory(atPath: path) else {
+            return (metadata.st_mode & S_IFMT) != S_IFDIR
+        }
+        for child in children.sorted() {
+            let childPath = (path as NSString).appendingPathComponent(child)
+            guard appendAllocatedByteCount(forPath: childPath, total: &total) else { return false }
+        }
+        return true
+    }
 }
 
 /// A small durable receipt directory. It deliberately does not delete old
@@ -415,6 +440,29 @@ nonisolated struct AppDeliveryReceiptStore: Sendable {
         }
     }
 
+    /// Explicit policy for the Test-only, receipt-owned cleanup operation. A
+    /// recent rollback is retained by timestamp in addition to the newest
+    /// restored receipt, so callers cannot accidentally turn cleanup into an
+    /// implicit age-based purge.
+    struct BackupCleanupPolicy: Equatable, Sendable {
+        let now: Date
+        let recentRollbackWindow: TimeInterval
+
+        init(now: Date = Date(), recentRollbackWindow: TimeInterval = 7 * 24 * 60 * 60) {
+            self.now = now
+            self.recentRollbackWindow = recentRollbackWindow
+        }
+    }
+
+    struct BackupCleanupResult: Equatable, Sendable {
+        let deletedPaths: [String]
+        let retainedPaths: [String]
+        let logicalBytesRemoved: UInt64
+        /// `st_blocks` measured before deletion. This is allocation accounting,
+        /// not a claim about physical free space reclaimed on the volume.
+        let allocatedBytesMeasured: UInt64
+    }
+
     enum RetentionError: Error, Equatable, LocalizedError {
         case invalidPolicy
         case outsideBackupRoot
@@ -438,6 +486,29 @@ nonisolated struct AppDeliveryReceiptStore: Sendable {
             case .unreadableMeasurement: return "a bundle's logical size could not be measured"
             case .budgetExceeded(let current, let candidate, let limit):
                 return "the saved backup budget would be exceeded (existing \(current) bytes plus \(candidate) bytes exceeds the \(limit)-byte limit)"
+            }
+        }
+    }
+
+    enum CleanupError: Error, Equatable, Sendable, LocalizedError {
+        case invalidPolicy
+        case unsafePath
+        case corruptInventory
+        case unreadableInventory
+        case ambiguousRecovery
+        case changedIdentity(path: String)
+        case deletionFailed(path: String, deletedPaths: [String], logicalBytesRemoved: UInt64, allocatedBytesMeasured: UInt64)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidPolicy: return "the backup cleanup policy is invalid"
+            case .unsafePath: return "the backup cleanup target contains an unsafe filesystem path"
+            case .corruptInventory: return "saved backup inventory is incomplete or corrupt"
+            case .unreadableInventory: return "saved backup inventory could not be read"
+            case .ambiguousRecovery: return "saved Undo recovery information is ambiguous"
+            case .changedIdentity(let path): return "the saved backup changed before cleanup: \(path)"
+            case .deletionFailed(let path, let deleted, _, _):
+                return "backup cleanup stopped at \(path) after deleting \(deleted.count) backup(s)"
             }
         }
     }
@@ -530,6 +601,219 @@ nonisolated struct AppDeliveryReceiptStore: Sendable {
         )
     }
 
+    /// Remove only obsolete, receipt-owned restored backups. This is an owner
+    /// operation rather than admission policy: all inventory and candidate
+    /// checks happen before the first unlink, while the receipt-store lock
+    /// serializes receipt writers. Receipt JSON and parent directories remain.
+    func cleanupRestoredBackups(
+        bundleIdentifier: String,
+        backupRoot: URL,
+        recoveryStore: DeliveredEditUndoRecoveryStore,
+        protectedPaths: [String],
+        policy: BackupCleanupPolicy = .init()
+    ) throws -> BackupCleanupResult {
+        guard !bundleIdentifier.isEmpty,
+              AppDeliveryReceipt.isSafeMetadataText(bundleIdentifier),
+              policy.now.timeIntervalSinceReferenceDate.isFinite,
+              policy.recentRollbackWindow.isFinite,
+              policy.recentRollbackWindow >= 0,
+              AppDeliveryReceipt.isCanonicalAbsolutePath(backupRoot.path),
+              protectedPaths.allSatisfy(AppDeliveryReceipt.isCanonicalAbsolutePath) else {
+            throw CleanupError.invalidPolicy
+        }
+        guard protectedPaths.allSatisfy({ pathHasNoSymlinkComponents($0, allowMissing: false) }) else {
+            throw CleanupError.unsafePath
+        }
+
+        return try withExclusiveStoreLock {
+            let receipts: [AppDeliveryReceipt]
+            do {
+                receipts = try retentionReceipts()
+            } catch {
+                throw cleanupError(for: error)
+            }
+
+            var rootMetadata = stat()
+            let rootExists = lstat(backupRoot.path, &rootMetadata) == 0
+            if !rootExists {
+                guard errno == ENOENT, receipts.isEmpty else { throw CleanupError.corruptInventory }
+                return BackupCleanupResult(
+                    deletedPaths: [], retainedPaths: [], logicalBytesRemoved: 0,
+                    allocatedBytesMeasured: 0
+                )
+            }
+            guard (rootMetadata.st_mode & S_IFMT) == S_IFDIR,
+                  pathHasNoSymlinkComponents(backupRoot.path, allowMissing: false) else {
+                throw CleanupError.unsafePath
+            }
+            do { try validateBackupNamespace(backupRoot) }
+            catch { throw cleanupError(for: error) }
+
+            let recovery = try cleanupRecoverySnapshot(
+                recoveryStore: recoveryStore, backupRoot: backupRoot
+            )
+            var protected = Set(protectedPaths.map { URL(fileURLWithPath: $0).standardizedFileURL.path })
+            protected.formUnion(recovery.protectedBackupPaths)
+            var restoredCandidates: [AppDeliveryReceipt] = []
+            var restoredPaths = Set<String>()
+            var receiptPayloadPaths: [String] = []
+            for receipt in receipts {
+                guard isWithin(receipt.backupPath, root: backupRoot.path),
+                      pathHasNoSymlinkComponents(receipt.backupPath, allowMissing: true) else {
+                    throw CleanupError.unsafePath
+                }
+                var metadata = stat()
+                guard lstat(receipt.backupPath, &metadata) == 0 else {
+                    // A prior successful cleanup intentionally leaves the
+                    // restored receipt JSON behind. Missing restored payloads
+                    // are therefore idempotently absent; an unfinished
+                    // prepared/installed delivery remains fail-closed.
+                    if errno == ENOENT, receipt.phase == .restored { continue }
+                    throw CleanupError.corruptInventory
+                }
+                guard (metadata.st_mode & S_IFMT) == S_IFDIR else {
+                    throw CleanupError.corruptInventory
+                }
+                let backupPath = URL(fileURLWithPath: receipt.backupPath).standardizedFileURL.path
+                guard !receiptPayloadPaths.contains(where: { pathsOverlap(backupPath, $0) }) else {
+                    // Two receipt records must never alias the same payload or
+                    // one another's ancestor. Otherwise a retained record can
+                    // be deleted through an older alias in the same pass.
+                    throw CleanupError.corruptInventory
+                }
+                receiptPayloadPaths.append(backupPath)
+                if receipt.phase != .restored {
+                    protected.insert(backupPath)
+                    continue
+                }
+                guard isPreviewEligible(receipt) else {
+                    // A restored record without complete identity is visible
+                    // history, not permission to discard its files.
+                    protected.insert(backupPath)
+                    continue
+                }
+                guard receipt.bundleIdentifier == bundleIdentifier else { continue }
+                restoredPaths.insert(backupPath)
+                restoredCandidates.append(receipt)
+            }
+
+            let newest = restoredCandidates.max {
+                if $0.startedAt != $1.startedAt { return $0.startedAt < $1.startedAt }
+                return $0.identifier.uuidString < $1.identifier.uuidString
+            }?.identifier
+            let cutoff = policy.now.addingTimeInterval(-policy.recentRollbackWindow)
+            var candidates: [AppDeliveryReceipt] = []
+            var retainedPaths = Set<String>()
+            for receipt in restoredCandidates {
+                let path = URL(fileURLWithPath: receipt.backupPath).standardizedFileURL.path
+                let retainedForRollback = receipt.identifier == newest || receipt.startedAt >= cutoff
+                let overlapsProtection = protected.contains { pathsOverlap(path, $0) }
+                if retainedForRollback || overlapsProtection {
+                    retainedPaths.insert(path)
+                    protected.insert(path)
+                } else {
+                    candidates.append(receipt)
+                }
+            }
+
+            // A restored receipt can be an alias of another protected receipt;
+            // no candidate is allowed to overlap any live/recovery path.
+            var preflightLogicalBytes: UInt64 = 0
+            var preflightAllocatedBytes: UInt64 = 0
+            for receipt in candidates {
+                let path = URL(fileURLWithPath: receipt.backupPath).standardizedFileURL.path
+                guard !protected.contains(where: { pathsOverlap(path, $0) }),
+                      let expectedIdentity = receipt.backupBundleIdentity,
+                      let actualIdentity = AppDeliveryReceipt.bundleIdentity(atPath: path),
+                      actualIdentity == expectedIdentity,
+                      let logicalBytes = AppDeliveryReceipt.logicalByteCount(
+                        atPath: path, rejectingSymlinks: false
+                      ),
+                      let allocatedBytes = AppDeliveryReceipt.allocatedByteCount(atPath: path),
+                      preflightLogicalBytes <= UInt64.max - logicalBytes,
+                      preflightAllocatedBytes <= UInt64.max - allocatedBytes else {
+                    throw CleanupError.changedIdentity(path: path)
+                }
+                preflightLogicalBytes += logicalBytes
+                preflightAllocatedBytes += allocatedBytes
+            }
+
+            // Recovery files are owned by a separate store, so compare their
+            // complete bounded snapshot once more after candidate preflight.
+            // A concurrent change cannot be made atomic with this receipt lock;
+            // it is therefore treated as an ambiguous, no-delete condition.
+            guard try cleanupRecoverySnapshot(
+                recoveryStore: recoveryStore, backupRoot: backupRoot
+            ) == recovery else {
+                throw CleanupError.ambiguousRecovery
+            }
+
+            var deleted: [String] = []
+            var logicalBytesRemoved: UInt64 = 0
+            var allocatedBytesMeasured: UInt64 = 0
+            for receipt in candidates {
+                guard (try? cleanupRecoverySnapshot(
+                    recoveryStore: recoveryStore, backupRoot: backupRoot
+                )) == recovery else {
+                    throw CleanupError.deletionFailed(
+                        path: receipt.backupPath, deletedPaths: deleted,
+                        logicalBytesRemoved: logicalBytesRemoved,
+                        allocatedBytesMeasured: allocatedBytesMeasured
+                    )
+                }
+                let path = URL(fileURLWithPath: receipt.backupPath).standardizedFileURL.path
+                guard pathHasNoSymlinkComponents(path, allowMissing: false),
+                      let expectedIdentity = receipt.backupBundleIdentity,
+                      AppDeliveryReceipt.bundleIdentity(atPath: path) == expectedIdentity,
+                      let logicalBytes = AppDeliveryReceipt.logicalByteCount(
+                        atPath: path, rejectingSymlinks: false
+                      ),
+                      let allocatedBytes = AppDeliveryReceipt.allocatedByteCount(atPath: path) else {
+                    throw CleanupError.deletionFailed(
+                        path: path, deletedPaths: deleted,
+                        logicalBytesRemoved: logicalBytesRemoved,
+                        allocatedBytesMeasured: allocatedBytesMeasured
+                    )
+                }
+                guard logicalBytesRemoved <= UInt64.max - logicalBytes,
+                      allocatedBytesMeasured <= UInt64.max - allocatedBytes else {
+                    throw CleanupError.deletionFailed(
+                        path: path, deletedPaths: deleted,
+                        logicalBytesRemoved: logicalBytesRemoved,
+                        allocatedBytesMeasured: allocatedBytesMeasured
+                    )
+                }
+                do {
+                    try FileManager.default.removeItem(atPath: path)
+                } catch {
+                    throw CleanupError.deletionFailed(
+                        path: path, deletedPaths: deleted,
+                        logicalBytesRemoved: logicalBytesRemoved,
+                        allocatedBytesMeasured: allocatedBytesMeasured
+                    )
+                }
+                var after = stat()
+                guard lstat(path, &after) != 0, errno == ENOENT else {
+                    throw CleanupError.deletionFailed(
+                        path: path, deletedPaths: deleted,
+                        logicalBytesRemoved: logicalBytesRemoved,
+                        allocatedBytesMeasured: allocatedBytesMeasured
+                    )
+                }
+                logicalBytesRemoved += logicalBytes
+                allocatedBytesMeasured += allocatedBytes
+                deleted.append(path)
+            }
+            retainedPaths.formUnion(restoredPaths.subtracting(deleted))
+            _ = recovery // Keeps the preflight snapshot alive through deletion.
+            return BackupCleanupResult(
+                deletedPaths: deleted.sorted(), retainedPaths: retainedPaths.sorted(),
+                logicalBytesRemoved: logicalBytesRemoved,
+                allocatedBytesMeasured: allocatedBytesMeasured
+            )
+        }
+    }
+
     /// Cheap UI gate. It proves only that the recorded backup is a safe,
     /// readable bundle at the recorded path. Undo still performs the existing
     /// full content-digest and source-identity checks off the main actor.
@@ -553,6 +837,111 @@ nonisolated struct AppDeliveryReceiptStore: Sendable {
             return false
         }
         return identity.bundleIdentifier == receipt.bundleIdentifier
+    }
+
+    private struct CleanupRecoverySnapshot: Equatable {
+        let live: DeliveredEditUndoRecoveryStore.Loaded
+        let archivedRecords: [DeliveredEditUndoRecoveryRecord]
+        let archivePaths: [String]
+        let protectedBackupPaths: [String]
+    }
+
+    private func cleanupRecoverySnapshot(
+        recoveryStore: DeliveredEditUndoRecoveryStore, backupRoot: URL
+    ) throws -> CleanupRecoverySnapshot {
+        let live = recoveryStore.load()
+        switch live {
+        case .absent: break
+        case .pending(let record):
+            guard let path = record.backupPath else { break }
+            guard AppDeliveryReceipt.isCanonicalAbsolutePath(path),
+                  isWithin(path, root: backupRoot.path),
+                  pathHasNoSymlinkComponents(path, allowMissing: true) else {
+                throw CleanupError.unsafePath
+            }
+        case .unreadable:
+            throw CleanupError.ambiguousRecovery
+        }
+        let archived = recoveryStore.archivedRecoveryInventory()
+        guard !archived.hasUnknownTargets else { throw CleanupError.ambiguousRecovery }
+        var protected: Set<String> = []
+        if case .pending(let record) = live {
+            try addCleanupRecoveryRecordReferences(record, root: backupRoot, protected: &protected)
+        }
+        for record in archived.records {
+            try addCleanupRecoveryRecordReferences(record, root: backupRoot, protected: &protected)
+        }
+        return CleanupRecoverySnapshot(
+            live: live, archivedRecords: archived.records,
+            archivePaths: archived.archivePaths,
+            protectedBackupPaths: protected.sorted()
+        )
+    }
+
+    private func addCleanupRecoveryReference(
+        _ path: String, root: URL, protected: inout Set<String>
+    ) throws {
+        guard AppDeliveryReceipt.isCanonicalAbsolutePath(path),
+              isWithin(path, root: root.path),
+              pathHasNoSymlinkComponents(path, allowMissing: true) else {
+            throw CleanupError.unsafePath
+        }
+        var metadata = stat()
+        if lstat(path, &metadata) == 0 {
+            guard (metadata.st_mode & S_IFMT) == S_IFDIR else { throw CleanupError.unsafePath }
+        } else if errno != ENOENT {
+            throw CleanupError.unreadableInventory
+        }
+        protected.insert(URL(fileURLWithPath: path).standardizedFileURL.path)
+    }
+
+    private func addCleanupRecoveryRecordReferences(
+        _ record: DeliveredEditUndoRecoveryRecord, root: URL, protected: inout Set<String>
+    ) throws {
+        if let backupPath = record.backupPath {
+            try addCleanupRecoveryReference(backupPath, root: root, protected: &protected)
+        }
+        for path in [record.installedPath, record.clonePath].compactMap({ $0 }) {
+            guard AppDeliveryReceipt.isCanonicalAbsolutePath(path),
+                  pathHasNoSymlinkComponents(path, allowMissing: true) else {
+                throw CleanupError.unsafePath
+            }
+            var metadata = stat()
+            if lstat(path, &metadata) == 0 {
+                guard (metadata.st_mode & S_IFMT) == S_IFDIR else { throw CleanupError.unsafePath }
+            } else if errno != ENOENT {
+                throw CleanupError.unreadableInventory
+            }
+            protected.insert(URL(fileURLWithPath: path).standardizedFileURL.path)
+        }
+    }
+
+    private func cleanupError(for error: Error) -> CleanupError {
+        if let error = error as? CleanupError { return error }
+        guard let error = error as? RetentionError else { return .unreadableInventory }
+        switch error {
+        case .unsafePath, .outsideBackupRoot: return .unsafePath
+        case .corruptInventory, .budgetExceeded, .backupDestinationExists: return .corruptInventory
+        case .unreadableInventory, .unreadableMeasurement: return .unreadableInventory
+        case .invalidPolicy: return .invalidPolicy
+        case .protectedReference: return .ambiguousRecovery
+        }
+    }
+
+    private func pathsOverlap(_ lhs: String, _ rhs: String) -> Bool {
+        let identities = [
+            URL(fileURLWithPath: lhs).standardizedFileURL.path,
+            URL(fileURLWithPath: lhs).resolvingSymlinksInPath().path
+        ]
+        let protected = [
+            URL(fileURLWithPath: rhs).standardizedFileURL.path,
+            URL(fileURLWithPath: rhs).resolvingSymlinksInPath().path
+        ]
+        return identities.contains { candidate in
+            protected.contains { other in
+                candidate == other || candidate.hasPrefix(other + "/") || other.hasPrefix(candidate + "/")
+            }
+        }
     }
 
     private func backupRetentionInventory(

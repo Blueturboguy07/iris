@@ -161,7 +161,7 @@ nonisolated struct FeatureEditRepositoryContext: Sendable, Equatable {
 
     /// Collect the bounded review context in priority order. Changed tests and
     /// declared native tests stay ahead of changed sources, then one local
-    /// import hop, then the caller's same-directory fallback paths. The first
+    /// possible callers, one local import hop, then same-directory fallbacks. The first
     /// pass reads changed files through this type's confined collector so
     /// dependency discovery cannot follow a symlink or escape the clone.
     static func collectReviewContext(
@@ -170,6 +170,7 @@ nonisolated struct FeatureEditRepositoryContext: Sendable, Equatable {
         declaredNativeTestPaths: [String],
         changedPaths: [String],
         sameDirectoryNeighborPaths: [String],
+        candidateSourcePaths: [String] = [],
         preferredDependencySourceByPath: [String: String] = [:],
         isNativeFinalReview: Bool = false,
         maxFileCount: Int = maximumPermittedReviewFileCount,
@@ -194,11 +195,17 @@ nonisolated struct FeatureEditRepositoryContext: Sendable, Equatable {
             repoRootPath: repoRootPath,
             preferredDependencySourceByPath: preferredDependencySourceByPath
         )
+        let consumerPaths = potentialConsumerPaths(
+            of: normalizedChangedPaths,
+            candidateSourcePaths: candidateSourcePaths,
+            repoRootPath: repoRootPath
+        )
         let orderedPaths = deduplicatedRelativePaths(
             (isNativeFinalReview
                 ? declaredNativeTestPaths + changedTestPaths
                 : changedTestPaths + declaredNativeTestPaths)
                 + normalizedChangedPaths
+                + consumerPaths
                 + directDependencyPaths
                 + sameDirectoryNeighborPaths
         )
@@ -267,6 +274,45 @@ nonisolated struct FeatureEditRepositoryContext: Sendable, Equatable {
     private static let maximumDependencySpecifierCount = 64
     private static let maximumDependencyCandidateProbeCount = 128
     private static let maximumResolvedDependencyCount = 24
+    private static let maximumConsumerCandidateCount = 100
+    private static let maximumConsumerScanBytes = 512 * 1024
+
+    /// Local import spelling is a selection hint, not proof of runtime wiring.
+    /// Reuse the caller's existing bounded repo map instead of walking the tree
+    /// again. Full source reads use the same confinement checks as final review.
+    /// Aliases, dynamic imports and unsupported languages remain unseen.
+    private static func potentialConsumerPaths(
+        of changedPaths: [String],
+        candidateSourcePaths: [String],
+        repoRootPath: String
+    ) -> [String] {
+        let changed = Set(changedPaths.filter(isEligibleRelativePath))
+        guard !changed.isEmpty else { return [] }
+        var remainingScanBytes = maximumConsumerScanBytes
+        var consumerPaths: [String] = []
+        for path in deduplicatedRelativePaths(candidateSourcePaths).prefix(maximumConsumerCandidateCount) {
+            guard remainingScanBytes > 0 else { break }
+            guard !changed.contains(path),
+                  supportedModuleExtensions.contains((path as NSString).pathExtension.lowercased()) else { continue }
+            let context = collect(
+                repoRootPath: repoRootPath,
+                relativePaths: [path],
+                maxBytes: min(remainingScanBytes, maximumPermittedByteBudget)
+            )
+            guard let source = context.files.first else { continue }
+            remainingScanBytes -= source.utf8ByteCount
+            let referencesChangedPath = localModuleSpecifiers(
+                in: source.utf8Text, limit: maximumDependencySpecifierCount
+            ).contains { specifier in
+                moduleCandidates(for: specifier, importingPath: path).contains { changed.contains($0) }
+            }
+            if referencesChangedPath {
+                consumerPaths.append(path)
+                if consumerPaths.count == maximumPermittedReviewFileCount { break }
+            }
+        }
+        return consumerPaths
+    }
 
     /// The source extensions understood by the repo map, plus common authored
     /// source files that can be useful to a caller outside those six languages.

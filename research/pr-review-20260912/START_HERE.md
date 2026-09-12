@@ -2,6 +2,12 @@
 
 Status: **not merge-ready**.
 
+Latest combined follow-up: [INTEGRATED_CANDIDATE.md](INTEGRATED_CANDIDATE.md).
+It records the installed Iris Test candidate, fresh regression checks, actual
+control interactions, terminal and guide ownership fixes, bounded source
+diagnostics and explicit saved-backup protection. It does not establish a
+successful complex-transfer feature or resolve upstream merge conflicts.
+
 Follow-ups after frozen snapshot `e79b401`: [installer retry ownership](FOLLOWUP_RETRY_OWNERSHIP.md) and [standalone package wiring](FOLLOWUP_PACKAGE_WIRING.md). The latter now passes 134 tests. The baseline findings below remain historical; these follow-ups do not establish full installer or complex-feature acceptance.
 
 This package contains the source snapshot behind the currently installed Iris

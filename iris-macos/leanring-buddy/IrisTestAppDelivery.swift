@@ -4,6 +4,12 @@ import Foundation
 /// Test delivery uses explicit registry paths, never Launch Services discovery.
 @MainActor
 enum IrisTestAppDelivery {
+    enum BackupCleanupOutcome: Equatable, Sendable {
+        case cleaned(AppDeliveryReceiptStore.BackupCleanupResult)
+        case refused(String)
+        case failed(AppDeliveryReceiptStore.CleanupError)
+    }
+
     static func install(
         project: IrisTestProjectRegistry.Project,
         artifactPath: String,
@@ -57,6 +63,83 @@ enum IrisTestAppDelivery {
                 && IrisTestProjectRegistry.contains(installedPath, within: IrisTestProjectRegistry.projectsDirectory)
                 && IrisTestProjectRegistry.contains(backupPath, within: backupDirectory)
         }
+    }
+
+    /// Explicit Test-runtime owner entrypoint. The detached helper is still
+    /// bound to the registered Test project and rechecks that identity before
+    /// any filesystem deletion.
+    static func cleanupObsoleteBackups(
+        project: IrisTestProjectRegistry.Project,
+        service: AppRelaunchService,
+        policy: AppDeliveryReceiptStore.BackupCleanupPolicy = .init()
+    ) async -> BackupCleanupOutcome {
+        guard IrisTestEnvironment.isEnabled,
+              permitsCleanup(project),
+              NSRunningApplication.runningApplications(withBundleIdentifier: project.bundleIdentifier).isEmpty else {
+            return .refused("Iris Test could not confirm its stopped, registered test copy. No backups were removed.")
+        }
+        let store = service.deliveryReceiptStore
+        return await Task.detached(priority: .utility) {
+            guard permitsCleanup(project),
+                  NSRunningApplication.runningApplications(withBundleIdentifier: project.bundleIdentifier).isEmpty else {
+                return .refused("The Test project changed or started before cleanup. No backups were removed.")
+            }
+            do {
+                return .cleaned(try cleanupObsoleteBackups(
+                    project: project, backupDirectory: backupDirectory,
+                    receiptStore: store, recoveryStore: DeliveredEditUndoRecoveryStore(),
+                    policy: policy
+                ))
+            } catch let error as AppDeliveryReceiptStore.CleanupError {
+                return .failed(error)
+            } catch {
+                return .refused("Backup cleanup could not be completed safely. No files were removed.")
+            }
+        }.value
+    }
+
+    /// Fixture-injectable cleanup seam. It deliberately does not discover a
+    /// project or use default Application Support; the runtime entrypoint above
+    /// owns those Test-only gates.
+    nonisolated static func cleanupObsoleteBackups(
+        project: IrisTestProjectRegistry.Project,
+        backupDirectory: URL,
+        receiptStore: AppDeliveryReceiptStore,
+        recoveryStore: DeliveredEditUndoRecoveryStore,
+        policy: AppDeliveryReceiptStore.BackupCleanupPolicy = .init()
+    ) throws -> AppDeliveryReceiptStore.BackupCleanupResult {
+        guard project.applicationPath != project.buildArtifactPath,
+              isCanonicalPath(project.applicationPath),
+              isCanonicalPath(project.buildArtifactPath),
+              isCanonicalPath(backupDirectory.path) else {
+            throw AppDeliveryReceiptStore.CleanupError.invalidPolicy
+        }
+        return try receiptStore.cleanupRestoredBackups(
+            bundleIdentifier: project.bundleIdentifier,
+            backupRoot: backupDirectory,
+            recoveryStore: recoveryStore,
+            protectedPaths: [project.applicationPath, project.buildArtifactPath, project.clonePath],
+            policy: policy
+        )
+    }
+
+    private nonisolated static func isCanonicalPath(_ path: String) -> Bool {
+        path.hasPrefix("/") && URL(fileURLWithPath: path).standardizedFileURL.path == path
+    }
+
+    private nonisolated static func permitsCleanup(
+        _ project: IrisTestProjectRegistry.Project
+    ) -> Bool {
+        IrisTestProjectRegistry.project(slug: project.slug) == project
+            && IrisTestProjectRegistry.isValidProject(
+                project,
+                within: IrisTestProjectRegistry.projectsDirectory,
+                applicationBundleIdentifier: AppRelaunchService.artifactBundleIdentifier(
+                    atPath: project.applicationPath
+                )
+            )
+            && AppRelaunchService.artifactBundleIdentifier(atPath: project.buildArtifactPath)
+                == project.bundleIdentifier
     }
 
     nonisolated static var backupDirectory: URL {

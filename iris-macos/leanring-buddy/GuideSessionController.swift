@@ -966,6 +966,11 @@ final class GuideSessionController: ObservableObject {
         branchKeyFromDeepLink: String?,
         stepIndexFromDeepLink: Int?
     ) async {
+        if IrisTestEnvironment.isEnabled {
+            loadState = .guideCouldNotBeLoaded(slug: slug,
+                userFacingMessage: "Iris Test is for editing separate test copies. Use regular Iris for marketplace installations.")
+            return
+        }
         cancelAnyWorkFromThePreviousStep()
         loadState = .guideIsLoading(slug: slug)
         guideBeingFollowed = nil
@@ -1421,9 +1426,22 @@ final class GuideSessionController: ObservableObject {
     /// least one command Iris could execute. Offering it on a guide with
     /// nothing to run would be a dead button.
     var canOfferAutopilot: Bool {
-        guard makeAutopilotRunner != nil, isActivelyGuiding, !autopilotIsRunning,
-              let branch = selectedBranch else { return false }
-        return branch.steps.contains { stepIsAutopilotExecutable($0) }
+        autopilotAvailability == .available
+    }
+
+    var autopilotAvailabilityExplanation: String? {
+        autopilotAvailability.explanation
+    }
+
+    private var autopilotAvailability: GuideAutopilotAvailability {
+        GuideAutopilotAvailability.resolve(
+            isActivelyGuiding: isActivelyGuiding && selectedBranch != nil,
+            isRunning: autopilotIsRunning,
+            isSupportedBranch: selectedBranch?.unsupported == nil,
+            isInSetupRecovery: readerIsInSetupRecovery,
+            hasRunner: makeAutopilotRunner != nil,
+            hasExecutableSteps: selectedBranch?.steps.contains { stepIsAutopilotExecutable($0) } ?? false
+        )
     }
 
     /// True while Iris is executing a terminal step itself. The exit code is
@@ -1449,6 +1467,10 @@ final class GuideSessionController: ObservableObject {
     /// guide and step, but it lands the reader on this button — it cannot
     /// press it. Nothing about opening a guide calls this.
     func startAutopilot() {
+        guard !IrisTestEnvironment.isEnabled else {
+            autopilotBlockedExplanation = "Marketplace installation is off in Iris Test. Your normal apps are protected."
+            return
+        }
         // EVERY refusal below names itself. This guard used to be six conditions
         // and one bare `return`, which is the literal shape of the "I click Let
         // Iris run it and nothing happens" report: the tap lands, nothing moves,
@@ -1507,7 +1529,7 @@ final class GuideSessionController: ObservableObject {
             platformLabel: branch.label,
             hostsReachedByTheGuide: Self.hostsReachedBy(branch: branch),
             commandTheGuidePublishesToInstallEachTool:
-                Self.commandsThisGuidePublishesToInstallEachToolItWatchesFor(branch: branch)
+                Self.commandsThisGuidePublishesToInstallEachToolForAutopilot(branch: branch)
         )
         let runner = makeAutopilotRunner(context)
         autopilotRunner = runner
@@ -2227,7 +2249,7 @@ final class GuideSessionController: ObservableObject {
     }
 
     /// For each tool this branch installs, the command the guide itself
-    /// publishes for installing it — what the autopilot runs when a later step
+    /// publishes for installing it, what the autopilot runs when a later step
     /// dies because that tool is missing, instead of asking a model for a fix it
     /// would then have to refuse (see
     /// `GuideAutopilotRunner.installTheMissingToolTheGuideInstallsItself`).
@@ -2236,24 +2258,99 @@ final class GuideSessionController: ObservableObject {
     /// which is as true of the step that INSTALLS the tool as of one that merely
     /// needs it: kneecap watches `git` on a `git --version` check and again on
     /// its `git clone`. A command that begins by running the tool cannot be what
-    /// installs it — it would fail the same way the step just did — so those are
-    /// left out, and what remains is the shape of kneecap's own "Install Bun"
-    /// step, `npm install -g bun`.
-    private static func commandsThisGuidePublishesToInstallEachToolItWatchesFor(
+    /// installs it, so those are left out. Some older published guides, such as
+    /// Simplicity, carry the install command without a `toolVersion` watch. The
+    /// package-manager command shape supplies that missing declaration for the
+    /// small set of package-manager binaries the runner can recover.
+    static func commandsThisGuidePublishesToInstallEachToolForAutopilot(
         branch: IrisGuideBranch
     ) -> [String: String] {
         var installCommandForEachTool: [String: String] = [:]
         for step in branch.setupSteps + branch.steps {
-            guard let command = step.command, let watch = step.watch else { continue }
-            let programsThisCommandRuns = GuideAutopilotCommandShape.programsEachLineWouldRun(command)
-            for expectation in watch.expect {
-                guard case .toolVersion(let tool) = expectation,
-                      installCommandForEachTool[tool] == nil,
-                      !programsThisCommandRuns.contains(tool) else { continue }
+            guard let command = step.command else { continue }
+            if let watch = step.watch {
+                let programsThisCommandRuns = GuideAutopilotCommandShape
+                    .programsEachLineWouldRun(command)
+                for expectation in watch.expect {
+                    guard case .toolVersion(let tool) = expectation,
+                          installCommandForEachTool[tool] == nil,
+                          !programsThisCommandRuns.contains(tool) else { continue }
+                    installCommandForEachTool[tool] = command
+                }
+            }
+
+            // The `tool` field is reserved for Git and Node prerequisites, so
+            // it cannot name the Yarn binary installed by `npm install -g yarn`.
+            // Recover only explicit package-manager targets from the command's
+            // executable position. This avoids treating prose such as
+            // `echo npm install -g yarn` as an installer.
+            for tool in packageManagerBinariesInstalledByGuideCommand(command)
+            where installCommandForEachTool[tool] == nil {
                 installCommandForEachTool[tool] = command
             }
         }
         return installCommandForEachTool
+    }
+
+    private static let packageManagerExecutablesForGuideRecovery: Set<String> = [
+        "npm", "pnpm", "yarn", "bun"
+    ]
+
+    /// Finds package-manager binaries explicitly installed by a guide command.
+    /// This is deliberately narrower than parsing arbitrary package names: the
+    /// recovery path only needs to replay a guide's own Yarn, pnpm, Bun, or npm
+    /// install command when a later command returns 127.
+    private static func packageManagerBinariesInstalledByGuideCommand(
+        _ command: String
+    ) -> [String] {
+        let separator: Character = "\u{1F}"
+        let separatorString = String(separator)
+        let segments = command
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .flatMap { line in
+                String(line)
+                    .replacingOccurrences(of: "&&", with: separatorString)
+                    .replacingOccurrences(of: "||", with: separatorString)
+                    .replacingOccurrences(of: ";", with: separatorString)
+                    .replacingOccurrences(of: "|", with: separatorString)
+                    .split(separator: separator)
+                    .map(String.init)
+            }
+
+        var installedBinaries: [String] = []
+        for segment in segments {
+            guard let executable = GuideAutopilotCommandShape
+                .programsEachLineWouldRun(segment).first?.lowercased(),
+                  packageManagerExecutablesForGuideRecovery.contains(executable) else {
+                continue
+            }
+
+            let words = segment
+                .split(whereSeparator: { $0 == " " || $0 == "\t" })
+                .map {
+                    $0.trimmingCharacters(in: CharacterSet(charactersIn: "(){}'\""))
+                        .lowercased()
+                }
+            guard let executableIndex = words.firstIndex(of: executable) else { continue }
+            let arguments = words.dropFirst(executableIndex + 1)
+            let hasInstallVerb = arguments.contains {
+                ["install", "i", "add"].contains($0)
+            }
+            let hasGlobalFlag = arguments.contains {
+                $0 == "-g" || $0 == "--global" || $0 == "--location=global"
+            }
+            guard hasInstallVerb, hasGlobalFlag else { continue }
+
+            for argument in arguments {
+                guard !argument.hasPrefix("-") else { continue }
+                let packageName = argument.split(separator: "@", maxSplits: 1).first
+                    .map(String.init) ?? argument
+                guard packageManagerExecutablesForGuideRecovery.contains(packageName),
+                      !installedBinaries.contains(packageName) else { continue }
+                installedBinaries.append(packageName)
+            }
+        }
+        return installedBinaries
     }
 
     // MARK: - Copying and opening

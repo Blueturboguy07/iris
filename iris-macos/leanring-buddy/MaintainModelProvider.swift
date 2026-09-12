@@ -145,6 +145,7 @@ protocol MaintainModelProviding: Sendable {
     /// Stable across launches and independent of `displayName`, which is prose
     /// and will be reworded. This is what a remembered choice is stored as.
     var identifier: String { get }
+    var requestedModelDescription: String { get }
     var isAvailable: Bool { get }
     func respond(
         systemPrompt: String,
@@ -153,12 +154,18 @@ protocol MaintainModelProviding: Sendable {
     ) async throws -> String
 }
 
+extension MaintainModelProviding {
+    var requestedModelDescription: String { "Provider default (model not reported)" }
+    var routeDescription: String { "\(displayName) · \(requestedModelDescription)" }
+}
+
 // MARK: - Anthropic (the user's own key, via the BYO-only ClaudeAPI)
 
 @MainActor
 final class AnthropicMaintainProvider: MaintainModelProviding {
     let displayName = "Anthropic (your key)"
     let identifier = "anthropic"
+    var requestedModelDescription: String { "Requested: \(byoOnlyAPI.model)" }
 
     // Tier C never runs on the funded proxy, so every call this makes is on the
     // reader's own credential. Whether it is METERED is still the transport's
@@ -237,6 +244,7 @@ final class AnthropicMaintainProvider: MaintainModelProviding {
 final class OpenAIMaintainProvider: MaintainModelProviding {
     let displayName = "OpenAI (your key)"
     let identifier = "openai"
+    var requestedModelDescription: String { "Requested: \(Self.model)" }
 
     /// The model the fix loop asks for. A capable coding model; the user's
     /// key, the user's spend.
@@ -415,7 +423,7 @@ enum MaintainModelProviderResolver {
         // picker in the composer writes `preferredProviderIdentifier`, and a
         // stored choice beats this order.
         let candidates: [MaintainModelProviding] = [
-            CodexMaintainProvider(),
+            CodexMaintainProvider(model: CodexEditModelSelection.selectedModel()),
             AnthropicMaintainProvider(),
             OpenAIMaintainProvider(),
         ]

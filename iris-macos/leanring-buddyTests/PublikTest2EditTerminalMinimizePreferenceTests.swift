@@ -6,12 +6,11 @@
 //  minimized, in settings tab."
 //
 //  `EditTerminalStartMinimizedPreference` is the persisted opt-in behind that
-//  setting. When it is on, `CompanionManager.reactToOnDemandEditPhase(.running)`
-//  skips presenting the centered terminal takeover, so an edit starts minimized
-//  (the eye bar's running card, with its "Show terminal" button, is the
-//  surface). These tests pin the preference's contract: off by default, and
-//  remembered across reads — over an ISOLATED `UserDefaults` suite so the
-//  reader's real setting is never touched.
+//  setting. When it is on, guide installs and on-demand edits start minimized
+//  and their compact workflow cards carry an explicit "Show terminal" action.
+//  These tests pin the preference's contract: off by default, and remembered
+//  across reads over an ISOLATED `UserDefaults` suite so the reader's real
+//  setting is never touched.
 //
 
 import Foundation
@@ -19,7 +18,7 @@ import Testing
 @testable import Iris
 
 @Suite
-struct PublikTest2EditTerminalMinimizePreferenceTests {
+struct PublikTest2TerminalStartMinimizedPreferenceTests {
 
     @Test func theTerminalStartsUnminimizedByDefaultAndPersists() throws {
         let suiteName = "iris.editTerminalMinimize.\(UUID().uuidString)"
@@ -42,5 +41,65 @@ struct PublikTest2EditTerminalMinimizePreferenceTests {
         preference.setStartsMinimized(false)
         #expect(preference.startsMinimized == false)
         #expect(EditTerminalStartMinimizedPreference(userDefaults: defaults).startsMinimized == false)
+    }
+
+    @Test func thePurePolicyUsesTheSamePreferenceForInstallsAndEdits() {
+        #expect(
+            TerminalStartMinimizedPolicy.shouldAutomaticallyPresent(
+                workflow: .guideInstall, startsMinimized: false
+            )
+        )
+        #expect(
+            !TerminalStartMinimizedPolicy.shouldAutomaticallyPresent(
+                workflow: .guideInstall, startsMinimized: true
+            )
+        )
+        #expect(
+            TerminalStartMinimizedPolicy.shouldAutomaticallyPresent(
+                workflow: .onDemandEdit, startsMinimized: false
+            )
+        )
+        #expect(
+            !TerminalStartMinimizedPolicy.shouldAutomaticallyPresent(
+                workflow: .onDemandEdit, startsMinimized: true
+            )
+        )
+    }
+
+    @Test func terminalOwnershipRejectsWrongWorkflowAndQueuesOnlyItsOwner() {
+        #expect(
+            TerminalTakeoverOwnershipPolicy.mayPresent(
+                requestedWorkflow: .guideInstall, presentedWorkflow: nil
+            )
+        )
+        #expect(
+            !TerminalTakeoverOwnershipPolicy.mayPresent(
+                requestedWorkflow: .onDemandEdit, presentedWorkflow: .guideInstall
+            )
+        )
+        #expect(
+            !TerminalTakeoverOwnershipPolicy.mayDismiss(
+                requestedWorkflow: .guideInstall, presentedWorkflow: .onDemandEdit
+            )
+        )
+        #expect(
+            TerminalTakeoverOwnershipPolicy.mayDismiss(
+                requestedWorkflow: .onDemandEdit, presentedWorkflow: .onDemandEdit
+            )
+        )
+        #expect(
+            TerminalTakeoverOwnershipPolicy.shouldQueueDismissalFollowUp(
+                requestedWorkflow: .onDemandEdit,
+                presentedWorkflow: .onDemandEdit,
+                isDismissing: true
+            )
+        )
+        #expect(
+            !TerminalTakeoverOwnershipPolicy.shouldQueueDismissalFollowUp(
+                requestedWorkflow: .guideInstall,
+                presentedWorkflow: .onDemandEdit,
+                isDismissing: true
+            )
+        )
     }
 }

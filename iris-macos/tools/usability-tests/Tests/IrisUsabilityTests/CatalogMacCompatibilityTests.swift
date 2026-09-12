@@ -1,0 +1,1 @@
+../../../../leanring-buddyTests/CatalogMacCompatibilityTests.swift

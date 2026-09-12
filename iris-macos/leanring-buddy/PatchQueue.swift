@@ -19,6 +19,9 @@
 //
 
 import Foundation
+#if canImport(IrisEnvironment)
+import IrisEnvironment
+#endif
 
 struct QueuedPatch: Codable, Equatable, Sendable {
     let recipeId: String
@@ -38,10 +41,8 @@ final class PatchQueue {
 
     private let queueDirectoryURL: URL
 
-    init(baseDirectoryURL: URL = FileManager.default
-        .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("Iris/patch-queue")
-    ) {
+    init(baseDirectoryURL: URL = IrisTestEnvironment.applicationSupportDirectory
+        .appendingPathComponent("patch-queue", isDirectory: true)) {
         queueDirectoryURL = baseDirectoryURL
         try? FileManager.default.createDirectory(
             at: queueDirectoryURL, withIntermediateDirectories: true
@@ -51,8 +52,16 @@ final class PatchQueue {
     // MARK: - Recording
 
     func record(_ patch: QueuedPatch) {
-        guard let data = try? JSONEncoder().encode(patch) else { return }
-        try? data.write(to: fileURL(appSlug: patch.appSlug, recipeId: patch.recipeId))
+        try? recordChecked(patch)
+    }
+
+    func recordChecked(_ patch: QueuedPatch) throws {
+        let destination = fileURL(appSlug: patch.appSlug, recipeId: patch.recipeId)
+        let data = try JSONEncoder().encode(patch)
+        try data.write(to: destination, options: .atomic)
+        guard try JSONDecoder().decode(QueuedPatch.self, from: Data(contentsOf: destination)) == patch else {
+            throw CocoaError(.fileWriteUnknown)
+        }
         irisTrace("maintain: patch queued for \(patch.appSlug) (recipe \(patch.recipeId))")
     }
 
@@ -71,6 +80,10 @@ final class PatchQueue {
 
     func remove(appSlug: String, recipeId: String) {
         try? FileManager.default.removeItem(at: fileURL(appSlug: appSlug, recipeId: recipeId))
+    }
+
+    func removeChecked(appSlug: String, recipeId: String) throws {
+        try PatchQueueCheckedRemoval.remove(appSlug: appSlug, recipeId: recipeId, from: queueDirectoryURL)
     }
 
     // MARK: - Replay across an upstream update
@@ -103,6 +116,12 @@ final class PatchQueue {
     private func replay(
         patch: QueuedPatch, runner: MaintainShellRunner
     ) async -> PatchReplayDisposition {
+        guard !DeliveredEditUndoRecoveryStore().archivedProtection(
+            appSlug: patch.appSlug, paths: [runner.repoRootPath]
+        ).blocksChanges else {
+            irisTrace("maintain: patch replay paused by saved Undo recovery information")
+            return .conflicted
+        }
         let patchFileName = ".iris-replay-\(patch.recipeId).patch"
         let patchFilePath = (runner.repoRootPath as NSString).appendingPathComponent(patchFileName)
         defer { try? FileManager.default.removeItem(atPath: patchFilePath) }

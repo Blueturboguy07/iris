@@ -375,7 +375,7 @@ struct OverlayEyeInteractionGeometry {
 
     /// The input bar's width. Wide enough for a real question, narrow enough
     /// that it reads as an attachment to the eye rather than as a window.
-    static let inputBarWidth: CGFloat = 320
+    static let inputBarWidth: CGFloat = 400
 
     /// The bar never touches a screen edge, which matters because the eye sits
     /// close to the left one and a bar centred under it would otherwise hang
@@ -847,17 +847,17 @@ struct IrisSetupHelperWalkthrough: Equatable {
         IrisSetupHelperStep(
             glyph: .summonShortcut,
             title: "Summon Iris anytime",
-            body: "Press Control + Option to open this panel from anywhere. Iris lives in your menu bar — there's no dock icon and no window to hunt for."
+            body: "Press Control + Option to open Iris from anywhere. Iris lives in your menu bar, with no dock icon."
         ),
         IrisSetupHelperStep(
             glyph: .theEye,
             title: "Ask at the eye",
-            body: "Click the eye beside your pointer to ask what's on your screen — or to fix a bug or add a feature to an app you installed through publik."
+            body: "Click the eye beside your pointer to open a conversation. Screen help and app editing use separate connections; Iris shows which one is ready."
         ),
         IrisSetupHelperStep(
             glyph: .theSettingsGear,
-            title: "Your settings live here",
-            body: "These are your settings — your model, permissions, apps, and account. When the eye's bar is open, the eye becomes a gear that brings you right back here."
+            title: "Choose your first app",
+            body: "Open Apps in settings to find a Mac app or edit one you already have. The eye's gear brings you back to your models, permissions and account."
         ),
     ]
 

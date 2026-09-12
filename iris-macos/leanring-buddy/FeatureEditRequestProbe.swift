@@ -198,6 +198,7 @@ nonisolated enum FeatureEditRequestProbe {
     ) async -> FeatureEditRequestProbeVerdict {
         var parsedPassAnswers: [FeatureEditRequestProbePassAnswer] = []
         for passIndex in 0...1 {
+            guard !Task.isCancelled else { return .allQuiet }
             let passPrompt = reasoningPassPrompt(
                 request: scrubbedRequest,
                 repoMapSummary: repoMapSummary,
@@ -208,11 +209,14 @@ nonisolated enum FeatureEditRequestProbe {
                 conversation: [MaintainChatTurn(role: "user", text: passPrompt)],
                 maximumOutputTokens: maximumOutputTokensPerProbeCall
             ), let parsedAnswer = parsedReasoningPassAnswer(reply) else {
+                guard !Task.isCancelled else { return .allQuiet }
                 continue
             }
+            guard !Task.isCancelled else { return .allQuiet }
             parsedPassAnswers.append(parsedAnswer)
         }
 
+        guard !Task.isCancelled else { return .allQuiet }
         // Trigger 2: either pass flagging irreversibility is enough (a false
         // positive costs one question; a false negative costs an unconsented
         // destructive change), and one parsed pass may still flag it.
@@ -239,6 +243,7 @@ nonisolated enum FeatureEditRequestProbe {
             )
         }
 
+        guard !Task.isCancelled else { return .allQuiet }
         let judgePrompt = agreementPrompt(
             firstImplementationSummary: parsedPassAnswers[0].implementationSummary,
             secondImplementationSummary: parsedPassAnswers[1].implementationSummary
@@ -248,6 +253,7 @@ nonisolated enum FeatureEditRequestProbe {
             conversation: [MaintainChatTurn(role: "user", text: judgePrompt)],
             maximumOutputTokens: 12
         ), let saysSame = parsedAgreementSaysSame(judgeReply) else {
+            guard !Task.isCancelled else { return .allQuiet }
             // The judge was unreachable or unusable: fail open, no question.
             return FeatureEditRequestProbeVerdict(
                 requestLooksAmbiguous: false,
@@ -255,6 +261,7 @@ nonisolated enum FeatureEditRequestProbe {
             )
         }
 
+        guard !Task.isCancelled else { return .allQuiet }
         return FeatureEditRequestProbeVerdict(
             requestLooksAmbiguous: !saysSame,
             impliesIrreversibleAction: impliesIrreversibleAction

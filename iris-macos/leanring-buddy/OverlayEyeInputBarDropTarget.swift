@@ -141,8 +141,9 @@ struct OverlayEyeBarDropDelegate: DropDelegate {
         attachment.aDragIsHoveringOverTheBar = false
         let providers = info.itemProviders(for: Self.droppedContentTypes)
         guard !providers.isEmpty else { return false }
+        let destination = attachment.captureDestination()
         for provider in providers.prefix(OverlayEyePastedImageReader.mostImagesOneMessageMayCarry) {
-            loadOneImage(from: provider)
+            loadOneImage(from: provider, destination: destination)
         }
         return true
     }
@@ -150,28 +151,28 @@ struct OverlayEyeBarDropDelegate: DropDelegate {
     /// Image DATA first (works for a browser drag and a screenshot thumbnail's
     /// promise without ever touching disk); a file URL is the fallback for a
     /// Finder drag, read through the same file reader a picked file uses.
-    private func loadOneImage(from provider: NSItemProvider) {
+    private func loadOneImage(from provider: NSItemProvider, destination: OverlayEyePastedImageAttachment.Destination) {
         if provider.canLoadObject(ofClass: NSImage.self) || provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
             provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
-                guard let data, let bitmap = NSBitmapImageRep(data: data),
-                      let image = OverlayEyePastedImageReader.sendableImage(from: bitmap) else {
-                    self.loadFileURL(from: provider)
+                guard let data,
+                      let image = OverlayEyePastedImageReader.sendableImage(from: data) else {
+                    self.loadFileURL(from: provider, destination: destination)
                     return
                 }
-                DispatchQueue.main.async { self.attachment.attach(image) }
+                DispatchQueue.main.async { self.attachment.attach(image, to: destination) }
             }
             return
         }
-        loadFileURL(from: provider)
+        loadFileURL(from: provider, destination: destination)
     }
 
-    private func loadFileURL(from provider: NSItemProvider) {
+    private func loadFileURL(from provider: NSItemProvider, destination: OverlayEyePastedImageAttachment.Destination) {
         guard provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) else { return }
         _ = provider.loadObject(ofClass: URL.self) { url, _ in
             guard let url else { return }
             let images = OverlayEyePastedImageReader.imagesInFiles([url])
             guard let image = images.first else { return }
-            DispatchQueue.main.async { self.attachment.attach(image) }
+            DispatchQueue.main.async { self.attachment.attach(image, to: destination) }
         }
     }
 }

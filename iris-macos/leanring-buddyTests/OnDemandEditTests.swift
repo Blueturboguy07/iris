@@ -30,6 +30,45 @@ import Testing
 @MainActor
 @Suite struct OnDemandEditPureLogicTests {
 
+    @Test func appSelectionDoesNotReplaceLiveAssessmentOrEditState() {
+        let replaceablePhases: [OnDemandEditPhase] = [
+            .pickApp, .describe, .done, .failed(reason: "failed"),
+            .notEligible(reason: "not eligible"), .blockedByModel(explanation: "blocked")
+        ]
+        for phase in replaceablePhases {
+            #expect(
+                OnDemandEditCoordinator.appSelectionMayRetargetCurrentFlow(
+                    phase: phase, isAssessingRequest: false, undoNeedsRecovery: false
+                )
+            )
+        }
+
+        let livePhases: [OnDemandEditPhase] = [
+            .clarifying, .presentingPlan, .awaitingStartConsent, .running,
+            .previewDiff, .committing, .awaitingRelaunchConsent, .relaunching,
+            .awaitingManifestConsent, .awaitingMachineCommandConsent, .delivering,
+            .awaitingSymptomConfirmation, .awaitingForceQuitConsent
+        ]
+        for phase in livePhases {
+            #expect(
+                !OnDemandEditCoordinator.appSelectionMayRetargetCurrentFlow(
+                    phase: phase, isAssessingRequest: false, undoNeedsRecovery: false
+                )
+            )
+        }
+
+        #expect(
+            !OnDemandEditCoordinator.appSelectionMayRetargetCurrentFlow(
+                phase: .describe, isAssessingRequest: true, undoNeedsRecovery: false
+            )
+        )
+        #expect(
+            !OnDemandEditCoordinator.appSelectionMayRetargetCurrentFlow(
+                phase: .pickApp, isAssessingRequest: false, undoNeedsRecovery: true
+            )
+        )
+    }
+
     // MARK: - Per-clone lock (mutual exclusion + canonicalization)
 
     @Test func theLockExcludesASecondHolderOnTheSamePath() {
@@ -105,6 +144,18 @@ import Testing
             "CMakeLists.txt",
             "deep/nested/gulpfile.js",
             "fragment.mk",
+            "Package.swift",
+            "setup.py",
+            "pyproject.toml",
+            "noxfile.py",
+            "tox.ini",
+            "nested/build.gradle",
+            "nested/build.gradle.kts",
+            "nested/settings.gradle",
+            "nested/settings.gradle.kts",
+            "gradlew",
+            "gradlew.bat",
+            "meson.build",
         ] {
             #expect(MaintainBuildScriptGuard.isBuildScriptFile(path), "\(path) should be a build-script file")
         }
@@ -118,15 +169,24 @@ import Testing
             "app/index.ts",
             "lib/util.js",
             "styles/app.css",
+            "docs/Package.swift.txt",
+            "docs/build.gradle.md",
+            "docs/gradlew.example",
+            "docs/meson.build.txt",
         ] {
             #expect(!MaintainBuildScriptGuard.isBuildScriptFile(path), "\(path) should NOT be a build-script file")
         }
     }
 
     @Test func buildScriptFilePathsFiltersOnlyTheOffenders() {
-        let changed = ["src/main.rs", "package.json", "README.md", "sub/build.rs"]
+        let changed = [
+            "src/main.rs", "package.json", "README.md", "sub/build.rs",
+            "Package.swift", "nested/build.gradle.kts", "docs/build.gradle.md"
+        ]
         let offenders = MaintainBuildScriptGuard.buildScriptFilePaths(inChangedPaths: changed)
-        #expect(offenders == ["package.json", "sub/build.rs"])
+        #expect(offenders == [
+            "package.json", "sub/build.rs", "Package.swift", "nested/build.gradle.kts"
+        ])
     }
 
     // MARK: - Synthesized changeId
@@ -490,6 +550,9 @@ import Testing
         let contents = try String(contentsOfFile: unwrappedRunLog.filePath, encoding: .utf8)
         #expect(contents.contains("demo (feature)"))
         #expect(contents.contains("Request: add a dark mode toggle"))
+        #expect(contents.contains("Iris version:"))
+        #expect(contents.contains("Iris build:"))
+        #expect(contents.contains("Run identifier:"))
         #expect(contents.contains("iris: Opening the settings view."))
         #expect(contents.contains("$ cat src/settings.tsx"))
         #expect(contents.contains("outcome: failed: ran out of steps"))
@@ -934,6 +997,45 @@ struct OnDemandEditEngineTests {
         #expect(FileManager.default.fileExists(atPath: repo + "/.git"))
         #expect(!Self.git(["branch", "--list", "iris/edit-*"], in: repo)
             .trimmingCharacters(in: .whitespacesAndNewlines).contains("iris/edit-"))
+    }
+
+    /// The unattended crash path has no reader approval surface for a model
+    /// build-file edit. Its shell command is still allowed to write inside the
+    /// exploration jail, so the shared pre-verification guard must restore the
+    /// file before the ordinary verifier sees it. The build command below
+    /// checks the exact pristine package content; if the crash path bypasses
+    /// the guard, verification fails instead of silently executing the edit.
+    @Test func aCrashFixBuildScriptEditIsRestoredBeforeVerification() async throws {
+        guard sandboxIsAvailable else { return }
+        let repo = try Self.makeBuggyRepo(extraFiles: ["package.json": "{\"name\":\"x\"}\n"])
+        defer { Self.removeRepo(repo) }
+
+        let fixer = MaintainTierCFixer(provider: ScriptedProvider([
+            "```bash\nprintf '{\"name\":\"model\"}\\n' > package.json\n```",
+            "```bash\nprintf 'FIXED\\n' > app.txt\n```",
+            "DONE",
+        ]))
+        let commands = VerificationCommands(
+            buildCommand: "test \"$(cat package.json)\" = '{\"name\":\"x\"}'",
+            testCommand: "test \"$(cat app.txt)\" = 'FIXED'",
+            commandSubdirectory: nil
+        )
+        let result = await fixer.attemptFix(
+            clonePath: repo,
+            appSlug: "demo",
+            appStack: .nextjs,
+            signatureId: "9999999999999999eeeeeeeeeeeeeeee",
+            crashEvidence: "SIGSEGV in demo",
+            verificationCommandsOverride: commands
+        )
+
+        guard case .fixedAndVerified = result else {
+            Issue.record("expected crash fix to verify after restoring its build-file edit, got \(result)")
+            return
+        }
+        #expect(Self.fileContents(repo, "package.json") == "{\"name\":\"x\"}")
+        #expect(Self.fileContents(repo, "app.txt") == "FIXED")
+        #expect(FileManager.default.fileExists(atPath: repo + "/.git"))
     }
 
     /// The reader's Stop is honored at the next step boundary and undoes

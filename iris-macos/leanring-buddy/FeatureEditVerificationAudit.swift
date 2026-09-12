@@ -289,7 +289,12 @@ enum FeatureEditVerificationAudit {
         // A per-run unique directory so two verification passes never collide
         // and the maker's tree is never a candidate location.
         let uniqueSuffix = UUID().uuidString
-        let freshCheckoutPath = (NSTemporaryDirectory() as NSString)
+#if IRIS_HARNESS_HEADLESS
+        let auditDirectory = HarnessFixtureEnvironment.scratchDirectory.path
+#else
+        let auditDirectory = NSTemporaryDirectory()
+#endif
+        let freshCheckoutPath = (auditDirectory as NSString)
             .appendingPathComponent("iris-clean-verify-\(uniqueSuffix)")
 
         let quotedRepoRoot = shellSingleQuoted(repoRootPath)

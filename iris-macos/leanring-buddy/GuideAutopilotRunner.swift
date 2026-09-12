@@ -81,6 +81,112 @@ struct GuideAutopilotGuideContext {
     var commandTheGuidePublishesToInstallEachTool: [String: String] = [:]
 }
 
+/// A source-pin command found a checkout, but its own clean-copy guard refused
+/// to continue. This is deliberately derived only from the command and output
+/// already captured for that step. It never runs a second Git probe, and it
+/// never guesses whether the refusal came from local changes or a different
+/// origin when the guide did not print that detail.
+nonisolated struct GuideAutopilotSourceCheckoutRefusal: Equatable, Sendable {
+    let verifiedWorkingDirectory: String
+    let safeRelativeChangedPaths: [String]
+
+    private static let maximumChangedPathsToShow = 16
+    private static let porcelainStatusCharacters = Set(" MADRCU?!")
+
+    static func detect(
+        command: String,
+        exitStatus: Int32,
+        scrubbedOutputTail: String,
+        workingDirectory: String
+    ) -> Self? {
+        guard exitStatus == 1,
+              looksLikeASourcePinGuard(command),
+              scrubbedOutputTail.lowercased().contains("not a clean copy"),
+              let verifiedWorkingDirectory = safeAbsoluteWorkingDirectory(workingDirectory)
+        else { return nil }
+
+        return Self(
+            verifiedWorkingDirectory: verifiedWorkingDirectory,
+            safeRelativeChangedPaths: changedPathsFromPorcelainOutput(scrubbedOutputTail)
+        )
+    }
+
+    /// The path came from the shell session's completed `$PWD` marker, rather
+    /// than from guide text. Keep only a plain absolute path before showing it
+    /// in a reader-facing diagnosis.
+    private static func safeAbsoluteWorkingDirectory(_ path: String) -> String? {
+        guard path.hasPrefix("/"), path != "/", !path.contains("//"),
+              !path.split(separator: "/").contains(".."),
+              !path.unicodeScalars.contains(where: { scalar in
+                  scalar.value < 0x20 || scalar.value == 0x7F
+              })
+        else { return nil }
+        return path
+    }
+
+    /// A source-pin guard checks the origin, checks porcelain, and only then
+    /// checks out its reviewed revision. Requiring all three fragments keeps a
+    /// normal failed build or an unrelated `git status` from being mislabeled.
+    private static func looksLikeASourcePinGuard(_ command: String) -> Bool {
+        let normalizedCommand = command
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+            .lowercased()
+        return normalizedCommand.contains("git config --get remote.origin.url")
+            && normalizedCommand.contains("git status --porcelain")
+            && normalizedCommand.contains("git checkout")
+    }
+
+    /// Git porcelain paths are optional here. The published guard currently
+    /// pipes porcelain into `grep -q`, so it reports the refusal without the
+    /// filenames. When a guide does print them, accept only unquoted,
+    /// relative, traversal-free paths already present in that output.
+    private static func changedPathsFromPorcelainOutput(_ output: String) -> [String] {
+        var paths = Set<String>()
+        for line in output.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+            let characters = Array(line)
+            guard characters.count >= 4,
+                  porcelainStatusCharacters.contains(characters[0]),
+                  porcelainStatusCharacters.contains(characters[1]),
+                  characters[2] == " " else { continue }
+
+            let path = String(line.dropFirst(3))
+            guard isSafeRelativePath(path) else { continue }
+            paths.insert(path)
+            if paths.count >= maximumChangedPathsToShow { break }
+        }
+        return paths.sorted()
+    }
+
+    private static func isSafeRelativePath(_ path: String) -> Bool {
+        guard !path.isEmpty,
+              !path.hasPrefix("/"), !path.hasPrefix("~"),
+              !path.contains("//"), !path.contains("->"),
+              !path.contains("\\"), !path.contains("\""), !path.contains("'"),
+              !path.unicodeScalars.contains(where: { scalar in
+                  scalar.value < 0x20 || scalar.value == 0x7F
+              }),
+              !path.split(separator: "/").contains("..") else { return false }
+        return true
+    }
+
+    var readerFacingDiagnosis: String {
+        var diagnosis = "The source check stopped in \(verifiedWorkingDirectory). "
+            + "Its clean-copy check refused to continue. Iris will not reset, move, "
+            + "stash, or replace anything there."
+        if safeRelativeChangedPaths.isEmpty {
+            diagnosis += " The check did not expose the individual changed filenames, "
+                + "so inspect that folder yourself for local changes or a different "
+                + "source copy, then press Try again."
+        } else {
+            diagnosis += " The check reported these changed paths: "
+                + safeRelativeChangedPaths.joined(separator: ", ")
+                + ". Review them yourself, then press Try again."
+        }
+        return diagnosis
+    }
+}
+
 /// Who is paying for the model calls this install's fix ladder makes — and,
 /// when publik is paying, what Iris may carry on with once publik's own budget
 /// for this install is gone.
@@ -245,6 +351,15 @@ struct GuideAutopilotFixLadderFunding {
 // `OnDemandEditRunner` for a user-initiated edit — and reuse the same renderer.
 @MainActor
 final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting {
+    /// Package-manager executables that a published guide may install itself.
+    /// `ToolVersionService` intentionally owns version probes, but its current
+    /// table does not include Yarn even though published guides can install it.
+    /// Keep this recovery exception closed to the package-manager shapes the
+    /// command analyzer already recognizes, rather than treating an arbitrary
+    /// `toolVersion` label from the wire as executable.
+    private static let guidePublishedPackageManagerExecutables: Set<String> = [
+        "npm", "pnpm", "yarn", "bun"
+    ]
 
     // MARK: - Budgets (see docs/iris-assistant-protocol.md §8)
 
@@ -468,6 +583,23 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         case .stopped:
             return .stopped
         case .failed(let exitStatus, let workingDirectory):
+            if let sourceCheckoutRefusal = GuideAutopilotSourceCheckoutRefusal.detect(
+                command: command,
+                exitStatus: exitStatus,
+                scrubbedOutputTail: shellSession.tailForTheModel(),
+                workingDirectory: workingDirectory
+            ) {
+                // A clean-copy refusal is a deterministic reader-owned state,
+                // not a repair opportunity. Surface it before the model ladder
+                // so Iris never proposes a stash, reset, move, or reclone.
+                transcript.append(.explanation(
+                    text: sourceCheckoutRefusal.readerFacingDiagnosis
+                ))
+                return surface(
+                    diagnosis: sourceCheckoutRefusal.readerFacingDiagnosis,
+                    command: command
+                )
+            }
             return await runFailureLadder(
                 step: step, command: command,
                 exitStatus: exitStatus, workingDirectory: workingDirectory
@@ -532,6 +664,14 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         case .succeeded(let workingDirectory):
             await holdSoTheCommandReadsAsWork(elapsed: duration)
             transcript.append(.exitStatus(code: 0, duration: duration))
+            if GuideAutopilotCommandShape.installsAGlobalPackageManagerBinary(command.text) {
+                // A package manager is a child process. Even when `npm install
+                // -g yarn` exits zero, the parent shell keeps the PATH and
+                // command lookup state it had before the install. Refresh it
+                // before the next guide step so `yarn install` is looked up in
+                // the same persistent shell that just performed the install.
+                await reloadTheReadersEnvironmentIntoTheShell()
+            }
             _ = workingDirectory
             return .succeeded
         case .failed(let exitStatus, let workingDirectory):
@@ -662,9 +802,12 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
 
         // This session is one shell, started before the tool existed: it holds
         // the PATH of that moment and a command hash table that has already
-        // looked this tool up and not found it. Without the reload the retry
-        // below fails exactly the way the step just did.
-        await reloadTheReadersEnvironmentIntoTheShell()
+        // looked this tool up and not found it. A global package-manager
+        // installer already refreshed the shell in runApproved; other guide
+        // installers still need the existing retry-path refresh here.
+        if !GuideAutopilotCommandShape.installsAGlobalPackageManagerBinary(installCommand) {
+            await reloadTheReadersEnvironmentIntoTheShell()
+        }
 
         transcript.append(.commandFromTheGuide(text: command))
         switch await runGuideCommand(
@@ -686,9 +829,12 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         _ command: String
     ) -> (missingTool: String, installCommand: String)? {
         for programName in GuideAutopilotCommandShape.programsEachLineWouldRun(command) {
-            guard ToolVersionService.toolSpecification(for: programName) != nil,
+            let normalizedProgramName = programName.lowercased()
+            guard ToolVersionService.toolSpecification(for: programName) != nil
+                    || Self.guidePublishedPackageManagerExecutables.contains(normalizedProgramName),
                   let installCommand =
                     guideContext.commandTheGuidePublishesToInstallEachTool[programName]
+                        ?? guideContext.commandTheGuidePublishesToInstallEachTool[normalizedProgramName]
             else { continue }
             return (missingTool: programName, installCommand: installCommand)
         }

@@ -1,0 +1,1842 @@
+{
+  "description": "Public review snapshot inventory, excluding this self-referential manifest. Source and tests have separate acceptance labels in STATUS_MATRIX.md.",
+  "base": "84dd908aa6d3c529f5abfd73158a3781a34c9c15",
+  "files": [
+    {
+      "path": ".github/workflows/iris-release.yml",
+      "sha256": "4f37e88b63a8bbc83373e4bba5a60593902df5538147064d06478756f5d3496f",
+      "bytes": 18098,
+      "symlink": false
+    },
+    {
+      "path": "AGENTS.md",
+      "sha256": "215c92d988960a186aa5bb13994b0d5ccfaf48594f2a3b13b59d97b00a74a0eb",
+      "bytes": 2207,
+      "symlink": false
+    },
+    {
+      "path": "docs/code-signing.md",
+      "sha256": "af8bae36c6154e14dbd3b1a6a5d7762cde0a49ee5b2fd665610f262035edb817",
+      "bytes": 10654,
+      "symlink": false
+    },
+    {
+      "path": "docs/iris-handover.md",
+      "sha256": "43ea9dfa322c7576f720b70e807ddd3f780a06a087f03946906e7c9053b88a70",
+      "bytes": 12977,
+      "symlink": false
+    },
+    {
+      "path": "docs/testing/macos-login-update-continuity.md",
+      "sha256": "ad7a5a1a748a2a40d19469dc103d7e1aeee7ca24ff19da89ae3b0bca5c8b837e",
+      "bytes": 4898,
+      "symlink": false
+    },
+    {
+      "path": "docs/testing/usability-branch.md",
+      "sha256": "e34db1a830e15ec1d8a4219fb4ddec185f93a3d2f6e48285a718362920c94941",
+      "bytes": 7816,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/AGENTS.md",
+      "sha256": "6bbb19fdf5eb8caf21a9be53f26fd88088e75878f8a3dc3f1c043e5028851c50",
+      "bytes": 102380,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/Package.swift",
+      "sha256": "e8eed9ca5da8f57b0440b1cbd401a1ac28e567abdad4ab18394b83df7049bacc",
+      "bytes": 604,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy.xcodeproj/project.pbxproj",
+      "sha256": "72c497413949f4f6ecfab817c55edc0a27586b6a567005cd7b0a265480d437b3",
+      "bytes": 26850,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy.xcodeproj/xcshareddata/xcschemes/Iris Test.xcscheme",
+      "sha256": "fe1a1b15adf824971a068c9494839e5b538717d47fa20180fa8c2423eb5ecfdd",
+      "bytes": 3302,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/AGENTS.md",
+      "sha256": "047dd0d6b4d08ad09c06d31ddac8aabc7ceca9e65796d926faf8d335e903028c",
+      "bytes": 10764,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/AccountService.swift",
+      "sha256": "4fab11490e06e6b449f7efe4514591632a359e28fff1d51312b874c39c16bb39",
+      "bytes": 50726,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/AppDeliveryReceiptStore.swift",
+      "sha256": "a33e389b7b0f5de810a7441b46c3768cbfa2e9b906a083b1c321db2262517275",
+      "bytes": 41872,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/AppInventorySectionView.swift",
+      "sha256": "0ad22213ecfbd792509d97fc575f0d7a02c0e86924f581b7b990b3c5d6cf7f3c",
+      "bytes": 26944,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/AppInventoryService.swift",
+      "sha256": "492af8f6759f1d6e87fb9f6d5b86e04e54d1a18860c7ab2843f7939ba916f1ea",
+      "bytes": 35837,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/AppRelaunchService.swift",
+      "sha256": "f7e70672b77b8a16173a3634c8eb168089176942065def1875deb3fc09af1e36",
+      "bytes": 71241,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/AssistantRequestDiagnostics.swift",
+      "sha256": "83ce16b4919037feeb8a51a7480fedf6dac1508cbfa2e1b3f6ef401523a0661f",
+      "bytes": 1566,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/CatalogAppIconLoader.swift",
+      "sha256": "3b104c027c0c8fd20d5c62a5be99dde8df1f0f0f883a8af2e12ecabeec59ac42",
+      "bytes": 8389,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/CatalogAppIconView.swift",
+      "sha256": "8020e4e3f1adb735cd8a51bf4fa0474f7fd88aaea822abb7f65f7edc6455bfcc",
+      "bytes": 2437,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/CatalogMacCompatibility.swift",
+      "sha256": "ecc6d803ff2953f9836ef9ab6d9893e52da07fc5fc4dbccdff7aa99b86828fdf",
+      "bytes": 4626,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/ChatActionTools.swift",
+      "sha256": "6d1611334c10c246202fe4aae660da1c2d48a7fc65d0a8d87cead5d882da436c",
+      "bytes": 22519,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/ChatTranscriptStore.swift",
+      "sha256": "7aaed3e45a3dbdd0a09b4a65f32248eb6e699f6a9bbc334906b36bb635cdadc5",
+      "bytes": 17418,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/ClaudeAPI.swift",
+      "sha256": "fd7cae45d3fc5912219bb741519c3cbe60b943935f1783fac785104b4b33b96a",
+      "bytes": 30839,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/ClaudeCodeLogin.swift",
+      "sha256": "9c1e6adcda587d5bebabacb1aef84afcdc538f84292b0d70b040ee5d2ddd0f76",
+      "bytes": 18361,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/CodexEditModelPicker.swift",
+      "sha256": "dd68f7cca85ca3c136e7368b78d0d860259a8549a7278bb8528e0b0cc253b52f",
+      "bytes": 4564,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/CodexEditModelSelection.swift",
+      "sha256": "6c482b9820200faa781f2b548ea5dd12cb672a321fc4adec7b8b66ac04e9437c",
+      "bytes": 3252,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/CodexMaintainProvider.swift",
+      "sha256": "1340480a89ea573bcbda2179247db58c99e5f67263715d17d8e84a07f87c34e7",
+      "bytes": 57693,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/CompanionManager.swift",
+      "sha256": "e69f527b5bf52f06be89b63da37268785e4beba55bc5fa28cbb488630ae81dd6",
+      "bytes": 184204,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/CompanionPanelView.swift",
+      "sha256": "077bee0287e9fc434b6728f55f0ff6f625a5909326091cf0c3c6f35c4deec99f",
+      "bytes": 82777,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/ComposerConnectionPresentation.swift",
+      "sha256": "2305ce42206c2b3441d38e5acd624416d496cbdb9b782b6c0f957cc208709e9c",
+      "bytes": 3161,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/DeliveredEditUndoArchive.swift",
+      "sha256": "253943772c18d294465ccc2bf2f032fb0d4d04e5af841a1cccd0eb06ceae2313",
+      "bytes": 8033,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/DeliveredEditUndoRecovery.swift",
+      "sha256": "d7f0d67730e2df4d3c649775502bfecaa65ada70c832efcf602a0635a1c61e72",
+      "bytes": 3808,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/DeliveredEditUndoRecoveryStore.swift",
+      "sha256": "9a16b79337924cab1b757fc237041bee84b60f77a7d68e2d67a7b227613d312c",
+      "bytes": 5258,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/DesignSystem.swift",
+      "sha256": "58eec6982778b4865ac7e4d35d1e9af80200a5d076fad58eed425fa80fdc634d",
+      "bytes": 28043,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/EditTerminalStartMinimizedPreference.swift",
+      "sha256": "359d46e47d1268b5d86a6930d386feb5f791d4312b7afbe2cd02f05a816caf84",
+      "bytes": 4016,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/EditVerificationReceipt.swift",
+      "sha256": "393d4e8233647f18a2879d4ab3c5b184c5bc16db0b8cc2dae073bec744eb5c19",
+      "bytes": 3195,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/FailedEditReviewArchive.swift",
+      "sha256": "7979ca06ecdc728e499bef516624ea37ece8f5ba0db164bcb429184883c9ed8b",
+      "bytes": 1468,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/FeatureEditAdversarialReviewer.swift",
+      "sha256": "77bb92efd6a0bbeccf16e580f6c7fd5ff1c627f53b6717a3d462621d5715b39f",
+      "bytes": 23077,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/FeatureEditRepositoryContext.swift",
+      "sha256": "02058d3dc1cad58aec3212ed041b484a0ee7cc47eee3f68e1443351b7970d116",
+      "bytes": 27209,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/FeatureEditRequestProbe.swift",
+      "sha256": "ffb1e918adf93b9d67e5929fc12933a404ad2537255d0105738aac34099331a6",
+      "bytes": 13118,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/FeatureEditVerificationAudit.swift",
+      "sha256": "1cc4569ff5e08346102b3d7fe451b0ac101a4afcbdd6fca2626370dd06384143",
+      "bytes": 35490,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/GuideAutopilotAvailability.swift",
+      "sha256": "5fad55671057750c47b9ceac3e864401fbfbb1392aba06041ec4c09e9dd169ac",
+      "bytes": 1674,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/GuideAutopilotCommandShape.swift",
+      "sha256": "c9bbee7c594ebc056b7dfc5bbc44731f5adf4f515e23ca338fe44ef3b22ac1df",
+      "bytes": 10803,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/GuideAutopilotOutputBuffer.swift",
+      "sha256": "00a91222814ceef2c045e4ac1d0f3934aad9f5aba201d12007e32483e8275866",
+      "bytes": 9755,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/GuideAutopilotRunner.swift",
+      "sha256": "10fe9456dd4be39c02769f3116f4d40eabc3f1e5d76ce864a29c58654062cbd8",
+      "bytes": 69714,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/GuideAutopilotShellSession.swift",
+      "sha256": "b500c5877037e3497aa9c1968c4daf8c49da704e5bac685c1cc07f339e73630c",
+      "bytes": 46036,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/GuideAutopilotTakeoverPanel.swift",
+      "sha256": "a587e147b7d7f9ea96dfb32cf95cedbe9f2eb8401ba834fe42e48c69c7e4cbdb",
+      "bytes": 78074,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/GuideAutopilotTerminalView.swift",
+      "sha256": "f4ac4beede83f7165a4300a4e3f5e5f56e558c897a24e6f4002d07fd10436fec",
+      "bytes": 30012,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/GuidePanelView.swift",
+      "sha256": "67a525551c598485f6af9b3fa6bdc9312670423f92bdda69de85f4a10725a56d",
+      "bytes": 35613,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/GuidePointing.swift",
+      "sha256": "faa4f5052a9a8706bc0568c2e88f5b62e4b1543bef2dd22158735588bc4f7236",
+      "bytes": 12998,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/GuidePointingFreshness.swift",
+      "sha256": "df30d8f77f9c22c4552685a333c46ddbf65405b3d587e9e0876dc343fec8ffe6",
+      "bytes": 2683,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/GuideSessionController.swift",
+      "sha256": "c2b2cfef8eb2e80f675dec43e9d55d1fddc934c925979360f379f2d04246c1a2",
+      "bytes": 165352,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/GuideStepPointing.swift",
+      "sha256": "521bb4e196cae4ae5491ac01a915f0a5ace6ecf8932f1f648b2d6fc2a1468627",
+      "bytes": 47423,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/HarnessBehaviorAssessment.swift",
+      "sha256": "f4949c751270df81903d16d61ddb8c8bf3a510b3afa97ef503be460df79905e3",
+      "bytes": 8485,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/HarnessCodexAdapter.swift",
+      "sha256": "576ef8a25bf4458e23f350e09d9e5b85f3f044d341a304b08d3cc30995f6bbbb",
+      "bytes": 24551,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/HarnessComparison.swift",
+      "sha256": "51a5333863a27e73b26261f7e9ab790fb058c10bb1f47df915a9b0361ac9bc4a",
+      "bytes": 4645,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/HarnessConversationProjection.swift",
+      "sha256": "09d1217327042ef4e710520307f2a300fa4cae9d495e08094bcb2378c0f336a6",
+      "bytes": 23684,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/HarnessExecutionJournal.swift",
+      "sha256": "2bbb446f18e9786052b810795d16d25de8d87a8779915d75826b8efebf7ee7fd",
+      "bytes": 3234,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/HarnessFeatureWorkflow.swift",
+      "sha256": "faf45019db26afa300687a6927134cf9df771bdc2dc0a95efb7a126556eefdd5",
+      "bytes": 40917,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/HarnessFixtureEnvironment.swift",
+      "sha256": "3cc760fd9bc124dbeeb77c109aeefcfd0bcccf143d25f92a1fd4e7c7f1d8e381",
+      "bytes": 981,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/HarnessModelSession.swift",
+      "sha256": "ae25b80f34b19e2255dd87452575988f108ba79c219fe06512253c10a92f757b",
+      "bytes": 10030,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/HarnessNativeVerificationSequence.swift",
+      "sha256": "5e5065c0f93153ca925901ffe0b956e4ca04cab3ec01f518a0af51f2753ed538",
+      "bytes": 25272,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/HarnessRunLedger.swift",
+      "sha256": "cc6c511709c8c2916bdef5cbebe3fc27dd447e298984ac8be74a26cf42c88569",
+      "bytes": 29435,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/HarnessTaskState.swift",
+      "sha256": "56a7da61828bc9cd09a4c46ec34d3a35a59dc4510dc299611f1424c6ce46a9d6",
+      "bytes": 44281,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/Info-Test.plist",
+      "sha256": "aa514504e2948a68f4bd2a98b4f0e7b84a34c5002cb3c7ea0bae906007917547",
+      "bytes": 901,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/InterruptedUndoResumeIdentity.swift",
+      "sha256": "b7fd0bf80f64dbf6936fdf9f13c4a563e7480d8f0017dbfad1fda1943aeb6d0c",
+      "bytes": 9336,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/Iris-Test.entitlements",
+      "sha256": "73e07fd12d6e29fe90f5435853b3b193b254834a8a14967faa288f778f36e95c",
+      "bytes": 546,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/IrisChatLoadingBar.swift",
+      "sha256": "360bda62d8161a35366fbbe48691db7b9041b965ba8d53f60261b39f11e66d5e",
+      "bytes": 6568,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/IrisEyeView.swift",
+      "sha256": "be3ea733e5e8da4a1b12e5c0e7ac8aa77a7621ff081243b2edef40e813c51c8b",
+      "bytes": 4990,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/IrisTestAppDelivery.swift",
+      "sha256": "303d445a790e74d4ccfeeed0d9dac9dee3d9e31b506a304eb31029f40306aa3a",
+      "bytes": 5948,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/IrisTestEnvironment.swift",
+      "sha256": "b582956db39454d3b511bf796478b7ff34a521aee3870d9e5b70c53ee758e9bf",
+      "bytes": 4637,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/IrisTestNativeVerification.swift",
+      "sha256": "2c0e7f8af4b042310d57ed90fec9d589085925d0eb1212b721c620738fc27afd",
+      "bytes": 15378,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/IrisTestProjectRegistry.swift",
+      "sha256": "c26f9de65cca1eebc902bfe5588b28833e29600228c7ff2ccb08781d18afd515",
+      "bytes": 11320,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/IrisTestRunUsage.swift",
+      "sha256": "8dcedcf346da11772997a2dac5dfd1e3764a7bc6834ab9fe8e126aca3f5740cd",
+      "bytes": 5072,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/IrisTestVerificationPlan.swift",
+      "sha256": "9636c6d3f319d7c42ae39506cfa52478116b8e9097ec06bac09290e174714130",
+      "bytes": 3935,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/KeychainReadPolicy.swift",
+      "sha256": "87f8b035bdf17c7453fe2a27c51fac6c6dff7c241cf4e4a392f132bd3e0b23d6",
+      "bytes": 2294,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/KeychainStore.swift",
+      "sha256": "b14c15ed8ada484eabe15334f7943500e8d4afe5ca3ac300691edafeecf12c00",
+      "bytes": 9710,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/MaintainBuildScriptGuard.swift",
+      "sha256": "05eb6a5c790d2f26e02af90314d7d2cb383bebe0cc4892e1c94440f81b4b01ad",
+      "bytes": 4289,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/MaintainClonePathLock.swift",
+      "sha256": "6dd8917595e8d3db71aaf75ffa2b3d849123a669892114e8546522dc61a78846",
+      "bytes": 4216,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/MaintainDiagnosticProbe.swift",
+      "sha256": "186d5522e921d2d06399eab80b43f12b6909c413f9de6f091e0bfe71418ab02c",
+      "bytes": 20064,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/MaintainFeatureRequests.swift",
+      "sha256": "e01c97b254f3b8cdd3afa34c938b3795baadf6dde215c0694adf80b32d91d4a2",
+      "bytes": 8134,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/MaintainFileEditApplier.swift",
+      "sha256": "25204f59c6a5e652c78a25d74782c924f39df330e99a7843d6d6e111ecdd063e",
+      "bytes": 24444,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/MaintainFixCommit.swift",
+      "sha256": "7b8324a9ac06acd5a301eea057540235ad93db954f5e09b16afea25e77651aa3",
+      "bytes": 14222,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/MaintainModelProvider.swift",
+      "sha256": "16654637bddeff367ed24a128be50a00ceacffc8fcad41cf574aa9befca0e9c2",
+      "bytes": 21910,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/MaintainPoolClient.swift",
+      "sha256": "2fe4e0d2a3738fc0739ccd0d6931f5c93b3e471bf7021e928557fbb70ad63114",
+      "bytes": 11697,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/MaintainSandbox.swift",
+      "sha256": "0230ade25f9eaa5990fdc620061131b3875b051ebebbc468e25806908e200ce0",
+      "bytes": 27533,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/MaintainSavedChangeRechecker.swift",
+      "sha256": "78cc9f2e4e99e9586506c5eaa34f967b3e02b859336f8e7c67302e30401b9239",
+      "bytes": 30920,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/MaintainShellRunner.swift",
+      "sha256": "e925c8e8047e9bf1faae686cd9fd702093c7a4a8dcbb614a3fb083efc8dfd279",
+      "bytes": 16048,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/MaintainTierCFixer.swift",
+      "sha256": "ff3d3524d6b331d8828c88c3115fd2b8c99048c1ff19bd1333a823fb2368f1fe",
+      "bytes": 228067,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/MenuBarPanelManager.swift",
+      "sha256": "379f12f87ae7e62d79aa9511d674ffedbe7c7e20e4519ee1e2a5dd0a358981b1",
+      "bytes": 18633,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/MenuBarPanelPlacement.swift",
+      "sha256": "c238a2cece99fa1c55bafee1dfabbfe0d7d8a8d54204bfa84129f465901ca41c",
+      "bytes": 6230,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/OnDemandEditCard.swift",
+      "sha256": "07a97b0a2a40536640329a54a4262897796c4a6e20f80f8459cc9ff67fb4157b",
+      "bytes": 107707,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/OnDemandEditCoordinator.swift",
+      "sha256": "0cb52b56a7cb5c9d767a0a0483a7cabfadbd418200adc5e57d7e6438074ea82b",
+      "bytes": 316266,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/OnDemandEditInterruptedRunRecovery.swift",
+      "sha256": "515eeec0caeab15f779600081c9be3889260f95e106c0c6c447251cfe55abc52",
+      "bytes": 17207,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/OnDemandEditRunLog.swift",
+      "sha256": "8b4d55b83a56d4edfaba85a7cee60e65c40b48332bf0de073ca140c62ff238db",
+      "bytes": 34687,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/OverlayEyeGuideCard.swift",
+      "sha256": "28054fc672df50410f72ad01f3214c8fe94d455c8dbd81509d527e8e84ee86b7",
+      "bytes": 10489,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/OverlayEyeInputBar.swift",
+      "sha256": "b4ac92a01b556d1101653ddb308648979a38296d07f7b833c7b2c40107de2d0c",
+      "bytes": 123589,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/OverlayEyeInputBarDraftStore.swift",
+      "sha256": "40902561274697e5c1fe102b83cc6b595a9f5d2169f6e8819609f08fa2910533",
+      "bytes": 7358,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/OverlayEyeInputBarDropTarget.swift",
+      "sha256": "68c65672ac96f1bd5daecd9492a2da17ce170da4f4012d270a41add4e9eac1ea",
+      "bytes": 9147,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/OverlayEyeInteraction.swift",
+      "sha256": "174e58b1e4cc143c25a025c7c7c9799ea127aac8707ab97521cf397400eb276b",
+      "bytes": 45873,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/OverlayEyeRestingPlace.swift",
+      "sha256": "57cbb67ad1eacf7dcd765cdaa551395fc65683c0cf452d504d9719e79f80f9b5",
+      "bytes": 4500,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/OverlayIrisEyeView.swift",
+      "sha256": "34adfb20a9ae7f036842184a7e4f4a85c1f13438a48dede228bb2cd194bcaf21",
+      "bytes": 31794,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/OverlayWindow.swift",
+      "sha256": "ddacc38505b59b9aa4a3e5d0087c098c71bf89a614533ba3aaa37cfcfa5c8f16",
+      "bytes": 76840,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/PatchQueue.swift",
+      "sha256": "28c07c5cf14616c91b927e315e4ffd4806d785a5bece2de9a4a4c98225ad5567",
+      "bytes": 6747,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/PatchQueueCheckedRemoval.swift",
+      "sha256": "a8cb0696dc97fc10758f7910ad3a57b41bee4e12a518108705d3563f2d98af8a",
+      "bytes": 2681,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/PendingEditCandidateIdentity.swift",
+      "sha256": "104144857d68efa5757dcd2089d920310bbb241a21414bb5cd092e9627fd3920",
+      "bytes": 10646,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/RepoRecipe.swift",
+      "sha256": "2cb94c22eb5e5bd7bd549581b163cac7d86cc8257f334729897ecc9cd8aa053a",
+      "bytes": 16301,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/RepoRecipeNodeWebDetector.swift",
+      "sha256": "f76164a4592ada2baba039157ce95622265b183cc7588539807043cc127e1642",
+      "bytes": 19421,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/RepoRecipeRustTauriDetector.swift",
+      "sha256": "87c0c37bec90bc7db9148ae18284c8877ec45933c3b43d4af3c8aa1080e123c7",
+      "bytes": 22357,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/RepoRecipeService.swift",
+      "sha256": "f59bf2f865032eb5f1ec856438f9c5476f69b60789611db1a5e8c70a53c04f07",
+      "bytes": 26639,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/RepoRecipeShippingEvidence.swift",
+      "sha256": "fd22216fda46a9e3bce770639e9793671c842635a6ea4f608973eb9f25a95ea5",
+      "bytes": 10781,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/SavedAppVersionsSection.swift",
+      "sha256": "82f507411de251aa0e48dbf7c475f7f06684cf3622e00f91484a5b35c7d60489",
+      "bytes": 6097,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/SavedEditDeliveryIdentity.swift",
+      "sha256": "f447094916bbb5476b746d8324e4539f07200a7d020ac295f7e8d1ecda34efe5",
+      "bytes": 2179,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/SavedUndoRecoverySection.swift",
+      "sha256": "212d967e0b60f6f714751d3817bca187e978605afd62f1ba546f394a23103d28",
+      "bytes": 1697,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/SelectionTextField.swift",
+      "sha256": "33932b8532a6dc7a52b7b1a49ef2ae3fab6346a6d582ed03f83940a3c17a1297",
+      "bytes": 27111,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/SettingsPanelRouting.swift",
+      "sha256": "672f5226c7aa5eafc5792e65c1dce5a2a9fcae5b1726afb7f04c0fa9ceb35372",
+      "bytes": 1509,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/SettingsPanelSceneRedirect.swift",
+      "sha256": "bcf658ddbd7f5b6aafbb7abcc4e0e34afacb3c5060a647856460652e0c94748e",
+      "bytes": 2479,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/VerificationHarness.swift",
+      "sha256": "927ef60770efc1d7a8ddf8812f215fcf3d77f8bc9e0fc6528ebff913f8072203",
+      "bytes": 34557,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddy/leanring_buddyApp.swift",
+      "sha256": "a56d722b1a0e46ac726b28c918dc9e4fe514671e1d6c3ec6666f6d0b7c923dd7",
+      "bytes": 10880,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/AppInventoryTests.swift",
+      "sha256": "3a47f3387e8e212b54d8053543f0eb4b4410b1e5ee488efb77598ed54351e851",
+      "bytes": 28120,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/AppRelaunchInstalledDeliveryTests.swift",
+      "sha256": "db953d5fb4b5f00b371abaf7c5cb6dd973e0b575fd012067e4dac44d475a1db1",
+      "bytes": 10226,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/AppRelaunchPackagingCommandTests.swift",
+      "sha256": "eda3d3f8473ba7912de9d7732edc868e75b3bad9d8a115372aab9aa6bc5fc1c6",
+      "bytes": 12296,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/AssistantRequestDiagnosticsTests.swift",
+      "sha256": "40729372ad677e335ee8ab0c8d7cb49d17aed53bfab95132e1243d3374a3021e",
+      "bytes": 1592,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/Bug10GlobalPackageInstallPathReproTests.swift",
+      "sha256": "4f103e5d22b96676295f812aa1edd127205edcb0a0be66ebccf4a2e63b201772",
+      "bytes": 5175,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/CatalogAppIconTests.swift",
+      "sha256": "914cc817bc83616f76efd3dbf69693ba8668c8adee8e2a0b24c595b2557781e4",
+      "bytes": 6722,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/CatalogMacCompatibilityTests.swift",
+      "sha256": "c767caff9e2522606f4987cc1e2bda2aed5ba00ec60ff47e5371a85a97cbf385",
+      "bytes": 5411,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/ChatActionCancellationTests.swift",
+      "sha256": "bc56e0a38663a47701824b9988f5e6d5b7d49933392dad9ca4b8724c9eb09aba",
+      "bytes": 6435,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/ChatTranscriptResetTests.swift",
+      "sha256": "4e3b6e451bc994d2731c388f33b3a199867d03d74607dffcdfd8f366da2cdc44",
+      "bytes": 11983,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/CodexCLILoginTests.swift",
+      "sha256": "ef9dfa4228c383d9a6eef519720c843a6bf7f1bec0871fb8bc929270c1118664",
+      "bytes": 38084,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/CodexEditModelSelectionTests.swift",
+      "sha256": "4fc0a3c4fb22f65b687689dcbf06c41d181b2e76f268fe4fe8dd33f480a331dc",
+      "bytes": 3478,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/ComposerConnectionPresentationTests.swift",
+      "sha256": "aeba3ef8982c66068c106ab59083b277a17c75ac7ced62b4838b2b677cdab7cd",
+      "bytes": 5233,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/EditBatteryLiveTests.swift",
+      "sha256": "c95d06e0f68f5f1071653de1b41771992b76b8578cc33fbb2ed8e256927cc2df",
+      "bytes": 58488,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/EditVerificationReceiptTests.swift",
+      "sha256": "b5ee1644cf7ed4810407a5fd0be3ff641f1db463027a531afbffe8be299123d7",
+      "bytes": 2155,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/FeatureEditAdversarialReviewerTests.swift",
+      "sha256": "fd6929dcb842857aba008a9d7b3aed85e7995772342594fff18aae12991d7748",
+      "bytes": 10436,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/FeatureEditRepositoryContextTests.swift",
+      "sha256": "4cd2f0f66048d8d19cd1589f814a39d3c3ec99b912f397be6bbbe033f476e2ed",
+      "bytes": 11753,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/GuideAutopilotCommandShapeTests.swift",
+      "sha256": "70e4279efd05220cc6e0ffac79c98588b093263ffc894e61c239e23c8be9dedc",
+      "bytes": 5318,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/GuideAutopilotRunnerTests.swift",
+      "sha256": "3c1ebfe3c1a4c2762e7ed535556b048892ec005dfde787e744bd64c6befc0491",
+      "bytes": 20390,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/GuidePointingTests.swift",
+      "sha256": "b70726fddf3c4ec7639e58400d1b8572830bbe3fb4beb653bec749d9bfd52ee5",
+      "bytes": 9040,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/GuidePresentationRegressionTests.swift",
+      "sha256": "1b86f4d75f9cc0becdaf0d471a88e78c802e76b3775937b13aeeb5998ab581ed",
+      "bytes": 5405,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/GuideSessionControllerRetryConcurrencyTests.swift",
+      "sha256": "f189481fcdabef0c5905752430a5164020fd36f3a2b0f55de5d22747bfd5a5aa",
+      "bytes": 17176,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/IrisEyeTests.swift",
+      "sha256": "4d42adef4c5351a3abe5f320df5252aa664bad6aa0265c5f220f6f956063c760",
+      "bytes": 68369,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/IrisTestRunUsageTests.swift",
+      "sha256": "a784fb9f650a8735c1acf5c401e5bf44f7bf8e586470278bafaa7a45edbf45aa",
+      "bytes": 8926,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/KeychainReadPolicyTests.swift",
+      "sha256": "3452855ee43a1d3d70d76ab5d1ac760cc36c03270f5594d43fedf2ac5a3e8014",
+      "bytes": 7526,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/OnDemandEditEvidenceDisciplineTests.swift",
+      "sha256": "034932dbd49d97c30f4fe83cbf25950cab0cd52b1ba6e087baf923bb56dcccce",
+      "bytes": 17914,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/OnDemandEditMemoryTests.swift",
+      "sha256": "4c4a4b03cdfa0b182ee04616238f0ca8d7bd17dfdcaab4808c3c97249d92bf9f",
+      "bytes": 21741,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/OnDemandEditTests.swift",
+      "sha256": "327bb8b571a3ffced675eb167b4ad09be9442dfa2938d5e86b9cab2836f070d5",
+      "bytes": 88511,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/OverlayEyeDragTests.swift",
+      "sha256": "0b80d26715b4011606118144965340e72c1aac2a531014a3cc6319d262ddee6e",
+      "bytes": 3763,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/PublikTest2EditTerminalMinimizePreferenceTests.swift",
+      "sha256": "97a8a80d92af2efa618cfe44f279c4edf488cdbce2828369b60b8d900c9e26f2",
+      "bytes": 3948,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/PublikTest2PackagingDmgToleranceReproTests.swift",
+      "sha256": "1ef92ffe39774be8dab5a819950878b71e41d9e4ae3799e77d87aa5a05ca22e6",
+      "bytes": 8874,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/RepoRecipeServiceTests.swift",
+      "sha256": "18179e85b022651ee0a07d7dd4de0ef5e281c9b247d363a08b6048173d088fde",
+      "bytes": 23466,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/SettingsPanelBehaviorTests.swift",
+      "sha256": "0ec1a20b88423e6ceefcede506db0bebd61b1ade107500b653a82b9f80bde596",
+      "bytes": 5185,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/SpatialGuidanceRegressionTests.swift",
+      "sha256": "bcd061adca97736c92d0d6de231b929462a08d1f1c96253c09f4433ed78db771",
+      "bytes": 4787,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/Test7DirtyCloneReproTests.swift",
+      "sha256": "4262ad228ad14e3612951c75e624d1e3a524862addea04c4119efcb55aa32a7e",
+      "bytes": 29600,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/Test7TakeoverResizeTests.swift",
+      "sha256": "05d67c5469fa8b5cf4f61250679382ec08950c116465478a515973fbf8a1ccf6",
+      "bytes": 20726,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/Test8DiscoveryTests.swift",
+      "sha256": "c0388f31701c61253d9d893aaa95397af129d75c9af830896ef3699001c677eb",
+      "bytes": 8294,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/VerificationAbsenceTests.swift",
+      "sha256": "48ca8aaf3645f475ed90d30093b3d9d763a90a9deb25313ec9ba628670405390",
+      "bytes": 14251,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/leanring-buddyTests/leanring_buddyTests.swift",
+      "sha256": "f8e4b7de7202bcc507236935424bfb75a13618b3403685708247fdc8acd14581",
+      "bytes": 2424,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/account-session-tests/.gitignore",
+      "sha256": "acc718146d21aae829cba1761475e05de39d73209d83af2ab8487a74843cead0",
+      "bytes": 18,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/account-session-tests/Package.swift",
+      "sha256": "84f927a1c461bc1b1750505aa56f954e6d67b8a5d6526184b19a43fdf5cefc99",
+      "bytes": 668,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/account-session-tests/Sources/IrisAccountSession/AccountService.swift",
+      "sha256": "4fab11490e06e6b449f7efe4514591632a359e28fff1d51312b874c39c16bb39",
+      "bytes": 50726,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/account-session-tests/Sources/IrisAccountSession/DependencyStubs.swift",
+      "sha256": "d3e4a7f6f8a49b094982a3f80e13870336c9998fb266a2fbfb1efc6663ffff40",
+      "bytes": 4630,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/account-session-tests/Sources/IrisAccountSession/KeychainReadPolicy.swift",
+      "sha256": "87f8b035bdf17c7453fe2a27c51fac6c6dff7c241cf4e4a392f132bd3e0b23d6",
+      "bytes": 2294,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/account-session-tests/Sources/IrisAccountSession/KeychainStore.swift",
+      "sha256": "b14c15ed8ada484eabe15334f7943500e8d4afe5ca3ac300691edafeecf12c00",
+      "bytes": 9710,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/account-session-tests/Tests/IrisAccountSessionTests/AccountSessionTests.swift",
+      "sha256": "05adbb0272307576204568536d7d1ef872132ced3a36f53d8a74f63228a930e9",
+      "bytes": 21616,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/account-session-tests/Tests/IrisAccountSessionTests/TestSupport.swift",
+      "sha256": "6e513c6492e06d0c9f74ec44976fb8a6274dc1afb1f15dc7ac115fe60479576c",
+      "bytes": 10375,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/chat-action-tests/.gitignore",
+      "sha256": "acc718146d21aae829cba1761475e05de39d73209d83af2ab8487a74843cead0",
+      "bytes": 18,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/chat-action-tests/Package.swift",
+      "sha256": "f833a69cc65271c06042e83cf49c19e14f738b68e1299d7e4b9461af429242a7",
+      "bytes": 433,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/chat-action-tests/Sources/IrisChatActions/AutopilotAutonomyGrant.swift",
+      "sha256": "563774e9b56869f82a2cf9abe0c7d7016ce98e06a194ea0abc8aed6b29d3e3a9",
+      "bytes": 3008,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/chat-action-tests/Sources/IrisChatActions/ChatActionTools.swift",
+      "sha256": "6d1611334c10c246202fe4aae660da1c2d48a7fc65d0a8d87cead5d882da436c",
+      "bytes": 22519,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/chat-action-tests/Sources/IrisChatActions/FixtureBoundaries.swift",
+      "sha256": "ebfd5fb05f5abdfb6aaf0e91495a979917c3d8d0b2b274e12c54b7aedbafc8b1",
+      "bytes": 647,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/chat-action-tests/Sources/IrisChatActions/GuideAutopilotOutputBuffer.swift",
+      "sha256": "00a91222814ceef2c045e4ac1d0f3934aad9f5aba201d12007e32483e8275866",
+      "bytes": 9755,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/chat-action-tests/Sources/IrisChatActions/GuideAutopilotRiskAssessment.swift",
+      "sha256": "774b118ac0c1872a0320fcf9465fc6302f0c40f88e8fbde24c647c64bf0984ea",
+      "bytes": 26785,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/chat-action-tests/Tests/IrisChatActionsTests/ChatActionCancellationTests.swift",
+      "sha256": "bc56e0a38663a47701824b9988f5e6d5b7d49933392dad9ca4b8724c9eb09aba",
+      "bytes": 6435,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/codex-provider-contract-tests/ProviderContractChecks.swift",
+      "sha256": "81eae2d3318df7556d1d0526f286eef88a2029c6b61ed9698d949618326fc744",
+      "bytes": 15418,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/codex-provider-contract-tests/README.md",
+      "sha256": "0d99904dd475477e0778e9d5d2f8978aa1abaf5acbb207d63b7b53bf963ec01d",
+      "bytes": 2401,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/codex-provider-contract-tests/TypecheckStubs.swift",
+      "sha256": "c5b0c0eedb16500c72c863490b65ba7b8afc8ecb6ed5e8c64e6c46370d615913",
+      "bytes": 1420,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/codex-provider-process-tests/ProcessLifecycleChecks.swift",
+      "sha256": "b0c720ffcedabb8df3cd2a55c654e47d91acdcec1d0135d75b8101ed05768bc1",
+      "bytes": 14864,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/codex-provider-process-tests/README.md",
+      "sha256": "1a3c07a4362ca4335767f6d753c7d50a6985b93675693c43ef30c242ef9e4e05",
+      "bytes": 1560,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/codex-provider-process-tests/TypecheckStubs.swift",
+      "sha256": "c5b0c0eedb16500c72c863490b65ba7b8afc8ecb6ed5e8c64e6c46370d615913",
+      "bytes": 1420,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/edit-battery/fixtures/t7-js-export-queue/oracle/drop/oracle.test.js",
+      "sha256": "fa7a7bfe62da37302490b68bedb8953877009ae9aea0aa16abf30ab72d4f7d97",
+      "bytes": 15580,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/edit-battery/fixtures/t7-js-export-queue/oracle/reference/src/export-controller.js",
+      "sha256": "b4b47d912b487d04746f1ec7ef578455048d7da39fe7d493df7956b8c5bcef89",
+      "bytes": 2290,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/edit-battery/fixtures/t7-js-export-queue/oracle/reference/src/export-queue.js",
+      "sha256": "f766f40e79b312c19bc678a6b735298243923ce57c7d36345c38d14b32dfb3b7",
+      "bytes": 5336,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/edit-battery/fixtures/t7-js-export-queue/oracle/spec.json",
+      "sha256": "fdd6c418c75d5dc032c547edd1f41e043588cdace7b0354edc612ba353e86236",
+      "bytes": 304,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/edit-battery/fixtures/t7-js-export-queue/work/.gitignore",
+      "sha256": "108d2b818b63d1f2ffaefee13455961edf1544f49ccf847396de3e85eb5ad724",
+      "bytes": 24,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/edit-battery/fixtures/t7-js-export-queue/work/README.md",
+      "sha256": "780e105ff39637f352042675f10919c5ecb028b0705545cd8231fd2954c4a323",
+      "bytes": 357,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/edit-battery/fixtures/t7-js-export-queue/work/docs/QUEUE.md",
+      "sha256": "7ab202d12a7fea6c572ce8154b80842b94e42dc4bcba028fae2062a9ab15d07b",
+      "bytes": 3480,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/edit-battery/fixtures/t7-js-export-queue/work/package.json",
+      "sha256": "5c5b0537362bdb0fb95d1565b851668a9f91c923c39417cf92a0fececae78cf9",
+      "bytes": 252,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/edit-battery/fixtures/t7-js-export-queue/work/src/export-controller.js",
+      "sha256": "e90fc1955ed918d6e9f0bd3b95566f7521297b78ad0216af737a665f015547d4",
+      "bytes": 2216,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/edit-battery/fixtures/t7-js-export-queue/work/src/export-queue.js",
+      "sha256": "08096d441161db4520db1111f5186e404bbff2ce6a95f93e93e239333df3e9a2",
+      "bytes": 4856,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/edit-battery/fixtures/t7-js-export-queue/work/src/export-store.js",
+      "sha256": "823c8b7ffee0aa82186cb435d3d0c9530581b11383cd81f3e3e4a162f58582e3",
+      "bytes": 1715,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/edit-battery/fixtures/t7-js-export-queue/work/test/regression.test.js",
+      "sha256": "0bf0b502f596f2ff83634d6c265608868068003ec965625c23d716473956afdc",
+      "bytes": 2394,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/edit-battery/manifest.json",
+      "sha256": "26b6b144adeda5073cdad04ce195febcdb0e23ed99a3006cc8cf2b63d13430e8",
+      "bytes": 19251,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/environment-tests/Tests/IrisEnvironmentTests/IrisTestEnvironmentTests.swift",
+      "sha256": "e0ab0bf92a08e78daed5bb0bcd2eeb62adcd902ef4e0675bdcb993c2eaf2aab4",
+      "bytes": 3672,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/AppCatalogRefreshChecks.swift",
+      "sha256": "2f3b6dc8690705468a3f01c3157eb0ffcd7a0971be5cefc2157ba2904d492055",
+      "bytes": 11284,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/AppDeliveryChecks.swift",
+      "sha256": "3032fe9fc2089a0df088bf220592da7cd3c749b379e042bbd3efe129a708016d",
+      "bytes": 36767,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/AppDeliveryReceiptChecks.swift",
+      "sha256": "19c2b5295ab1609c561593d1321007d8e152fb2d60504ca5ff1c0708e872cb8e",
+      "bytes": 12755,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/BackupRetentionChecks.swift",
+      "sha256": "1cc0b546ad967f3b49d14db4382ef88c365c1a51cfb18c4483f28d6b7f63758c",
+      "bytes": 23615,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/CandidateBoundaryChecks.swift",
+      "sha256": "84be5e0eed2e0a3817e3ad129f4926d3117a53adc172ffc9de87487e3ac56128",
+      "bytes": 9217,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/CandidatePolicyChecks.swift",
+      "sha256": "5d4068fd77c8e367b00180d646f2d7c7e6fc8cf277c3c73fc3f1589314a81dd5",
+      "bytes": 15698,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/CommandFreshnessChecks.swift",
+      "sha256": "c2568fb6f90745714a36fa37909f6fe125d7ad61d01ea9c1ee56b7f507ddcc5d",
+      "bytes": 15094,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/CrashBuildGuardChecks.swift",
+      "sha256": "47751fdb609ce984c39d112f3b179292167ecec2ed3e3133892de8a96b8fcf80",
+      "bytes": 30420,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/FeatureEditRepositoryContextChecks.swift",
+      "sha256": "889c5bd9b81bc2c4cacb05dc55418a1c4c55264f2c426e02ca9803d2e9a990e1",
+      "bytes": 24981,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/GeneralChatModeChecks.swift",
+      "sha256": "c1ba6531b745e5760cc52a594bcafd1d0cfc7db3bcd76dc23668ce373e6f4f6d",
+      "bytes": 4191,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/HarnessFeatureHost.swift",
+      "sha256": "0563ee9a18c5b9464a84b67346159cbcf83bf141c469d5bc94b9b9c43a1b0e35",
+      "bytes": 26308,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/HarnessNativeReviewChecks.swift",
+      "sha256": "00bb3d231ca0b18f55cd21d490a1fb653eed51df6e8d73a2147ea936852b178a",
+      "bytes": 41289,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/HarnessReviewReserveChecks.swift",
+      "sha256": "fe6548a312ddacc5bbebc94e723eceb83145a87781b1dc487a2815963342614e",
+      "bytes": 44745,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/ImageInputBoundaryChecks.swift",
+      "sha256": "4a08b53696166642610cfc31806dfd4232edafceb5fbbc6130efd750cb9ff82a",
+      "bytes": 3649,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/InterruptedUndoResumeIdentityChecks.swift",
+      "sha256": "3b8a98080e94b23181b06c60b8aeae8e416ba25c2abb9820120476b86205f2ec",
+      "bytes": 28136,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/IrisTestAppDeliveryChecks.swift",
+      "sha256": "60b4051c0c36c3fd50d5c2639eb21765995d46043438069a13fa5a22ff83355f",
+      "bytes": 4757,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/IrisTestGitPreflightChecks.swift",
+      "sha256": "e2d7e394f6e166dca9d43e9e29160ce8e9f733b1bfa17e063e5eeb5a09637892",
+      "bytes": 2552,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/IrisTestNativeVerificationChecks.swift",
+      "sha256": "dae237e7247832412b0cf644b898d98a7b31775bee4f24fd1741b031bec49e36",
+      "bytes": 9017,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/IrisTestProjectRegistryChecks.swift",
+      "sha256": "93a4409d445a989dfa48984b21dae7c952c4df1354f27a3f7cc1c47a79dab28a",
+      "bytes": 22649,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/IrisTestToolchainChecks.swift",
+      "sha256": "fed61ebb4404c880e389048d9f2c64d64ca031e97cbf006d83eddf5944985f7b",
+      "bytes": 3532,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/MaintainFixCommitChecks.swift",
+      "sha256": "0d9ece4068d3e3cf274edda4b7b361ae61d7a424208bee774d399d1818540401",
+      "bytes": 13296,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/MaintainSandboxToolchainChecks.swift",
+      "sha256": "1d4019a465240a1f731e44de81713507d1bb5b91328a869d67631b94ece8b159",
+      "bytes": 12424,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/MaintainSavedChangeRecheckerChecks.swift",
+      "sha256": "1aded693fa056da61d827c64be54d0cd4abc07a3c5059b5d4ab5cc12ec6bb915",
+      "bytes": 18356,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/PendingEditCandidateIdentityChecks.swift",
+      "sha256": "971450509a424d12ba5124ed30a2b50de10f60d2361ecb5bf223b683570a5f33",
+      "bytes": 11380,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/PlantGPTBuildPreflight.swift",
+      "sha256": "0b854a71935a23cf6659d8ab1ccb78ac546df36ce9369328df954171a91c64f0",
+      "bytes": 3319,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/PowerUserHost.swift",
+      "sha256": "66594b3e0c363b046a7c5b271bf00b9db9df5d9d663e757af6c7a018a3cee309",
+      "bytes": 12789,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/README.md",
+      "sha256": "9536a60e9b693871beb106a432f0a94ad9457cc42dda99fcc37af1c707a0850e",
+      "bytes": 7162,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/RepairCandidateIdentityChecks.swift",
+      "sha256": "585036ad1f8fed4f91288a63c3f2a0d07a5a02ed2b25ab155687d53b168cbb0c",
+      "bytes": 3891,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/RepairTestCheckpointChecks.swift",
+      "sha256": "2d9447424cd124a5cd75821b81d7c736fcae9663987256e24e02a1b546dff495",
+      "bytes": 11423,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/RepairWindowChecks.swift",
+      "sha256": "c96d1edee89d6132be72734305b0a921d7eab3ee77d27d889861fc844ba7d61c",
+      "bytes": 29052,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/RunMemoryChecks.swift",
+      "sha256": "0484cc1dae51052744916f5212c72773eaac4846b156315c8a1943972030a7cc",
+      "bytes": 19238,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/SavedEditDeliveryChecks.swift",
+      "sha256": "1a39368de4e85efee935f8b4ba7398efefd8b07a3efdba566af3394c207c475a",
+      "bytes": 13041,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/SavedVersionLifecycleChecks.swift",
+      "sha256": "5b09a4227736601aa1ea75b99c03b67f6c3a0ed66598f3d89e47e2af344337dd",
+      "bytes": 32422,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/SourceCheckoutRefusalChecks.swift",
+      "sha256": "9d745c2f6e59439c8300cd7df76f1ecb9d371aacd3528eb91cd04f9909845421",
+      "bytes": 5571,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/SpatialGuidanceChecks.swift",
+      "sha256": "d7bd56e69786d37b905254ac7fea00be4a6d3e35221a00d69cb0c7b0f0501dae",
+      "bytes": 8337,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/UnadmittedRepairChecks.swift",
+      "sha256": "17e9e51cdff5062f59ac8b63da0c0885e894cb526cf9aaddfec9af711bc43fc5",
+      "bytes": 30477,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/UsageAttributionChecks.swift",
+      "sha256": "8000c8f0c84a1b7dc2f7a34ab8998c0b7133421ad9c389a70fcd5efbb2c34d7d",
+      "bytes": 11705,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/VerificationDiagnosticChecks.swift",
+      "sha256": "41e5725621955ebadbe29e14fc6f79dd52d9bdf695891bd95d23e29748577318",
+      "bytes": 8350,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/build-unadmitted-repair.mjs",
+      "sha256": "623f60eeebe21577d0c0c5fece4be2952a55f2a490866934875d703ebed397be",
+      "bytes": 4693,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-feature-host/build.mjs",
+      "sha256": "3e7b05b73d8d93cfcbf4a0462b7c0387fc541ded37492876661cbd766ed16dee",
+      "bytes": 3513,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/.gitignore",
+      "sha256": "acc718146d21aae829cba1761475e05de39d73209d83af2ab8487a74843cead0",
+      "bytes": 18,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Package.swift",
+      "sha256": "7823e65fff9575ac69b6d1c6fb627ebbababb4bd1009af208f0c27fb5e43947e",
+      "bytes": 272,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Sources/IrisHarness/HarnessBehaviorAssessment.swift",
+      "sha256": "f4949c751270df81903d16d61ddb8c8bf3a510b3afa97ef503be460df79905e3",
+      "bytes": 8485,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Sources/IrisHarness/HarnessComparison.swift",
+      "sha256": "51a5333863a27e73b26261f7e9ab790fb058c10bb1f47df915a9b0361ac9bc4a",
+      "bytes": 4645,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Sources/IrisHarness/HarnessConversationProjection.swift",
+      "sha256": "09d1217327042ef4e710520307f2a300fa4cae9d495e08094bcb2378c0f336a6",
+      "bytes": 23684,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Sources/IrisHarness/HarnessExecutionJournal.swift",
+      "sha256": "2bbb446f18e9786052b810795d16d25de8d87a8779915d75826b8efebf7ee7fd",
+      "bytes": 3234,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Sources/IrisHarness/HarnessFeatureWorkflow.swift",
+      "sha256": "faf45019db26afa300687a6927134cf9df771bdc2dc0a95efb7a126556eefdd5",
+      "bytes": 40917,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Sources/IrisHarness/HarnessModelSession.swift",
+      "sha256": "ae25b80f34b19e2255dd87452575988f108ba79c219fe06512253c10a92f757b",
+      "bytes": 10030,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Sources/IrisHarness/HarnessRunLedger.swift",
+      "sha256": "cc6c511709c8c2916bdef5cbebe3fc27dd447e298984ac8be74a26cf42c88569",
+      "bytes": 29435,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Sources/IrisHarness/HarnessTaskState.swift",
+      "sha256": "56a7da61828bc9cd09a4c46ec34d3a35a59dc4510dc299611f1424c6ce46a9d6",
+      "bytes": 44281,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Tests/IrisHarnessTests/HarnessBehaviorAssessmentTests.swift",
+      "sha256": "7ceeeee6f5560bf8dcf38e706944d4a20ed04f2b8c092f239724126b6555f238",
+      "bytes": 3611,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Tests/IrisHarnessTests/HarnessClarificationWorkflowTests.swift",
+      "sha256": "7d96b4557b507cfa939d2fd1302a79901af9e35fe9b236b1aa5cb508a3190596",
+      "bytes": 61121,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Tests/IrisHarnessTests/HarnessCodexConversationBudgetTests.swift",
+      "sha256": "20b871db78c184b042ac503bbebdda99fdb9164ff563faa6193f7f888a2fc793",
+      "bytes": 6371,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Tests/IrisHarnessTests/HarnessComparisonTests.swift",
+      "sha256": "5782af6b945557a42d0f5c8e01afeff44e5356d70b00413afb8d606435db8d27",
+      "bytes": 3566,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Tests/IrisHarnessTests/HarnessConversationProjectionTests.swift",
+      "sha256": "a3d19f5f2b2ec1055c5f6c4906157cf83b9b05b56721f474a51444ad5e1cbe43",
+      "bytes": 10497,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Tests/IrisHarnessTests/HarnessDecisionProjectionTests.swift",
+      "sha256": "8686ee11899cf5cf1f4af6256a403b375982f823b102f9b27873c4e30b47d940",
+      "bytes": 13432,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Tests/IrisHarnessTests/HarnessExecutionJournalTests.swift",
+      "sha256": "ee65b25a9d077c849e0f8ed5d68e59ece5294ef9a69d2db7d34623379ac6d5b9",
+      "bytes": 2100,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Tests/IrisHarnessTests/HarnessFeatureWorkflowTests.swift",
+      "sha256": "aee2f3c059efa79a4fb15fcf551ccd846e638572f3676f42450fcd051a4fa4c4",
+      "bytes": 5909,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Tests/IrisHarnessTests/HarnessModelSessionTests.swift",
+      "sha256": "6d3d2731d4385da90094489868df681fb2e17ecce5a359d47de176429a429c75",
+      "bytes": 11905,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Tests/IrisHarnessTests/HarnessNontechnicalIntakeAcceptanceTests.swift",
+      "sha256": "b92378754c94db9c1e1e855d9436b1b0965897c67cc500d8ac76365a3bd7fb07",
+      "bytes": 14792,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Tests/IrisHarnessTests/HarnessReviewInputBudgetTests.swift",
+      "sha256": "6617bc6b9e9e03f35f6c1769b29e529dab188bf3a5e9086d334fe5ec64a0854e",
+      "bytes": 7004,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Tests/IrisHarnessTests/HarnessRunLedgerTests.swift",
+      "sha256": "1dccb60e581d874c97a456d4eb0ee8c0c0e71b69a26f271f141f7ffc44b75fd5",
+      "bytes": 14503,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/harness-tests/Tests/IrisHarnessTests/HarnessTaskStateTests.swift",
+      "sha256": "fe98aeeda401dffbfd221450247d2ae3563957d08f0bb3bb0c2c972ef78567fe",
+      "bytes": 10702,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/maintain-test-harness/TestContainmentProbe.swift",
+      "sha256": "ed48ac1375750febe1910b5c0c808b53f63dc414211cefddbadaf0b3e6dce163",
+      "bytes": 11172,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/transfer-native-oracle/README.md",
+      "sha256": "3b9d5f6ec14f5bdd1af16676e614ccf7375f8cdce6dfcd9c28815f4b5abe7f5a",
+      "bytes": 4501,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/transfer-native-oracle/cases.mjs",
+      "sha256": "8f25d6fe5b503daad92cb202f7f1b7a851bc618a5e2c2a569e424214e4a3b52e",
+      "bytes": 4291,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/transfer-native-oracle/transfer-fixture.mjs",
+      "sha256": "973e8e1b0d18c3a19c7e029c1940405887988eb1a6d18b5b284c9244cf3b197c",
+      "bytes": 27782,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/transfer-native-oracle/transfer.test.mjs",
+      "sha256": "06a74f8e223c4e1dd09ba0b5b34d9a7561ef25d19739b2174ed2f82ba9afde5f",
+      "bytes": 19125,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/.gitignore",
+      "sha256": "acc718146d21aae829cba1761475e05de39d73209d83af2ab8487a74843cead0",
+      "bytes": 18,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Package.swift",
+      "sha256": "c1e1d98320687ae58585eabbd1acf0a8f46c27241205a4ecc328f10dedbf0c40",
+      "bytes": 602,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Sources/IrisUsability/AssistantRequestDiagnostics.swift",
+      "sha256": "83ce16b4919037feeb8a51a7480fedf6dac1508cbfa2e1b3f6ef401523a0661f",
+      "bytes": 1566,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Sources/IrisUsability/CatalogAppIconLoader.swift",
+      "sha256": "3b104c027c0c8fd20d5c62a5be99dde8df1f0f0f883a8af2e12ecabeec59ac42",
+      "bytes": 8389,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Sources/IrisUsability/CatalogMacCompatibility.swift",
+      "sha256": "ecc6d803ff2953f9836ef9ab6d9893e52da07fc5fc4dbccdff7aa99b86828fdf",
+      "bytes": 4626,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Sources/IrisUsability/ChatTranscriptStore.swift",
+      "sha256": "7aaed3e45a3dbdd0a09b4a65f32248eb6e699f6a9bbc334906b36bb635cdadc5",
+      "bytes": 17418,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Sources/IrisUsability/CodexEditModelSelection.swift",
+      "sha256": "6c482b9820200faa781f2b548ea5dd12cb672a321fc4adec7b8b66ac04e9437c",
+      "bytes": 3252,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Sources/IrisUsability/ComposerConnectionPresentation.swift",
+      "sha256": "2305ce42206c2b3441d38e5acd624416d496cbdb9b782b6c0f957cc208709e9c",
+      "bytes": 3161,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Sources/IrisUsability/DeliveredEditUndoArchive.swift",
+      "sha256": "253943772c18d294465ccc2bf2f032fb0d4d04e5af841a1cccd0eb06ceae2313",
+      "bytes": 8033,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Sources/IrisUsability/DeliveredEditUndoRecovery.swift",
+      "sha256": "d7f0d67730e2df4d3c649775502bfecaa65ada70c832efcf602a0635a1c61e72",
+      "bytes": 3808,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Sources/IrisUsability/DeliveredEditUndoRecoveryStore.swift",
+      "sha256": "9a16b79337924cab1b757fc237041bee84b60f77a7d68e2d67a7b227613d312c",
+      "bytes": 5258,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Sources/IrisUsability/EditVerificationReceipt.swift",
+      "sha256": "393d4e8233647f18a2879d4ab3c5b184c5bc16db0b8cc2dae073bec744eb5c19",
+      "bytes": 3195,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Sources/IrisUsability/GuideAutopilotAvailability.swift",
+      "sha256": "5fad55671057750c47b9ceac3e864401fbfbb1392aba06041ec4c09e9dd169ac",
+      "bytes": 1674,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Sources/IrisUsability/GuidePointingFreshness.swift",
+      "sha256": "df30d8f77f9c22c4552685a333c46ddbf65405b3d587e9e0876dc343fec8ffe6",
+      "bytes": 2683,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Sources/IrisUsability/KeychainReadPolicy.swift",
+      "sha256": "87f8b035bdf17c7453fe2a27c51fac6c6dff7c241cf4e4a392f132bd3e0b23d6",
+      "bytes": 2294,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Sources/IrisUsability/MaintainClonePathLock.swift",
+      "sha256": "6dd8917595e8d3db71aaf75ffa2b3d849123a669892114e8546522dc61a78846",
+      "bytes": 4216,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Sources/IrisUsability/MenuBarPanelPlacement.swift",
+      "sha256": "c238a2cece99fa1c55bafee1dfabbfe0d7d8a8d54204bfa84129f465901ca41c",
+      "bytes": 6230,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Sources/IrisUsability/OverlayEyeRestingPlace.swift",
+      "sha256": "57cbb67ad1eacf7dcd765cdaa551395fc65683c0cf452d504d9719e79f80f9b5",
+      "bytes": 4500,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Sources/IrisUsability/PatchQueueCheckedRemoval.swift",
+      "sha256": "a8cb0696dc97fc10758f7910ad3a57b41bee4e12a518108705d3563f2d98af8a",
+      "bytes": 2681,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Sources/IrisUsability/SettingsPanelRouting.swift",
+      "sha256": "672f5226c7aa5eafc5792e65c1dce5a2a9fcae5b1726afb7f04c0fa9ceb35372",
+      "bytes": 1509,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Tests/IrisUsabilityTests/AssistantRequestDiagnosticsTests.swift",
+      "sha256": "40729372ad677e335ee8ab0c8d7cb49d17aed53bfab95132e1243d3374a3021e",
+      "bytes": 1592,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Tests/IrisUsabilityTests/CatalogAppIconTests.swift",
+      "sha256": "914cc817bc83616f76efd3dbf69693ba8668c8adee8e2a0b24c595b2557781e4",
+      "bytes": 6722,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Tests/IrisUsabilityTests/CatalogMacCompatibilityTests.swift",
+      "sha256": "c767caff9e2522606f4987cc1e2bda2aed5ba00ec60ff47e5371a85a97cbf385",
+      "bytes": 5411,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Tests/IrisUsabilityTests/ChatTranscriptResetTests.swift",
+      "sha256": "4e3b6e451bc994d2731c388f33b3a199867d03d74607dffcdfd8f366da2cdc44",
+      "bytes": 11983,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Tests/IrisUsabilityTests/CodexEditModelSelectionTests.swift",
+      "sha256": "4fc0a3c4fb22f65b687689dcbf06c41d181b2e76f268fe4fe8dd33f480a331dc",
+      "bytes": 3478,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Tests/IrisUsabilityTests/ComposerConnectionPresentationTests.swift",
+      "sha256": "aeba3ef8982c66068c106ab59083b277a17c75ac7ced62b4838b2b677cdab7cd",
+      "bytes": 5233,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Tests/IrisUsabilityTests/DeliveredEditUndoArchiveTests.swift",
+      "sha256": "b76e7cf3986e3c835b83b87678268aa6e9cd9f01212880a2cee704b74e5cb967",
+      "bytes": 8983,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Tests/IrisUsabilityTests/DeliveredEditUndoRecoveryStoreTests.swift",
+      "sha256": "95f6e5a089e19ac04c84e1c631f21fddbad068e2ba9fe4afb8fbf7bb2f56d09c",
+      "bytes": 7295,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Tests/IrisUsabilityTests/DeliveredEditUndoRecoveryTests.swift",
+      "sha256": "cea0aae27739a32efaa488554184e6686505288fe6c53917fa5278bcfa1bfe79",
+      "bytes": 4230,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Tests/IrisUsabilityTests/DeliveredEditUndoSourceTests.swift",
+      "sha256": "00519f3cac32048330fede9f70fcb5522f2a14d0ea275f439f8abec276fa8643",
+      "bytes": 5649,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Tests/IrisUsabilityTests/EditVerificationReceiptTests.swift",
+      "sha256": "b5ee1644cf7ed4810407a5fd0be3ff641f1db463027a531afbffe8be299123d7",
+      "bytes": 2155,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Tests/IrisUsabilityTests/GuidePresentationRegressionTests.swift",
+      "sha256": "1b86f4d75f9cc0becdaf0d471a88e78c802e76b3775937b13aeeb5998ab581ed",
+      "bytes": 5405,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Tests/IrisUsabilityTests/KeychainReadPolicyTests.swift",
+      "sha256": "3452855ee43a1d3d70d76ab5d1ac760cc36c03270f5594d43fedf2ac5a3e8014",
+      "bytes": 7526,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Tests/IrisUsabilityTests/OverlayEyeDragTests.swift",
+      "sha256": "0b80d26715b4011606118144965340e72c1aac2a531014a3cc6319d262ddee6e",
+      "bytes": 3763,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Tests/IrisUsabilityTests/PatchQueueCheckedRemovalTests.swift",
+      "sha256": "2f1542d1e70a348aea61e5f69cfa62fe7c5959e91075ee8786fd17e9dc7b4ade",
+      "bytes": 4851,
+      "symlink": false
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Tests/IrisUsabilityTests/SettingsPanelBehaviorTests.swift",
+      "sha256": "0ec1a20b88423e6ceefcede506db0bebd61b1ade107500b653a82b9f80bde596",
+      "bytes": 5185,
+      "symlink": true
+    },
+    {
+      "path": "iris-macos/tools/usability-tests/Tests/IrisUsabilityTests/StoppedUndoCloneProtectionTests.swift",
+      "sha256": "73989639d520fe118b423e73b6d669f89582e3ea744b8b23e070f980e377853f",
+      "bytes": 3257,
+      "symlink": false
+    },
+    {
+      "path": "research/pr-review-20260912/BUILD_LINEAGE.md",
+      "sha256": "1798f73503584c086bba5c76e7f5ac3d993827a8769416fea9c23b6e6d913310",
+      "bytes": 1859,
+      "symlink": false
+    },
+    {
+      "path": "research/pr-review-20260912/KNEECAP_SETUP.md",
+      "sha256": "ff4bd29205f13a702afffa53ebb1ec3f3bb3b19f29e217e10ccef52b8a8559e2",
+      "bytes": 2242,
+      "symlink": false
+    },
+    {
+      "path": "research/pr-review-20260912/REVIEWER_PRECAUTIONS.md",
+      "sha256": "e6953073782e042a8a9bbb920a961cecdbf1826f5a2fac7ed75acbb95e648969",
+      "bytes": 6636,
+      "symlink": false
+    },
+    {
+      "path": "research/pr-review-20260912/SOURCE_SCOPE_AUDIT.md",
+      "sha256": "b8b3f10dc9b1be726d9e0a5a28015d84a182e3bd058eab7f6ecebef71449b251",
+      "bytes": 17232,
+      "symlink": false
+    },
+    {
+      "path": "research/pr-review-20260912/START_HERE.md",
+      "sha256": "69c9d8a646333b7c40e74784373b9fe922d848596c06dedeed23ae2b5ce63458",
+      "bytes": 4765,
+      "symlink": false
+    },
+    {
+      "path": "research/pr-review-20260912/STATUS_MATRIX.md",
+      "sha256": "bd9c87262747c2b15c1bb238371bbb045580b84265876caf0bbd99b66dbaa7f8",
+      "bytes": 4903,
+      "symlink": false
+    },
+    {
+      "path": "research/pr-review-20260912/TEST_FINDINGS.md",
+      "sha256": "7596bed4db3309987a93d4a162e05c4ee22f130ac1c33f029eb6ff80ccbb6a50",
+      "bytes": 6871,
+      "symlink": false
+    },
+    {
+      "path": "research/pr-review-20260912/UPSTREAM_INTEGRATION.md",
+      "sha256": "1b17dcb9fd6b12fab1db38bf24ac53daeb375bd21b78f400fe0e80f082cd0ba8",
+      "bytes": 2572,
+      "symlink": false
+    }
+  ]
+}

@@ -359,13 +359,23 @@ nonisolated enum MaintainFileEditApplier {
         }
         // Never write THROUGH a symlink (a model could plant one inside the
         // jail pointing out of the repo).
-        if let attributes = try? FileManager.default.attributesOfItem(atPath: resolvedPath),
+        let existingAttributes = try? FileManager.default.attributesOfItem(atPath: resolvedPath)
+        if let attributes = existingAttributes,
            (attributes[.type] as? FileAttributeType) == .typeSymbolicLink {
             return .failure(.pathIsASymbolicLink(path: relativePath))
         }
 
         switch request {
         case .writeWholeFile(_, let content):
+            // An identical write is not new source evidence. Preserve its
+            // timestamp so the executor does not invalidate fresh command
+            // results or count a no-op as progress.
+            let replacementBytes = Data(content.utf8)
+            if (existingAttributes?[.type] as? FileAttributeType) == .typeRegular,
+               (existingAttributes?[.size] as? NSNumber)?.intValue == replacementBytes.count,
+               (try? Data(contentsOf: URL(fileURLWithPath: resolvedPath))) == replacementBytes {
+                return .success("unchanged \(relativePath)")
+            }
             let parentDirectory = (resolvedPath as NSString).deletingLastPathComponent
             try? FileManager.default.createDirectory(
                 atPath: parentDirectory, withIntermediateDirectories: true
@@ -393,6 +403,9 @@ nonisolated enum MaintainFileEditApplier {
                 return .failure(.searchTextNotFound(path: relativePath))
             }
             let edited = original.replacingCharacters(in: matchRange, with: replace)
+            guard !edited.utf8.elementsEqual(original.utf8) else {
+                return .success("unchanged \(relativePath)")
+            }
             do {
                 try edited.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
                 return .success("edited \(relativePath)")

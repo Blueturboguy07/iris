@@ -178,7 +178,8 @@ nonisolated struct RepoRecipeRustTauriDetector: EcosystemDetector {
             // A Tauri app is definitionally a desktop app — no server, no scale
             // machinery — so this branch votes pure-local with confidence.
             runtimeShapeContribution: .pureLocalApp,
-            matched: true
+            matched: true,
+            shippingStack: .tauri
         )
     }
 

@@ -149,7 +149,7 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
                 Spacer(minLength: 0)
                 helpButton
             }
-            Text("iris — install")
+            Text("Iris terminal")
                 .font(.system(size: 10.5, weight: .medium))
                 .foregroundColor(Color.white.opacity(0.5))
         }
@@ -222,6 +222,8 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
         .onHover { hovering in escapeHatchIsHovered = hovering }
         .pointerCursor()
         .nativeTooltip("Close — stops the install, keeps your place in the guide")
+        .accessibilityLabel("Stop and close terminal")
+        .accessibilityHint("Stops the current task.")
         .reportsFrameAsATakeoverControl()
     }
 
@@ -258,6 +260,8 @@ struct GuideAutopilotTerminalView<Runner: AutopilotTerminalPresenting>: View {
             .onHover { hovering in minimizeIsHovered = hovering }
             .pointerCursor()
             .nativeTooltip("Minimize — the install keeps running")
+            .accessibilityLabel("Minimize terminal")
+            .accessibilityHint("Hides the terminal while the task keeps running.")
             .reportsFrameAsATakeoverControl()
         } else {
             Circle().fill(GuideAutopilotTerminalTheme.trafficYellow).frame(width: 11, height: 11)

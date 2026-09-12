@@ -30,6 +30,7 @@
 //  verdict is a failure — which the `noFreshAppMeansFailure` cases pin.
 //
 
+import Foundation
 import Testing
 @testable import Iris
 
@@ -90,6 +91,64 @@ struct PublikTest2PackagingDmgToleranceReproTests {
             reason.contains("E0425"),
             "the failure should carry the build's own error so the reader (and the repair loop) can see it, got: \(reason)"
         )
+    }
+
+    /// A long compiler/packager log must keep the root cause as well as the
+    /// final context. A raw character suffix can preserve only stack frames.
+    @Test func aLongPackagingFailureKeepsTheRootCauseAndFinalContext() {
+        let rootCause = "Error: electron-builder could not write the application bundle (EACCES)"
+        let privateToken = "API_TOKEN=packaging-secret-value"
+        let outputLines = [rootCause]
+            + (1...120).map {
+                "at stackFrame\($0) (/private/tmp/project/node_modules/app-builder-lib/src/packager.ts:\($0):11)"
+            }
+        let output = ([outputLines[0] + " " + privateToken] + outputLines.dropFirst())
+            .joined(separator: "\n")
+
+        let verdict = AppRelaunchService.packagingVerdict(
+            freshLaunchableAppBundlePath: nil,
+            buildSucceeded: false,
+            buildOutputTail: output
+        )
+        guard case .noLaunchableApp(let reason) = verdict else {
+            Issue.record("a failed build with no .app should be a packaging failure, got \(verdict)")
+            return
+        }
+        #expect(reason.contains(rootCause))
+        #expect(reason.contains("stackFrame120"))
+        #expect(reason.contains("earlier packaging output omitted"))
+        #expect(reason.contains("[REDACTED]"))
+        #expect(!reason.contains(privateToken))
+        #expect(AppRelaunchService.packagingDiagnosticSummary(output).count <= 2_000)
+    }
+
+    /// Electron-builder commonly uses `release/mac-<arch>` rather than
+    /// electron-forge's `dist`/`out` layout. Those explicit release locations
+    /// must still honor the launchability and freshness checks.
+    @Test func releaseElectronBuilderOutputIsDiscoveredForEachMacLayout() throws {
+        let fileManager = FileManager.default
+        for relativeParent in ["release/mac", "release/mac-arm64", "release/mac-universal"] {
+            let root = fileManager.temporaryDirectory
+                .appendingPathComponent("iris-release-discovery-\(UUID().uuidString)")
+            defer { try? fileManager.removeItem(at: root) }
+            let bundlePath = root.appendingPathComponent("\(relativeParent)/NitroAI.app")
+            try fileManager.createDirectory(
+                at: bundlePath.appendingPathComponent("Contents/MacOS"),
+                withIntermediateDirectories: true
+            )
+            let executable = bundlePath.appendingPathComponent("Contents/MacOS/NitroAI")
+            try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+            try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+            try PropertyListSerialization.data(
+                fromPropertyList: ["CFBundleExecutable": "NitroAI"], format: .xml, options: 0
+            ).write(to: bundlePath.appendingPathComponent("Contents/Info.plist"))
+            let found = AppRelaunchService.newestLaunchableAppBundle(
+                forStack: .electron,
+                clonePath: root.path,
+                producedAtOrAfter: Date(timeIntervalSinceNow: -60)
+            )
+            #expect(found == bundlePath.path, "release layout should be searched: \(relativeParent)")
+        }
     }
 
     /// The pathological case the old success-path guarded: a build that reported

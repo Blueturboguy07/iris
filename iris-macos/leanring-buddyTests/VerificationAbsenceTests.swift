@@ -43,6 +43,12 @@ import Testing
         #expect(outcome.build == .notRun)
         #expect(outcome.suite == .notRun)
         #expect(outcome.atLeastOneVerificationStageActuallyRan == false)
+        #expect(outcome.editReceipt.buildPassed == nil)
+        #expect(outcome.editReceipt.testsPassed == nil)
+        #expect(outcome.editReceipt.commitTrailer == "Applied: build-not-run, suite-not-run")
+        // Reporting skipped checks must not introduce another approval or
+        // change the existing automatic execution policy for unsupported stacks.
+        #expect(outcome.earnsCleanApply)
 
         // And the compatibility accessors keep their old meanings exactly, so
         // the serialized shape and the existing readers are untouched.
@@ -51,11 +57,14 @@ import Testing
         // A stage that ran and passed is distinguishable from one that did not
         // run — which is the whole point.
         outcome.build = .passed
+        #expect(outcome.editReceipt.buildPassed == true)
+        #expect(outcome.editReceipt.testsPassed == nil)
         #expect(outcome.build == .passed)
         #expect(outcome.atLeastOneVerificationStageActuallyRan)
         #expect(outcome.buildSucceeded)
 
         outcome.build = .failed
+        #expect(outcome.editReceipt.hasFailure)
         #expect(!outcome.buildSucceeded)
         #expect(!outcome.earnsCleanApply)
     }

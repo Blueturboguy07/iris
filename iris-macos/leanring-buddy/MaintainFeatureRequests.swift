@@ -99,6 +99,7 @@ final class MaintainFeatureRequests {
     /// N people who want that").
     @discardableResult
     func poolWish(_ message: String, forAppSlug appSlug: String) async -> String? {
+        guard !IrisTestEnvironment.isEnabled else { return nil }
         let normalized = Self.normalizedRequest(from: message)
         guard !normalized.isEmpty else { return nil }
         let signature = Self.signature(appSlug: appSlug, normalizedRequest: normalized)
@@ -125,6 +126,7 @@ final class MaintainFeatureRequests {
     /// and forget, keyed by the same normalized signature `poolWish` uses so it
     /// increments the right row.
     func markPooledRequestImplemented(_ requestText: String, forAppSlug appSlug: String) async {
+        guard !IrisTestEnvironment.isEnabled else { return }
         let normalized = Self.normalizedRequest(from: requestText)
         guard !normalized.isEmpty else { return }
         let signature = Self.signature(appSlug: appSlug, normalizedRequest: normalized)

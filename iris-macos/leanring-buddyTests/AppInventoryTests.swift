@@ -120,6 +120,7 @@ struct AppInventoryTests {
         let simplicityEntry = try #require(inventoryService.inventoryEntries.first)
         #expect(simplicityEntry.installationState == .installed(installedVersion: "0.1.0"))
         #expect(simplicityEntry.updateAvailability == .upToDate)
+        #expect(simplicityEntry.installedBundlePath == simplicityBundleURL.path)
         #expect(inventoryService.installedEntriesForDisplay.map(\.slug) == ["simplicity"])
     }
 
@@ -457,6 +458,66 @@ struct AppInventoryTests {
         )
     }
 
+    @Test func forceRefreshInvalidatesAStaleCatalogCopy() async throws {
+        let initialCatalog = [
+            CatalogAppDescriptor(
+                slug: "oldapp",
+                name: "Old app",
+                macBundleId: nil,
+                latestReleaseTag: nil
+            ),
+        ]
+        let replacementCatalog = [
+            CatalogAppDescriptor(
+                slug: "newapp",
+                name: "New app",
+                macBundleId: nil,
+                latestReleaseTag: nil
+            ),
+        ]
+        let catalogDirectory = CachedRotatingCatalogAppDirectory(catalogApps: initialCatalog)
+        let inventoryService = AppInventoryService(
+            catalogDirectory: catalogDirectory,
+            installedApplicationLocator: StubbedInstalledApplicationLocator(
+                applicationBundleURLsByBundleIdentifier: [:]
+            )
+        )
+
+        await inventoryService.refreshInventory()
+        await catalogDirectory.replaceUpstreamCatalog(with: replacementCatalog)
+
+        // A normal service refresh still uses the source's bounded cache.
+        await inventoryService.refreshInventory()
+        #expect(inventoryService.inventoryEntries.map(\.slug) == ["oldapp"])
+
+        await inventoryService.refreshInventory(forceCatalogFetch: true)
+        #expect(inventoryService.inventoryEntries.map(\.slug) == ["newapp"])
+        #expect(await catalogDirectory.clearCount == 1)
+    }
+
+    @Test func duplicateCatalogSlugsKeepTheFirstPublishedRow() {
+        let descriptors = [
+            CatalogAppDescriptor(
+                slug: "same-app",
+                name: "First name",
+                macBundleId: nil,
+                latestReleaseTag: "v1.0.0"
+            ),
+            CatalogAppDescriptor(
+                slug: "same-app",
+                name: "Second name",
+                macBundleId: nil,
+                latestReleaseTag: "v2.0.0"
+            ),
+        ]
+
+        let deduplicated = AppInventoryService.deduplicatedCatalogDescriptors(descriptors)
+
+        #expect(deduplicated.map(\.slug) == ["same-app"])
+        #expect(deduplicated.first?.name == "First name")
+        #expect(deduplicated.first?.latestReleaseTag == "v1.0.0")
+    }
+
     // MARK: - Failures
 
     @Test func aCatalogThatCannotBeReadKeepsTheLastKnownInventory() async throws {
@@ -532,6 +593,35 @@ private actor StubbedCatalogAppDirectory: CatalogAppDirectorySource {
             throw failureToThrow
         }
         return fixedCatalogApps
+    }
+}
+
+/// Models the real directory's in-memory cache so a forced service refresh is
+/// tested as an invalidation, not merely as a second call to a fixed fake.
+private actor CachedRotatingCatalogAppDirectory: CatalogAppDirectorySource {
+    private var cachedCatalogApps: [CatalogAppDescriptor]?
+    private var upstreamCatalogApps: [CatalogAppDescriptor]
+    private(set) var clearCount = 0
+
+    init(catalogApps: [CatalogAppDescriptor]) {
+        self.upstreamCatalogApps = catalogApps
+    }
+
+    func replaceUpstreamCatalog(with catalogApps: [CatalogAppDescriptor]) {
+        upstreamCatalogApps = catalogApps
+    }
+
+    func catalogApps() async throws -> [CatalogAppDescriptor] {
+        if let cachedCatalogApps {
+            return cachedCatalogApps
+        }
+        cachedCatalogApps = upstreamCatalogApps
+        return upstreamCatalogApps
+    }
+
+    func clearCachedCatalogApps() async {
+        clearCount += 1
+        cachedCatalogApps = nil
     }
 }
 

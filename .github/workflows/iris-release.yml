@@ -1,19 +1,21 @@
 name: Release Iris
 
-# Produces the downloadable Iris installers and, when the signing secrets are
-# present, signs and notarizes them. Every job ends by installing what it just
-# built and checking it opens — a build that cannot be opened is worse than no
-# build, because it looks finished.
+# Produces the downloadable Iris installers. The macOS artifact is published
+# only after distribution signing, notarization, stapling, and a strict
+# downloaded-copy check all pass. Every job ends by checking what it built
+# opens. A build that cannot be opened is worse than no build, because it looks
+# finished.
 #
-# Secrets (all optional; missing ones downgrade to an unsigned build):
+# macOS distribution secrets are required for the customer release path. A
+# missing value fails the macOS job; it never downgrades that artifact to
+# unsigned or unstapled. The names deliberately match NitroAI's so the same
+# values can be managed in one place:
 #
-#   macOS — deliberately the same names NitroAI uses, so the same five values
-#   can be copied straight across:
-#     CSC_LINK                      base64 of the Developer ID .p12
-#     CSC_KEY_PASSWORD              its export password
-#     APPLE_ID                      Apple account email
-#     APPLE_APP_SPECIFIC_PASSWORD   app-specific password from appleid.apple.com
-#     APPLE_TEAM_ID                 R5R3ZS54LV
+#   CSC_LINK                      base64 of the Developer ID .p12
+#   CSC_KEY_PASSWORD              its export password
+#   APPLE_ID                      Apple account email
+#   APPLE_APP_SPECIFIC_PASSWORD   app-specific password from appleid.apple.com
+#   APPLE_TEAM_ID                 expected Developer ID/notary team identifier
 #
 #   Windows — Azure Artifact Signing (formerly Trusted Signing). There is no
 #   .pfx path any more: since June 2023 the CA/Browser rules keep code-signing
@@ -48,19 +50,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Same keychain dance as build-macos above; the identity and secrets are
-      # shared. Kept in sync by hand — if you touch one, touch both.
+      # Import only a Developer ID identity for the customer artifact. All five
+      # values are checked before any build can produce a release candidate.
       - name: Set up macOS code signing
         id: signing
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          if [ -z "${CSC_LINK:-}" ]; then
-            echo "No signing certificate configured — building unsigned."
-            echo "signed=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          missing=""
+          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name:-}" ]; then
+              missing="$missing $name"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::macOS customer release requires signing and notarization configuration; missing:$missing" >&2
+            exit 1
           fi
 
           KEYCHAIN="$RUNNER_TEMP/iris-signing.keychain-db"
@@ -83,6 +93,10 @@ jobs:
             echo "The certificate imported but no Developer ID Application identity came with it." >&2
             exit 1
           fi
+          if ! printf '%s\n' "$IDENTITY" | grep -Fq "($APPLE_TEAM_ID)"; then
+            echo "The imported Developer ID identity is not issued to the configured Apple team." >&2
+            exit 1
+          fi
           echo "Signing as: $IDENTITY"
           echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
           echo "signed=true" >> "$GITHUB_OUTPUT"
@@ -90,23 +104,17 @@ jobs:
       - name: Build Iris.app
         working-directory: iris-macos
         env:
-          SIGNED: ${{ steps.signing.outputs.signed }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          if [ "$SIGNED" = "true" ]; then
-            xcodebuild -project leanring-buddy.xcodeproj -scheme leanring-buddy \
-              -configuration Release -derivedDataPath build \
-              CODE_SIGN_IDENTITY="$APPLE_SIGNING_IDENTITY" \
-              CODE_SIGN_STYLE=Manual \
-              ENABLE_HARDENED_RUNTIME=YES \
-              OTHER_CODE_SIGN_FLAGS="--timestamp" \
-              build
-          else
-            xcodebuild -project leanring-buddy.xcodeproj -scheme leanring-buddy \
-              -configuration Release -derivedDataPath build \
-              CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
-              build
-          fi
+          xcodebuild -project leanring-buddy.xcodeproj -scheme leanring-buddy \
+            -configuration Release -derivedDataPath build \
+            CODE_SIGN_IDENTITY="$APPLE_SIGNING_IDENTITY" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            ENABLE_HARDENED_RUNTIME=YES \
+            OTHER_CODE_SIGN_FLAGS="--timestamp" \
+            build
           test -d "build/Build/Products/Release/Iris.app"
 
       # Sparkle ships its helpers ALREADY signed — ad-hoc — and Xcode's
@@ -118,7 +126,6 @@ jobs:
       # Inside-out order is not optional: signing a container invalidates the
       # signature of anything signed inside it afterwards.
       - name: Re-sign Sparkle's nested helpers
-        if: steps.signing.outputs.signed == 'true'
         working-directory: iris-macos
         run: |
           set -euo pipefail
@@ -146,6 +153,24 @@ jobs:
           done < <(find "build/Build/Products/Release/Iris.app" -type f \
                      -exec sh -c 'file "$1" | grep -q "Mach-O" && echo "$1"' _ {} \;)
 
+      # Notarize the app before packaging it. This leaves a stapled app inside
+      # the dmg, rather than stapling only a copy that never reaches users.
+      - name: Notarize and staple Iris.app
+        working-directory: iris-macos
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          APP="build/Build/Products/Release/Iris.app"
+          ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/Iris.app.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/Iris.app.zip" \
+            --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+
       - name: Package dmg
         working-directory: iris-macos
         run: |
@@ -162,13 +187,10 @@ jobs:
           # the file people actually download then reports "rejected, source=no
           # usable signature". The app inside assesses as Notarized Developer
           # ID either way, which is why this went unnoticed through 0.3.x.
-          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
-            codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp \
-              "dist/Iris-assistant.dmg"
-          fi
+          codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp \
+            "dist/Iris-assistant.dmg"
 
-      - name: Notarize and staple
-        if: steps.signing.outputs.signed == 'true'
+      - name: Notarize and staple dmg
         working-directory: iris-macos
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -176,47 +198,49 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          if [ -z "${APPLE_ID:-}" ]; then
-            echo "Signed but no notary credentials — skipping notarization."
-            exit 0
-          fi
           xcrun notarytool submit dist/Iris-assistant.dmg \
             --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" --wait
           xcrun stapler staple dist/Iris-assistant.dmg
+          xcrun stapler validate dist/Iris-assistant.dmg
           # Assess what will actually be downloaded, not just what is inside it.
           spctl --assess --type open --context context:primary-signature -vv \
             dist/Iris-assistant.dmg
 
       - name: Check the build opens
         working-directory: iris-macos
-        env:
-          SIGNED: ${{ steps.signing.outputs.signed }}
         run: |
           set -euo pipefail
           APP="build/Build/Products/Release/Iris.app"
-          if [ "$SIGNED" = "true" ]; then
-            codesign --verify --deep --strict "$APP"
-            spctl --assess --type execute "$APP" || {
-              echo "Gatekeeper rejected the app (expected until notarization succeeds on a stapled copy)."
-              [ -n "${APPLE_ID:-}" ] && exit 1 || true
-            }
-          fi
+          codesign --verify --deep --strict "$APP"
+          spctl --assess --type execute "$APP"
           open "$APP"
           sleep 5
           pgrep -x Iris >/dev/null
           osascript -e 'tell application "Iris" to quit' || pkill -x Iris || true
 
-      - name: Record whether the app was signed
+      - name: Verify macOS distribution artifact
+        env:
+          IRIS_EXPECTED_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          echo "${{ steps.signing.outputs.signed }}" > iris-macos/dist/macos-signed.txt
+          set -euo pipefail
+          scripts/verify-iris-macos.sh \
+            --app "iris-macos/build/Build/Products/Release/Iris.app" \
+            --dmg "iris-macos/dist/Iris-assistant.dmg" \
+            --expected-team "$IRIS_EXPECTED_TEAM_ID" \
+            --expected-bundle-id "com.publikhq.iris" \
+            --require-notarized
+
+      - name: Record macOS distribution readiness
+        run: |
+          echo true > iris-macos/dist/macos-distribution-ready.txt
 
       - uses: actions/upload-artifact@v4
         with:
           name: iris-macos
           path: |
             iris-macos/dist/Iris-assistant.dmg
-            iris-macos/dist/macos-signed.txt
+            iris-macos/dist/macos-distribution-ready.txt
           if-no-files-found: error
 
   # Windows ships the Electron app. It used to ship iris-desktop (Tauri) — a
@@ -319,19 +343,9 @@ jobs:
 
   # Publishing is DELIBERATE, never a side effect of pushing a tag.
   #
-  # This repo has no signing secrets (`gh secret list` is empty), so the build
-  # jobs above downgrade to unsigned — and this job ends in
-  # `gh release upload --clobber`. On a tag that combination replaces a DMG
-  # signed and notarized on a real Mac with an unsigned CI build, silently, a
-  # few minutes after the release goes up. It has been caught twice by hand:
-  # the 0.3.1 and 0.3.2 runs were both cancelled mid-flight for this reason,
-  # which is not a safeguard, it is a person being quick.
-  #
-  # So a tag now builds and verifies but does not publish. Releasing is either
-  # local (build, sign, notarize, staple, `gh release create`) or an explicit
-  # workflow_dispatch with publish=true. Once the secrets exist and CI can
-  # produce a signed build, `startsWith(github.ref, 'refs/tags/')` can come
-  # back and this comment can go.
+  # A tag builds but does not publish. Releasing is an explicit
+  # workflow_dispatch with publish=true, and the macOS artifact must carry the
+  # readiness marker written only after the strict downloaded-copy verifier.
   publish:
     needs: [build-macos, build-windows]
     if: inputs.publish
@@ -345,25 +359,23 @@ jobs:
         with:
           name: iris-windows
           path: release-assets/windows
-      # Iris is meant to be a signed application on both platforms. It is not
-      # signed yet, and that must not stop a release — but it must not be
-      # invisible either, because an unsigned build is the one where the user
-      # meets Gatekeeper or SmartScreen instead of the app and concludes it is
-      # malware. So an unsigned platform is stated on the release itself, and
-      # the note disappears on its own once the secrets exist.
-      - name: Work out what got signed
+      # macOS is the customer release gate. Windows remains informational here
+      # so its existing signing behavior is unchanged.
+      - name: Verify macOS release gate
         id: signing
         run: |
-          macos="$(cat release-assets/macos/macos-signed.txt 2>/dev/null || echo unknown)"
+          set -euo pipefail
+          macos="$(cat release-assets/macos/macos-distribution-ready.txt 2>/dev/null || echo unknown)"
+          if [ "$macos" != "true" ]; then
+            echo "::error::Refusing to publish: macOS artifact did not pass the signed and notarized release gate." >&2
+            exit 1
+          fi
           windows="$(cat release-assets/windows/windows-signed.txt 2>/dev/null || echo unknown)"
           echo "macos=$macos" >> "$GITHUB_OUTPUT"
           echo "windows=$windows" >> "$GITHUB_OUTPUT"
 
           notes="Publik's desktop assistant for macOS and Windows."
           warn=""
-          if [ "$macos" != "true" ]; then
-            warn="$warn\n- **macOS build is not signed or notarized.** Gatekeeper will refuse it on first open; right-click → Open, or \`xattr -dr com.apple.quarantine\`."
-          fi
           if [ "$windows" != "true" ]; then
             warn="$warn\n- **Windows installer is not signed.** SmartScreen will warn on download; More info → Run anyway."
           fi

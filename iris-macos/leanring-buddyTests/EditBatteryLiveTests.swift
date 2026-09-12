@@ -382,6 +382,12 @@ final class EditBatteryRunLog {
     /// the transcript.
     func handle(_ event: MaintainTierCProgressEvent) {
         switch event {
+        case .modelRouteSelected(let description):
+            note("model route: \(description)")
+
+        case .verificationCompleted(let receipt):
+            note("verification receipt: \(receipt.summary)")
+
         case .waitingOnTheModel(let stepNumber):
             note("step \(stepNumber): waiting on the model")
 

@@ -127,6 +127,163 @@ import Testing
         #expect(recipe.runtimeShape == .pureLocalApp)
     }
 
+    // MARK: - Desktop shell precedence
+
+    @Test func declaredElectronShippingPathBeatsAVestigialTauriFolder() throws {
+        // This is the dual-shell shape that caused the plan/build mismatch:
+        // Tauri files remain in the clone, but package.json declares a real
+        // Electron entrypoint and a package script that invokes its builder.
+        let repoRootPath = try Self.makeFixtureRepo(files: [
+            "package.json": #"""
+            {
+              "main": "electron/main.mjs",
+              "scripts": {
+                "build": "tsc && vite build",
+                "app:nobuild": "electron .",
+                "dist:mac": "npm run build && electron-builder --mac"
+              },
+              "dependencies": {
+                "electron": "43.1.1",
+                "@tauri-apps/api": "2.0.0"
+              },
+              "devDependencies": {
+                "electron-builder": "26.15.3",
+                "@tauri-apps/cli": "2.0.0"
+              }
+            }
+            """#,
+            "package-lock.json": "",
+            "electron/main.mjs": "export {}\n",
+            "electron-builder.cjs": "module.exports = {}\n",
+            "src-tauri/tauri.conf.json": #"""
+            { "build": {
+              "beforeBuildCommand": "npm run build",
+              "beforeDevCommand": "npm run dev"
+            } }
+            """#,
+            "src-tauri/Cargo.toml": "[package]\nname = \"vestigial\"\nversion = \"0.1.0\"\n",
+        ])
+        defer { Self.removeFixtureRepo(repoRootPath) }
+
+        let shippingEvidence = try #require(
+            RepoRecipeNodeWebDetector().detect(repoRootPath: repoRootPath)
+        )
+        #expect(shippingEvidence.shippingStack == .electron)
+
+        let recipe = RepoRecipeService.deriveRecipe(repoRootPath: repoRootPath)
+        #expect(recipe.ecosystemIdentifier == "node/electron")
+        #expect(recipe.build?.commandLine == "npm run build")
+        #expect(recipe.package?.commandLine == "npm run dist:mac")
+        #expect(recipe.provenanceByField[.package] == .explicitProjectConfig)
+    }
+
+    @Test func incidentalElectronToolingDoesNotDisplaceARealTauriRecipe() throws {
+        // Electron is present as a dependency, but there is no root Electron
+        // entrypoint or packaging declaration. The Tauri config is therefore
+        // the only complete desktop shipping path.
+        let repoRootPath = try Self.makeFixtureRepo(files: [
+            "package.json": #"""
+            {
+              "scripts": { "build": "vite build", "dev": "vite" },
+              "dependencies": {
+                "electron": "43.1.1",
+                "@tauri-apps/api": "2.0.0"
+              },
+              "devDependencies": { "@tauri-apps/cli": "2.0.0" }
+            }
+            """#,
+            "package-lock.json": "",
+            "src-tauri/tauri.conf.json": #"""
+            { "build": {
+              "beforeBuildCommand": "npm run build",
+              "beforeDevCommand": "npm run dev"
+            } }
+            """#,
+            "src-tauri/Cargo.toml": "[package]\nname = \"real-tauri\"\nversion = \"0.1.0\"\n",
+        ])
+        defer { Self.removeFixtureRepo(repoRootPath) }
+
+        let nodeFinding = try #require(
+            RepoRecipeNodeWebDetector().detect(repoRootPath: repoRootPath)
+        )
+        #expect(nodeFinding.shippingStack == nil)
+
+        let recipe = RepoRecipeService.deriveRecipe(repoRootPath: repoRootPath)
+        #expect(recipe.ecosystemIdentifier == "rust/tauri")
+        #expect(recipe.build?.commandLine
+            == "npm run build && cargo build --release --manifest-path src-tauri/Cargo.toml")
+        #expect(recipe.package?.commandLine == "cargo tauri build")
+    }
+
+    @Test func ambiguousElectronPackagingDoesNotOverrideTauri() throws {
+        // Two different declared packaging tools are not a safe stack choice.
+        // Keep the Tauri recipe rather than selecting one Electron command by
+        // dictionary order.
+        let repoRootPath = try Self.makeFixtureRepo(files: [
+            "package.json": #"""
+            {
+              "main": "electron/main.mjs",
+              "scripts": {
+                "build": "vite build",
+                "dist": "electron-builder",
+                "make": "electron-forge make",
+                "tauri:build": "tauri build"
+              },
+              "dependencies": { "electron": "43.1.1" },
+              "devDependencies": {
+                "electron-builder": "26.15.3",
+                "electron-forge": "7.8.0"
+              }
+            }
+            """#,
+            "package-lock.json": "",
+            "electron/main.mjs": "export {}\n",
+            "src-tauri/tauri.conf.json": "{ \"build\": {} }",
+            "src-tauri/Cargo.toml": "[package]\nname = \"ambiguous\"\nversion = \"0.1.0\"\n",
+        ])
+        defer { Self.removeFixtureRepo(repoRootPath) }
+
+        let nodeFinding = try #require(
+            RepoRecipeNodeWebDetector().detect(repoRootPath: repoRootPath)
+        )
+        #expect(nodeFinding.shippingStack == nil)
+        let packageJSON = try #require(RepoRecipeFiles.jsonObject(
+            atRelativePath: "package.json", underRepoRoot: repoRootPath
+        ))
+        #expect(!RepoRecipeElectronShippingEvidence.inspect(
+            packageJSON: packageJSON,
+            repoRootPath: repoRootPath
+        ).isStrong)
+
+        let recipe = RepoRecipeService.deriveRecipe(repoRootPath: repoRootPath)
+        #expect(recipe.ecosystemIdentifier == "rust/tauri")
+        #expect(recipe.package?.commandLine == "cargo tauri build")
+    }
+
+    @Test func ElectronDependencyAndEntrypointWithoutPackagingEvidenceStayTauri() throws {
+        let repoRootPath = try Self.makeFixtureRepo(files: [
+            "package.json": #"""
+            {
+              "main": "electron/main.mjs",
+              "dependencies": {
+                "electron": "43.1.0",
+                "@tauri-apps/api": "2.0.0"
+              }
+            }
+            """#,
+            "package-lock.json": "",
+            "electron/main.mjs": "export {}\n",
+            "src-tauri/tauri.conf.json": "{ \"build\": {} }",
+            "src-tauri/Cargo.toml": "[package]\nname = \"no-electron-shipping\"\nversion = \"0.1.0\"\n",
+        ])
+        defer { Self.removeFixtureRepo(repoRootPath) }
+
+        let recipe = RepoRecipeService.deriveRecipe(repoRootPath: repoRootPath)
+        #expect(recipe.ecosystemIdentifier == "rust/tauri")
+        #expect(recipe.package?.commandLine == "cargo tauri build")
+        #expect(recipe.provenanceByField[.package] == .explicitProjectConfig)
+    }
+
     // MARK: - Next.js: buildable, and classified as a single-instance service
 
     @Test func nextAppIsBuildableAndClassifiedAsLocalSingleInstanceService() throws {

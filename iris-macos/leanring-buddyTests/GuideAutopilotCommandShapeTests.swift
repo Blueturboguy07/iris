@@ -90,4 +90,40 @@ struct GuideAutopilotCommandShapeTests {
         )
         #expect(hosts == ["github.com", "registry.npmjs.org"])
     }
+
+    @Test func globalPackageManagerInstallsAreTheOnlyCommandsThatRequestAPathRefresh() {
+        let globalInstalls = [
+            "npm install -g yarn",
+            "npm i --global yarn",
+            "pnpm add --global typescript",
+            "yarn global add serve",
+            "corepack enable",
+            "sudo npm install -g yarn",
+            "env npm install -g yarn",
+            "command npm install -g yarn",
+        ]
+        for command in globalInstalls {
+            #expect(
+                GuideAutopilotCommandShape.installsAGlobalPackageManagerBinary(command),
+                "must refresh the persistent shell after: \(command)"
+            )
+        }
+
+        let projectLocalCommands = [
+            "npm install",
+            "npm install yarn",
+            "pnpm add typescript",
+            "yarn install",
+            "npm run build",
+            "echo npm install -g yarn",
+            "printf 'npm install -g yarn\\n'",
+            "echo corepack enable",
+        ]
+        for command in projectLocalCommands {
+            #expect(
+                !GuideAutopilotCommandShape.installsAGlobalPackageManagerBinary(command),
+                "must not reload dotfiles for a project-local command: \(command)"
+            )
+        }
+    }
 }

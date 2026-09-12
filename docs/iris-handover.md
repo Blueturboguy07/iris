@@ -194,7 +194,7 @@ enough to choose an architecture, not to quote as a benchmark.
   kills the unsigned runner. Pre-existing, unrelated; always use
   `-only-testing:leanring-buddyTests`.
 - **Reading Iris's logs:** stdout is fully buffered when not a terminal. Give
-  it a pty — `script -q /tmp/iris.log /Applications/Iris.app/Contents/MacOS/Iris`
+  it a pty, for example with `script -q <temporary-log> <installed-Iris>/Contents/MacOS/Iris`.
   — and the `🔑` permission lines appear immediately.
 - **The desktop apps are separate projects.** Root `tsconfig`/`vitest` exclude
   `iris-windows/` and `iris-macos/`; each has its own runner and dependencies.

@@ -64,6 +64,8 @@
 
 import AppKit
 import Combine
+import Darwin
+import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -107,6 +109,14 @@ struct OverlayEyePastedImage: Sendable, Equatable, CustomStringConvertible {
 /// on exactly as it always has.
 enum OverlayEyePastedImageReader {
 
+    /// Input limits are deliberately separate from the smaller output limits
+    /// below.  ImageIO can otherwise allocate while decoding a perfectly
+    /// valid, very large photo before `sendableImage` gets a chance to
+    /// downscale it.
+    static let maximumInputDataBytes = 32 * 1024 * 1024
+    static let maximumInputPixelDimension = 16_384
+    static let maximumInputPixelCount = 32_000_000
+
     /// The longest side a pasted image is sent at. The same 1280 the screen
     /// capture downscales displays to, for the same reason: it is the size the
     /// model reads well at, and a phone-camera photo pasted at full size is
@@ -135,8 +145,12 @@ enum OverlayEyePastedImageReader {
     /// Nil is a load-bearing answer, not a failure: it is what makes an
     /// ordinary text paste fall through to the field editor untouched.
     static func imageOnThePasteboard(_ pasteboard: NSPasteboard) -> OverlayEyePastedImage? {
-        guard let bitmap = bitmapOnThePasteboard(pasteboard) else { return nil }
-        return sendableImage(from: bitmap)
+        // Read the bytes once, then inspect their ImageIO metadata before
+        // asking AppKit to decode a bitmap.  This keeps paste and file/drop
+        // inputs on the same bounded path.
+        guard let availableImageType = pasteboard.availableType(from: imageTypesWorthReading),
+              let imageData = pasteboard.data(forType: availableImageType) else { return nil }
+        return sendableImage(from: imageData)
     }
 
     // MARK: Dropped and picked images
@@ -182,9 +196,8 @@ enum OverlayEyePastedImageReader {
         for fileURL in fileURLs {
             guard images.count < mostImagesOneMessageMayCarry else { break }
             guard fileURLIsAnImage(fileURL),
-                  let fileData = try? Data(contentsOf: fileURL),
-                  let bitmap = NSBitmapImageRep(data: fileData),
-                  let image = sendableImage(from: bitmap) else { continue }
+                  let fileData = boundedImageFileData(at: fileURL),
+                  let image = sendableImage(from: fileData) else { continue }
             images.append(image)
         }
         return images
@@ -208,22 +221,85 @@ enum OverlayEyePastedImageReader {
         return imageFileTypesWorthReading.contains { contentType.conforms(to: $0) }
     }
 
-    private static func bitmapOnThePasteboard(_ pasteboard: NSPasteboard) -> NSBitmapImageRep? {
-        // `availableType(from:)` rather than reading each type blind, so a
-        // pasteboard carrying only text is never asked for image data it does
-        // not have — and so a promised item is not woken for nothing.
-        guard let availableImageType = pasteboard.availableType(from: imageTypesWorthReading),
-              let imageData = pasteboard.data(forType: availableImageType),
-              let bitmap = NSBitmapImageRep(data: imageData)
-        else { return nil }
-        return bitmap
+    /// The ImageIO metadata path is intentionally cache-free: it validates
+    /// the container and dimensions without rasterizing it.  Callers must
+    /// still compare the decoded bitmap dimensions before using it because a
+    /// malformed file may disagree with its metadata.
+    static func imagePixelDimensions(in data: Data) -> (width: Int, height: Int)? {
+        guard inputDataIsWithinByteLimit(data),
+              let source = CGImageSourceCreateWithData(data as CFData, [
+                kCGImageSourceShouldCache: false,
+            ] as CFDictionary),
+              CGImageSourceGetCount(source) > 0,
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = integerImageProperty(kCGImagePropertyPixelWidth, in: properties),
+              let height = integerImageProperty(kCGImagePropertyPixelHeight, in: properties),
+              inputPixelDimensionsAreWithinBounds(width: width, height: height) else {
+            return nil
+        }
+        return (width, height)
+    }
+
+    static func inputDataIsWithinByteLimit(_ data: Data) -> Bool {
+        data.count <= maximumInputDataBytes
+    }
+
+    static func inputPixelDimensionsAreWithinBounds(width: Int, height: Int) -> Bool {
+        guard width > 0,
+              height > 0,
+              width <= maximumInputPixelDimension,
+              height <= maximumInputPixelDimension else { return false }
+        return width <= maximumInputPixelCount / height
+    }
+
+    static func sendableImage(from data: Data) -> OverlayEyePastedImage? {
+        guard let dimensions = imagePixelDimensions(in: data),
+              let source = CGImageSourceCreateWithData(data as CFData,
+                  [kCGImageSourceShouldCache: false] as CFDictionary),
+              let image = CGImageSourceCreateImageAtIndex(source, 0,
+                  [kCGImageSourceShouldCache: false] as CFDictionary),
+              image.width == dimensions.width, image.height == dimensions.height else { return nil }
+        let bitmap = NSBitmapImageRep(cgImage: image)
+        return sendableImage(from: bitmap)
+    }
+
+    private static func integerImageProperty(_ key: CFString, in properties: [CFString: Any]) -> Int? {
+        if let value = properties[key] as? Int { return value }
+        if let value = properties[key] as? NSNumber { return value.intValue }
+        return nil
+    }
+
+    /// Read at most one byte beyond the limit.  The initial `fstat` rejects a
+    /// known oversized file; the bounded read also rejects a file that grows
+    /// after that check.  `O_NOFOLLOW` prevents a dragged symlink from
+    /// redirecting this read to an unrelated file.
+    private static func boundedImageFileData(at fileURL: URL) -> Data? {
+        guard fileURL.isFileURL else { return nil }
+        let descriptor = open(fileURL.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        guard descriptor >= 0 else { return nil }
+        let fileHandle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? fileHandle.close() }
+
+        var fileInformation = stat()
+        guard fstat(descriptor, &fileInformation) == 0,
+              (fileInformation.st_mode & S_IFMT) == S_IFREG,
+              fileInformation.st_size >= 0,
+              fileInformation.st_size <= off_t(maximumInputDataBytes) else { return nil }
+
+        do {
+            let data = try fileHandle.read(upToCount: maximumInputDataBytes + 1) ?? Data()
+            guard data.count <= maximumInputDataBytes else { return nil }
+            return data
+        } catch {
+            return nil
+        }
     }
 
     /// Bounded in size, bounded in weight, PNG when PNG is cheap enough.
     static func sendableImage(from bitmap: NSBitmapImageRep) -> OverlayEyePastedImage? {
         let widthInPixels = bitmap.pixelsWide
         let heightInPixels = bitmap.pixelsHigh
-        guard widthInPixels > 0, heightInPixels > 0 else { return nil }
+        guard inputPixelDimensionsAreWithinBounds(width: widthInPixels, height: heightInPixels) else { return nil }
 
         // A bitmap decoded from data carries a `size` in POINTS, derived from
         // whatever DPI the file declared, and `draw(in:)` scales against that.
@@ -315,6 +391,49 @@ final class OverlayEyePastedImageAttachment: ObservableObject {
     static let shared = OverlayEyePastedImageAttachment()
 
     @Published private(set) var theImagesTheReaderAttached: [OverlayEyePastedImage] = []
+    private var inactiveComposerImages: [OverlayEyePastedImage] = []
+    private var composerIsAsking = true
+    struct Destination: Sendable {
+        fileprivate let isAsking: Bool
+        fileprivate let generation: UUID
+    }
+    private var askGeneration = UUID()
+    private var editGeneration = UUID()
+
+    func captureDestination() -> Destination {
+        Destination(isAsking: composerIsAsking,
+                    generation: composerIsAsking ? askGeneration : editGeneration)
+    }
+
+    func attach(_ image: OverlayEyePastedImage, to destination: Destination) {
+        guard destination.generation == (destination.isAsking ? askGeneration : editGeneration) else { return }
+        if destination.isAsking == composerIsAsking {
+            attach(image)
+        } else {
+            inactiveComposerImages.append(image)
+            inactiveComposerImages = Array(inactiveComposerImages.suffix(OverlayEyePastedImageReader.mostImagesOneMessageMayCarry))
+        }
+    }
+    var generalHelpHasAttachments: Bool {
+        !(composerIsAsking ? theImagesTheReaderAttached : inactiveComposerImages).isEmpty
+    }
+    var editModeHasAttachments: Bool {
+        !(composerIsAsking ? inactiveComposerImages : theImagesTheReaderAttached).isEmpty
+    }
+
+    func clearGeneralHelpAttachments() {
+        if composerIsAsking { removeAllAttachments() }
+        else { inactiveComposerImages = []; askGeneration = UUID() }
+    }
+
+    func switchComposerMode(isAsking: Bool) {
+        guard composerIsAsking != isAsking else { return }
+        let previous = theImagesTheReaderAttached
+        theImagesTheReaderAttached = inactiveComposerImages
+        inactiveComposerImages = previous
+        composerIsAsking = isAsking
+        aDragIsHoveringOverTheBar = false
+    }
 
     /// True while a drag is over the bar, so the bar can say "drop to attach"
     /// before the reader lets go. Set and cleared by the drop target.
@@ -346,6 +465,7 @@ final class OverlayEyePastedImageAttachment: ObservableObject {
 
     /// The bar going away.
     func removeAllAttachments() {
+        if composerIsAsking { askGeneration = UUID() } else { editGeneration = UUID() }
         theImagesTheReaderAttached = []
         aDragIsHoveringOverTheBar = false
     }
@@ -353,7 +473,7 @@ final class OverlayEyePastedImageAttachment: ObservableObject {
     /// Hands the images to the message being sent and forgets them in the
     /// same move.
     func takeTheImagesForThisMessage() -> [OverlayEyePastedImage] {
-        defer { theImagesTheReaderAttached = [] }
+        defer { removeAllAttachments() }
         return theImagesTheReaderAttached
     }
 }

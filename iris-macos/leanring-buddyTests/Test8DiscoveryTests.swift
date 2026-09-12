@@ -27,7 +27,8 @@ struct Test8DiscoveryTests {
         name: String,
         isInstalled: Bool,
         latestReleaseTag: String? = "v1.0.0",
-        installStateIsUnknown: Bool = false
+        installStateIsUnknown: Bool = false,
+        macCompatibility: CatalogMacCompatibility = .desktopApp
     ) -> CatalogAppInventoryEntry {
         let installationState: CatalogAppInstallationState
         if installStateIsUnknown {
@@ -44,11 +45,25 @@ struct Test8DiscoveryTests {
             latestReleaseTag: latestReleaseTag,
             installationState: installationState,
             updateAvailability: .unknown,
-            isLocallyEditable: false
+            isLocallyEditable: false,
+            macCompatibility: macCompatibility
         )
     }
 
     // MARK: - What is offered
+
+    @Test func startersExcludeUnsupportedMobileAndUnknownCompatibility() {
+        let inventory = [
+            inventoryEntry(slug: "mac", name: "Mac", isInstalled: false),
+            inventoryEntry(slug: "windows", name: "Windows", isInstalled: false, macCompatibility: .noPublishedMacRoute),
+            inventoryEntry(slug: "mobile", name: "Mobile", isInstalled: false, macCompatibility: .mobileOnly),
+            inventoryEntry(slug: "unknown", name: "Unknown", isInstalled: false, macCompatibility: .unknown),
+        ]
+        #expect(CatalogAppDiscovery.starterSuggestions(fromInventory: inventory).map(\.slug) == ["mac"])
+        #expect(CatalogAppDiscovery.discoverableApps(fromInventory: inventory, matchingSearchText: "unknown").map(\.slug) == ["unknown"])
+        #expect(CatalogAppDiscovery.discoverableApps(fromInventory: inventory, matchingSearchText: "windows").isEmpty)
+        #expect(CatalogAppDiscovery.discoverableApps(fromInventory: inventory, matchingSearchText: "mobile").isEmpty)
+    }
 
     @Test func discoveryExcludesInstalledAppsButStillOffersUnknownOnes() {
         // Installed → never offered (it has its own section). notInstalled →

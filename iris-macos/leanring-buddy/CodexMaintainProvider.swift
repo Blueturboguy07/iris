@@ -44,6 +44,25 @@
 //
 
 import Foundation
+import Darwin
+
+/// The reasoning levels understood by the current Codex CLI model catalog.
+/// These values are passed through the CLI config override rather than stored
+/// in the user's config file.
+nonisolated enum CodexReasoningEffort: String, CaseIterable, Sendable {
+    case low
+    case medium
+    case high
+    case xhigh
+    case max
+    case ultra
+
+    static let configKey = "model_reasoning_effort"
+
+    var configOverride: String {
+        "\(Self.configKey)=\"\(rawValue)\""
+    }
+}
 
 // MARK: - Building one `codex exec` invocation (pure)
 
@@ -59,6 +78,8 @@ nonisolated enum CodexExecInvocation {
         case carriesADangerousBypass(flag: String)
         /// A required isolation flag was missing.
         case missingRequiredFlag(flag: String)
+        case invalidModelIdentifier
+        case invalidReasoningEffort
     }
 
     /// The flags that must be present on every invocation Iris makes.
@@ -83,6 +104,7 @@ nonisolated enum CodexExecInvocation {
         workingDirectory: String,
         attachedImagePaths: [String] = [],
         model: String? = nil,
+        reasoningEffort: CodexReasoningEffort? = nil,
         // Defaults ON, so Tier C — the caller this was written for — is
         // untouched. The guide fix ladder turns it OFF for its first rung, so
         // that rung matches the Anthropic route's material-only rung and its
@@ -110,6 +132,9 @@ nonisolated enum CodexExecInvocation {
         if webSearchEnabled {
             arguments += ["-c", "tools.web_search=true"]
         }
+        if let reasoningEffort {
+            arguments += ["-c", reasoningEffort.configOverride]
+        }
         arguments += ["--json"]
         arguments += ["--output-last-message", finalMessageOutputPath]
         if let model, !model.isEmpty {
@@ -127,8 +152,33 @@ nonisolated enum CodexExecInvocation {
     /// the vector unchanged when it holds, throws when it does not.
     @discardableResult
     static func validated(_ candidateArguments: [String]) throws -> [String] {
+        if let modelIndex = candidateArguments.firstIndex(of: "--model") {
+            guard candidateArguments.indices.contains(modelIndex + 1),
+                  CodexEditModelSelection.isValidIdentifier(candidateArguments[modelIndex + 1]) else {
+                throw ValidationError.invalidModelIdentifier
+            }
+        }
         for argument in candidateArguments where argument.hasPrefix(forbiddenFlagPrefix) {
             throw ValidationError.carriesADangerousBypass(flag: argument)
+        }
+        for (index, argument) in candidateArguments.enumerated()
+        where argument == "-c" || argument == "--config" {
+            guard candidateArguments.indices.contains(index + 1) else { continue }
+            let configOverride = candidateArguments[index + 1]
+            let prefix = "\(CodexReasoningEffort.configKey)="
+            guard configOverride.hasPrefix(prefix) else { continue }
+            let rawEffort = String(configOverride.dropFirst(prefix.count))
+            let unquotedEffort: String
+            if rawEffort.count >= 2,
+               ((rawEffort.first == "\"" && rawEffort.last == "\"")
+                || (rawEffort.first == "'" && rawEffort.last == "'")) {
+                unquotedEffort = String(rawEffort.dropFirst().dropLast())
+            } else {
+                unquotedEffort = rawEffort
+            }
+            guard CodexReasoningEffort(rawValue: unquotedEffort) != nil else {
+                throw ValidationError.invalidReasoningEffort
+            }
         }
         for requiredFlag in requiredFlags where !candidateArguments.contains(requiredFlag) {
             throw ValidationError.missingRequiredFlag(flag: requiredFlag)
@@ -186,8 +236,17 @@ nonisolated enum CodexExecInvocation {
         """
 
     /// The whole prompt for one step. Pure, so the exact bytes sent are testable.
-    static func promptText(systemPrompt: String, conversation: [MaintainChatTurn]) -> String {
-        var sections: [String] = [framingPreamble, systemPrompt]
+    static func promptText(systemPrompt: String, conversation: [MaintainChatTurn],
+                           webSearchEnabled: Bool = true) -> String {
+        let offlineFraming = """
+        You are a text model inside another program. Your reply is the deliverable;
+        follow the output format below exactly. Do not use your own shell or file
+        tools: your working directory is an empty scratch directory, not the project.
+        Read and edit the project through the command and edit blocks described below;
+        the program executes those blocks and returns their results. Web search is
+        disabled for this call. Do not claim to have searched or accessed the internet.
+        """
+        var sections: [String] = [webSearchEnabled ? framingPreamble : offlineFraming, systemPrompt]
         for turn in conversation {
             let speakerLabel = turn.role == "assistant" ? "Assistant" : "User"
             sections.append("\(speakerLabel): \(turn.text)")
@@ -266,11 +325,11 @@ nonisolated enum CodexExecOutput {
 
     /// Token accounting from the `turn.completed` event. Used by the parity
     /// harness, and by nothing in the app — Iris does not bill this tier.
-    struct Usage: Equatable {
-        let inputTokens: Int
-        let cachedInputTokens: Int
-        let outputTokens: Int
-        let reasoningOutputTokens: Int
+    struct Usage: Equatable, Sendable {
+        let inputTokens: Int?
+        let cachedInputTokens: Int?
+        let outputTokens: Int?
+        let reasoningOutputTokens: Int?
     }
 
     static func usage(fromJSONL jsonLines: String) -> Usage? {
@@ -282,10 +341,10 @@ nonisolated enum CodexExecOutput {
                 continue
             }
             return Usage(
-                inputTokens: usage["input_tokens"] as? Int ?? 0,
-                cachedInputTokens: usage["cached_input_tokens"] as? Int ?? 0,
-                outputTokens: usage["output_tokens"] as? Int ?? 0,
-                reasoningOutputTokens: usage["reasoning_output_tokens"] as? Int ?? 0
+                inputTokens: usage["input_tokens"] as? Int,
+                cachedInputTokens: usage["cached_input_tokens"] as? Int,
+                outputTokens: usage["output_tokens"] as? Int,
+                reasoningOutputTokens: usage["reasoning_output_tokens"] as? Int
             )
         }
         return nil
@@ -423,17 +482,261 @@ nonisolated enum CodexExecOutput {
     }
 }
 
+/// The identity and requested route for one admitted Codex process attempt.
+nonisolated struct CodexProcessAttemptContext: Equatable, Sendable {
+    let attemptID: UUID
+    let model: String?
+    let reasoningEffort: CodexReasoningEffort?
+}
+
+/// The bounded lifecycle result reported after one Codex process attempt.
+nonisolated struct CodexProcessAttemptResult: Equatable, Sendable {
+    enum Outcome: Equatable, Sendable {
+        case succeeded
+        case emptyReply
+        case failed
+        case cancelled
+    }
+
+    let context: CodexProcessAttemptContext
+    let outcome: Outcome
+    let usage: CodexExecOutput.Usage?
+}
+
+/// Optional hooks for an external run ledger. The admission hook runs before a
+/// process is spawned and may reject the attempt. The completion hook receives
+/// every admitted attempt, including an empty reply or cancellation.
+nonisolated struct CodexProcessAttemptObserver: Sendable {
+    let beforeAttempt: (@Sendable (CodexProcessAttemptContext) async throws -> Void)?
+    let afterAttempt: (@Sendable (CodexProcessAttemptResult) async -> Void)?
+
+    init(
+        beforeAttempt: (@Sendable (CodexProcessAttemptContext) async throws -> Void)? = nil,
+        afterAttempt: (@Sendable (CodexProcessAttemptResult) async -> Void)? = nil
+    ) {
+        self.beforeAttempt = beforeAttempt
+        self.afterAttempt = afterAttempt
+    }
+}
+
+private nonisolated struct CodexExecAttemptOutput: Sendable {
+    let assistantMessage: String?
+    let usage: CodexExecOutput.Usage?
+}
+
+private nonisolated final class CodexProcessCancellationHandle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+    private var cancellationWasRequested = false
+
+    func attach(_ process: Process) {
+        lock.lock()
+        if cancellationWasRequested {
+            lock.unlock()
+            Self.terminate(process)
+            return
+        }
+        self.process = process
+        lock.unlock()
+    }
+
+    func cancel() {
+        lock.lock()
+        cancellationWasRequested = true
+        let process = self.process
+        lock.unlock()
+        if let process {
+            Self.terminate(process)
+        }
+    }
+
+    /// Ends the process and its group without waiting for Foundation to reap it.
+    /// The group kill also closes inherited pipe descriptors held by descendants.
+    static func terminate(_ process: Process) {
+        guard process.isRunning else { return }
+        process.terminate()
+        let processIdentifier = process.processIdentifier
+        guard processIdentifier > 0 else { return }
+        if killpg(processIdentifier, SIGKILL) != 0 {
+            kill(processIdentifier, SIGKILL)
+        }
+    }
+}
+
+private enum CodexProcessTerminationWaitError: Error {
+    case deadlineExceeded
+}
+
+/// Waits for Foundation's termination callback instead of blocking on
+/// `Process.waitUntilExit()`. The latter can remain blocked after the child has
+/// exited, which leaves the provider stuck even when its output file is complete.
+/// A deadline is kept outside the process so cancellation and a missing callback
+/// both have a bounded completion path.
+private nonisolated final class CodexProcessTerminationWaiter: @unchecked Sendable {
+    private let process: Process
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var pendingResult: Result<Void, Error>?
+    private var timeoutWorkItem: DispatchWorkItem?
+    private var hasFinished = false
+    private var cancellationWasRequested = false
+    private var isArmed = false
+
+    init(process: Process) {
+        self.process = process
+    }
+
+    /// Installs the termination callback and deadline before any synchronous
+    /// stdin write. A large write can itself wait for the child to read, so the
+    /// process must already have a cancellation and timeout path at that point.
+    func arm(timeoutSeconds: TimeInterval) {
+        lock.lock()
+        guard !isArmed, !hasFinished else {
+            lock.unlock()
+            return
+        }
+        isArmed = true
+        lock.unlock()
+
+        process.terminationHandler = { [weak self] _ in
+            self?.processDidTerminate()
+        }
+
+        // The handler may be installed after a very short-lived process exits.
+        // Check the state as well so completion does not depend on callback
+        // delivery timing.
+        if !process.isRunning {
+            finish(.success(()))
+            return
+        }
+
+        let timeoutWorkItem = DispatchWorkItem { [weak self] in
+            self?.deadlineDidExpire()
+        }
+        lock.lock()
+        guard !hasFinished else {
+            lock.unlock()
+            return
+        }
+        self.timeoutWorkItem = timeoutWorkItem
+        lock.unlock()
+
+        let boundedMilliseconds = max(
+            0,
+            min(timeoutSeconds * 1_000, Double(Int.max))
+        )
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(
+            deadline: .now() + .milliseconds(Int(boundedMilliseconds)),
+            execute: timeoutWorkItem
+        )
+    }
+
+    func wait() async throws {
+        try Task.checkCancellation()
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            lock.lock()
+            if let pendingResult {
+                self.pendingResult = nil
+                lock.unlock()
+                resume(pendingResult, with: continuation)
+                return
+            }
+            if cancellationWasRequested || hasFinished {
+                lock.unlock()
+                continuation.resume(throwing: CancellationError())
+                return
+            }
+            self.continuation = continuation
+            lock.unlock()
+        }
+    }
+
+    func cancel() {
+        lock.lock()
+        cancellationWasRequested = true
+        guard !hasFinished else {
+            lock.unlock()
+            return
+        }
+        let continuation = self.continuation
+        self.continuation = nil
+        hasFinished = true
+        if continuation == nil {
+            pendingResult = .failure(CancellationError())
+        }
+        let timeoutWorkItem = self.timeoutWorkItem
+        self.timeoutWorkItem = nil
+        lock.unlock()
+
+        timeoutWorkItem?.cancel()
+        CodexProcessCancellationHandle.terminate(process)
+        continuation?.resume(throwing: CancellationError())
+    }
+
+    private func processDidTerminate() {
+        finish(.success(()))
+    }
+
+    private func deadlineDidExpire() {
+        lock.lock()
+        let shouldFinish = !hasFinished
+        lock.unlock()
+        guard shouldFinish else { return }
+
+        // Force-close the process group before resuming. Detached pipe readers
+        // otherwise can remain blocked on descriptors inherited by a child.
+        CodexProcessCancellationHandle.terminate(process)
+        finish(.failure(CodexProcessTerminationWaitError.deadlineExceeded))
+    }
+
+    private func finish(_ result: Result<Void, Error>) {
+        lock.lock()
+        guard !hasFinished else {
+            lock.unlock()
+            return
+        }
+        hasFinished = true
+        let continuation = self.continuation
+        self.continuation = nil
+        if continuation == nil {
+            pendingResult = result
+        }
+        let timeoutWorkItem = self.timeoutWorkItem
+        self.timeoutWorkItem = nil
+        lock.unlock()
+
+        timeoutWorkItem?.cancel()
+        guard let continuation else { return }
+        resume(result, with: continuation)
+    }
+
+    private func resume(
+        _ result: Result<Void, Error>,
+        with continuation: CheckedContinuation<Void, Error>
+    ) {
+        switch result {
+        case .success:
+            continuation.resume()
+        case .failure(let error):
+            continuation.resume(throwing: error)
+        }
+    }
+}
+
 // MARK: - The provider
 
 @MainActor
 final class CodexMaintainProvider: MaintainModelProviding {
     let displayName = "Codex (your ChatGPT login)"
     let identifier = "codex"
+    var requestedModelDescription: String { CodexEditModelSelection.requestedModelLabel(model) }
 
-    /// Left nil so the CLI's own default applies — which is what the reader
-    /// chose when they installed it, and what `codex` upgrades over time. Iris
-    /// pinning a model here would go stale silently.
+    /// Captured at provider creation for this run. Nil uses the CLI's built-in
+    /// default, not config.toml, because the isolation policy ignores user config.
     private let model: String?
+    private let reasoningEffort: CodexReasoningEffort?
+    private let attemptObserver: CodexProcessAttemptObserver?
+    private let maximumEmptyReplyRetriesOverride: Int?
 
     /// How long one step may take before Iris gives up on it. Generous: a Tier C
     /// step can carry a large context, and a reasoning model can take a while.
@@ -465,9 +768,18 @@ final class CodexMaintainProvider: MaintainModelProviding {
     /// the guide fix ladder's first rung sets it false.
     private let webSearchEnabled: Bool
 
-    init(model: String? = nil, webSearchEnabled: Bool = true) {
+    init(
+        model: String? = nil,
+        reasoningEffort: CodexReasoningEffort? = nil,
+        webSearchEnabled: Bool = true,
+        attemptObserver: CodexProcessAttemptObserver? = nil,
+        maximumEmptyReplyRetriesOverride: Int? = nil
+    ) {
         self.model = model
+        self.reasoningEffort = reasoningEffort
         self.webSearchEnabled = webSearchEnabled
+        self.attemptObserver = attemptObserver
+        self.maximumEmptyReplyRetriesOverride = maximumEmptyReplyRetriesOverride
     }
 
     var isAvailable: Bool { CodexCLILogin.currentState().isUsable }
@@ -477,6 +789,11 @@ final class CodexMaintainProvider: MaintainModelProviding {
         conversation: [MaintainChatTurn],
         maximumOutputTokens: Int
     ) async throws -> String {
+        if let model, !CodexEditModelSelection.isValidIdentifier(model) {
+            throw MaintainModelProviderError.requestFailed(
+                "The saved Codex model ID is invalid. Choose a model or Codex default in the project composer."
+            )
+        }
         // Two different problems that used to throw the same opaque case: the
         // command isn't findable, and the command is findable but signed out.
         // The first is often a PATH problem rather than a missing install — a
@@ -495,7 +812,7 @@ final class CodexMaintainProvider: MaintainModelProviding {
         // run is the fix loop's step ceiling, which applies to every provider.
 
         let promptText = CodexExecInvocation.promptText(
-            systemPrompt: systemPrompt, conversation: conversation
+            systemPrompt: systemPrompt, conversation: conversation, webSearchEnabled: webSearchEnabled
         )
         let attachedImages = conversation.compactMap { $0.attachedImagePNGData }
 
@@ -505,11 +822,26 @@ final class CodexMaintainProvider: MaintainModelProviding {
             attachedImagePNGDataList: attachedImages,
             model: model,
             webSearchEnabled: webSearchEnabled,
-            timeoutSeconds: Self.stepTimeoutSeconds
+            timeoutSeconds: Self.stepTimeoutSeconds,
+            reasoningEffort: reasoningEffort,
+            maximumEmptyReplyRetriesOverride: maximumEmptyReplyRetriesOverride,
+            attemptObserver: attemptObserver
         )
     }
 
     // MARK: - Running the process
+
+    nonisolated private static func reportAttemptCompletion(
+        context: CodexProcessAttemptContext,
+        outcome: CodexProcessAttemptResult.Outcome,
+        usage: CodexExecOutput.Usage?,
+        observer: CodexProcessAttemptObserver?
+    ) async {
+        guard let afterAttempt = observer?.afterAttempt else { return }
+        await afterAttempt(CodexProcessAttemptResult(
+            context: context, outcome: outcome, usage: usage
+        ))
+    }
 
     /// Runs `codex exec` for one step and returns its final assistant turn.
     ///
@@ -529,27 +861,82 @@ final class CodexMaintainProvider: MaintainModelProviding {
         model: String?,
         webSearchEnabled: Bool,
         timeoutSeconds: TimeInterval,
+        reasoningEffort: CodexReasoningEffort? = nil,
         // The pause between empty-reply retries (see
         // `maximumEmptyReplyRetriesPerStep`). Defaults to the real backoff; a
         // test drives it to 0 to exercise the whole retry ladder in
         // milliseconds. It changes only the wait BETWEEN retries, never how many
         // happen, so production behavior is untouched.
-        emptyReplyRetryWaitSecondsOverride: Double? = nil
+        emptyReplyRetryWaitSecondsOverride: Double? = nil,
+        // Harness callers can set this to 0 when their outer ledger owns the
+        // retry budget. Nil preserves the production retry ladder.
+        maximumEmptyReplyRetriesOverride: Int? = nil,
+        attemptObserver: CodexProcessAttemptObserver? = nil
     ) async throws -> String {
+        let maximumEmptyReplyRetries = maximumEmptyReplyRetriesOverride
+            ?? Self.maximumEmptyReplyRetriesPerStep
+        guard maximumEmptyReplyRetries >= 0 else {
+            throw MaintainModelProviderError.requestFailed(
+                "codex exec retry budget must not be negative."
+            )
+        }
         let backoffSeconds = emptyReplyRetryWaitSecondsOverride
             ?? Double(emptyReplyRetryWaitSeconds)
-        var emptyReplyRetriesRemaining = maximumEmptyReplyRetriesPerStep
+        var emptyReplyRetriesRemaining = maximumEmptyReplyRetries
         while true {
-            if let assistantMessage = try await runCodexExecOnce(
-                codexBinaryPath: codexBinaryPath,
-                promptText: promptText,
-                attachedImagePNGDataList: attachedImagePNGDataList,
-                model: model,
-                webSearchEnabled: webSearchEnabled,
-                timeoutSeconds: timeoutSeconds
-            ) {
+            try Task.checkCancellation()
+            let attemptContext = CodexProcessAttemptContext(
+                attemptID: UUID(), model: model, reasoningEffort: reasoningEffort
+            )
+            if let beforeAttempt = attemptObserver?.beforeAttempt {
+                try await beforeAttempt(attemptContext)
+            }
+
+            let attemptOutput: CodexExecAttemptOutput
+            do {
+                try Task.checkCancellation()
+                attemptOutput = try await runCodexExecOnceWithUsage(
+                    codexBinaryPath: codexBinaryPath,
+                    promptText: promptText,
+                    attachedImagePNGDataList: attachedImagePNGDataList,
+                    model: model,
+                    reasoningEffort: reasoningEffort,
+                    webSearchEnabled: webSearchEnabled,
+                    timeoutSeconds: timeoutSeconds
+                )
+            } catch is CancellationError {
+                await reportAttemptCompletion(
+                    context: attemptContext,
+                    outcome: .cancelled,
+                    usage: nil,
+                    observer: attemptObserver
+                )
+                throw CancellationError()
+            } catch {
+                await reportAttemptCompletion(
+                    context: attemptContext,
+                    outcome: .failed,
+                    usage: nil,
+                    observer: attemptObserver
+                )
+                throw error
+            }
+
+            if let assistantMessage = attemptOutput.assistantMessage {
+                await reportAttemptCompletion(
+                    context: attemptContext,
+                    outcome: .succeeded,
+                    usage: attemptOutput.usage,
+                    observer: attemptObserver
+                )
                 return assistantMessage
             }
+            await reportAttemptCompletion(
+                context: attemptContext,
+                outcome: .emptyReply,
+                usage: attemptOutput.usage,
+                observer: attemptObserver
+            )
             // A clean exit (status 0) with no assistant message: the process ran
             // and simply wrote nothing. Retry it a bounded number of times with
             // a short backoff before surfacing the honest failure.
@@ -564,8 +951,9 @@ final class CodexMaintainProvider: MaintainModelProviding {
                 "maintain: codex exec exited cleanly with no assistant message, retrying "
                     + "(\(emptyReplyRetriesRemaining) retries left)"
             )
+            try Task.checkCancellation()
             if backoffSeconds > 0 {
-                try? await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
+                try await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
             }
         }
     }
@@ -581,12 +969,40 @@ final class CodexMaintainProvider: MaintainModelProviding {
         attachedImagePNGDataList: [Data],
         model: String?,
         webSearchEnabled: Bool,
-        timeoutSeconds: TimeInterval
+        timeoutSeconds: TimeInterval,
+        reasoningEffort: CodexReasoningEffort? = nil
     ) async throws -> String? {
+        let attemptOutput = try await runCodexExecOnceWithUsage(
+            codexBinaryPath: codexBinaryPath,
+            promptText: promptText,
+            attachedImagePNGDataList: attachedImagePNGDataList,
+            model: model,
+            reasoningEffort: reasoningEffort,
+            webSearchEnabled: webSearchEnabled,
+            timeoutSeconds: timeoutSeconds
+        )
+        return attemptOutput.assistantMessage
+    }
+
+    private nonisolated static func runCodexExecOnceWithUsage(
+        codexBinaryPath: String,
+        promptText: String,
+        attachedImagePNGDataList: [Data],
+        model: String?,
+        reasoningEffort: CodexReasoningEffort?,
+        webSearchEnabled: Bool,
+        timeoutSeconds: TimeInterval
+    ) async throws -> CodexExecAttemptOutput {
+        try Task.checkCancellation()
         // A scratch directory per call: it is the agent's working root, and it
         // is deliberately EMPTY and outside any repo, so even a read-only shell
         // has nothing of the reader's to look at.
-        let scratchDirectoryURL = FileManager.default.temporaryDirectory
+#if IRIS_HARNESS_HEADLESS
+        let temporaryRoot = HarnessFixtureEnvironment.scratchDirectory
+#else
+        let temporaryRoot = FileManager.default.temporaryDirectory
+#endif
+        let scratchDirectoryURL = temporaryRoot
             .appendingPathComponent("iris-codex-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(
             at: scratchDirectoryURL, withIntermediateDirectories: true
@@ -608,13 +1024,27 @@ final class CodexMaintainProvider: MaintainModelProviding {
                 workingDirectory: scratchDirectoryURL.path,
                 attachedImagePaths: attachedImagePaths,
                 model: model,
+                reasoningEffort: reasoningEffort,
                 webSearchEnabled: webSearchEnabled
             )
         )
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: codexBinaryPath)
-        process.arguments = arguments
+        // Own one process group in both the normal app and fixture host. The
+        // CLI can exit before a helper closes inherited output pipes.
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
+        process.arguments = ["-e", "setpgrp(0,0) or die 'process group failed'; exec @ARGV; die 'exec failed';",
+            "--", codexBinaryPath] + arguments
+#if IRIS_HARNESS_HEADLESS
+        // Model transport needs its backend connection, but its own read-only
+        // shell must not inspect the lab's held-out fixture answers.
+        let boundaryProfile = scratchDirectoryURL.appendingPathComponent("fixture-read-boundary.sb")
+        try ("(version 1)\n(allow default)\n" + HarnessFixtureEnvironment.sourceReadDenial)
+            .write(to: boundaryProfile, atomically: true, encoding: .utf8)
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
+        process.arguments = ["-e", "setpgrp(0,0) or die 'process group failed'; exec @ARGV; die 'exec failed';",
+            "--", "/usr/bin/sandbox-exec", "-f", boundaryProfile.path, codexBinaryPath] + arguments
+#endif
         process.environment = CodexCLILogin.environmentForCodex()
         process.currentDirectoryURL = scratchDirectoryURL
 
@@ -625,88 +1055,125 @@ final class CodexMaintainProvider: MaintainModelProviding {
         process.standardOutput = standardOutputPipe
         process.standardError = standardErrorPipe
 
-        do {
-            try process.run()
-        } catch {
-            throw MaintainModelProviderError.requestFailed(
-                "iris found the codex command but couldn't start it. reinstall it "
-                    + "(`npm install -g @openai/codex`) or reconnect under \"Sign in with Codex\" in "
-                    + "settings, then try again. the system said: \(error.localizedDescription)"
-            )
-        }
-
-        // Feed the prompt and close stdin so the CLI stops waiting for more.
-        if let promptData = promptText.data(using: .utf8) {
-            standardInputPipe.fileHandleForWriting.write(promptData)
-        }
-        try? standardInputPipe.fileHandleForWriting.close()
-
-        // Drain both pipes on their own threads. A `codex exec --json` run can
-        // emit more than a pipe buffer holds, and a full pipe would deadlock the
-        // child against a parent that is only waiting on exit.
-        let outputCollector = PipeCollector(fileHandle: standardOutputPipe.fileHandleForReading)
-        let errorCollector = PipeCollector(fileHandle: standardErrorPipe.fileHandleForReading)
-
-        // The watchdog ESCALATES, and that escalation is load-bearing. A single
-        // `terminate()` (SIGTERM) is not enough: a `codex exec` blocked on a
-        // network read, or one that has spawned children, can ignore it — and
-        // then `waitUntilExit()` never returns and the whole call hangs forever,
-        // which a full-suite run actually hit (a 20-minute hang on a stuck
-        // codex). Worse under the empty-reply retry above, which must never sit
-        // on top of an unkillable process. So: SIGTERM, a short grace period,
-        // then SIGKILL the whole PROCESS GROUP (negative pid) so any children
-        // die with it. A killed process comes back with a non-zero
-        // terminationStatus, which throws below and is NOT retried — a hang is
-        // not a transient empty.
-        let watchdog = Task {
-            try await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
-            guard process.isRunning else { return }
-            let processIdentifier = process.processIdentifier
-            process.terminate()
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            guard process.isRunning else { return }
-            // SIGKILL the group; fall back to the single pid if the group send
-            // is rejected (e.g. the child changed its own process group).
-            if killpg(processIdentifier, SIGKILL) != 0 {
-                kill(processIdentifier, SIGKILL)
+        let cancellationHandle = CodexProcessCancellationHandle()
+        let terminationWaiter = CodexProcessTerminationWaiter(process: process)
+        return try await withTaskCancellationHandler(operation: {
+            do {
+                try Task.checkCancellation()
+                guard FileManager.default.isExecutableFile(atPath: codexBinaryPath) else {
+                    throw CocoaError(.fileReadNoSuchFile)
+                }
+                try process.run()
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw MaintainModelProviderError.requestFailed(
+                    "iris found the codex command but couldn't start it. reinstall it "
+                        + "(`npm install -g @openai/codex`) or reconnect under \"Sign in with Codex\" in "
+                        + "settings, then try again. the system said: \(error.localizedDescription)"
+                )
             }
-        }
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                process.waitUntilExit()
-                continuation.resume()
+            cancellationHandle.attach(process)
+            // Also close helpers on cancellation, timeout or another thrown
+            // error, before the call's scratch directory is removed.
+            defer { killpg(process.processIdentifier, SIGKILL) }
+            try Task.checkCancellation()
+
+            // Drain both pipes on their own threads. A `codex exec --json` run can
+            // emit more than a pipe buffer holds, and a full pipe would deadlock the
+            // child against a parent that is only waiting on exit.
+            let outputCollector = PipeCollector(fileHandle: standardOutputPipe.fileHandleForReading)
+            let errorCollector = PipeCollector(fileHandle: standardErrorPipe.fileHandleForReading)
+            defer {
+                outputCollector.stopReading()
+                errorCollector.stopReading()
+                try? standardInputPipe.fileHandleForWriting.close()
             }
-        }
-        watchdog.cancel()
 
-        let standardOutputText = outputCollector.collectedText()
-        let standardErrorText = errorCollector.collectedText()
-        // Kept so a harness can ask what tools this turn actually used. The
-        // provider protocol returns only the assistant's text, and whether the
-        // model REACHED for web search is not in the text — it is in the event
-        // stream, and it is the thing worth measuring.
-        CodexExecOutput.eventStreamOfTheMostRecentTurn = standardOutputText
+            // Start draining output and arm cancellation before sending a large
+            // prompt. A child may write startup output before it reads stdin;
+            // feeding first can leave both ends waiting on full pipes.
+            terminationWaiter.arm(timeoutSeconds: timeoutSeconds)
+            let inputComplete = try await sendPrompt(Data(promptText.utf8),
+                to: standardInputPipe.fileHandleForWriting, process: process)
+            try? standardInputPipe.fileHandleForWriting.close()
 
-        if process.terminationStatus != 0 {
-            throw CodexExecOutput.failure(
-                fromStandardError: standardErrorText.isEmpty ? standardOutputText : standardErrorText,
-                exitCode: process.terminationStatus
-            )
-        }
+            do {
+                try await terminationWaiter.wait()
+            } catch CodexProcessTerminationWaitError.deadlineExceeded {
+                throw MaintainModelProviderError.requestFailed(
+                    "codex exec exceeded its time limit. try again, and if it keeps happening "
+                        + "connect a different model in settings."
+                )
+            }
+            // The wrapper owns this group. Close descendants before draining
+            // their inherited pipes or deleting their scratch directory.
+            killpg(process.processIdentifier, SIGKILL)
+            try Task.checkCancellation()
 
-        // The written file first; the event stream as the fallback.
-        if let finalMessage = try? String(contentsOf: finalMessageURL, encoding: .utf8),
-           !finalMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return finalMessage
+            let standardOutputText = try outputCollector.collectedText()
+            let standardErrorText = try errorCollector.collectedText()
+            // Kept so a harness can ask what tools this turn actually used. The
+            // provider protocol returns only the assistant's text. Whether the
+            // model REACHED for web search is not in the text. It is in the
+            // event stream, and it is the thing worth measuring.
+            CodexExecOutput.eventStreamOfTheMostRecentTurn = standardOutputText
+            let usage = CodexExecOutput.usage(fromJSONL: standardOutputText)
+
+            if process.terminationStatus != 0 {
+                throw CodexExecOutput.failure(
+                    fromStandardError: standardErrorText.isEmpty ? standardOutputText : standardErrorText,
+                    exitCode: process.terminationStatus
+                )
+            }
+            guard inputComplete else {
+                throw MaintainModelProviderError.requestFailed("codex closed its input before receiving the full request. try again.")
+            }
+
+            // The written file first; the event stream as the fallback.
+            if let finalMessage = try? String(contentsOf: finalMessageURL, encoding: .utf8),
+               !finalMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return CodexExecAttemptOutput(assistantMessage: finalMessage, usage: usage)
+            }
+            if let recoveredMessage = CodexExecOutput.finalAssistantText(fromJSONL: standardOutputText),
+               !recoveredMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return CodexExecAttemptOutput(assistantMessage: recoveredMessage, usage: usage)
+            }
+            // Clean exit, nothing written. The caller decides whether to retry.
+            return CodexExecAttemptOutput(assistantMessage: nil, usage: usage)
+        }, onCancel: {
+            cancellationHandle.cancel()
+            terminationWaiter.cancel()
+        })
+    }
+
+    /// A stalled reader must not block cancellation or crash Iris with SIGPIPE.
+    /// These flags affect only this call's pipe, never process-wide signals.
+    private nonisolated static func sendPrompt(
+        _ data: Data, to handle: FileHandle, process: Process
+    ) async throws -> Bool {
+        let fd = handle.fileDescriptor
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0,
+              fcntl(fd, F_SETNOSIGPIPE, 1) == 0 else {
+            throw MaintainModelProviderError.requestFailed("iris couldn't prepare the codex input pipe. try again.")
         }
-        if let recoveredMessage = CodexExecOutput.finalAssistantText(fromJSONL: standardOutputText),
-           !recoveredMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return recoveredMessage
+        var offset = 0
+        while offset < data.count {
+            try Task.checkCancellation()
+            guard process.isRunning else { return false }
+            let count = data.withUnsafeBytes { bytes in
+                Darwin.write(fd, bytes.baseAddress!.advanced(by: offset), min(65_536, data.count - offset))
+            }
+            if count > 0 { offset += count; continue }
+            if count < 0, errno == EINTR { continue }
+            if count < 0, errno == EPIPE { return false }
+            guard count < 0, errno == EAGAIN || errno == EWOULDBLOCK else {
+                throw MaintainModelProviderError.requestFailed("iris couldn't send the request to codex. try again.")
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
         }
-        // Clean exit, nothing written. Report the empty as `nil` and let the
-        // caller (`runCodexExec`) decide whether to retry it or surface it — an
-        // empty here is a transient, not proof the model refused.
-        return nil
+        return true
     }
 }
 
@@ -721,20 +1188,48 @@ final class CodexMaintainProvider: MaintainModelProviding {
 private nonisolated final class PipeCollector: @unchecked Sendable {
     private let lock = NSLock()
     private var collectedData = Data()
+    private var stopped = false
     private let finishedReading = DispatchSemaphore(value: 0)
 
     init(fileHandle: FileHandle) {
         Thread.detachNewThread { [self] in
-            let data = fileHandle.readDataToEndOfFile()
-            lock.lock()
-            collectedData = data
-            lock.unlock()
-            finishedReading.signal()
+            defer {
+                try? fileHandle.close()
+                finishedReading.signal()
+            }
+            let fd = fileHandle.fileDescriptor
+            let flags = fcntl(fd, F_GETFL)
+            guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else { return }
+            var buffer = [UInt8](repeating: 0, count: 65_536)
+            while true {
+                lock.lock()
+                let shouldStop = stopped
+                lock.unlock()
+                if shouldStop { return }
+                let count = Darwin.read(fd, &buffer, buffer.count)
+                if count > 0 {
+                    lock.lock()
+                    collectedData.append(contentsOf: buffer.prefix(count))
+                    lock.unlock()
+                } else if count == 0 { return }
+                else if errno == EINTR { continue }
+                else if errno == EAGAIN || errno == EWOULDBLOCK { usleep(10_000) }
+                else { return }
+            }
         }
     }
 
-    func collectedText() -> String {
-        finishedReading.wait()
+    func stopReading() {
+        lock.lock()
+        stopped = true
+        lock.unlock()
+    }
+
+    func collectedText() throws -> String {
+        guard finishedReading.wait(timeout: .now() + 1) == .success else {
+            stopReading()
+            throw MaintainModelProviderError.requestFailed("codex exited but a helper kept its output open. try again.")
+        }
         lock.lock()
         defer { lock.unlock() }
         return String(data: collectedData, encoding: .utf8) ?? ""

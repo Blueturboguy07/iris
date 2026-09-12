@@ -252,7 +252,8 @@ import Testing
             directoryPath: directory
         )
         #expect(OnDemandEditRunLog.priorAttemptsDidNotCureTheComplaint(
-            forAppSlug: "whimprflow", directoryPath: directory
+            forAppSlug: "whimprflow", request: "perms already granted", kind: .bugFix,
+            directoryPath: directory
         ))
     }
 
@@ -274,7 +275,8 @@ import Testing
             directoryPath: directory
         )
         #expect(!OnDemandEditRunLog.priorAttemptsDidNotCureTheComplaint(
-            forAppSlug: "whimprflow", directoryPath: directory
+            forAppSlug: "whimprflow", request: "perms already granted", kind: .bugFix,
+            directoryPath: directory
         ))
     }
 
@@ -296,7 +298,8 @@ import Testing
             directoryPath: directory
         )
         #expect(OnDemandEditRunLog.priorAttemptsDidNotCureTheComplaint(
-            forAppSlug: "whimprflow", directoryPath: directory
+            forAppSlug: "whimprflow", request: "perms already granted", kind: .bugFix,
+            directoryPath: directory
         ))
     }
 
@@ -324,7 +327,8 @@ import Testing
             )
         }
         #expect(!OnDemandEditRunLog.priorAttemptsDidNotCureTheComplaint(
-            forAppSlug: "whimprflow", directoryPath: directory
+            forAppSlug: "whimprflow", request: "perms already granted", kind: .bugFix,
+            directoryPath: directory
         ))
     }
 

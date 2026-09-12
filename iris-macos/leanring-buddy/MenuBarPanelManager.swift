@@ -12,7 +12,6 @@
 //
 
 import AppKit
-import QuartzCore
 import SwiftUI
 
 extension Notification.Name {
@@ -63,9 +62,12 @@ final class MenuBarPanelManager: NSObject {
     /// monitor that was just unplugged comes back onto one that exists instead
     /// of staying open where nobody can see it.
     private var screenLayoutChangeObserver: NSObjectProtocol?
+    private var isApplyingProgrammaticFrame = false
+    private var pendingPlacementUpdates = SettingsPanelPlacementUpdates()
+    private var placementSaveTask: Task<Void, Never>?
 
     private let companionManager: CompanionManager
-    private let panelWidth: CGFloat = 320
+    private let panelWidth: CGFloat = 376
     private let panelHeight: CGFloat = 380
 
     init(companionManager: CompanionManager) {
@@ -123,6 +125,10 @@ final class MenuBarPanelManager: NSObject {
     }
 
     deinit {
+        placementSaveTask?.cancel()
+        for observer in panelPlacementObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
         if let monitor = clickOutsideMonitor {
             NSEvent.removeMonitor(monitor)
         }
@@ -206,20 +212,29 @@ final class MenuBarPanelManager: NSObject {
     /// Toggles the panel open/closed. Used by both the status item click
     /// and the global summon hotkey.
     private func togglePanel() {
-        if let panel, panel.isVisible {
-            hidePanel()
-        } else {
-            showPanel()
-        }
+        routeSettingsRequest(.toggle)
     }
 
     // MARK: - Panel Lifecycle
 
     private func showPanel() {
-        if panel == nil {
+        routeSettingsRequest(.show)
+    }
+
+    private func routeSettingsRequest(_ request: SettingsPanelRouting.Request) {
+        switch SettingsPanelRouting.action(
+            for: request, panelExists: panel != nil, panelIsVisible: panel?.isVisible == true
+        ) {
+        case .hideExisting:
+            hidePanel()
+            return
+        case .createAndShow:
             createPanel()
+        case .showExisting:
+            break
         }
 
+        if NSEvent.pressedMouseButtons == 0 { persistSettledPanelPlacement() }
         positionPanelBelowStatusItem()
 
         panel?.makeKeyAndOrderFront(nil)
@@ -228,16 +243,18 @@ final class MenuBarPanelManager: NSObject {
     }
 
     private func hidePanel() {
+        persistSettledPanelPlacement()
         panel?.orderOut(nil)
         removeClickOutsideMonitor()
     }
 
     private func createPanel() {
         let companionPanelView = CompanionPanelView(companionManager: companionManager)
-            .frame(width: panelWidth)
+            .frame(minWidth: panelWidth, maxWidth: .infinity)
 
         let hostingView = NSHostingView(rootView: companionPanelView)
         hostingView.frame = NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight)
+        hostingView.autoresizingMask = [.width, .height]
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = .clear
 
@@ -272,26 +289,37 @@ final class MenuBarPanelManager: NSObject {
         )
         menuBarPanel.titleVisibility = .hidden
         menuBarPanel.titlebarAppearsTransparent = true
+        menuBarPanel.identifier = NSUserInterfaceItemIdentifier("iris.settings.panel")
+        menuBarPanel.tabbingMode = .disallowed
 
         menuBarPanel.contentView = hostingView
         panel = menuBarPanel
 
-        // Remember wherever the reader leaves it. Both notifications fire after
-        // the gesture ends, so this stores a settled frame rather than every
-        // intermediate one during a drag.
+        // didMove fires repeatedly during a drag. Coalesce in memory, exclude
+        // our own positioning, and write defaults only when movement settles.
         panelPlacementObservers = [
             NotificationCenter.default.addObserver(
                 forName: NSWindow.didMoveNotification, object: menuBarPanel, queue: .main
-            ) { [weak menuBarPanel] _ in
-                guard let menuBarPanel else { return }
-                MenuBarPanelPlacement.shared.remember(origin: menuBarPanel.frame.origin)
+            ) { [weak self, weak menuBarPanel] _ in
+                MainActor.assumeIsolated {
+                    guard let self, let menuBarPanel, !self.isApplyingProgrammaticFrame else { return }
+                    self.pendingPlacementUpdates.recordMove(
+                        to: menuBarPanel.frame.origin, isProgrammatic: false
+                    )
+                    self.scheduleSettledPanelPlacementSave()
+                }
             },
             NotificationCenter.default.addObserver(
                 forName: NSWindow.didEndLiveResizeNotification, object: menuBarPanel, queue: .main
-            ) { [weak menuBarPanel] _ in
-                guard let menuBarPanel else { return }
-                MenuBarPanelPlacement.shared.remember(size: menuBarPanel.frame.size)
-                MenuBarPanelPlacement.shared.remember(origin: menuBarPanel.frame.origin)
+            ) { [weak self, weak menuBarPanel] _ in
+                MainActor.assumeIsolated {
+                    guard let self, let menuBarPanel, !self.isApplyingProgrammaticFrame else { return }
+                    self.pendingPlacementUpdates.recordResize(
+                        to: menuBarPanel.frame.size, origin: menuBarPanel.frame.origin,
+                        isProgrammatic: false
+                    )
+                    self.scheduleSettledPanelPlacementSave()
+                }
             },
         ]
     }
@@ -299,8 +327,35 @@ final class MenuBarPanelManager: NSObject {
     /// Kept so the observers can be torn down with the panel.
     private var panelPlacementObservers: [NSObjectProtocol] = []
 
+    private func scheduleSettledPanelPlacementSave() {
+        placementSaveTask?.cancel()
+        placementSaveTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 200_000_000)
+                while NSEvent.pressedMouseButtons != 0 {
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                }
+            } catch { return }
+            guard !Task.isCancelled else { return }
+            self?.persistSettledPanelPlacement()
+        }
+    }
+
+    private func persistSettledPanelPlacement() {
+        placementSaveTask?.cancel()
+        placementSaveTask = nil
+        let update = pendingPlacementUpdates.takeSettledUpdate()
+        if let origin = update.origin { MenuBarPanelPlacement.shared.remember(origin: origin) }
+        if let size = update.size { MenuBarPanelPlacement.shared.remember(size: size) }
+    }
+
     private func positionPanelBelowStatusItem() {
         guard let panel else { return }
+        // Re-measure requests can arrive while a button hover or layout update
+        // is being handled. Never fight a drag or resize already in progress.
+        if panel.isVisible, NSEvent.pressedMouseButtons != 0 || panel.inLiveResize { return }
+        isApplyingProgrammaticFrame = true
+        defer { isApplyingProgrammaticFrame = false }
 
         // Once the reader has moved or resized it, it stays where they put it.
         // Re-snapping it under the menu bar icon on every open would make the
@@ -315,7 +370,8 @@ final class MenuBarPanelManager: NSObject {
             let origin = MenuBarPanelPlacement.clampedOrigin(
                 storedOrigin, panelSize: size, visibleFrames: visibleFrames
             )
-            panel.setFrame(NSRect(origin: origin, size: size), display: true)
+            let targetFrame = NSRect(origin: origin, size: size)
+            if panel.frame != targetFrame { panel.setFrame(targetFrame, display: true) }
             return
         }
         guard let buttonWindow = statusItem?.button?.window else { return }
@@ -338,17 +394,7 @@ final class MenuBarPanelManager: NSObject {
             height: actualPanelHeight
         )
 
-        if panel.isVisible && panel.frame != targetPanelFrame {
-            // The content changed shape while the panel is up — a guide opening,
-            // a longer step. Glide to the new frame with the same ease-out cubic
-            // the Tauri pill used for its `glide_iris` movement (24 frames at
-            // 12ms, eased 1-(1-t)^3), instead of snapping.
-            NSAnimationContext.runAnimationGroup { animationContext in
-                animationContext.duration = 0.28
-                animationContext.timingFunction = CAMediaTimingFunction(controlPoints: 0.33, 1.0, 0.68, 1.0)
-                panel.animator().setFrame(targetPanelFrame, display: true)
-            }
-        } else {
+        if panel.frame != targetPanelFrame {
             panel.setFrame(targetPanelFrame, display: true)
         }
     }

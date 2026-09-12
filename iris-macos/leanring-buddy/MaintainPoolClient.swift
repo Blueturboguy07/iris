@@ -110,6 +110,7 @@ final class MaintainPoolClient {
     /// forget: an outcome that never lands costs the pool one data point,
     /// not the user anything.
     func fileRecipeOutcome(recipeId: String, succeeded: Bool, installId: UUID) async {
+        guard !IrisTestEnvironment.isEnabled else { return }
         let url = publikBaseURL
             .appendingPathComponent("api/iris/recipes")
             .appendingPathComponent(recipeId)
@@ -129,6 +130,7 @@ final class MaintainPoolClient {
     /// break-status flip to "fixed in vX" is the release webhook's job, this
     /// is the human-readable companion.
     func recordFixLog(appSlug: String, diagnosisTitle: String, repo: String) async {
+        guard !IrisTestEnvironment.isEnabled else { return }
         let url = publikBaseURL.appendingPathComponent("api/iris/fix-log")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -148,6 +150,7 @@ final class MaintainPoolClient {
     /// so publik can render the two differently. Returns whether the row was
     /// accepted, so the card can say it landed.
     func recordChangelog(appSlug: String, summary: String, repo: String?, kind: String) async -> Bool {
+        guard !IrisTestEnvironment.isEnabled else { return false }
         let url = publikBaseURL.appendingPathComponent("api/iris/changelog")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -166,6 +169,7 @@ final class MaintainPoolClient {
     /// intake refused or the network failed — the caller stages locally and
     /// retries on the next incident rather than looping here.
     func fileConfirmedBreak(_ filing: ConfirmedBreakFiling) async -> String? {
+        guard !IrisTestEnvironment.isEnabled else { return nil }
         let url = publikBaseURL.appendingPathComponent("api/iris/breaks")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"

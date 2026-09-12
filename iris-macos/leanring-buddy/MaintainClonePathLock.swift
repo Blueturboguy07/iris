@@ -39,6 +39,11 @@ final class MaintainClonePathLock {
     /// Canonical clone path → a short human label naming who holds it, purely
     /// so a refusal can say *what* is already working on the app.
     private var ownerByCanonicalClonePath: [String: String] = [:]
+    private let undoRecoveryStore: DeliveredEditUndoRecoveryStore
+
+    init(undoRecoveryStore: DeliveredEditUndoRecoveryStore = DeliveredEditUndoRecoveryStore()) {
+        self.undoRecoveryStore = undoRecoveryStore
+    }
 
     /// Try to take the latch for `clonePath`. Returns true and records `owner`
     /// when the path was free; returns false (taking nothing) when another
@@ -46,6 +51,7 @@ final class MaintainClonePathLock {
     /// a false into an honest "something else is already editing this" refusal
     /// rather than queueing behind a potentially long build.
     func tryAcquire(clonePath: String, owner: String) -> Bool {
+        guard !undoRecoveryStore.archivedProtection(paths: [clonePath]).blocksChanges else { return false }
         let key = Self.canonicalKey(forClonePath: clonePath)
         guard ownerByCanonicalClonePath[key] == nil else { return false }
         ownerByCanonicalClonePath[key] = owner
@@ -61,7 +67,10 @@ final class MaintainClonePathLock {
     /// Who currently holds the latch for `clonePath`, or nil when it is free —
     /// for a refusal message that names the current holder.
     func currentOwner(ofClonePath clonePath: String) -> String? {
-        ownerByCanonicalClonePath[Self.canonicalKey(forClonePath: clonePath)]
+        if undoRecoveryStore.archivedProtection(paths: [clonePath]).blocksChanges {
+            return "saved Undo recovery information"
+        }
+        return ownerByCanonicalClonePath[Self.canonicalKey(forClonePath: clonePath)]
     }
 
     /// The canonical key both paths agree on: symlinks resolved and the path

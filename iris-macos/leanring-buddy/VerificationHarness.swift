@@ -45,6 +45,79 @@
 
 import Foundation
 
+/// Normalize and redact verification output before retaining a tail. Secret
+/// patterns need the key/header prefix to match; truncating first can leave a
+/// value suffix looking like harmless output while still carrying the secret.
+nonisolated func scrubbedVerificationOutputTail(_ tail: String) -> String {
+    let controlStripped = tail.components(separatedBy: "\n").map {
+        GuideAutopilotOutputBuffer.strippedOfControlSequences($0)
+    }.joined(separator: "\n")
+    let scrubbed = GuideAutopilotOutputBuffer.scrubbed(controlStripped)
+    let scrubbedCount = scrubbed.count
+    let maximumCharacters = 2_000
+    guard scrubbedCount > maximumCharacters else { return scrubbed }
+
+    let omissionMarker = "… earlier verification output omitted …"
+    let separatorCharacters = 2
+    let maximumDiagnosticCharacters = 700
+    let reservedTailCharacters = maximumCharacters - maximumDiagnosticCharacters
+        - omissionMarker.count - separatorCharacters
+    var cursor = 0
+    var diagnostic: String?
+    for line in scrubbed.components(separatedBy: "\n") {
+        let lineStart = cursor
+        cursor += line.count + 1
+        guard lineStart < scrubbedCount - reservedTailCharacters,
+              isLikelyVerificationDiagnosticLine(line) else { continue }
+        diagnostic = boundedVerificationDiagnostic(line, maximumCharacters: maximumDiagnosticCharacters)
+        break
+    }
+
+    guard let diagnostic else { return String(scrubbed.suffix(maximumCharacters)) }
+    let suffixCharacters = maximumCharacters - diagnostic.count
+        - omissionMarker.count - separatorCharacters
+    let suffix = String(scrubbed.suffix(max(0, suffixCharacters)))
+    return diagnostic + "\n" + omissionMarker + "\n" + suffix
+}
+
+nonisolated private func boundedVerificationDiagnostic(_ line: String, maximumCharacters: Int) -> String {
+    guard line.count > maximumCharacters else { return line }
+    guard maximumCharacters > 1 else { return String(line.prefix(maximumCharacters)) }
+    return String(line.prefix(maximumCharacters - 1)) + "…"
+}
+
+nonisolated private func isLikelyVerificationDiagnosticLine(_ line: String) -> Bool {
+    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !isObviousVerificationMarkupLine(trimmed) else { return false }
+    let lowercased = trimmed.lowercased()
+    let diagnosticPatterns = [
+        #"\berror(?:\s*:|\s)"#, #"\bfail(?:ed)?(?:\s*:|\s)"#, #"\bfatal(?:\s*:|\s)"#,
+        #"\bexception(?:\s*:|\s)"#, #"\bassert(?:ion)?(?:\s*:|\s)"#,
+        #"\bexpected(?:\s*:|\s)"#, #"\breceived(?:\s*:|\s)"#, #"\bnot found\b"#,
+        #"\bcannot\b"#, #"\bcould not\b"#, #"\bunable to\b"#, #"\btimed out\b"#,
+        #"\bexit (?:code|status)\b"#, #"\bpanic(?:\s*:|\s)"#,
+    ]
+    return diagnosticPatterns.contains {
+        lowercased.range(of: $0, options: .regularExpression) != nil
+    }
+}
+
+nonisolated private func isObviousVerificationMarkupLine(_ line: String) -> Bool {
+    guard !line.isEmpty else { return true }
+    if line.hasPrefix("<") || line == ">" || line == "/>" {
+        return true
+    }
+    if line.range(of: #"^[A-Za-z_:][-A-Za-z0-9_:.]*\s*=\s*["']"#, options: .regularExpression) != nil {
+        return true
+    }
+    let markupPrefixes = [
+        "class=", "data-", "aria-", "href=", "title=", "width=", "height=", "viewbox=",
+        "xmlns=", "fill=", "stroke=", "stroke-", "style=", "id=", "role=", "d=", "x=", "y=",
+    ]
+    let lowercased = line.lowercased()
+    return markupPrefixes.contains { lowercased.hasPrefix($0) }
+}
+
 /// What became of one verification stage. Three states, because a stage has
 /// three fates and any two-valued encoding has to conflate two of them:
 ///
@@ -85,6 +158,8 @@ struct VerificationOutcome: Sendable {
     /// when the stack has no test command — honestly skipped, never a silent
     /// green.
     var suite: VerificationStageResult = .notRun
+    var confinedSuite: VerificationStageResult? = nil
+    var nativeSuite: VerificationStageResult? = nil
 
     /// COMPATIBILITY ACCESSOR. "The build stage did not fail" — which is what
     /// this field has always meant, absent and green alike. Every reader that
@@ -171,6 +246,25 @@ struct VerificationOutcome: Sendable {
     /// nothing ran it.
     var atLeastOneVerificationStageActuallyRan: Bool {
         build != .notRun || suite != .notRun || reproPassedAfterPatch != nil
+    }
+
+    var editReceipt: EditVerificationReceipt {
+        func recordedResult(_ stage: VerificationStageResult) -> Bool? {
+            switch stage {
+            case .passed: return true
+            case .failed: return false
+            case .notRun: return nil
+            }
+        }
+        return EditVerificationReceipt(
+            buildPassed: recordedResult(build), testsPassed: recordedResult(suite),
+            confinedTestsPassed: confinedSuite.flatMap(recordedResult),
+            nativeTestsPassed: nativeSuite.flatMap(recordedResult),
+            nativeTestsRequired: nativeSuite != nil,
+            symptomReproduced: earnsVerifiedFix,
+            failureStage: blockedStage,
+            failureOutputTail: blockedStage == nil ? nil : blockedOutputTail.map(scrubbedVerificationOutputTail)
+        )
     }
 }
 
@@ -331,6 +425,9 @@ enum VerificationHarness {
             guard outcome.suite == .passed else {
                 return blocked(&outcome, stage: "suite", tail: suiteResult?.outputTail ?? "")
             }
+            let observedOutput = GuideAutopilotOutputBuffer.scrubbed(suiteResult?.outputTail ?? "")
+            outcome.evidenceLog.append("Observed test command: \(testCommand); exit 0. Output tail (untrusted test output):\n"
+                + String(observedOutput.suffix(2_048)))
         }
 
         // ── Feature Engine verification ladder (plan §9) ───────────────────
@@ -363,7 +460,7 @@ enum VerificationHarness {
         let collectedEvidence = evidenceFromCollectedSignals(outcome: outcome)
         outcome.verificationEvidence = collectedEvidence
         outcome.verificationRung = FeatureEditVerificationLadder.highestEarnedRung(from: collectedEvidence)
-        outcome.evidenceLog = collectedEvidence.evidenceLogLines()
+        outcome.evidenceLog = collectedEvidence.evidenceLogLines() + outcome.evidenceLog
         // When the caller told us how this app runs, also record the rung it
         // must reach to auto-commit (ratified decision 5a). Data only — this
         // harness does not gate on it; the caller does.
@@ -549,7 +646,9 @@ enum VerificationHarness {
         _ outcome: inout VerificationOutcome, stage: String, tail: String
     ) -> VerificationOutcome {
         outcome.blockedStage = stage
-        outcome.blockedOutputTail = String(tail.suffix(2000))
+        // Redact before the final cap so a long credential cannot lose the
+        // prefix that identifies it to the scrubber.
+        outcome.blockedOutputTail = scrubbedVerificationOutputTail(tail)
         irisTrace("maintain: verification BLOCKED at \(stage)")
         return outcome
     }

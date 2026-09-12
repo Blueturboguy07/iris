@@ -294,6 +294,9 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// `VerificationHarness` — never re-derived. Nil until a run reaches
     /// verification. See `MaintainTierCProgressEvent.verificationLadderEarned`.
     @Published private(set) var earnedVerification: (rung: VerificationRung, evidenceLog: [String])?
+    @Published private(set) var currentModelRoute: String?
+    @Published private(set) var verificationReceipt: EditVerificationReceipt?
+    @Published private(set) var deliveryProgress = EditDeliveryProgress()
 
     /// What the independent reviewer objected to, if anything. Shown to the
     /// reader beside the result: the change still stands, and they get to see
@@ -316,16 +319,215 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// a retry seeded from a still-broken verdict, or a blocked question's
     /// answer folded into the original request. The card consumes it.
     @Published private(set) var describePrefillText: String?
+    @Published private(set) var isPreparingSavedChangeRecheck = false
+    @Published private(set) var isRecheckingSavedChanges = false
+    private var pendingRecheckIdentity: PendingEditCandidateIdentity?
+
+    var canRecheckSavedChanges: Bool {
+        guard IrisTestEnvironment.isEnabled, makeHarnessWorkflow != nil,
+              editTask == nil, !isAssessingRequest, !isPreparingSavedChangeRecheck,
+              let slug = activeAppSlug,
+              let record = OnDemandEditInterruptedRunRecovery.recordOnDisk(),
+              record.requiresReviewBeforeRecovery == true, record.appSlug == slug,
+              let project = IrisTestProjectRegistry.project(slug: slug),
+              project.clonePath == record.clonePath else { return false }
+        switch phase {
+        case .describe: return !isRecheckingSavedChanges
+        case .failed: return true
+        default: return false
+        }
+    }
+
+    /// Capture the existing staged change, then use the normal request/plan
+    /// confirmation. No old review, log text or installed state is promoted.
+    func prepareSavedChangeRecheck() {
+        guard canRecheckSavedChanges, let slug = activeAppSlug,
+              let record = OnDemandEditInterruptedRunRecovery.recordOnDisk(),
+              let project = IrisTestProjectRegistry.project(slug: slug) else { return }
+        let previousRequest = record.recheckRequest ?? scrubbedRequest
+        fileTheCurrentExchangeIfThereIsOne()
+        resetInFlightState()
+        deriveTheRepoRecipe(forAppSlug: slug)
+        let generation = flowGeneration
+        phase = .describe
+        isPreparingSavedChangeRecheck = true
+        statusLine = "Checking the saved files. No code will be rewritten."
+        Task { [weak self] in
+            guard let self, self.flowGeneration == generation else { return }
+            defer {
+                if self.flowGeneration == generation { self.isPreparingSavedChangeRecheck = false }
+            }
+            guard self.clonePathLock.tryAcquire(clonePath: project.clonePath, owner: "recheck-capture:\(slug)") else {
+                self.statusLine = "Iris is already working on this app. Try rechecking when that finishes."
+                return
+            }
+            defer { self.clonePathLock.release(clonePath: project.clonePath) }
+            do {
+                let runner = try MaintainShellRunner(repoRootPath: project.clonePath)
+                let identity = try await PendingEditCandidateIdentity.capture(
+                    record: record, project: project, runner: runner)
+                guard self.flowGeneration == generation, self.activeAppSlug == slug,
+                      OnDemandEditInterruptedRunRecovery.recordOnDisk() == record,
+                      IrisTestProjectRegistry.project(slug: slug) == project else { return }
+                if let previous = record.pendingCandidate, previous != identity {
+                    self.phase = .failed(reason: "The saved files or project changed since the last recheck. Nothing was overwritten. Review those changes before continuing.")
+                    self.statusLine = self.phaseReason
+                    return
+                }
+                var held = record
+                held.pendingCandidate = identity
+                OnDemandEditInterruptedRunRecovery.remember(held)
+                guard OnDemandEditInterruptedRunRecovery.recordOnDisk() == held else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                self.pendingRecheckIdentity = identity
+                self.isRecheckingSavedChanges = true
+                self.classifiedKind = .feature
+                self.describePrefillText = previousRequest
+                self.suggestedRequests = []
+                self.presentedPlan = nil
+                self.clarificationQuestions = []
+                self.statusLine = "Confirm what the saved change should do. Iris will recheck it without rewriting the code."
+            } catch {
+                guard self.flowGeneration == generation else { return }
+                self.phase = .failed(reason: "Iris could not safely identify this saved change. Its files were kept. \(GuideAutopilotOutputBuffer.scrubbed(error.localizedDescription))")
+                self.statusLine = self.phaseReason
+            }
+        }
+    }
 
     /// True after a "still broken" verdict, so the done card can offer
     /// "Try again with what Iris learned" (the memory record carries the
     /// negative verdict into the next run).
     @Published private(set) var offersRetryWithMemory: Bool = false
+    @Published private(set) var savedDeliveryMayBeRetried = false
+    private var savedDeliveryIdentity: SavedEditDeliveryIdentity?
+    var canRetrySavedDelivery: Bool {
+        savedDeliveryMayBeRetried && savedDeliveryIdentity != nil && phase == .done
+            && editTask == nil && !undoNeedsRecovery && !deliveryProgress.freshAppBuilt
+            && !deliveryProgress.installedCopyReplaced
+    }
+
+    func retrySavedDelivery() {
+        guard canRetrySavedDelivery, let identity = savedDeliveryIdentity,
+              let slug = activeAppSlug, let branch = committedBranchName else { return }
+        guard clonePathLock.tryAcquire(clonePath: identity.clonePath, owner: "delivery-retry:\(slug)") else {
+            statusLine = "Another task is using this project. Retry the update when it finishes."
+            return
+        }
+        resolvedClonePath = identity.clonePath
+        phase = .delivering
+        savedDeliveryMayBeRetried = false
+        let generation = flowGeneration
+        editTask = Task { [weak self] in
+            guard let self else { return }
+            defer { if self.flowGeneration == generation { self.editTask = nil } }
+            guard await identity.stillMatchesSource() else {
+                self.statusLine = "The saved source has changed since this edit. Iris left your app alone. Review the newer source before applying an update."
+                self.releaseLockIfHeld()
+                self.phase = .done
+                return
+            }
+            self.runLog?.record("delivery retry: reusing saved source; no model edit requested")
+            await self.beginAutomaticDelivery(branchName: branch)
+        }
+    }
 
     /// True while a delivered change can still be undone after the fact (the
     /// rebuilt app is running; the installed app can be brought back and the
     /// branch dropped).
     @Published private(set) var deliveredChangeCanBeUndone: Bool = false
+    /// Published projection for the short validation window after a Saved
+    /// Versions Undo tap. It is separate from `undoIsInProgress`: recovery has
+    /// not started until the saved source and bundle payload pass their exact
+    /// identity checks, but the card must not briefly fall back to the stale
+    /// forward-delivery summary while those checks are awaiting.
+    @Published private(set) var savedVersionUndoIsPending = false
+    /// True only after every Undo stage succeeds: the prior installed bundle
+    /// was restored and reopened, and the saved source checkout was restored.
+    /// This is presentation state, not recovery authority; the durable receipt
+    /// and recovery checkpoints remain the source of truth for retry decisions.
+    @Published private(set) var previousVersionWasRestored = false
+    @Published private(set) var undoIsInProgress = false
+    @Published private(set) var undoFailureMessage: String?
+    private let undoRecovery = DeliveredEditUndoRecovery()
+    private var undoGeneration = UUID()
+    private let deliveredUndoRecoveryStore: DeliveredEditUndoRecoveryStore
+    /// The receipt inventory used by Saved Versions. This is injected so the
+    /// coordinator and the delivery service can share one isolated directory
+    /// in Iris Test, while normal Iris keeps its own default location.
+    private let appDeliveryReceiptStore: AppDeliveryReceiptStore
+    private var liveUndoRecoveryRecord: DeliveredEditUndoRecoveryRecord?
+    private var undoRecordNeedsRemoval = false
+    /// Set between the Saved Versions tap and its async source/content checks.
+    /// This closes the rapid-double-tap window before regular Undo state flips.
+    private var pendingSavedUndoReceiptIdentifier: UUID?
+    @Published private(set) var interruptedUndoRecoveryMessage: String?
+    @Published private(set) var interruptedUndoRecoveryPaths: [String] = []
+    @Published private(set) var isCheckingInterruptedUndo = false
+    @Published private(set) var savedUndoArchivePaths: [String] = []
+    @Published private(set) var stoppedUndoRecoveryMessage: String?
+    @Published private(set) var stoppedUndoRecoveryPaths: [String] = []
+    private var stopUndoArchiveReceipt: DeliveredEditUndoRecoveryStore.ArchiveReceipt?
+    private var stopUndoWasRequested = false
+    var canRetryUndo: Bool {
+        deliveredChangeCanBeUndone && !undoIsInProgress && !interruptedUndoRequiresReview
+            && stopUndoArchiveReceipt == nil && !stopUndoWasRequested
+    }
+    var canStopUndo: Bool {
+        !undoIsInProgress && !isCheckingInterruptedUndo
+            && (liveUndoRecoveryRecord != nil || interruptedUndoRequiresReview || stopUndoArchiveReceipt != nil)
+    }
+    var canResumeInterruptedUndo: Bool {
+        guard IrisTestEnvironment.isEnabled, interruptedUndoRequiresReview,
+              !isCheckingInterruptedUndo, !undoIsInProgress, editTask == nil,
+              case .pending(let record) = deliveredUndoRecoveryStore.load(),
+              let receiptID = record.deliveryReceiptIdentifier,
+              case .valid(let receipt) = appDeliveryReceiptStore.load(receiptID),
+              receipt.sourceIdentity != nil,
+              receipt.phase == .installed || receipt.phase == .restored,
+              IrisTestProjectRegistry.project(slug: record.appSlug) != nil else { return false }
+        return true
+    }
+    var interruptedUndoRequiresReview: Bool { interruptedUndoRecoveryMessage != nil }
+    var undoNeedsRecovery: Bool {
+        undoIsInProgress || undoRecovery.needsRecovery || undoRecordNeedsRemoval || interruptedUndoRequiresReview
+    }
+    var undoRecoveryPaths: [String] {
+        interruptedUndoRequiresReview ? interruptedUndoRecoveryPaths
+            : [deliveredInstalledBackupPath, deliveredInstalledAppPath, resolvedClonePath].compactMap { $0 }
+    }
+
+    /// Returns whether choosing another app may safely replace the current
+    /// coordinator state. A picker tap must not file the current exchange and
+    /// reset a request probe, an edit run, a consent gate, or recovery state.
+    /// Terminal outcomes remain replaceable so the existing retry and
+    /// retargeting behavior is unchanged.
+    static func appSelectionMayRetargetCurrentFlow(
+        phase: OnDemandEditPhase,
+        isAssessingRequest: Bool,
+        undoNeedsRecovery: Bool
+    ) -> Bool {
+        guard !isAssessingRequest, !undoNeedsRecovery else { return false }
+        switch phase {
+        case .pickApp, .describe, .done, .failed, .notEligible, .blockedByModel:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Shared by the Apps panel and the coordinator itself. Keeping this as a
+    /// published-state-only gate makes every app picker obey the same reset
+    /// boundary without cancelling or otherwise touching the active task.
+    var canPickAnotherApp: Bool {
+        editTask == nil && pendingSavedUndoReceiptIdentifier == nil
+            && Self.appSelectionMayRetargetCurrentFlow(
+            phase: phase,
+            isAssessingRequest: isAssessingRequest,
+            undoNeedsRecovery: undoNeedsRecovery
+        )
+    }
 
     /// Where the INSTALLED app lives (the bundle the reader had before Iris
     /// rebuilt from the clone), so an undo can bring it back. Wired by
@@ -341,10 +543,34 @@ final class OnDemandEditCoordinator: ObservableObject {
             -> AppRelaunchService.InstalledDeliveryResult
     )?
 
+    /// Source-bound installed delivery seam. New delivery owners should wire
+    /// this closure so the exact source branch, delivered commit and base are
+    /// written into the receipt before any installed bytes are touched. The
+    /// older closure remains for compatibility with clone-only fixtures; its
+    /// receipts are intentionally not restart-undoable when they lack this
+    /// context.
+    var deliverEditedAppOverInstalledAppWithRecoveryContext: (
+        (_ appSlug: String, _ freshBuildArtifactPath: String,
+         _ sourceIdentity: AppDeliveryReceipt.SourceIdentity) async
+            -> AppRelaunchService.InstalledDeliveryResult
+    )?
+
     /// Put the pre-delivery installed bundle back (used by undo). Wired by
     /// CompanionManager to `AppRelaunchService.restoreInstalledAppFromBackup`.
     var restoreInstalledAppFromBackup: (
         (_ installedPath: String, _ backupPath: String) async -> Bool
+    )?
+
+    /// Installed Undo must quit the edited process before its bundle is
+    /// replaced. These two seams are separate from the normal delivery path so
+    /// tests can assert quit -> restore -> reopen ordering without launching an
+    /// app. When they are not supplied, the legacy relaunch closure is used only
+    /// for old clone-only callers.
+    var terminateEditedAppBeforeUndo: (
+        (_ appSlug: String, _ installedPath: String) async -> AppRelaunchTerminationResult
+    )?
+    var launchRestoredAppAfterUndo: (
+        (_ appSlug: String, _ installedPath: String) async -> AppRelaunchLaunchResult
     )?
 
     /// The installed app path the most recent delivery replaced, and the
@@ -353,6 +579,7 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// Non-nil only between a successful over-install and its undo/reset.
     private var deliveredInstalledAppPath: String?
     private var deliveredInstalledBackupPath: String?
+    private var deliveredReceiptIdentifier: UUID?
 
     /// The question the model asked when it declared BLOCKED (nil when it
     /// only explained). The card shows it with an answer field; the answer
@@ -388,6 +615,87 @@ final class OnDemandEditCoordinator: ObservableObject {
     private let installProvenanceStore: InstallProvenanceStore
     private let patchQueue: PatchQueue
     private let clonePathLock: MaintainClonePathLock
+    // Only an isolated lab host supplies this. The normal app stays on its
+    // existing route until separate runtime state has been validated.
+    private let makeHarnessWorkflow: (() throws -> HarnessFeatureWorkflow)?
+    private var harnessWorkflow: HarnessFeatureWorkflow?
+    @Published private var editTask: Task<Void, Never>?
+    private var activeEditRunID: UUID?
+    private var flowGeneration = UUID()
+    private var unverifiedTestCandidateIsAvailable = false
+    private var unverifiedTestCandidateRegistryProject: IrisTestProjectRegistry.Project?
+    private var pendingUnverifiedTestDeliveryProject: IrisTestProjectRegistry.Project?
+    var allowsWrittenClarification: Bool { harnessWorkflow != nil }
+    var proposedHarnessDefaults: [String] {
+        harnessWorkflow?.state?.brief.modelAssumptions.map(\.statement) ?? []
+    }
+    var selectedHarnessDecisions: [HarnessSelectedDecision] {
+        harnessWorkflow?.selectedDecisionSummaries ?? []
+    }
+    var pendingHarnessScopeReconciliation: HarnessScopeReconciliation? {
+        harnessWorkflow?.pendingScopeReconciliation
+    }
+    private(set) var harnessBehaviorAssessment: HarnessBehaviorAssessment?
+    var harnessRunSnapshot: HarnessRunLedgerSnapshot? { harnessWorkflow?.modelSession.ledger.snapshot }
+
+    /// A test-only preview for a registered app with no automated suite. This
+    /// is an explicit manual-test offer, not a second verification result.
+    var isUnverifiedTestCandidate: Bool {
+        phase == .previewDiff
+            && unverifiedTestCandidateIsAvailable
+            && committedBranchName != nil
+            && savedDeliveryIdentity != nil
+            && unverifiedTestCandidateRegistryProject != nil
+            && classifiedKind == .feature
+            && !readerAskedToStopTheRun
+    }
+
+    /// Pure entry/click policy for the Iris Test manual-candidate lane. A
+    /// missing stage is never treated as a pass. The regular automatic gate
+    /// remains unchanged and this policy is intentionally stricter than a
+    /// generic applied result.
+    nonisolated static func unverifiedTestCandidatePasses(
+        isFeature: Bool,
+        isTestApplication: Bool,
+        isExactRegisteredProject: Bool,
+        hasDeclaredNativeVerification: Bool,
+        hasResolvedTestCommand: Bool,
+        suitePassed: Bool?,
+        verificationReceipt: EditVerificationReceipt?,
+        assessment: HarnessBehaviorAssessment?,
+        currentRevision: String?,
+        sourceIdentityMatches: Bool,
+        stopRequested: Bool
+    ) -> Bool {
+        guard isFeature,
+              isTestApplication,
+              isExactRegisteredProject,
+              !hasDeclaredNativeVerification,
+              !hasResolvedTestCommand,
+              suitePassed == nil,
+              let receipt = verificationReceipt,
+              receipt.anyCheckRan,
+              receipt.buildPassed == true,
+              receipt.testsPassed == nil,
+              receipt.confinedTestsPassed == nil,
+              receipt.nativeTestsPassed == nil,
+              !receipt.nativeTestsRequired,
+              receipt.failureStage == nil,
+              let assessment,
+              assessment.manualCodeAdmissionClean == true,
+              !assessment.reviewWasClean,
+              assessment.supported.isEmpty,
+              assessment.protocolIssue == nil,
+              assessment.reviewIssues.isEmpty,
+              !assessment.suitePassed,
+              !assessment.revision.isEmpty,
+              currentRevision == assessment.revision,
+              sourceIdentityMatches,
+              !stopRequested else {
+            return false
+        }
+        return true
+    }
 
     /// The pooled "what others also wanted" prefills for an app. Injected so
     /// the coordinator does not have to own the feature-request transport.
@@ -514,6 +822,18 @@ final class OnDemandEditCoordinator: ObservableObject {
         (_ appSlug: String, _ artifactPath: String, _ allowForceQuit: Bool) async -> AppRelaunchLaunchResult
     )?
 
+    /// Quit-only and launch-only seams for installed delivery. When an
+    /// installed-copy delivery seam is present, these keep graceful quit ahead
+    /// of the filesystem swap while preserving the existing force-quit consent.
+    var terminateEditedAppBeforeDelivery: (
+        (_ appSlug: String, _ artifactPath: String, _ allowForceQuit: Bool) async
+            -> AppRelaunchTerminationResult
+    )?
+    var launchEditedAppAfterDelivery: (
+        (_ appSlug: String, _ artifactPath: String, _ fallbackApplicationPath: String?) async
+            -> AppRelaunchLaunchResult
+    )?
+
     /// Perform the PUBLIC publish for a kept change: record it to publik's public
     /// fix log and, for a feature, mark the pooled request implemented. Called
     /// ONLY from `confirmPublishToPublik()`, behind its own explicit every-time
@@ -532,6 +852,7 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// The branch the engine committed the edit onto, for the preview, the
     /// keep/discard, and an explicit fork backup.
     private var committedBranchName: String?
+    var hasCommittedChange: Bool { committedBranchName != nil }
     /// The changeId keying this edit — its branch name and its PatchQueue
     /// record. Synthesized from the scrubbed, normalized request + a timestamp.
     private var changeId: String?
@@ -629,6 +950,8 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// watchdog) that lands after the reader re-submitted, cancelled, or moved
     /// on is dropped instead of advancing a flow it no longer describes.
     private var requestProbeGeneration = 0
+    private var requestProbeTask: Task<Void, Never>?
+    private var requestProbeWatchdog: Task<Void, Never>?
 
     /// How long the describe step will wait on the request probe before
     /// proceeding with the fail-open all-quiet verdict — the probe may only
@@ -666,14 +989,173 @@ final class OnDemandEditCoordinator: ObservableObject {
                 _ additionalPromptSections: [String],
                 _ manifestChangeApproval: @escaping MaintainTierCManifestChangeApproval
             ) async -> MaintainOnDemandEditResult
-        )? = nil
+        )? = nil,
+        deliveredUndoRecoveryStore: DeliveredEditUndoRecoveryStore? = nil,
+        appDeliveryReceiptStore: AppDeliveryReceiptStore? = nil,
+        makeHarnessWorkflow: (() throws -> HarnessFeatureWorkflow)? = nil
     ) {
         self.installProvenanceStore = installProvenanceStore
         self.patchQueue = patchQueue
         self.clonePathLock = clonePathLock ?? .shared
+        self.makeHarnessWorkflow = makeHarnessWorkflow
         self.topRequestsForApp = topRequestsForApp
         self.probeRequestTriggers = probeRequestTriggers ?? Self.defaultProbeRequestTriggers
         self.performOnDemandEdit = performOnDemandEdit ?? Self.defaultPerformOnDemandEdit
+        self.deliveredUndoRecoveryStore = deliveredUndoRecoveryStore ?? DeliveredEditUndoRecoveryStore()
+        self.appDeliveryReceiptStore = appDeliveryReceiptStore ?? AppDeliveryReceiptStore()
+        loadInterruptedUndoRecoveryForReview()
+        refreshSavedUndoArchives()
+    }
+
+    private func refreshSavedUndoArchives() {
+        let inventory = deliveredUndoRecoveryStore.archivedRecoveryInventory()
+        savedUndoArchivePaths = inventory.archivePaths
+        guard !inventory.archivePaths.isEmpty else { return }
+        stoppedUndoRecoveryPaths = inventory.archivePaths + inventory.records.flatMap(\.paths)
+        stoppedUndoRecoveryMessage = inventory.hasUnknownTargets
+            ? "Undo was stopped and its recovery information was saved. Iris cannot identify the affected app, so edits remain paused until that information can be checked. Restoration has not been confirmed."
+            : "Undo was stopped and its recovery information was saved. Restoration has not been confirmed. You can edit other apps; the affected app remains protected."
+        if !interruptedUndoRequiresReview && phase == .pickApp { phase = .done }
+    }
+
+    /// Called only after the reader confirms Stop. This archives information,
+    /// never moves a backup, restores an app, or edits working files.
+    func stopUndoAndKeepRecoveryInformation() {
+        guard canStopUndo else { return }
+        stopUndoWasRequested = true
+        do {
+            if stopUndoArchiveReceipt == nil {
+                stopUndoArchiveReceipt = try deliveredUndoRecoveryStore.archiveBeforeStopping()
+            }
+            guard let receipt = stopUndoArchiveReceipt else { return }
+            try deliveredUndoRecoveryStore.clearActiveAfterArchival(receipt)
+            releaseLockIfHeld()
+            resetInFlightState()
+            liveUndoRecoveryRecord = nil
+            undoRecordNeedsRemoval = false
+            stopUndoArchiveReceipt = nil
+            stopUndoWasRequested = false
+            interruptedUndoRecoveryMessage = nil
+            interruptedUndoRecoveryPaths = []
+            refreshSavedUndoArchives()
+            statusLine = stoppedUndoRecoveryMessage
+            phase = .done
+        } catch {
+            undoFailureMessage = "Iris could not safely save the recovery information and stop Undo. It remains paused. Try Stop again; your app and working files have not been changed by this action."
+            statusLine = undoFailureMessage
+            savedUndoArchivePaths = deliveredUndoRecoveryStore.archivedRecoveryInventory().archivePaths
+        }
+    }
+
+    private func archivedUndoBlocksEditing(appSlug: String) -> Bool {
+        let paths = [provenanceClonePath(forAppSlug: appSlug), installedApplicationPathForApp?(appSlug)].compactMap { $0 }
+        let protection = deliveredUndoRecoveryStore.archivedProtection(appSlug: appSlug, paths: paths)
+        guard protection.blocksChanges else { return false }
+        stoppedUndoRecoveryPaths = protection.archivePaths
+        stoppedUndoRecoveryMessage = "This app is protected by saved Undo recovery information. Its restoration has not been confirmed. Review the saved information before changing it."
+        if case .unknownTargets = protection {
+            stoppedUndoRecoveryMessage = "Edits are paused because saved Undo recovery information does not identify the affected app. Review that information before changing any app."
+        }
+        statusLine = stoppedUndoRecoveryMessage
+        phase = .done
+        return true
+    }
+
+    private func loadInterruptedUndoRecoveryForReview() {
+        let loaded = deliveredUndoRecoveryStore.load()
+        guard loaded.requiresReview else { return }
+        interruptedUndoRecoveryPaths = [deliveredUndoRecoveryStore.recordURL.path]
+        switch loaded {
+        case .pending(let record):
+            activeAppSlug = record.appSlug
+            activeAppName = record.appName
+            interruptedUndoRecoveryPaths += record.paths
+            interruptedUndoRecoveryMessage = "Iris closed before Undo was confirmed complete for \(record.appName). Nothing was changed during this recovery check. Retry Undo checks the saved app and source before finishing the remaining steps. If those checks fail, Iris keeps the recovery information."
+        case .unreadable:
+            interruptedUndoRecoveryMessage = "Iris found recovery information it could not read. It has been kept for review. Your app and working files have not been changed during this recovery check. Further edits are paused until recovery can be checked."
+        case .absent: return
+        }
+        statusLine = interruptedUndoRecoveryMessage
+        phase = .done
+    }
+
+    /// Explicit recovery of an interrupted Test Undo, bound to its durable
+    /// receipt and freshly checked app/source bytes. A marker alone never
+    /// authorizes filesystem replay or claims any completed stage.
+    func resumeInterruptedUndo() {
+        guard canResumeInterruptedUndo,
+              case .pending(let record) = deliveredUndoRecoveryStore.load(),
+              let receiptID = record.deliveryReceiptIdentifier,
+              case .valid(let receipt) = appDeliveryReceiptStore.load(receiptID),
+              let source = receipt.sourceIdentity,
+              let project = IrisTestProjectRegistry.project(slug: record.appSlug),
+              clonePathLock.tryAcquire(clonePath: record.clonePath, owner: "undo-resume:\(record.appSlug)") else { return }
+        isCheckingInterruptedUndo = true
+        undoFailureMessage = nil
+        statusLine = "Checking the saved app and working files before resuming Undo."
+        let generation = flowGeneration
+        Task { [weak self] in
+            guard let self else { return }
+            var transferredLock = false
+            defer {
+                self.isCheckingInterruptedUndo = false
+                if !transferredLock { self.clonePathLock.release(clonePath: record.clonePath) }
+            }
+            do {
+                let runner = try MaintainShellRunner(repoRootPath: record.clonePath)
+                let resumeIdentity = try await InterruptedUndoResumeIdentity.capture(
+                    record: record, receipt: receipt, project: project, runner: runner)
+                guard await resumeIdentity.stillMatches(
+                    record: record, receipt: receipt, project: project, runner: runner
+                ) else { throw CocoaError(.fileReadUnknown) }
+                guard self.flowGeneration == generation,
+                      self.deliveredUndoRecoveryStore.load() == .pending(record),
+                      case .valid(let currentReceipt) = self.appDeliveryReceiptStore.load(receiptID),
+                      currentReceipt == receipt,
+                      IrisTestProjectRegistry.project(slug: record.appSlug) == project else {
+                    throw CocoaError(.fileReadUnknown)
+                }
+                if resumeIdentity.appState == .restored, receipt.phase == .installed {
+                    // Reconcile only the durable metadata. The matching old
+                    // app is already in place, so never swap it a second time.
+                    _ = try self.appDeliveryReceiptStore.transition(receipt, to: .restored)
+                }
+                self.activeAppSlug = source.appSlug
+                self.activeAppName = source.appName
+                self.committedBranchName = source.branchName
+                self.changeId = source.changeId
+                self.originalHeadCommit = source.baseCommit
+                self.originalHeadRef = source.baseRef
+                self.savedDeliveryIdentity = SavedEditDeliveryIdentity(
+                    clonePath: source.clonePath, branchName: source.branchName, commit: source.commit)
+                self.deliveredReceiptIdentifier = receiptID
+                self.deliveredInstalledAppPath = receipt.installedPath
+                self.deliveredInstalledBackupPath = receipt.backupPath
+                self.deliveredChangeCanBeUndone = true
+                self.liveUndoRecoveryRecord = record
+                self.undoRecovery.reset()
+                if resumeIdentity.appState == .restored {
+                    self.undoRecovery.restoreConfirmedAppCheckpoint()
+                }
+                self.interruptedUndoRecoveryMessage = nil
+                self.interruptedUndoRecoveryPaths = []
+                self.resolvedClonePath = source.clonePath
+                self.isCheckingInterruptedUndo = false
+                self.phase = .done
+                self.undoDeliveredChange()
+                // Synchronous preflight can still refuse a changed receipt.
+                // Keep ownership only once the recovery operation has begun.
+                transferredLock = self.undoIsInProgress
+                if !transferredLock {
+                    self.resolvedClonePath = nil
+                    self.loadInterruptedUndoRecoveryForReview()
+                }
+            } catch {
+                guard self.flowGeneration == generation else { return }
+                self.undoFailureMessage = "Iris could not confirm the saved app and source for this Undo. Nothing was changed. The recovery information is kept; review any later changes before retrying."
+                self.statusLine = self.undoFailureMessage
+            }
+        }
     }
 
     /// The production probe: the reader's own model provider (never the funded
@@ -702,11 +1184,53 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// (never the funded proxy) and run the jailed on-demand edit through the
     /// shared Tier C engine, build-script edits hard-blocked before the build,
     /// with the engine's live progress narrated and the reader's Stop honored.
-    static let defaultPerformOnDemandEdit: (
+    typealias OnDemandEditPerformer = (
         String, String, BreakAppStack, String, String, OnDemandEditKind,
         @escaping MaintainTierCProgressHandler, @escaping MaintainTierCCancellationCheck,
         OnDemandEditRuntimeEvidence, [String], @escaping MaintainTierCManifestChangeApproval
-    ) async -> MaintainOnDemandEditResult = { resolvedClonePath, appSlug, appStack, changeId, scrubbedRequest, kind, progressHandler, cancellationCheck, runtimeEvidence, additionalPromptSections, manifestChangeApproval in
+    ) async -> MaintainOnDemandEditResult
+
+    private static func harnessPerformer(workflow: HarnessFeatureWorkflow,
+        existingCandidate: PendingEditCandidateIdentity? = nil,
+        assessment: @escaping (HarnessBehaviorAssessment?) -> Void) -> OnDemandEditPerformer {
+        { clonePath, slug, stack, changeID, request, kind, progress, cancellation, evidence, sections, approval in
+            let provider = HarnessWorkflowMaintainProvider(workflow: workflow)
+            if let candidate = existingCandidate {
+                guard kind == .feature,
+                      let runner = try? MaintainShellRunner(repoRootPath: clonePath) else {
+                    return .couldNotComplete(reason: "The saved change could not be rechecked. Its source was kept.")
+                }
+                let result = await MaintainSavedChangeRechecker.run(
+                    runner: runner, clonePath: clonePath, appSlug: slug, appStack: stack,
+                    changeId: changeID, request: request, provider: provider,
+                    derivedRecipe: RepoRecipeService.deriveRecipe(repoRootPath: clonePath),
+                    isCurrent: {
+                        guard !cancellation(), IrisTestEnvironment.isEnabled,
+                              let record = OnDemandEditInterruptedRunRecovery.recordOnDisk(),
+                              record.pendingCandidate == candidate,
+                              let project = IrisTestProjectRegistry.project(slug: slug) else { return false }
+                        return await candidate.stillMatches(record: record, project: project, runner: runner)
+                    }, progress: progress, cancellation: cancellation)
+                assessment(provider.behaviorAssessment)
+                return result
+            }
+            let fixer = MaintainTierCFixer(provider: provider)
+            let result = await fixer.attemptOnDemandEdit(clonePath: clonePath, appSlug: slug,
+                appStack: stack, changeId: changeID, request: request, kind: kind,
+                progressHandler: progress, cancellationCheck: cancellation,
+                runtimeLogContext: evidence.runtimeLogText,
+                appWindowScreenshotPNG: evidence.appWindowScreenshotPNG,
+                attachedScreenshotIsOfTheReadersWholeScreen: evidence.screenshotIsOfTheReadersWholeScreen,
+                additionalPromptSections: sections, manifestChangeApproval: approval,
+                priorAttemptsDidNotCureTheComplaint:
+                    OnDemandEditRunLog.priorAttemptsDidNotCureTheComplaint(
+                        forAppSlug: slug, request: request, kind: kind))
+            assessment(provider.behaviorAssessment)
+            return result
+        }
+    }
+
+    static let defaultPerformOnDemandEdit: OnDemandEditPerformer = { resolvedClonePath, appSlug, appStack, changeId, scrubbedRequest, kind, progressHandler, cancellationCheck, runtimeEvidence, additionalPromptSections, manifestChangeApproval in
         guard let provider = MaintainModelProviderResolver.firstAvailable() else {
             return .notEligible(reason: "no model key is available for the edit engine")
         }
@@ -726,11 +1250,11 @@ final class OnDemandEditCoordinator: ObservableObject {
                 runtimeEvidence.screenshotIsOfTheReadersWholeScreen,
             additionalPromptSections: additionalPromptSections,
             manifestChangeApproval: manifestChangeApproval,
-            // Read here rather than threaded through the performer's signature:
-            // the app slug is all it takes, and keeping the judgement next to
-            // the log that backs it means one place can be wrong, not two.
+            // Only prior attempts at this bug report justify the diagnostic
+            // detour; unrelated app history does not establish a failed fix.
             priorAttemptsDidNotCureTheComplaint:
-                OnDemandEditRunLog.priorAttemptsDidNotCureTheComplaint(forAppSlug: appSlug)
+                OnDemandEditRunLog.priorAttemptsDidNotCureTheComplaint(
+                    forAppSlug: appSlug, request: scrubbedRequest, kind: kind)
         )
     }
 
@@ -771,7 +1295,19 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// or the frontmost-app inference). Runs an ADVISORY eligibility check to
     /// decide whether to even offer the describe step — the binding check is
     /// re-run LIVE at start, so a stale positive here can never cause an edit.
-    func pickApp(slug: String, name: String, stack: BreakAppStack) {
+    @discardableResult
+    func pickApp(slug: String, name: String, stack: BreakAppStack) -> Bool {
+        // This guard must precede the recovery checks. Some recovery helpers
+        // inspect and publish phase state, so even a rejected picker tap must
+        // not mutate a live assessment or edit flow on its way out.
+        guard editTask == nil, !isPreparingSavedChangeRecheck, canPickAnotherApp else {
+            irisTrace("on-demand edit: ignored app selection while phase=\(phase)")
+            return false
+        }
+        guard !undoNeedsRecovery else { return false }
+        guard !archivedUndoBlocksEditing(appSlug: slug) else { return false }
+        stoppedUndoRecoveryMessage = nil
+        stoppedUndoRecoveryPaths = []
         // File whatever the reader was last shown BEFORE overwriting the app it
         // was about. Starting a second edit used to erase the first one's
         // result outright ("when I click out of Iris it doesn't save that chat
@@ -808,6 +1344,7 @@ final class OnDemandEditCoordinator: ObservableObject {
             phase = .notEligible(reason: reason)
             statusLine = reason
         }
+        return true
     }
 
     /// Derive the per-repo build/run recipe by READING the clone (plan §4/§8)
@@ -848,8 +1385,9 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// false (staying in `.describe`, with a `statusLine` reason) when the
     /// request is empty or too large, so the reader can revise it.
     @discardableResult
-    func describeRequest(_ rawRequest: String, kind: OnDemandEditKind) -> Bool {
-        guard phase == .describe else { return false }
+    func describeRequest(_ rawRequest: String, kind requestedKind: OnDemandEditKind) -> Bool {
+        guard editTask == nil, !isPreparingSavedChangeRecheck, phase == .describe else { return false }
+        let kind: OnDemandEditKind = isRecheckingSavedChanges ? .feature : requestedKind
         let trimmed = rawRequest.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             statusLine = "Tell Iris what you'd like changed first."
@@ -883,15 +1421,61 @@ final class OnDemandEditCoordinator: ObservableObject {
         // runtime shape — are read live from the derived recipe at advance
         // time, so the "unknown stack" case still ASKS how to build (turning
         // the old wall into a capability) instead of hard-refusing.
+        requestProbeTask?.cancel()
+        requestProbeWatchdog?.cancel()
         requestProbeGeneration += 1
         let probeGeneration = requestProbeGeneration
         isAssessingRequest = true
         statusLine = nil
         let clonePathForProbe = provenanceClonePath(forAppSlug: activeAppSlug ?? "")
 
-        Task { [weak self] in
+        if let makeHarnessWorkflow {
+            do {
+                let workflow = try makeHarnessWorkflow()
+                harnessWorkflow = workflow
+                let summary = clonePathForProbe.map {
+                    FeatureEditRepoMap.summarize(repoRootPath: $0, tokenBudget: 2400)
+                } ?? "No repository summary is available."
+                requestProbeTask = Task { [weak self] in
+                    do {
+                        let brief = try await workflow.plan(request: scrubbed,
+                            repositorySummary: GuideAutopilotOutputBuffer.scrubbed(summary))
+                        guard let self, !Task.isCancelled, self.phase == .describe,
+                              self.requestProbeGeneration == probeGeneration,
+                              self.isAssessingRequest else { return }
+                        self.requestProbeWatchdog?.cancel()
+                        self.requestProbeWatchdog = nil
+                        self.requestProbeTask = nil
+                        self.isAssessingRequest = false
+                        self.clarificationQuestions = brief.targetedQuestions.map {
+                            ClarificationQuestion(prompt: $0.prompt, options: $0.options.map(\.label),
+                                trigger: .ambiguousAmongImplementations, id: "harness:" + $0.id)
+                        }
+                        if self.clarificationQuestions.isEmpty {
+                            self.buildAndPresentPlan(kind: kind)
+                        } else {
+                            self.phase = .clarifying
+                            self.statusLine = "A quick decision before Iris starts."
+                        }
+                    } catch {
+                        self?.failHarnessPlanning(generation: probeGeneration)
+                    }
+                }
+                requestProbeWatchdog = Task { [weak self] in
+                    do { try await Task.sleep(nanoseconds: 180_000_000_000) }
+                    catch { return }
+                    self?.failHarnessPlanning(generation: probeGeneration)
+                }
+            } catch {
+                failHarnessPlanning(generation: probeGeneration)
+            }
+            return true
+        }
+
+        requestProbeTask = Task { [weak self] in
             guard let self else { return }
             let probeVerdict = await self.probeRequestTriggers(scrubbed, clonePathForProbe)
+            guard !Task.isCancelled else { return }
             self.advanceFromDescribe(
                 afterProbeGeneration: probeGeneration, verdict: probeVerdict, kind: kind
             )
@@ -900,13 +1484,26 @@ final class OnDemandEditCoordinator: ObservableObject {
         // provider's own long timeout) proceeds all-quiet rather than holding
         // the reader behind a spinner. A late real verdict is then dropped by
         // the generation guard.
-        Task { [weak self] in
-            try? await Task.sleep(nanoseconds: Self.probeWatchdogNanoseconds)
+        requestProbeWatchdog = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: Self.probeWatchdogNanoseconds) }
+            catch { return }
             self?.advanceFromDescribe(
                 afterProbeGeneration: probeGeneration, verdict: .allQuiet, kind: kind
             )
         }
         return true
+    }
+
+    private func failHarnessPlanning(generation: Int) {
+        guard requestProbeGeneration == generation, phase == .describe,
+              isAssessingRequest else { return }
+        requestProbeTask?.cancel()
+        requestProbeWatchdog?.cancel()
+        requestProbeTask = nil
+        requestProbeWatchdog = nil
+        isAssessingRequest = false
+        harnessWorkflow = nil
+        statusLine = "Iris could not finish the plan. Nothing was changed. Please try again."
     }
 
     /// The second half of the describe step, entered when the request probe's
@@ -924,6 +1521,10 @@ final class OnDemandEditCoordinator: ObservableObject {
               isAssessingRequest,
               requestProbeGeneration == probeGeneration,
               let scrubbed = scrubbedRequest else { return }
+        requestProbeTask?.cancel()
+        requestProbeWatchdog?.cancel()
+        requestProbeTask = nil
+        requestProbeWatchdog = nil
         isAssessingRequest = false
 
         let clarificationQuestionBatch = FeatureEditClarificationLogic.questions(
@@ -953,11 +1554,43 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// unwanted change. Otherwise it records the answers and builds the pre-edit
     /// plan, advancing to the plan-approval gate.
     func submitClarificationAnswers(_ answersByQuestionId: [String: String]) {
-        guard phase == .clarifying, let kind = classifiedKind else { return }
+        guard phase == .clarifying, !isAssessingRequest, let kind = classifiedKind else { return }
+        guard pendingHarnessScopeReconciliation == nil else {
+            statusLine = "Choose which plan you want before Iris continues."
+            return
+        }
+        var needsRefinement = false
+        if let workflow = harnessWorkflow, let brief = workflow.state?.brief {
+            do {
+                let answered = Set(workflow.state?.userDecisions.compactMap(\.questionID) ?? [])
+                for question in brief.targetedQuestions {
+                    guard let answer = answersByQuestionId["harness:" + question.id] else {
+                        if answered.contains(question.id) { continue }
+                        throw HarnessFeatureWorkflow.WorkflowError.unansweredQuestions
+                    }
+                    let cleanAnswer = GuideAutopilotOutputBuffer.scrubbed(answer)
+                    if let option = question.options.first(where: { $0.label == answer }) {
+                        try workflow.recordAnswer(questionID: question.id, optionID: option.id, answer: cleanAnswer)
+                    } else {
+                        try workflow.recordFreeTextAnswer(questionID: question.id, answer: cleanAnswer)
+                        needsRefinement = true
+                    }
+                }
+                if !needsRefinement { _ = try workflow.implementationContext() }
+            } catch {
+                statusLine = "Please answer each question before Iris starts."
+                return
+            }
+        }
         clarificationAnswersByQuestionId = answersByQuestionId
         clarificationAnswerPairsForPrompt = clarificationQuestions.compactMap { question in
             guard let answer = answersByQuestionId[question.id] else { return nil }
-            return (question: question.prompt, answer: answer)
+            return (question: GuideAutopilotOutputBuffer.scrubbed(question.prompt),
+                    answer: GuideAutopilotOutputBuffer.scrubbed(answer))
+        }
+        if needsRefinement, let workflow = harnessWorkflow {
+            refineHarnessClarification(workflow: workflow, kind: kind)
+            return
         }
 
         // Any option beginning with "Stop" is the reader declining after seeing
@@ -965,7 +1598,7 @@ final class OnDemandEditCoordinator: ObservableObject {
         // and hand control back — never to proceed on an ambiguous or refused
         // change. (The clarification options are a fixed, code-authored set, so
         // matching their "Stop…" prefix is a reliable signal, not a guess.)
-        let readerChoseToStop = answersByQuestionId.values.contains { selectedOption in
+        let readerChoseToStop = harnessWorkflow == nil && answersByQuestionId.values.contains { selectedOption in
             selectedOption.lowercased().hasPrefix("stop")
         }
         if readerChoseToStop {
@@ -978,11 +1611,97 @@ final class OnDemandEditCoordinator: ObservableObject {
         buildAndPresentPlan(kind: kind)
     }
 
+    private func refineHarnessClarification(workflow: HarnessFeatureWorkflow, kind: OnDemandEditKind) {
+        requestProbeTask?.cancel()
+        requestProbeWatchdog?.cancel()
+        requestProbeGeneration += 1
+        let generation = requestProbeGeneration
+        isAssessingRequest = true
+        statusLine = "Updating the plan with your answer. No edit has started."
+        let summary = provenanceClonePath(forAppSlug: activeAppSlug ?? "").map {
+            FeatureEditRepoMap.summarize(repoRootPath: $0, tokenBudget: 2400)
+        } ?? "No repository summary is available."
+        requestProbeTask = Task { [weak self] in
+            do {
+                let brief = try await workflow.refineBrief(repositorySummary: GuideAutopilotOutputBuffer.scrubbed(summary))
+                guard let self, !Task.isCancelled, self.phase == .clarifying,
+                      self.requestProbeGeneration == generation, self.harnessWorkflow === workflow else { return }
+                self.requestProbeWatchdog?.cancel()
+                self.requestProbeWatchdog = nil
+                self.requestProbeTask = nil
+                self.isAssessingRequest = false
+                if workflow.pendingScopeReconciliation != nil {
+                    self.statusLine = "Your answer changes the plan. Check the changes below; nothing has been edited."
+                } else {
+                    self.presentRemainingHarnessQuestions(workflow: workflow, brief: brief, kind: kind)
+                }
+            } catch {
+                guard let self, self.phase == .clarifying, self.requestProbeGeneration == generation else { return }
+                self.requestProbeWatchdog?.cancel()
+                self.requestProbeWatchdog = nil
+                self.requestProbeTask = nil
+                self.isAssessingRequest = false
+                self.statusLine = "Your answers are kept. " + GuideAutopilotOutputBuffer.scrubbed(error.localizedDescription)
+            }
+        }
+        requestProbeWatchdog = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 180_000_000_000) } catch { return }
+            guard let self, self.phase == .clarifying, self.requestProbeGeneration == generation else { return }
+            self.requestProbeGeneration += 1
+            self.requestProbeTask?.cancel()
+            self.requestProbeTask = nil
+            self.isAssessingRequest = false
+            self.statusLine = "The plan update timed out. Your answers are kept; try Continue again."
+        }
+    }
+
+    func resolveHarnessScopeReconciliation(id: String, approve: Bool) {
+        guard phase == .clarifying, !isAssessingRequest, let workflow = harnessWorkflow,
+              let kind = classifiedKind else { return }
+        do {
+            if approve { try workflow.approveScopeReconciliation(id: id) }
+            else { try workflow.rejectScopeReconciliation(id: id) }
+            guard let brief = workflow.state?.brief else { return }
+            presentRemainingHarnessQuestions(workflow: workflow, brief: brief, kind: kind)
+        } catch {
+            statusLine = GuideAutopilotOutputBuffer.scrubbed(error.localizedDescription)
+        }
+    }
+
+    private func presentRemainingHarnessQuestions(workflow: HarnessFeatureWorkflow,
+        brief: HarnessTaskBrief, kind: OnDemandEditKind) {
+        let unanswered = workflow.unansweredQuestionIDs
+        clarificationQuestions = brief.targetedQuestions.filter { unanswered.contains($0.id) }.map {
+            ClarificationQuestion(prompt: $0.prompt, options: $0.options.map(\.label),
+                trigger: .ambiguousAmongImplementations, id: "harness:" + $0.id)
+        }
+        if clarificationQuestions.isEmpty { buildAndPresentPlan(kind: kind) }
+        else { statusLine = "One more detail will help Iris get this right." }
+    }
+
     /// Build the short pre-edit PLAN (plan §7) from the derived recipe, the
     /// runtime shape, and the reader's request, and show it for approval. The
     /// plan is informational: the single binding safety gate is still
     /// `confirmStartAndRun()`, reached only when the reader approves the plan.
     private func buildAndPresentPlan(kind: OnDemandEditKind) {
+        if let workflow = harnessWorkflow, let brief = workflow.state?.brief {
+            do { _ = try workflow.implementationContext() }
+            catch {
+                statusLine = "The plan still needs a decision or a smaller scope. Nothing was changed."
+                return
+            }
+            presentedPlan = FeatureEditPlan(filesToTouch: [],
+                approachSummary: isRecheckingSavedChanges ? brief.desiredOutcome
+                    : brief.desiredOutcome + "\n" + brief.milestones.map(\.title).joined(separator: "\n"),
+                resolvedRecipeSummary: recipeSummaryText(derivedRepoRecipe),
+                openQuestions: [],
+                expectedRung: (isRecheckingSavedChanges ? "" : "Checks still needed: ")
+                    + brief.acceptanceCriteria.map(\.statement).joined(separator: "; "))
+            clarificationQuestions = []
+            phase = .presentingPlan
+            statusLine = nil
+            return
+        }
         let appName = activeAppName ?? (activeAppSlug ?? "this app")
         let requestText = scrubbedRequest ?? "the requested change"
         let verb = kind == .feature ? "add this feature to" : "fix this in"
@@ -1076,6 +1795,9 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// names the app, the clone path, and that the reader's OWN key pays for it,
     /// so consent is informed.
     private func startConsentPrompt(kind: OnDemandEditKind) -> String {
+        if isRecheckingSavedChanges {
+            return "Iris will build and independently review the saved changes without rewriting the code. If those checks pass, it will save a version using the usual update and recovery controls."
+        }
         let appName = activeAppName ?? "this app"
         let clone = resolvedClonePath ?? provenanceClonePath(forAppSlug: activeAppSlug ?? "") ?? "its source clone"
         let verb = kind == .feature ? "add this feature to" : "fix this in"
@@ -1089,6 +1811,8 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// throttle — the reader initiated this, so the ask-limiter that guards
     /// against AI nagging is deliberately absent.
     func confirmStartAndRun() {
+        guard !undoNeedsRecovery else { return }
+        if let slug = activeAppSlug, archivedUndoBlocksEditing(appSlug: slug) { return }
         guard phase == .awaitingStartConsent,
               let slug = activeAppSlug,
               let stack = activeAppStack,
@@ -1140,6 +1864,11 @@ final class OnDemandEditCoordinator: ObservableObject {
 
         phase = .running
         statusLine = "Working on it under your model key…"
+        currentModelRoute = nil
+        verificationReceipt = nil
+        earnedVerification = nil
+        adversarialReviewIssues = []
+        deliveryProgress = EditDeliveryProgress()
         readerAskedToStopTheRun = false
         // A previous attempt's dirty-clone refusal is about a tree that is
         // being re-read right now — the offer must not survive into a run.
@@ -1156,11 +1885,21 @@ final class OnDemandEditCoordinator: ObservableObject {
             scrubbedRequest: scrubbed
         )
 
-        Task { [weak self] in
+        let runID = UUID()
+        activeEditRunID = runID
+        let runWorkflow = harnessWorkflow
+        editTask = Task { [weak self] in
             guard let self else { return }
+            defer {
+                if self.activeEditRunID == runID {
+                    self.activeEditRunID = nil
+                    self.editTask = nil
+                }
+            }
             await self.runEdit(
                 resolvedClonePath: resolved, slug: slug, stack: stack,
-                changeId: editChangeId, scrubbedRequest: scrubbed, kind: kind
+                changeId: editChangeId, scrubbedRequest: scrubbed, kind: kind,
+                runID: runID, workflow: runWorkflow
             )
         }
     }
@@ -1175,13 +1914,30 @@ final class OnDemandEditCoordinator: ObservableObject {
         stack: BreakAppStack,
         changeId editChangeId: String,
         scrubbedRequest scrubbed: String,
-        kind: OnDemandEditKind
+        kind: OnDemandEditKind,
+        runID: UUID,
+        workflow: HarnessFeatureWorkflow?
     ) async {
+        guard activeEditRunID == runID else { return }
+        let recheckIdentity = pendingRecheckIdentity
         guard let runner = try? MaintainShellRunner(repoRootPath: resolvedClonePath) else {
             runLog?.finish(outcome: "not started: the clone path is not usable")
             runLog = nil
             failRun(reason: "the clone path is not usable", resolvedClonePath: resolvedClonePath)
             return
+        }
+
+        if isRecheckingSavedChanges {
+            guard let identity = recheckIdentity, workflow != nil, kind == .feature,
+                  let record = OnDemandEditInterruptedRunRecovery.recordOnDisk(),
+                  record.pendingCandidate == identity,
+                  let project = IrisTestProjectRegistry.project(slug: slug),
+                  await identity.stillMatches(record: record, project: project, runner: runner) else {
+                failRun(reason: "The saved change no longer matches the files you chose to recheck. Nothing was overwritten. Review the source changes before continuing.",
+                    resolvedClonePath: resolvedClonePath, preserveRecovery: true)
+                return
+            }
+            guard continuePreparingEdit(runID: runID, resolvedClonePath: resolvedClonePath) else { return }
         }
 
         // Refuse a DIRTY tree outright: the engine reverts on failure with
@@ -1198,6 +1954,14 @@ final class OnDemandEditCoordinator: ObservableObject {
         // `git status` — and the date was one `stat` away, and it discarded both
         // before speaking. See `OnDemandEditDirtyTreeReport`.
         let status = try? await runner.run("git status --porcelain", deadline: 60)
+        guard Self.repositoryStatusWasRead(status) else {
+            let reason = "Iris could not check this project's saved files because Git or the developer tools failed. No files were changed. This is a setup problem, not uncommitted work."
+            runLog?.finish(outcome: "not started: repository status command failed")
+            runLog = nil
+            dirtyCloneRefusal = nil
+            failRun(reason: reason, resolvedClonePath: resolvedClonePath)
+            return
+        }
         // Read EXACTLY what git wrote. Porcelain's first status column is very
         // often a space (` M path`), so trimming the block before parsing it
         // eats the first character of the first path — which is not
@@ -1213,7 +1977,7 @@ final class OnDemandEditCoordinator: ObservableObject {
             porcelainOutput: status?.outputTail ?? "", repoRootPath: resolvedClonePath,
             leftByAnInterruptedIrisEdit: interruptedRun?.clonePath == resolvedClonePath ? interruptedRun : nil
         )
-        if dirtyTree.isDirty {
+        if dirtyTree.isDirty && recheckIdentity == nil {
             let refusal = dirtyTree.refusalSentence(appName: activeAppName ?? slug)
             editRunner.note(refusal)
             editRunner.finishStopped()
@@ -1228,12 +1992,53 @@ final class OnDemandEditCoordinator: ObservableObject {
             return
         }
 
+        guard continuePreparingEdit(runID: runID, resolvedClonePath: resolvedClonePath) else { return }
+
+        // A missing compiler is setup work, not a feature for the model to
+        // repair. Check the fixed Rust executables in the same confined runner
+        // before collecting evidence or spending any editor calls. This is only
+        // executable readiness, not a substitute for the later full build.
+        if let command = Self.testBuildToolPreflightCommand(
+            isTestApplication: IrisTestEnvironment.isEnabled,
+            ecosystemIdentifier: derivedRepoRecipe?.ecosystemIdentifier
+        ) {
+            statusLine = "Checking the tools needed to build this app…"
+            let tools = try? await runner.run(command, deadline: 15)
+            guard continuePreparingEdit(runID: runID, resolvedClonePath: resolvedClonePath) else { return }
+            guard tools?.succeeded == true else {
+                let reason = "Iris could not start the Rust build tools this app needs in its protected test environment. No edit was started and your app is unchanged. The build setup needs to be fixed before retrying."
+                runLog?.record("build-tool preflight failed: \(tools?.outputTail ?? "command unavailable")")
+                runLog?.finish(outcome: "not started: Rust build tools unavailable; no editor call")
+                runLog = nil
+                editRunner.note(reason)
+                editRunner.finishStopped()
+                failRun(reason: reason, resolvedClonePath: resolvedClonePath, preserveRecovery: true)
+                return
+            }
+            runLog?.record("build-tool preflight passed: Rust executables; full build still required")
+        }
+
+        do {
+            if recheckIdentity == nil {
+                try OnDemandEditInterruptedRunRecovery.archiveHeldReviewBeforeNewRun()
+            }
+        } catch {
+            failRun(reason: "Iris could not preserve the previous incomplete edit's recovery details. No new edit was started. Review the saved recovery file before retrying.",
+                resolvedClonePath: resolvedClonePath, preserveRecovery: true)
+            return
+        }
+
         // Capture the base so a discard restores the clone exactly and a keep
         // records the correct base commit for the patch queue's replay.
-        originalHeadCommit = (try? await runner.run("git rev-parse HEAD", deadline: 30))?
-            .outputTail.trimmingCharacters(in: .whitespacesAndNewlines)
-        originalHeadRef = (try? await runner.run("git rev-parse --abbrev-ref HEAD", deadline: 30))?
-            .outputTail.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let identity = recheckIdentity {
+            originalHeadCommit = identity.baselineCommit
+            originalHeadRef = identity.branchName
+        } else {
+            originalHeadCommit = (try? await runner.run("git rev-parse HEAD", deadline: 30))?
+                .outputTail.trimmingCharacters(in: .whitespacesAndNewlines)
+            originalHeadRef = (try? await runner.run("git rev-parse --abbrev-ref HEAD", deadline: 30))?
+                .outputTail.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
 
         // Gather the runtime evidence — the app's window and its recent logs —
         // so the agent sees what the reader sees. Best-effort; an all-nil
@@ -1258,7 +2063,7 @@ final class OnDemandEditCoordinator: ObservableObject {
         }
         runtimeEvidenceTextBeforeTheRun = runtimeEvidence.runtimeLogText
         runtimeEvidenceBeforeTheRun = runtimeEvidence
-        filesTouchedThisRun = []
+        filesTouchedThisRun = recheckIdentity?.changedPaths ?? []
         lastAgentNarrationThisRun = ""
 
         // Extra prompt sections for THIS run. (1) The per-app MEMORY: what the
@@ -1268,13 +2073,19 @@ final class OnDemandEditCoordinator: ObservableObject {
         // re-guessing what run N already learned. (2) The reader's
         // clarification answers, which were collected and never read before.
         var additionalPromptSections: [String] = []
-        let priorRuns = OnDemandEditRunLog.recentMemoryRecords(forAppSlug: slug)
-        if let memorySection = OnDemandEditRunLog.memoryPromptSection(fromRecords: priorRuns) {
+        let priorRuns = OnDemandEditRunLog.memoryRecordsForPrompt(
+            forAppSlug: slug, request: scrubbed, kind: kind)
+        var serializedPriorRunCount = 0
+        if let memorySection = OnDemandEditRunLog.memoryPromptSection(
+            fromRecords: priorRuns, serializedRecordCount: &serializedPriorRunCount) {
             additionalPromptSections.append(memorySection)
-            editRunner.note("Iris remembers \(priorRuns.count) earlier attempt\(priorRuns.count == 1 ? "" : "s") on \(appName) and is using what it learned.")
-            runLog?.record("memory: \(priorRuns.count) prior run(s) injected")
+            editRunner.note("Iris is considering \(serializedPriorRunCount) earlier attempt\(serializedPriorRunCount == 1 ? "" : "s") on \(appName).")
+            runLog?.record("memory: \(serializedPriorRunCount) prior run(s) injected")
         }
-        if !clarificationAnswerPairsForPrompt.isEmpty {
+        // The harness pins its revisioned decisions itself, including rejected
+        // scope proposals. Repeating an earlier raw answer here could conflict
+        // with the reader's later choice to keep the previous plan.
+        if harnessWorkflow == nil, !clarificationAnswerPairsForPrompt.isEmpty {
             let answerLines = clarificationAnswerPairsForPrompt
                 .map { "- Q: \($0.question)\n  A: \($0.answer)" }
                 .joined(separator: "\n")
@@ -1326,32 +2137,67 @@ final class OnDemandEditCoordinator: ObservableObject {
             runLog?.record("runtime evidence: \(gatheredEvidenceParts.joined(separator: ", "))")
         }
 
-        editRunner.note("Locating the relevant source and making the smallest change that does it…")
+        editRunner.note(recheckIdentity == nil
+            ? "Locating the relevant source and making the smallest change that does it…"
+            : "Rechecking the saved source. Iris will not generate or rewrite the feature.")
 
         let startedAt = Date()
-        let result = await performOnDemandEdit(
+        let performer: OnDemandEditPerformer
+        var runAssessment: HarnessBehaviorAssessment?
+        if let workflow {
+            harnessBehaviorAssessment = nil
+            performer = Self.harnessPerformer(workflow: workflow, existingCandidate: recheckIdentity) { [weak self] assessment in
+                guard let self, self.activeEditRunID == runID else { return }
+                runAssessment = assessment
+                self.harnessBehaviorAssessment = assessment
+            }
+        } else {
+            performer = performOnDemandEdit
+        }
+        guard continuePreparingEdit(runID: runID, resolvedClonePath: resolvedClonePath) else { return }
+        let result = await performer(
             resolvedClonePath, slug, stack, editChangeId, scrubbed, kind,
             // The engine's live activity — every real jailed command, exit,
             // and wait — streamed into the terminal transcript and the status
             // line, so the run is never a black box to the reader again.
             { [weak self] progressEvent in
-                self?.presentEngineProgress(progressEvent)
+                guard let self, self.activeEditRunID == runID else { return }
+                self.presentEngineProgress(progressEvent)
             },
             // The poll the engine honors when the reader taps Stop.
             { [weak self] in
-                self?.readerAskedToStopTheRun ?? true
+                guard let self, self.activeEditRunID == runID else { return true }
+                return self.readerAskedToStopTheRun
             },
             runtimeEvidence,
             additionalPromptSections,
             // The per-run manifest consent: pause the flow on a card, resume
             // the engine with the reader's Allow/Decline.
             { [weak self] declaration in
-                await self?.askReaderToApproveManifestChange(declaration) ?? false
+                guard let self, self.activeEditRunID == runID else { return false }
+                return await self.askReaderToApproveManifestChange(declaration)
             }
         )
+        guard activeEditRunID == runID else { return }
         let elapsed = Date().timeIntervalSince(startedAt)
         editRunner.setWorking(false)
         lastResult = result
+
+        if case .couldNotComplete(let reason) = result,
+           reason == MaintainSavedChangeRechecker.stoppedReason {
+            rememberTheUncommittedEditsInCaseIrisGoesAway(waitingOn: "Recheck stopped; saved source needs review")
+            let message = "Recheck stopped. Your saved code was kept and the installed app was not changed."
+            editRunner.note(message)
+            editRunner.finishStopped()
+            runLog?.finish(outcome: "recheck stopped; saved source preserved; not installed")
+            runLog = nil
+            readerAskedToStopTheRun = false
+            clonePathLock.release(clonePath: resolvedClonePath)
+            self.resolvedClonePath = nil
+            statusLine = message
+            phase = .done
+            return
+        }
 
         // A READER-initiated stop is its own calm ending, not a failure: the
         // engine has already reverted everything, so release the lock and say
@@ -1376,20 +2222,76 @@ final class OnDemandEditCoordinator: ObservableObject {
         switch result {
         case .appliedAndRebuilt(let branchName, _, _, let suitePassed, let symptomVerifiedByRepro):
             committedBranchName = branchName
+            deliveryProgress.codeSaved = true
             OnDemandEditInterruptedRunRecovery.forget()
-            editRunner.recordVerificationResult(passed: true, over: elapsed)
-            editRunner.note(verificationNote(
-                suitePassed: suitePassed, kind: kind, symptomVerifiedByRepro: symptomVerifiedByRepro
-            ))
-            runLog?.finish(outcome: "applied on branch \(branchName) (suite: \(suitePassed.map(String.init) ?? "none to run")"
+            if let receipt = verificationReceipt {
+                if receipt.anyCheckRan {
+                    editRunner.recordVerificationResult(passed: !receipt.hasFailure, over: elapsed)
+                }
+                editRunner.note(receipt.summary)
+            } else {
+                editRunner.note("Code saved. Verification results were not reported; continuing to the existing packaging check.")
+            }
+            runLog?.record("code saved on branch \(branchName) (suite: \(suitePassed.map(String.init) ?? "none to run")"
                 + (symptomVerifiedByRepro ? ", repro-verified" : "") + ")")
-            runLog = nil
+            // Keep this same run log through packaging, delivery and the
+            // symptom verdict. Reset closes it when the reader leaves the flow.
             recordMemory(
                 outcome: OnDemandEditMemoryRecord.appliedOutcome(branchName: branchName)
                     + (symptomVerifiedByRepro ? " (repro-verified)" : ""),
                 kind: kind
             )
             proposedDiffText = await readCommittedDiff(runner: runner)
+            let committedDiff = workflow == nil ? nil
+                : try? await runner.run("git --no-pager diff HEAD~1 HEAD", deadline: 60)
+            let currentRevision = committedDiff.flatMap { result in
+                result.succeeded ? HarnessFrozenComparison.digest(Data(result.outputTail.utf8)) : nil
+            }
+            let runGeneration = flowGeneration
+            if await offerUnverifiedTestCandidateIfEligible(
+                slug: slug,
+                resolvedClonePath: resolvedClonePath,
+                branchName: branchName,
+                changeID: editChangeId,
+                kind: kind,
+                suitePassed: suitePassed,
+                currentRevision: currentRevision,
+                assessment: runAssessment,
+                workflow: workflow,
+                runID: runID,
+                generation: flowGeneration
+            ) {
+                return
+            }
+            if let workflow {
+                guard harnessWorkflow === workflow else { return }
+            } else {
+                guard harnessWorkflow == nil else { return }
+            }
+            guard activeEditRunID == runID,
+                  flowGeneration == runGeneration,
+                  phase == .running,
+                  committedBranchName == branchName,
+                  changeId == editChangeId else { return }
+            if readerAskedToStopTheRun || (workflow != nil
+                && runAssessment?.permitsAutomaticDelivery(forRevision: currentRevision) != true) {
+                unverifiedTestCandidateIsAvailable = false
+                unverifiedTestCandidateRegistryProject = nil
+                let message = runAssessment?.permitsAutomaticDelivery == false ? runAssessment?.readerSummary
+                    : nil
+                let readerMessage = readerAskedToStopTheRun
+                    ? "Stopped before installation. Your code change is saved on its branch; your installed app has not been replaced."
+                    : message ?? "Your change is saved, but the requested behaviors have not completed their test review. Your installed app has not been replaced."
+                statusLine = readerMessage
+                editRunner.note(readerMessage)
+                editRunner.finishStopped()
+                runLog?.finish(outcome: "saved; behavior acceptance incomplete; not installed")
+                runLog = nil
+                clonePathLock.release(clonePath: resolvedClonePath)
+                self.resolvedClonePath = nil
+                phase = .done
+                return
+            }
             // FULLY AUTOMATIC delivery (founder decision, Aug 22 2026): no
             // keep/relaunch taps — record, rebuild, relaunch, then ask the
             // only question that matters (is the symptom gone?), with undo.
@@ -1397,6 +2299,19 @@ final class OnDemandEditCoordinator: ObservableObject {
 
         case .couldNotComplete(let reason):
             let mapped = Self.mappedFailure(reason: reason)
+            let finalStatus = try? await runner.run("git status --porcelain --untracked-files=all", deadline: 15)
+            let sourceConfirmedClean = Self.repositoryStatusWasRead(finalStatus)
+                && finalStatus?.outputTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true
+            let failureMessage = Self.sourceAwareFailureMessage(mapped: mapped.userFacing,
+                reason: reason, status: finalStatus)
+            if !sourceConfirmedClean {
+                rememberTheUncommittedEditsInCaseIrisGoesAway(waitingOn: "Review incomplete edit before retrying")
+                if var recovery = OnDemandEditInterruptedRunRecovery.recordOnDisk(),
+                   recovery.clonePath == resolvedClonePath {
+                    recovery.requiresReviewBeforeRecovery = true
+                    OnDemandEditInterruptedRunRecovery.remember(recovery)
+                }
+            }
             blockedByBuildScriptEdit = mapped.wasBuildScriptBlock
             failureWasRateLimit = mapped.wasRateLimited
             // A rejected credential is the one mid-run failure the reader can
@@ -1404,7 +2319,7 @@ final class OnDemandEditCoordinator: ObservableObject {
             // shortcut the missing-key refusal does.
             refusalOffersModelKeySetup = mapped.offersModelKeySetup
             editRunner.recordVerificationResult(passed: false, over: elapsed)
-            editRunner.note(mapped.userFacing)
+            editRunner.note(failureMessage)
             if let runLog {
                 // The pointer that makes "what did it actually try?" a
                 // question with an answer, right where the failure lands.
@@ -1414,7 +2329,8 @@ final class OnDemandEditCoordinator: ObservableObject {
             runLog = nil
             recordMemory(outcome: OnDemandEditMemoryRecord.failedOutcome(reason: reason), kind: kind)
             editRunner.finishStopped()
-            failRun(reason: mapped.userFacing, resolvedClonePath: resolvedClonePath)
+            failRun(reason: failureMessage, resolvedClonePath: resolvedClonePath,
+                preserveRecovery: !sourceConfirmedClean)
 
         case .notEligible(let reason):
             editRunner.note("Iris couldn't start the edit: \(reason).")
@@ -1489,7 +2405,11 @@ final class OnDemandEditCoordinator: ObservableObject {
         guard case .blockedByModel = phase, let slug = activeAppSlug else { return false }
         return relaunchIsAvailableForApp?(slug) == true
             && packageEditedAppFromClone != nil
-            && terminateAndRelaunchEditedApp != nil
+            && (terminateAndRelaunchEditedApp != nil || splitDeliveryRelaunchIsAvailable)
+    }
+
+    private var splitDeliveryRelaunchIsAvailable: Bool {
+        terminateEditedAppBeforeDelivery != nil && launchEditedAppAfterDelivery != nil
     }
 
     /// Rebuild the app from its clone and relaunch it, after a block that a
@@ -1503,8 +2423,7 @@ final class OnDemandEditCoordinator: ObservableObject {
     func rebuildAndRelaunchTheBlockedApp() {
         guard irisCanRebuildTheBlockedApp,
               let slug = activeAppSlug,
-              let package = packageEditedAppFromClone,
-              let relaunch = terminateAndRelaunchEditedApp else { return }
+              let package = packageEditedAppFromClone else { return }
         let appName = activeAppName ?? slug
 
         phase = .delivering
@@ -1523,13 +2442,17 @@ final class OnDemandEditCoordinator: ObservableObject {
             }
             editRunner.note("Built a fresh \(appName) from the clone (\(signingSummary)).")
 
-            // The block this answers is "the binary on disk is stale", so the
-            // fix is to replace the INSTALLED copy — not launch a parallel one
-            // and leave the stale binary in place (founder override, Sep 2 2026).
-            let launchPath = await deliverOverInstalledAppThenResolveLaunchPath(
-                slug: slug, appName: appName, artifactPath: artifactPath
-            )
-            let launch = await relaunch(slug, launchPath, false)
+            // Quit before replacing the installed copy. A refusal leaves the
+            // installed bytes unchanged and waits for explicit force consent.
+            if let launch = await terminateDeliverAndLaunchIfNeeded(
+                slug: slug, appName: appName, artifactPath: artifactPath, allowForceQuit: false
+            ) {
+                editRunner.finishApplied()
+                applyRelaunchLaunchResult(launch, allowedForceQuit: false)
+                return
+            }
+            guard let relaunch = terminateAndRelaunchEditedApp else { return }
+            let launch = await relaunch(slug, artifactPath, false)
             editRunner.finishApplied()
             phase = .done
             switch launch {
@@ -1546,6 +2469,9 @@ final class OnDemandEditCoordinator: ObservableObject {
             case .launchFailedPriorAppRestored(let reason):
                 editRunner.note("The fresh build wouldn't launch (\(reason)); Iris put the previous one back.")
                 statusLine = "Built \(appName) at \(artifactPath), but it wouldn't launch: \(reason). Your previous copy is running again."
+            case .launchFailedPriorAppNotRestored(let reason):
+                editRunner.note("The fresh build would not launch (\(reason)); the previous copy was not confirmed.")
+                statusLine = "Built \(appName) at \(artifactPath), but it wouldn't launch: \(reason). The previous app was not confirmed running; its recovery information was retained."
             case .ineligible(let reason):
                 editRunner.note("Iris couldn't relaunch \(appName): \(reason)")
                 statusLine = "Built a fresh \(appName) at \(artifactPath). Quit the running copy and open that one."
@@ -1566,6 +2492,17 @@ final class OnDemandEditCoordinator: ObservableObject {
             if !stopIsPending { statusLine = line }
         }
         switch progressEvent {
+        case .modelRouteSelected(let description):
+            currentModelRoute = description
+            editRunner.note("This edit uses \(description).")
+            runLog?.record("model route: \(description)")
+        case .verificationCompleted(let receipt):
+            verificationReceipt = receipt
+            runLog?.record("verification receipt: \(receipt.summary)")
+            if let stage = receipt.failureStage {
+                runLog?.record("verification failure stage: \(stage)")
+                runLog?.record("verification failure output: \(receipt.failureOutputTail ?? "No output was captured.")")
+            }
         case .waitingOnTheModel(let stepNumber):
             showStatus(stepNumber == 1
                 ? "Reading the code and deciding where to start…"
@@ -1636,13 +2573,19 @@ final class OnDemandEditCoordinator: ObservableObject {
             editRunner.note(line)
             runLog?.record("verifying: build=\(buildCommand ?? "none"), tests=\(testCommand ?? "none")")
             showStatus(line)
+        case .checkingStartingTests:
+            showStatus("Checking the app's existing tests before making changes…")
+            runLog?.record("starting test check began; no source edits yet")
+        case .startingTestsChecked(let summary):
+            showStatus(summary)
+            runLog?.record(summary)
         case .verificationFailedPreparingRepair(let stage, let remainingRounds):
             let line = "The \(stage) failed — Iris is reading the errors and fixing its change (\(remainingRounds) more \(remainingRounds == 1 ? "try" : "tries") after this)…"
             editRunner.note(line)
             runLog?.record("verification failed (\(stage)) — repair round begins (\(remainingRounds) left)")
             showStatus(line)
         case .committingTheChange:
-            let line = "It checks out — committing the change on a branch…"
+            let line = "Saving the change on a branch. Check results are recorded separately."
             editRunner.note(line)
             runLog?.record("committing")
             showStatus(line)
@@ -1703,6 +2646,11 @@ final class OnDemandEditCoordinator: ObservableObject {
     func stopRunningEdit() {
         guard phase == .running, !readerAskedToStopTheRun else { return }
         readerAskedToStopTheRun = true
+        if isRecheckingSavedChanges {
+            statusLine = "Stopping the recheck after the current step. Your saved code will be kept."
+            editRunner.note("Stopping at your request. Saved source will be preserved and no app update will start.")
+            return
+        }
         statusLine = "Stopping — Iris is finishing the current step, then putting everything back…"
         editRunner.note("Stopping at your request — no more changes; anything already made is being reverted.")
     }
@@ -1739,20 +2687,311 @@ final class OnDemandEditCoordinator: ObservableObject {
 
     // MARK: - Automatic delivery → symptom re-check → verdict (founder: fully automatic)
 
+    /// Offer a manual test for an Iris Test app whose clean build passed but
+    /// whose repository has no automated test command. The ordinary automatic
+    /// delivery gate stays unchanged for every other result.
+    private func offerUnverifiedTestCandidateIfEligible(
+        slug: String,
+        resolvedClonePath: String,
+        branchName: String,
+        changeID: String,
+        kind: OnDemandEditKind,
+        suitePassed: Bool?,
+        currentRevision: String?,
+        assessment: HarnessBehaviorAssessment?,
+        workflow: HarnessFeatureWorkflow?,
+        runID: UUID,
+        generation: UUID
+    ) async -> Bool {
+        guard activeEditRunID == runID,
+              flowGeneration == generation,
+              phase == .running,
+              committedBranchName == branchName,
+              changeId == changeID,
+              kind == .feature,
+              case .appliedAndRebuilt(let resultBranch, let resultChangeID, let resultKind, _, _) = lastResult,
+              resultBranch == branchName,
+              resultChangeID == changeID,
+              resultKind == kind,
+              let workflow,
+              harnessWorkflow === workflow,
+              IrisTestEnvironment.isEnabled,
+              let project = IrisTestProjectRegistry.project(slug: slug),
+              project.clonePath == resolvedClonePath,
+              IrisTestProjectRegistry.permitsEdit(slug: slug, clonePath: resolvedClonePath),
+              let receipt = verificationReceipt,
+              let currentRevision,
+              let assessment,
+              project.nativeVerification == nil,
+              derivedRepoRecipe?.test == nil,
+              let candidateIdentity = await SavedEditDeliveryIdentity.capture(
+                  clonePath: resolvedClonePath, expectedBranch: branchName
+              ),
+              let originalHeadCommit,
+              await candidateIdentity.hasParentCommit(originalHeadCommit),
+              activeEditRunID == runID,
+              flowGeneration == generation,
+              phase == .running,
+              committedBranchName == branchName,
+              changeId == changeID,
+              harnessWorkflow === workflow,
+              IrisTestProjectRegistry.project(slug: slug) == project,
+              !readerAskedToStopTheRun,
+              Self.unverifiedTestCandidatePasses(
+                  isFeature: kind == .feature,
+                  isTestApplication: IrisTestEnvironment.isEnabled,
+                  isExactRegisteredProject: true,
+                  hasDeclaredNativeVerification: project.nativeVerification != nil,
+                  hasResolvedTestCommand: derivedRepoRecipe?.test != nil,
+                  suitePassed: suitePassed,
+                  verificationReceipt: receipt,
+                  assessment: assessment,
+                  currentRevision: currentRevision,
+                  sourceIdentityMatches: true,
+                  stopRequested: readerAskedToStopTheRun
+              ) else {
+            return false
+        }
+
+        savedDeliveryIdentity = candidateIdentity
+        unverifiedTestCandidateIsAvailable = true
+        unverifiedTestCandidateRegistryProject = project
+        phase = .previewDiff
+        statusLine = "The change is ready to try in the separate Iris Test app."
+        editRunner.note("The clean build passed review. This app has no automated test suite, so Iris is waiting for your manual test.")
+        runLog?.record("saved; unverified Iris Test candidate offered; installed app unchanged")
+        return true
+    }
+
+    /// Re-check every candidate condition immediately before delivery. This
+    /// repeats registry, review, digest, and source identity checks because the
+    /// preview may have remained visible while a file or registry entry changed.
+    private func validateUnverifiedTestCandidateForDelivery(
+        branchName: String,
+        changeID: String,
+        workflow: HarnessFeatureWorkflow,
+        expectedProject: IrisTestProjectRegistry.Project,
+        generation: UUID
+    ) async -> SavedEditDeliveryIdentity? {
+        guard flowGeneration == generation,
+              IrisTestEnvironment.isEnabled,
+              harnessWorkflow === workflow,
+              phase == .delivering,
+              !readerAskedToStopTheRun,
+              committedBranchName == branchName,
+              changeId == changeID,
+              let slug = activeAppSlug,
+              let resolved = resolvedClonePath,
+              let project = IrisTestProjectRegistry.project(slug: slug),
+              project == expectedProject,
+              project.clonePath == resolved,
+              IrisTestProjectRegistry.permitsEdit(slug: slug, clonePath: resolved),
+              project.nativeVerification == nil,
+              derivedRepoRecipe?.test == nil,
+              let receipt = verificationReceipt,
+              let assessment = harnessBehaviorAssessment,
+              case .appliedAndRebuilt(let resultBranch, let resultChangeID, let resultKind, let suitePassed, _) = lastResult,
+              resultBranch == branchName,
+              resultChangeID == changeID,
+              resultKind == .feature,
+              classifiedKind == .feature,
+              let runner = try? MaintainShellRunner(repoRootPath: resolved),
+              let diff = try? await runner.run("git --no-pager diff HEAD~1 HEAD", deadline: 60),
+              diff.succeeded,
+              diff.bytesDroppedBeforeTail == 0,
+              flowGeneration == generation,
+              harnessWorkflow === workflow,
+              phase == .delivering,
+              !readerAskedToStopTheRun,
+              IrisTestProjectRegistry.project(slug: slug) == expectedProject else {
+            return nil
+        }
+        let currentRevision = HarnessFrozenComparison.digest(Data(diff.outputTail.utf8))
+        guard let savedIdentity = savedDeliveryIdentity,
+              let capturedIdentity = await SavedEditDeliveryIdentity.capture(
+            clonePath: resolved, expectedBranch: branchName
+        ), flowGeneration == generation,
+              harnessWorkflow === workflow,
+              phase == .delivering,
+              !readerAskedToStopTheRun,
+              IrisTestProjectRegistry.project(slug: slug) == expectedProject,
+              capturedIdentity == savedIdentity,
+              await savedIdentity.stillMatchesSource(),
+              flowGeneration == generation,
+              harnessWorkflow === workflow,
+              phase == .delivering,
+              !readerAskedToStopTheRun,
+              IrisTestProjectRegistry.project(slug: slug) == expectedProject,
+              Self.unverifiedTestCandidatePasses(
+                  isFeature: classifiedKind == .feature,
+                  isTestApplication: IrisTestEnvironment.isEnabled,
+                  isExactRegisteredProject: true,
+                  hasDeclaredNativeVerification: project.nativeVerification != nil,
+                  hasResolvedTestCommand: derivedRepoRecipe?.test != nil,
+                  suitePassed: suitePassed,
+                  verificationReceipt: receipt,
+                  assessment: assessment,
+                  currentRevision: currentRevision,
+                  sourceIdentityMatches: true,
+                  stopRequested: readerAskedToStopTheRun
+              ) else {
+            return nil
+        }
+        return savedIdentity
+    }
+
+    /// The explicit candidate action owns the coordinator task while its
+    /// asynchronous checks and existing delivery transaction run. It never
+    /// routes through the destructive keep/discard helpers.
+    func tryUnverifiedTestCandidate() {
+        guard isUnverifiedTestCandidate,
+              editTask == nil,
+              let branchName = committedBranchName,
+              let editChangeID = changeId,
+              let workflow = harnessWorkflow,
+              let expectedProject = unverifiedTestCandidateRegistryProject else { return }
+        let generation = flowGeneration
+        unverifiedTestCandidateIsAvailable = false
+        unverifiedTestCandidateRegistryProject = nil
+        phase = .delivering
+        statusLine = "Checking the saved test candidate before delivery…"
+        editTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.flowGeneration == generation {
+                    self.editTask = nil
+                }
+            }
+            guard self.flowGeneration == generation,
+                  self.phase == .delivering,
+                  !self.readerAskedToStopTheRun,
+                  self.committedBranchName == branchName,
+                  self.changeId == editChangeID else { return }
+            guard let identity = await self.validateUnverifiedTestCandidateForDelivery(
+                branchName: branchName,
+                changeID: editChangeID,
+                workflow: workflow,
+                expectedProject: expectedProject,
+                generation: generation
+            ) else {
+                guard self.flowGeneration == generation,
+                      self.phase == .delivering,
+                      self.committedBranchName == branchName,
+                      self.changeId == editChangeID else { return }
+                self.editRunner.note("The saved test candidate changed before delivery. The installed app was left unchanged.")
+                self.editRunner.finishApplied()
+                self.runLog?.finish(outcome: "saved; test candidate became stale; not installed")
+                self.runLog = nil
+                self.releaseLockIfHeld()
+                self.deliveryIsAutomatic = false
+                self.unverifiedTestCandidateRegistryProject = nil
+                self.statusLine = "The saved test candidate changed before delivery. Your installed app was left unchanged; the branch is still saved."
+                self.phase = .done
+                return
+            }
+            guard self.flowGeneration == generation,
+                  self.phase == .delivering,
+                  self.committedBranchName == branchName,
+                  self.changeId == editChangeID,
+                  self.harnessWorkflow === workflow,
+                  IrisTestProjectRegistry.project(slug: self.activeAppSlug ?? "") == expectedProject else { return }
+            guard !self.readerAskedToStopTheRun else {
+                self.editRunner.note("Stopped before delivery. The test candidate remains saved and the installed app was left unchanged.")
+                self.editRunner.finishApplied()
+                self.runLog?.finish(outcome: "saved; test candidate delivery stopped; not installed")
+                self.runLog = nil
+                self.releaseLockIfHeld()
+                self.deliveryIsAutomatic = false
+                self.unverifiedTestCandidateRegistryProject = nil
+                self.statusLine = "Stopped before delivery. The test candidate remains saved and your installed app was left unchanged."
+                self.phase = .done
+                return
+            }
+            self.savedDeliveryIdentity = identity
+            self.pendingUnverifiedTestDeliveryProject = expectedProject
+            await self.beginAutomaticDelivery(branchName: branchName, expectedTestProject: expectedProject)
+        }
+    }
+
+    /// Decline the manual candidate without deleting its branch or restoring
+    /// any source files. The installed app has not been touched at this point.
+    func dismissUnverifiedTestCandidate() {
+        guard isUnverifiedTestCandidate, editTask == nil,
+              let branchName = committedBranchName else { return }
+        unverifiedTestCandidateIsAvailable = false
+        unverifiedTestCandidateRegistryProject = nil
+        editRunner.note("The change stays saved on branch \(branchName). Iris did not try the test build or replace the installed app.")
+        editRunner.finishApplied()
+        runLog?.finish(outcome: "saved; unverified test candidate not tried; installed app unchanged")
+        runLog = nil
+        releaseLockIfHeld()
+        deliveryIsAutomatic = false
+        savedDeliveryMayBeRetried = false
+        statusLine = "Saved on branch \(branchName). The test build was not tried, and your installed app was left unchanged."
+        phase = .done
+    }
+
     /// Record the applied change, rebuild the app from the clone, relaunch it,
     /// and hand off to the symptom re-check — no keep/relaunch taps. An app
     /// Iris cannot rebuild ends honestly: the installed app still runs the
     /// old code, and the copy says exactly that (never "relaunch to pick it
     /// up", which was false for an unrebuilt install).
-    private func beginAutomaticDelivery(branchName: String) async {
+    private func beginAutomaticDelivery(
+        branchName: String,
+        expectedTestProject: IrisTestProjectRegistry.Project? = nil
+    ) async {
         guard let slug = activeAppSlug, let editChangeId = changeId else { return }
         let appName = activeAppName ?? slug
+        let generation = flowGeneration
+        defer {
+            // A generic retry does not carry the explicit candidate's registry
+            // binding. Keep failed manual candidates saved, not auto-retryable.
+            if expectedTestProject != nil, flowGeneration == generation, phase == .done {
+                savedDeliveryMayBeRetried = false
+            }
+        }
+        func candidateIsCurrent() -> Bool {
+            guard let expectedTestProject else { return true }
+            return IrisTestEnvironment.isEnabled
+                && flowGeneration == generation && changeId == editChangeId
+                && phase == .delivering && committedBranchName == branchName
+                && !readerAskedToStopTheRun
+                && resolvedClonePath == expectedTestProject.clonePath
+                && IrisTestProjectRegistry.project(slug: slug) == expectedTestProject
+        }
+        func finishChangedCandidate() {
+            guard flowGeneration == generation, changeId == editChangeId,
+                  phase == .delivering else { return }
+            let message = "The test candidate or its destination changed before installation. No app was replaced. The source branch is still saved."
+            statusLine = message
+            editRunner.note(message)
+            editRunner.finishApplied()
+            runLog?.finish(outcome: "saved; candidate identity changed during packaging; not installed")
+            runLog = nil
+            savedDeliveryMayBeRetried = false
+            releaseLockIfHeld()
+            phase = .done
+        }
         phase = .delivering
         deliveryIsAutomatic = true
+        savedDeliveryMayBeRetried = false
+        if savedDeliveryIdentity == nil, let clonePath = resolvedClonePath {
+            savedDeliveryIdentity = await SavedEditDeliveryIdentity.capture(clonePath: clonePath, expectedBranch: branchName)
+        }
+        guard candidateIsCurrent() else { finishChangedCandidate(); return }
+        let identity = savedDeliveryIdentity
+        let sourceStillMatches = await identity?.stillMatchesSource() == true
+        guard candidateIsCurrent() else { finishChangedCandidate(); return }
+        guard let identity, sourceStillMatches else {
+            statusLine = "Your source change is saved, but Iris could not confirm the exact clean version to build. Your installed app was left alone."
+            releaseLockIfHeld()
+            phase = .done
+            return
+        }
         statusLine = "Applied on branch \(branchName) — rebuilding \(appName) so you're running the fix…"
         editRunner.note("Rebuilding \(appName) from the clone and relaunching it with the change…")
 
-        patchQueue.record(QueuedPatch(
+        do { try patchQueue.recordChecked(QueuedPatch(
             recipeId: editChangeId,
             signatureId: editChangeId,
             appSlug: slug,
@@ -1760,11 +2999,18 @@ final class OnDemandEditCoordinator: ObservableObject {
             patchText: proposedDiffText ?? "",
             baseCommit: originalHeadCommit,
             appliedAt: Date()
-        ))
+        )) } catch {
+            statusLine = "Your source change is saved, but Iris could not save its version record. No app was replaced. Check available storage and try again."
+            savedDeliveryMayBeRetried = true
+            releaseLockIfHeld()
+            phase = .done
+            return
+        }
 
         guard relaunchIsAvailableForApp?(slug) == true,
               let package = packageEditedAppFromClone,
-              let relaunch = terminateAndRelaunchEditedApp else {
+              terminateAndRelaunchEditedApp != nil || splitDeliveryRelaunchIsAvailable else {
+            runLog?.record("delivery: no supported packaging and relaunch route; code saved only")
             editRunner.finishApplied()
             releaseLockIfHeld()
             statusLine = "Applied on branch \(branchName). Your installed \(appName) still runs the OLD code — Iris can't rebuild this kind of app yet, so rebuild it from the clone yourself to pick the change up."
@@ -1775,12 +3021,23 @@ final class OnDemandEditCoordinator: ObservableObject {
         // 1) Package + assert the artifact exists (signed with a stable identity
         //    when one is available). Nothing is terminated yet.
         let packaging = await package(slug)
+        guard candidateIsCurrent() else { finishChangedCandidate(); return }
         guard case .artifactReady(let artifactPath, let signingSummary) = packaging else {
             editRunner.finishApplied()
             finishRelaunchWithoutTerminating(fromPackaging: packaging)
             return
         }
+        let packagedSourceStillMatches = await identity.stillMatchesSource()
+        guard candidateIsCurrent() else { finishChangedCandidate(); return }
+        guard packagedSourceStillMatches else {
+            statusLine = "The source changed while packaging. Iris did not install the build. Review the current source before trying again."
+            releaseLockIfHeld()
+            phase = .done
+            return
+        }
         packagedArtifactPath = artifactPath
+        deliveryProgress.freshAppBuilt = true
+        runLog?.record("packaging: fresh app built at \(artifactPath)")
         freshBuildSigningSummary = signingSummary
         editRunner.note("Built a fresh \(appName) from the clone (\(signingSummary)).")
 
@@ -1815,15 +3072,165 @@ final class OnDemandEditCoordinator: ObservableObject {
         //     Sep 2 2026). Resolves the path to launch — the installed copy on a
         //     successful swap, else the build-dir artifact — and records the
         //     installed path + pre-delivery backup for a later undo.
-        let launchArtifactPath = await deliverOverInstalledAppThenResolveLaunchPath(
-            slug: slug, appName: appName, artifactPath: artifactPath
-        )
+        guard candidateIsCurrent() else { finishChangedCandidate(); return }
+        if let launch = await terminateDeliverAndLaunchIfNeeded(
+            slug: slug, appName: appName, artifactPath: artifactPath, allowForceQuit: false
+        ) {
+            applyRelaunchLaunchResult(launch, allowedForceQuit: false)
+            return
+        }
         // 2) Quit the running app (gracefully — a save dialog still routes to
         //    the force-quit consent, the one destructive act that can corrupt
         //    data) and launch the delivered build.
         statusLine = "Quitting \(appName) and opening the rebuilt one…"
-        let launch = await relaunch(slug, launchArtifactPath, false)
+        guard let relaunch = terminateAndRelaunchEditedApp else { return }
+        let launch = await relaunch(slug, artifactPath, false)
         applyRelaunchLaunchResult(launch, allowedForceQuit: false)
+    }
+
+    /// Quit the current app, deliver the fresh build only after it has exited,
+    /// and launch the delivered path. A nil result means there is no installed
+    /// delivery seam, so the older build-directory launch path remains valid.
+    private func terminateDeliverAndLaunchIfNeeded(
+        slug: String, appName: String, artifactPath: String, allowForceQuit: Bool
+    ) async -> AppRelaunchLaunchResult? {
+        guard deliverEditedAppOverInstalledApp != nil
+                || deliverEditedAppOverInstalledAppWithRecoveryContext != nil else { return nil }
+        guard let terminateEditedAppBeforeDelivery,
+              let launchEditedAppAfterDelivery else {
+            return .ineligible(reason: "Iris could not establish quit-before-delivery, so the installed app was left unchanged")
+        }
+
+        let expectedProject = pendingUnverifiedTestDeliveryProject
+        let generation = flowGeneration
+        func candidateDestinationIsCurrent() -> Bool {
+            guard let expectedProject else { return true }
+            return flowGeneration == generation && activeAppSlug == slug
+                && !readerAskedToStopTheRun
+                && IrisTestProjectRegistry.project(slug: slug) == expectedProject
+        }
+
+        if let savedDeliveryIdentity, await !savedDeliveryIdentity.stillMatchesSource() {
+            return .ineligible(reason: "the saved source changed before delivery; the installed app was left unchanged")
+        }
+        guard candidateDestinationIsCurrent() else {
+            return .ineligible(reason: "the test destination changed before quit; no app was replaced")
+        }
+        let sourceIdentity = sourceIdentityForDelivery(branchName: committedBranchName ?? "")
+        if deliverEditedAppOverInstalledAppWithRecoveryContext != nil, sourceIdentity == nil {
+            return .ineligible(reason: "Iris could not capture the exact source branch and base before delivery; the installed app was left unchanged")
+        }
+
+        // Preserve the artifact for a force-quit retry. The installed copy is
+        // still untouched until the quit-only seam reports success.
+        packagedArtifactPath = artifactPath
+        statusLine = allowForceQuit
+            ? "Force quitting \(appName) and preparing the rebuilt app…"
+            : "Quitting \(appName) before replacing its installed files…"
+        let termination = await terminateEditedAppBeforeDelivery(slug, artifactPath, allowForceQuit)
+        switch termination {
+        case .readyForDelivery(let priorApplicationPath):
+            guard candidateDestinationIsCurrent() else {
+                return .ineligible(reason: "the test destination changed while quitting; the stopped test app was not replaced")
+            }
+            if let savedDeliveryIdentity, await !savedDeliveryIdentity.stillMatchesSource() {
+                if let priorApplicationPath {
+                    _ = await launchEditedAppAfterDelivery(slug, priorApplicationPath, nil)
+                }
+                return .ineligible(reason: "the saved source changed while the app was quitting; the installed app was left unchanged")
+            }
+            guard candidateDestinationIsCurrent() else {
+                return .ineligible(reason: "the test destination changed before replacement; the stopped test app was not replaced")
+            }
+            let launchPath = await deliverOverInstalledAppThenResolveLaunchPath(
+                slug: slug, appName: appName, artifactPath: artifactPath,
+                sourceIdentity: sourceIdentity
+            )
+            let fallbackApplicationPath = deliveryProgress.installedCopyReplaced
+                ? nil
+                : priorApplicationPath
+            let launch = await launchEditedAppAfterDelivery(slug, launchPath, fallbackApplicationPath)
+            guard case .launchFailedPriorAppNotRestored = launch,
+                  deliveryProgress.installedCopyReplaced,
+                  let installedPath = deliveredInstalledAppPath,
+                  let backupPath = deliveredInstalledBackupPath,
+                  let restoreInstalledAppFromBackup,
+                  await restoreInstalledAppFromBackup(installedPath, backupPath) else {
+                return launch
+            }
+            deliveryProgress.installedCopyReplaced = false
+            deliveryProgress.relaunched = false
+            savedDeliveryMayBeRetried = savedDeliveryIdentity != nil
+            switch await launchEditedAppAfterDelivery(slug, installedPath, nil) {
+            case .relaunchedFreshBuild:
+                return .launchFailedPriorAppRestored(
+                    reason: "the freshly built app didn't start, so Iris restored and reopened your previous copy"
+                )
+            case .runningAppWouldNotQuit:
+                return .launchFailedPriorAppNotRestored(
+                    reason: "the freshly built app didn't start; Iris restored the previous files but could not reopen them"
+                )
+            case .launchFailedPriorAppRestored, .launchFailedPriorAppNotRestored, .ineligible:
+                return .launchFailedPriorAppNotRestored(
+                    reason: "the freshly built app didn't start; Iris restored the previous files but could not confirm them running"
+                )
+            }
+        case .runningAppWouldNotQuit:
+            // No delivery has happened. The existing force-quit consent card
+            // can call this method again with allowForceQuit true.
+            return .runningAppWouldNotQuit
+        case .ineligible(let reason):
+            return .ineligible(reason: reason)
+        }
+    }
+
+    /// Build the immutable source context that must be persisted before an
+    /// installed swap. A missing base or delivered commit is an ineligible
+    /// delivery, not a reason to write a partial receipt and hope to recover it.
+    private func sourceIdentityForDelivery(
+        branchName: String
+    ) -> AppDeliveryReceipt.SourceIdentity? {
+        guard let slug = activeAppSlug,
+              let clonePath = resolvedClonePath,
+              let changeId,
+              let deliveredIdentity = savedDeliveryIdentity,
+              deliveredIdentity.branchName == branchName,
+              let baseCommit = originalHeadCommit else { return nil }
+        let sourceIdentity = AppDeliveryReceipt.SourceIdentity(
+            appSlug: slug,
+            appName: activeAppName ?? slug,
+            clonePath: deliveredIdentity.clonePath,
+            branchName: deliveredIdentity.branchName,
+            commit: deliveredIdentity.commit,
+            baseCommit: baseCommit,
+            baseRef: originalHeadRef?.isEmpty == false ? originalHeadRef : nil,
+            changeId: changeId
+        )
+        guard sourceIdentity.isValid,
+              URL(fileURLWithPath: clonePath).resolvingSymlinksInPath().path == sourceIdentity.clonePath else {
+            return nil
+        }
+        return sourceIdentity
+    }
+
+    /// Bind the in-session undo to the same durable receipt the installed
+    /// delivery wrote. A separate store or a path-only match is not enough:
+    /// two edits can target one app path over time.
+    private func rememberReceiptForDelivery(
+        sourceIdentity: AppDeliveryReceipt.SourceIdentity,
+        installedPath: String,
+        backupPath: String
+    ) {
+        let installed = URL(fileURLWithPath: installedPath).standardizedFileURL.path
+        let backup = URL(fileURLWithPath: backupPath).standardizedFileURL.path
+        deliveredReceiptIdentifier = appDeliveryReceiptStore.entries().compactMap { entry -> UUID? in
+            guard case .valid(let receipt) = entry,
+                  receipt.phase == .installed,
+                  receipt.installedPath == installed,
+                  receipt.backupPath == backup,
+                  receipt.sourceIdentity == sourceIdentity else { return nil }
+            return receipt.identifier
+        }.first
     }
 
     /// Deliver the fresh build OVER the reader's installed copy (founder
@@ -1833,26 +3240,47 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// and updates `packagedArtifactPath` so a force-quit RETRY (which reuses it)
     /// relaunches the same delivered copy.
     private func deliverOverInstalledAppThenResolveLaunchPath(
-        slug: String, appName: String, artifactPath: String
+        slug: String, appName: String, artifactPath: String,
+        sourceIdentity: AppDeliveryReceipt.SourceIdentity? = nil
     ) async -> String {
         deliveredInstalledAppPath = nil
         deliveredInstalledBackupPath = nil
-        guard let deliver = deliverEditedAppOverInstalledApp else {
+        deliveredReceiptIdentifier = nil
+        deliveryProgress.installedCopyReplaced = false
+        let deliveryResult: AppRelaunchService.InstalledDeliveryResult
+        if let deliverWithContext = deliverEditedAppOverInstalledAppWithRecoveryContext,
+           let sourceIdentity {
+            deliveryResult = await deliverWithContext(slug, artifactPath, sourceIdentity)
+        } else if let deliver = deliverEditedAppOverInstalledApp {
+            deliveryResult = await deliver(slug, artifactPath)
+        } else {
             packagedArtifactPath = artifactPath
             return artifactPath
         }
         statusLine = "Installing the rebuilt \(appName) over your copy…"
         let launchPath: String
-        switch await deliver(slug, artifactPath) {
-        case .replacedInstalledApp(let installedPath, let backupPath, let grantsMayReset):
+        switch deliveryResult {
+        case .replacedInstalledApp(let installedPath, let backupPath, let grantsMayReset, let recoveryWarning):
+            deliveryProgress.installedCopyReplaced = true
             launchPath = installedPath
             deliveredInstalledAppPath = installedPath
             deliveredInstalledBackupPath = backupPath
+            if let sourceIdentity {
+                rememberReceiptForDelivery(
+                    sourceIdentity: sourceIdentity,
+                    installedPath: installedPath,
+                    backupPath: backupPath
+                )
+            }
             let permissionNote = grantsMayReset
                 ? " — it was signed differently, so macOS may reset its permissions and re-ask."
                 : "."
             editRunner.note("Replaced your installed \(appName) with the rebuilt one\(permissionNote)")
             runLog?.record("delivered: replaced installed app at \(installedPath) (grantsMayReset: \(grantsMayReset))")
+            if let recoveryWarning {
+                editRunner.note(recoveryWarning)
+                runLog?.record("delivery recovery warning: \(recoveryWarning)")
+            }
         case .noInstalledCopyToReplace:
             launchPath = artifactPath
             editRunner.note("No separately installed \(appName) to replace — running the rebuilt copy from the clone.")
@@ -1870,16 +3298,21 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// then ask the reader whether THEIR complaint is gone — the only
     /// end-to-end truth signal the flow has.
     private func beginSymptomRecheck() {
+        let generation = flowGeneration
         let appName = activeAppName ?? (activeAppSlug ?? "the app")
         phase = .awaitingSymptomConfirmation
+        deliveryProgress.relaunched = true
+        runLog?.record("relaunch: succeeded; behavior not yet confirmed")
         deliveredChangeCanBeUndone = true
         symptomRecheckSummary = nil
         statusLine = "\(appName) is running with the change. Give it a moment, then tell Iris whether it's actually fixed."
         editRunner.note("Relaunched \(appName) with the change. Looking again in a moment…")
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 15_000_000_000)
-            guard let self, self.phase == .awaitingSymptomConfirmation, let slug = self.activeAppSlug else { return }
+            guard let self, self.flowGeneration == generation,
+                  self.phase == .awaitingSymptomConfirmation, let slug = self.activeAppSlug else { return }
             let evidenceAfter = await self.gatherRuntimeEvidenceForApp?(slug)
+            guard self.flowGeneration == generation, self.phase == .awaitingSymptomConfirmation else { return }
             let textAfter = evidenceAfter?.runtimeLogText ?? ""
             let crashBefore = self.runtimeEvidenceTextBeforeTheRun?.contains("crash report") == true
             let crashAfter = textAfter.contains("crash report")
@@ -1903,9 +3336,9 @@ final class OnDemandEditCoordinator: ObservableObject {
             // app they normally open, and got the old code back. Reported to
             // Iris, correctly, as "you said it worked and it is still broken".
             if let artifactPath = self.packagedArtifactPath,
-               !artifactPath.hasPrefix("/Applications/") {
+               !self.deliveryProgress.installedCopyReplaced {
                 summaryParts.append(
-                    "the running copy is the one Iris just built at \(artifactPath) — your installed \(appName) is untouched and still has the old code, so open it from there to see the fix"
+                    "running the build at \(artifactPath); Iris did not replace a separately installed copy, so use this build to test the change"
                 )
             }
             if !self.packagingMetadataFailures.isEmpty {
@@ -1920,13 +3353,17 @@ final class OnDemandEditCoordinator: ObservableObject {
             // waiting for a tap that usually never comes. The reader's own
             // answer still overrides this the moment they give one; until then
             // the record says what Iris observed rather than "nobody checked".
-            guard let machineCheck = self.machineCheckTheSymptom,
+            // The legacy screenshot verdict cannot prove the lab's behavior
+            // checklist and would use a separate, unaccounted provider. Keep
+            // this experimental run unverified until the actual checks run.
+            guard self.harnessWorkflow == nil,
+                  let machineCheck = self.machineCheckTheSymptom,
                   let complaint = self.scrubbedRequest,
                   self.phase == .awaitingSymptomConfirmation else { return }
             let recheck = await machineCheck(
                 complaint, self.runtimeEvidenceBeforeTheRun, evidenceAfter
             )
-            guard let recheck,
+            guard self.flowGeneration == generation, let recheck,
                   self.phase == .awaitingSymptomConfirmation,
                   self.readerHasAnsweredTheSymptomQuestion == false else { return }
             self.machineSymptomRecheck = recheck
@@ -1946,6 +3383,7 @@ final class OnDemandEditCoordinator: ObservableObject {
                 if !OnDemandEditCoordinator.aWorkingEditOpensAPullRequest(forKind: self.classifiedKind) {
                     self.recordFeatureChangelogToPublik()
                 } else if await self.readerCanPushToTheAppsRepo?(slug) == true {
+                    guard self.flowGeneration == generation, self.phase == .awaitingSymptomConfirmation else { return }
                     self.openPullRequestForTheKeptEdit(because: .machineCheckLookedFixed)
                 }
             case .looksStillBroken:
@@ -1964,6 +3402,7 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// and the per-app memory record. "Still broken" unlocks a retry that
     /// carries the negative verdict forward.
     func recordSymptomVerdict(_ verdict: OnDemandEditSymptomVerdict) {
+        guard !undoNeedsRecovery else { return }
         guard phase == .awaitingSymptomConfirmation, let slug = activeAppSlug else { return }
         let appName = activeAppName ?? slug
         let branchName = committedBranchName ?? "the branch"
@@ -2042,6 +3481,7 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// edit. Automatic on the reader's "Fixed", automatic on Iris's re-check
     /// when the repo is the reader's, and one tap away otherwise.
     func openPullRequestForTheKeptEdit(because trigger: OnDemandEditPullRequestTrigger) {
+        guard !undoNeedsRecovery else { return }
         guard let branchName = committedBranchName, let slug = activeAppSlug else { return }
         guard pullRequestState.allowsAnAttempt else { return }
         guard let openPullRequest = openPullRequestForTheKeptEdit else {
@@ -2090,18 +3530,22 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// model-authored feature has no correctness oracle to review against, and
     /// the founder's rule is that features are changelogged, not proposed.
     func recordFeatureChangelogToPublik() {
-        guard classifiedKind == .feature, let slug = activeAppSlug else { return }
+        guard !IrisTestEnvironment.isEnabled else { return }
+        guard !undoNeedsRecovery else { return }
+        guard classifiedKind == .feature, let slug = activeAppSlug, let editChangeId = changeId else { return }
         guard changelogState.allowsAnAttempt else { return }
         guard let pushChangelog = pushFeatureChangelogToPublik else {
             changelogState = .notSetUp(reason: "Iris couldn't reach publik to record this change")
             return
         }
         let summary = Self.pullRequestTitle(fromRequest: scrubbedRequest ?? activeRequestText ?? "a change made with Iris")
+        let generation = undoGeneration
         changelogState = .pushing
         editRunner.note("Recording this change to publik's changelog…")
         Task { [weak self] in
             let confirmation = await pushChangelog(slug, summary)
-            guard let self, self.activeAppSlug == slug else { return }
+            guard let self, self.activeAppSlug == slug,
+                  self.acceptsExternalCompletion(changeId: editChangeId, generation: generation) else { return }
             if let confirmation {
                 self.changelogState = .pushed
                 self.editRunner.note(confirmation)
@@ -2114,6 +3558,11 @@ final class OnDemandEditCoordinator: ObservableObject {
         }
     }
 
+    private func acceptsExternalCompletion(changeId: String, generation: UUID) -> Bool {
+        self.changeId == changeId && undoGeneration == generation
+            && !undoNeedsRecovery && !stopUndoWasRequested && stoppedUndoRecoveryMessage == nil
+    }
+
     /// The reader's request, first line, trimmed to a title's length.
     static func pullRequestTitle(fromRequest request: String) -> String {
         let firstLine = request
@@ -2124,19 +3573,14 @@ final class OnDemandEditCoordinator: ObservableObject {
         return String(firstLine.prefix(69)).trimmingCharacters(in: .whitespaces) + "…"
     }
 
-    /// Stamp the verdict on the commit (a trailer a human sees) and in the
-    /// per-app memory (what the next run sees).
+    /// Record the verdict in the run log and per-app memory. The delivered
+    /// commit is pinned by the durable receipt, so a later symptom answer must
+    /// not amend it and invalidate restart-safe Undo.
     private func persistSymptomVerdict(_ verdict: OnDemandEditSymptomVerdict) {
-        guard let resolved = resolvedClonePath else { return }
-        let trailerValue = verdict.trailerValue
-        Task {
-            if let runner = try? MaintainShellRunner(repoRootPath: resolved) {
-                _ = try? await runner.run(
-                    "git commit --amend --no-edit --trailer 'Symptom-Recheck: \(trailerValue)' --quiet 2>/dev/null || true",
-                    deadline: 60
-                )
-            }
-        }
+        deliveryProgress.behavior = verdict.cameFromAPerson
+            ? "Your verdict: \(verdict.displayLabel)"
+            : verdict.displayLabel
+        runLog?.record("behavior: \(deliveryProgress.behavior)")
         // The per-app memory: the NEXT run on this app reads this verdict. A
         // still-broken is the important one — it turns this attempt into a
         // negative signal rather than something to repeat.
@@ -2145,6 +3589,166 @@ final class OnDemandEditCoordinator: ObservableObject {
                 forAppSlug: slug, to: verdict.memoryRecordValue
             )
         }
+    }
+
+    /// Explain why a durable receipt cannot be used for Undo. This check is
+    /// deliberately synchronous and path-bound so a visible Saved Versions
+    /// action never starts a filesystem operation on a changed bundle.
+    private func persistedReceiptUndoFailure(_ receipt: AppDeliveryReceipt) -> String? {
+        guard receipt.phase == .installed else {
+            return receipt.phase == .prepared
+                ? "This update was only prepared. Iris will not guess whether its installed files changed."
+                : "This update is already recorded as restored."
+        }
+        guard receipt.hasCompleteUndoMetadata,
+              case .valid(let current) = appDeliveryReceiptStore.load(receipt.identifier),
+              current.identity == receipt.identity else {
+            return "Iris could not confirm the exact saved version record. No app files were changed."
+        }
+        guard let sourceIdentity = receipt.sourceIdentity else {
+            return "This saved version has no complete source identity. Iris will not guess which branch to undo."
+        }
+        if let registeredPath = installedApplicationPathForApp?(sourceIdentity.appSlug),
+           URL(fileURLWithPath: registeredPath).standardizedFileURL.path != receipt.installedPath {
+            return "The registered app path changed since delivery. Iris left the installed app alone."
+        }
+        guard let replacementIdentity = receipt.replacementBundleIdentity,
+              AppDeliveryReceipt.bundleMetadataIdentity(atPath: receipt.installedPath)
+                .map({ $0.matchesMetadata(of: replacementIdentity) }) == true else {
+            return "The installed app identity changed since delivery. Iris left it alone."
+        }
+        guard let backupIdentity = receipt.backupBundleIdentity,
+              AppDeliveryReceipt.bundleMetadataIdentity(atPath: receipt.backupPath)
+                .map({ $0.matchesMetadata(of: backupIdentity) }) == true else {
+            return "The saved previous app identity is missing or changed. Iris left the installed app alone."
+        }
+        return nil
+    }
+
+    /// Verify the bytes represented by a durable receipt off the main actor.
+    /// Build artifacts are disposable and may be overwritten after delivery,
+    /// so only the installed replacement and retained backup are authoritative.
+    private func persistedReceiptPayloadUndoFailure(_ receipt: AppDeliveryReceipt, restored: Bool = false) async -> String? {
+        let paths = (receipt.installedPath, receipt.backupPath)
+        let actual = await Task.detached(priority: .userInitiated) {
+            (
+                AppDeliveryReceipt.bundleIdentity(atPath: paths.0),
+                AppDeliveryReceipt.bundleIdentity(atPath: paths.1)
+            )
+        }.value
+        guard let expectedReplacement = restored ? receipt.backupBundleIdentity : receipt.replacementBundleIdentity,
+              actual.0 == expectedReplacement else {
+            return "The installed app payload changed since delivery. Iris left it alone."
+        }
+        guard let expectedBackup = receipt.backupBundleIdentity,
+              actual.1 == expectedBackup else {
+            return "The saved previous app payload is missing or changed. Iris left the installed app alone."
+        }
+        return nil
+    }
+
+    /// Reconstruct the compact Undo action from an installed receipt selected
+    /// after Iris restarted. This does not replay a prepared receipt and does
+    /// not infer an app from bundle id or Launch Services. The exact receipt
+    /// supplies the app, source branch/base, installed path and backup path,
+    /// then the existing coordinator Undo stages perform the actual recovery.
+    @discardableResult
+    func undoSavedAppVersion(_ receipt: AppDeliveryReceipt) -> Bool {
+        guard canPickAnotherApp, pendingSavedUndoReceiptIdentifier == nil else {
+            statusLine = "Finish the current recovery before starting another Undo."
+            return false
+        }
+        if deliveredChangeCanBeUndone,
+           deliveredReceiptIdentifier != receipt.identifier {
+            statusLine = "Finish the current app recovery before selecting another saved version."
+            return false
+        }
+        guard persistedReceiptUndoFailure(receipt) == nil,
+              let sourceIdentity = receipt.sourceIdentity else {
+            let reason = persistedReceiptUndoFailure(receipt)
+                ?? "This saved version has no complete source identity. Iris will not guess which branch to undo."
+            undoFailureMessage = reason
+            statusLine = reason
+            phase = .done
+            return false
+        }
+
+        activeAppSlug = sourceIdentity.appSlug
+        activeAppName = sourceIdentity.appName
+        activeAppStack = nil
+        committedBranchName = sourceIdentity.branchName
+        changeId = sourceIdentity.changeId
+        originalHeadCommit = sourceIdentity.baseCommit
+        originalHeadRef = sourceIdentity.baseRef
+        // Keep the saved source in `savedDeliveryIdentity`. Only
+        // `undoDeliveredChange` assigns `resolvedClonePath`, and it does so
+        // after acquiring the per-clone lock. An in-session delivery's path is
+        // left untouched because that transaction already owns its lock.
+        savedDeliveryIdentity = SavedEditDeliveryIdentity(
+            clonePath: sourceIdentity.clonePath,
+            branchName: sourceIdentity.branchName,
+            commit: sourceIdentity.commit
+        )
+        deliveredReceiptIdentifier = receipt.identifier
+        deliveredInstalledAppPath = receipt.installedPath
+        deliveredInstalledBackupPath = receipt.backupPath
+        deliveredChangeCanBeUndone = true
+        savedVersionUndoIsPending = true
+        previousVersionWasRestored = false
+        deliveryProgress.codeSaved = true
+        deliveryProgress.freshAppBuilt = true
+        deliveryProgress.installedCopyReplaced = true
+        deliveryProgress.relaunched = false
+        deliveryProgress.behavior = "Unverified after restart"
+        deliveryIsAutomatic = false
+        savedDeliveryMayBeRetried = false
+        undoFailureMessage = nil
+        stoppedUndoRecoveryMessage = nil
+        statusLine = "Checking the saved source before Undoing \(sourceIdentity.appName)…"
+        phase = .done
+
+        let selectedReceipt = receipt
+        let generation = flowGeneration
+        pendingSavedUndoReceiptIdentifier = receipt.identifier
+        Task { [weak self] in
+            guard let self else { return }
+            guard let identity = self.savedDeliveryIdentity else { return }
+            let sourceStillMatches = await identity.stillMatchesSource()
+            // Every await can outlive a reset or a newer Saved Versions tap.
+            // A stale continuation must not clear the newer selection's marker
+            // or publish an error about an operation it no longer owns.
+            guard self.flowGeneration == generation,
+                  self.pendingSavedUndoReceiptIdentifier == selectedReceipt.identifier else { return }
+            guard sourceStillMatches,
+                  self.persistedReceiptUndoFailure(selectedReceipt) == nil else {
+                self.pendingSavedUndoReceiptIdentifier = nil
+                self.savedVersionUndoIsPending = false
+                self.undoFailureMessage = "The saved source or app identity changed since delivery. Iris left the installed app alone."
+                self.statusLine = self.undoFailureMessage
+                return
+            }
+            let payloadFailure = await self.persistedReceiptPayloadUndoFailure(selectedReceipt)
+            guard self.flowGeneration == generation,
+                  self.pendingSavedUndoReceiptIdentifier == selectedReceipt.identifier else { return }
+            guard payloadFailure == nil else {
+                self.pendingSavedUndoReceiptIdentifier = nil
+                self.savedVersionUndoIsPending = false
+                self.undoFailureMessage = payloadFailure
+                self.statusLine = payloadFailure
+                return
+            }
+            self.pendingSavedUndoReceiptIdentifier = nil
+            self.savedVersionUndoIsPending = false
+            self.undoDeliveredChange()
+        }
+        return true
+    }
+
+    /// Readable alias for integration code that describes the same action as
+    /// restoring a saved app version. It follows the exact Undo path above.
+    @discardableResult
+    func restoreSavedAppVersion(_ receipt: AppDeliveryReceipt) -> Bool {
+        undoSavedAppVersion(receipt)
     }
 
     /// Append this run's memory record (every terminal outcome writes one, so
@@ -2157,6 +3761,11 @@ final class OnDemandEditCoordinator: ObservableObject {
             scrubbedRequest: scrubbedRequest ?? "",
             filesTouched: filesTouchedThisRun,
             agentFinalNarration: lastAgentNarrationThisRun,
+            verificationObservation: outcome.hasPrefix("failed:")
+                ? OnDemandEditRunLog.verificationObservation(
+                    failureStage: verificationReceipt?.failureStage,
+                    failureOutputTail: verificationReceipt?.failureOutputTail)
+                : nil,
             outcome: outcome
         ))
     }
@@ -2188,55 +3797,205 @@ final class OnDemandEditCoordinator: ObservableObject {
     // extras.)
 
     /// Undo a delivered change after the fact: bring the INSTALLED app back
-    /// (quit the rebuilt instance, launch the installed bundle), drop the
-    /// branch, restore the clone to where it was, and forget the queued patch.
+    /// (quit the rebuilt instance, launch the installed bundle), restore the
+    /// source checkout, and forget the queued patch only after all steps succeed.
     func undoDeliveredChange() {
-        guard deliveredChangeCanBeUndone,
+        guard canRetryUndo,
               let slug = activeAppSlug,
               let branchName = committedBranchName,
               let editChangeId = changeId,
-              let resolved = resolvedClonePath ?? provenanceResolvedClonePath(forAppSlug: slug) else { return }
+              let resolved = resolvedClonePath ?? savedDeliveryIdentity?.clonePath
+                ?? provenanceResolvedClonePath(forAppSlug: slug) else { return }
         let appName = activeAppName ?? slug
-        deliveredChangeCanBeUndone = false
+        if let receiptIdentifier = deliveredReceiptIdentifier {
+            guard case .valid(let receipt) = appDeliveryReceiptStore.load(receiptIdentifier) else {
+                undoFailureMessage = "The saved app version changed before Undo could start. Iris left the installed app alone."
+                statusLine = undoFailureMessage
+                return
+            }
+            if receipt.phase == .installed {
+                guard persistedReceiptUndoFailure(receipt) == nil else {
+                    undoFailureMessage = "The saved app version changed before Undo could start. Iris left the installed app alone."
+                    statusLine = undoFailureMessage
+                    return
+                }
+            } else {
+                // A launch/source failure can happen after the swap has
+                // already restored the prior bundle. Only the same live
+                // checkpoint may resume from relaunch; a restored receipt
+                // without that checkpoint is never replayed from scratch.
+                guard receipt.phase == .restored,
+                      liveUndoRecoveryRecord != nil,
+                      undoRecovery.completed.contains(.restore) else {
+                    undoFailureMessage = "The saved app version is already restored or has no resumable Undo checkpoint. Iris left it alone."
+                    statusLine = undoFailureMessage
+                    return
+                }
+            }
+        }
+        if resolvedClonePath == nil {
+            guard clonePathLock.tryAcquire(clonePath: resolved, owner: "undo:\(slug)") else {
+                undoFailureMessage = "Another task is using this project. Try Undo when it finishes."
+                statusLine = undoFailureMessage
+                return
+            }
+            resolvedClonePath = resolved
+        }
+        if liveUndoRecoveryRecord == nil {
+            let record = DeliveredEditUndoRecoveryRecord(
+                identifier: UUID(), startedAt: Date(), appSlug: slug, appName: appName,
+                installedPath: deliveredInstalledAppPath ?? installedApplicationPathForApp?(slug),
+                backupPath: deliveredInstalledBackupPath, clonePath: resolved,
+                branchName: branchName, originalCommit: originalHeadCommit, originalRef: originalHeadRef,
+                deliveryReceiptIdentifier: deliveredReceiptIdentifier
+            )
+            do {
+                try deliveredUndoRecoveryStore.saveBeforeStarting(record)
+                liveUndoRecoveryRecord = record
+            } catch {
+                undoFailureMessage = "Undo has not started because Iris could not save its recovery information. Try again after checking available storage."
+                statusLine = undoFailureMessage
+                phase = .done
+                loadInterruptedUndoRecoveryForReview()
+                return
+            }
+        }
+        guard let operation = undoRecovery.begin() else { return }
+        // The Saved Versions preflight uses a separate published flag so the
+        // card can cover the await before this recovery operation starts. Once
+        // the checkpoint is owned, the regular in-progress projection takes
+        // over.
+        savedVersionUndoIsPending = false
+        undoGeneration = UUID()
+        let generation = undoGeneration
+        undoIsInProgress = true
+        undoFailureMessage = nil
         phase = .committing
-        statusLine = "Undoing — bringing back the installed \(appName)…"
+        statusLine = "Undoing: bringing back your previous version of \(appName)…"
         Task { [weak self] in
             guard let self else { return }
             let installedPath = self.deliveredInstalledAppPath
                 ?? self.installedApplicationPathForApp?(slug)
-            if let installedPath {
-                // If the delivery OVER-INSTALLED the change (founder default,
-                // Sep 2 2026), the bundle on disk now IS the change — so restore
-                // the pre-delivery snapshot first, otherwise "undo" would just
-                // relaunch the very change it is meant to remove.
-                if let backupPath = self.deliveredInstalledBackupPath,
-                   let restore = self.restoreInstalledAppFromBackup {
-                    let restored = await restore(installedPath, backupPath)
-                    self.runLog?.record("undo: restored installed app from backup — \(restored)")
-                }
-                if let relaunch = self.terminateAndRelaunchEditedApp {
-                    _ = await relaunch(slug, installedPath, false)
+            let failure = await self.undoRecovery.run(operation: operation) { stage in
+                switch stage {
+                case .restore:
+                    guard let installedPath else {
+                        return "Undo could not find your previous app. Iris kept the recovery information."
+                    }
+                    guard self.deliveredInstalledAppPath != nil else { return nil }
+                    if let receiptIdentifier = self.deliveredReceiptIdentifier {
+                        guard case .valid(let receipt) = self.appDeliveryReceiptStore.load(receiptIdentifier),
+                              receipt.phase == .installed,
+                              await self.persistedReceiptPayloadUndoFailure(receipt) == nil else {
+                            return "The installed app or saved previous app changed before Undo. Iris left it alone."
+                        }
+                    }
+                    guard let terminateEditedAppBeforeUndo = self.terminateEditedAppBeforeUndo else {
+                        return "Iris could not safely quit the edited app before restoring it. The recovery information was kept."
+                    }
+                    switch await terminateEditedAppBeforeUndo(slug, installedPath) {
+                    case .readyForDelivery:
+                        break
+                    case .runningAppWouldNotQuit:
+                        return "The edited app would not quit. Save your work and quit it, then retry Undo."
+                    case .ineligible(let reason):
+                        return "Iris could not safely quit the edited app (\(reason)). The recovery information was kept."
+                    }
+                    guard let backupPath = self.deliveredInstalledBackupPath,
+                          let restore = self.restoreInstalledAppFromBackup else {
+                        return "Iris could not prepare your previous app for recovery. The recovery information was kept."
+                    }
+                    guard await restore(installedPath, backupPath) else {
+                        return "Undo could not restore your previous app. Iris kept the recovery information; try again."
+                    }
+                    if let receiptIdentifier = self.deliveredReceiptIdentifier {
+                        guard case .valid(let receipt) = self.appDeliveryReceiptStore.load(receiptIdentifier),
+                              receipt.phase == .restored else {
+                            return "The previous app files were restored, but Iris could not confirm the saved receipt. The recovery information was kept."
+                        }
+                    }
+                    return nil
+                case .relaunch:
+                    guard let installedPath else {
+                        return "Iris could not reopen your previous app. Try Undo again."
+                    }
+                    guard let relaunchRestoredAppAfterUndo = self.launchRestoredAppAfterUndo else {
+                        return "Iris restored the previous app files, but Iris could not reopen them safely. The recovery information was kept."
+                    }
+                    switch await relaunchRestoredAppAfterUndo(slug, installedPath) {
+                    case .relaunchedFreshBuild: return nil
+                    case .runningAppWouldNotQuit:
+                        return "The running app would not quit. Save your work and quit it, then retry Undo to reopen your previous app."
+                    case .launchFailedPriorAppRestored, .launchFailedPriorAppNotRestored, .ineligible:
+                        return "Iris could not confirm that your previous app reopened. Try Undo again."
+                    }
+                case .source:
+                    if let receiptIdentifier = self.deliveredReceiptIdentifier {
+                        guard case .valid(let receipt) = self.appDeliveryReceiptStore.load(receiptIdentifier),
+                              receipt.phase == .restored,
+                              await self.persistedReceiptPayloadUndoFailure(receipt, restored: true) == nil else {
+                            return "The restored app or its backup changed before source recovery. Iris kept the working files and recovery information."
+                        }
+                    }
+                    guard let originalCommit = self.originalHeadCommit else {
+                        return "Your previous app is running, but Iris could not find the information needed to restore its working files. The recovery information was kept."
+                    }
+                    do {
+                        let runner = try MaintainShellRunner(repoRootPath: resolved)
+                        let result = try await runner.run(
+                            DeliveredEditUndoRecovery.sourceRestoreCommand(
+                                originalHeadRef: self.originalHeadRef, originalCommit: originalCommit,
+                                editedBranchName: branchName
+                            ),
+                            deadline: 120
+                        )
+                        guard result.succeeded else {
+                            return "Your previous app is running, but Iris could not restore its working files. The recovery information was kept. Save any work in those files, then try Undo again."
+                        }
+                        return nil
+                    } catch {
+                        return "Your previous app is running, but Iris could not restore its working files. The recovery information was kept; try again."
+                    }
                 }
             }
+            guard self.undoGeneration == generation,
+                  self.changeId == editChangeId, self.undoIsInProgress else { return }
+            if let failure {
+                self.undoIsInProgress = false
+                self.undoFailureMessage = failure
+                self.statusLine = failure
+                self.runLog?.record("undo incomplete: \(failure)")
+                self.phase = .done
+                return
+            }
+            do {
+                try self.patchQueue.removeChecked(appSlug: slug, recipeId: editChangeId)
+                guard let record = self.liveUndoRecoveryRecord else { throw DeliveredEditUndoRecoveryStore.StoreError.recordChanged }
+                try self.deliveredUndoRecoveryStore.clearAfterCompletion(identifier: record.identifier)
+                self.liveUndoRecoveryRecord = nil
+                self.undoRecordNeedsRemoval = false
+            } catch {
+                self.undoRecordNeedsRemoval = true
+                self.undoIsInProgress = false
+                self.undoFailureMessage = "Your previous app and working files are restored, but Iris could not finish saving that result. Try Undo again to finish; completed recovery steps will not repeat."
+                self.statusLine = self.undoFailureMessage
+                self.phase = .done
+                return
+            }
+            self.undoIsInProgress = false
+            self.deliveredChangeCanBeUndone = false
+            self.savedVersionUndoIsPending = false
+            self.previousVersionWasRestored = true
             self.deliveredInstalledAppPath = nil
             self.deliveredInstalledBackupPath = nil
-            if let runner = try? MaintainShellRunner(repoRootPath: resolved) {
-                let restore = (self.originalHeadRef.map { $0 != "HEAD" } == true)
-                    ? "git checkout '\(self.originalHeadRef!)' --quiet"
-                    : "git checkout '\(self.originalHeadCommit ?? "HEAD")' --quiet"
-                _ = try? await runner.run(
-                    "\(restore) 2>/dev/null; git branch -D '\(branchName)' --quiet 2>/dev/null || true",
-                    deadline: 120
-                )
-            }
-            self.patchQueue.remove(appSlug: slug, recipeId: editChangeId)
-            self.editRunner.note("Undone — the installed \(appName) is back and the branch is gone.")
+            self.deliveredReceiptIdentifier = nil
+            self.editRunner.note("Undone: the original \(appName) and source checkout are restored. Branch \(branchName) was kept as recovery history.")
             self.editRunner.finishStopped()
             self.releaseLockIfHeld()
             self.proposedDiffText = nil
             self.committedBranchName = nil
             self.offersRetryWithMemory = false
-            self.statusLine = "Undone — you're back on the installed \(appName); nothing of the change remains."
+            self.statusLine = "Previous version restored. \(appName) is running again."
             self.phase = .done
         }
     }
@@ -2255,6 +4014,7 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// same app with the same request; the memory record (which now carries
     /// the still-broken verdict) shapes the next run's opening message.
     func retryAfterStillBroken() {
+        guard !undoNeedsRecovery else { return }
         guard let slug = activeAppSlug, let name = activeAppName, let stack = activeAppStack else { return }
         let previousRequest = scrubbedRequest
         releaseLockIfHeld()
@@ -2494,6 +4254,9 @@ final class OnDemandEditCoordinator: ObservableObject {
         // when it finds nothing to stash, and a clone that is still dirty here
         // would walk straight back into the same refusal a second later.
         let statusAfterwards = try? await runner.run("git status --porcelain", deadline: 60)
+        guard Self.repositoryStatusWasRead(statusAfterwards) else {
+            return .couldNotSetAside(reason: "Git could not verify the project after setting changes aside. Iris has not started editing.")
+        }
         let theCloneIsStillDirty = statusAfterwards?.outputTail
             .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         if theCloneIsStillDirty {
@@ -2581,7 +4344,7 @@ final class OnDemandEditCoordinator: ObservableObject {
         guard phase == .awaitingRelaunchConsent,
               let slug = activeAppSlug,
               let package = packageEditedAppFromClone,
-              let relaunch = terminateAndRelaunchEditedApp else { return }
+              terminateAndRelaunchEditedApp != nil || splitDeliveryRelaunchIsAvailable else { return }
         phase = .relaunching
         statusLine = "Building a runnable copy of \(activeAppName ?? slug)…"
         Task { [weak self] in
@@ -2594,15 +4357,18 @@ final class OnDemandEditCoordinator: ObservableObject {
             }
             self.packagedArtifactPath = artifactPath
             self.freshBuildSigningSummary = signingSummary
-            // 1b) Deliver over the installed copy (founder override, Sep 2 2026),
-            //     then launch whichever copy that resolved to.
-            let launchPath = await self.deliverOverInstalledAppThenResolveLaunchPath(
-                slug: slug, appName: self.activeAppName ?? slug, artifactPath: artifactPath
-            )
-            // 2) Terminate the running app (graceful only) and launch the
-            //    delivered build. A refusal to quit surfaces the force-quit consent.
+            if let launch = await self.terminateDeliverAndLaunchIfNeeded(
+                slug: slug, appName: self.activeAppName ?? slug,
+                artifactPath: artifactPath, allowForceQuit: false
+            ) {
+                self.applyRelaunchLaunchResult(launch, allowedForceQuit: false)
+                return
+            }
+            guard let relaunch = self.terminateAndRelaunchEditedApp else { return }
+            // With no installed-delivery seam, this is the build-directory
+            // launch path and performs no filesystem replacement.
             self.statusLine = "Quitting \(self.activeAppName ?? slug) and opening your edited build…"
-            let launch = await relaunch(slug, launchPath, false)
+            let launch = await relaunch(slug, artifactPath, false)
             self.applyRelaunchLaunchResult(launch, allowedForceQuit: false)
         }
     }
@@ -2613,7 +4379,8 @@ final class OnDemandEditCoordinator: ObservableObject {
         guard phase == .awaitingRelaunchConsent,
               let branchName = committedBranchName else { return }
         let appName = activeAppName ?? (activeAppSlug ?? "the app")
-        statusLine = "Kept on branch \(branchName). Relaunch \(appName) yourself when you're ready to pick it up."
+        statusLine = "Your change is saved on branch \(branchName), but the update was not applied to \(appName). Restarting the current app will not apply it."
+        savedDeliveryMayBeRetried = savedDeliveryIdentity != nil
         releaseLockIfHeld()
         packagedArtifactPath = nil
         phase = .done
@@ -2634,11 +4401,19 @@ final class OnDemandEditCoordinator: ObservableObject {
         guard phase == .awaitingForceQuitConsent,
               let slug = activeAppSlug,
               let artifactPath = packagedArtifactPath,
-              let relaunch = terminateAndRelaunchEditedApp else { return }
+              terminateAndRelaunchEditedApp != nil || splitDeliveryRelaunchIsAvailable else { return }
         phase = .relaunching
         statusLine = "Force quitting \(activeAppName ?? slug) and opening your edited build…"
         Task { [weak self] in
             guard let self else { return }
+            if let launch = await self.terminateDeliverAndLaunchIfNeeded(
+                slug: slug, appName: self.activeAppName ?? slug,
+                artifactPath: artifactPath, allowForceQuit: true
+            ) {
+                self.applyRelaunchLaunchResult(launch, allowedForceQuit: true)
+                return
+            }
+            guard let relaunch = self.terminateAndRelaunchEditedApp else { return }
             let launch = await relaunch(slug, artifactPath, true)
             self.applyRelaunchLaunchResult(launch, allowedForceQuit: true)
         }
@@ -2650,7 +4425,8 @@ final class OnDemandEditCoordinator: ObservableObject {
         guard phase == .awaitingForceQuitConsent,
               let branchName = committedBranchName else { return }
         let appName = activeAppName ?? (activeAppSlug ?? "the app")
-        statusLine = "Left \(appName) running. Your change is on branch \(branchName) — quit \(appName) and relaunch it yourself to pick it up."
+        statusLine = "Left \(appName) running without replacing it. Your change is saved on branch \(branchName). Close the app when your work is saved, then retry the update; restarting the old app alone will not apply it."
+        savedDeliveryMayBeRetried = savedDeliveryIdentity != nil
         releaseLockIfHeld()
         packagedArtifactPath = nil
         phase = .done
@@ -2674,7 +4450,9 @@ final class OnDemandEditCoordinator: ObservableObject {
         case .ineligible(let reason):
             detail = reason
         }
-        statusLine = "Your change is safe on branch \(branchName), but Iris couldn't build a runnable copy of \(appName) (\(detail)). Nothing was quit — relaunch \(appName) yourself once it builds."
+        runLog?.record("packaging did not produce a runnable app: \(detail)")
+        if case .packagingFailed = packaging { savedDeliveryMayBeRetried = savedDeliveryIdentity != nil }
+        statusLine = "Update not applied. Your current \(appName) was left unchanged. The source change is saved on branch \(branchName). Packaging needs attention: \(detail). Restarting the current app will not apply this change."
         releaseLockIfHeld()
         packagedArtifactPath = nil
         phase = .done
@@ -2689,6 +4467,7 @@ final class OnDemandEditCoordinator: ObservableObject {
         let branchName = committedBranchName ?? "the branch"
         switch result {
         case .relaunchedFreshBuild:
+            deliveryProgress.relaunched = true
             if deliveryIsAutomatic {
                 // The lock stays held through the re-check: an undo still
                 // touches the clone (branch drop + checkout).
@@ -2700,16 +4479,24 @@ final class OnDemandEditCoordinator: ObservableObject {
             packagedArtifactPath = nil
             phase = .done
         case .runningAppWouldNotQuit:
+            runLog?.record("relaunch: existing app did not quit; waiting for the existing force-quit consent")
             // Only reachable on the graceful (non-force) attempt. Ask before
             // anything is killed — the app is still up and unharmed.
             statusLine = forceQuitConsentPrompt
             phase = .awaitingForceQuitConsent
         case .launchFailedPriorAppRestored(let reason):
-            statusLine = "Iris couldn't finish the relaunch (\(reason)). Your change is safe on branch \(branchName) — relaunch \(appName) yourself to pick it up."
+            runLog?.record("relaunch: not completed (\(reason)); behavior unconfirmed")
+            statusLine = "Iris couldn't open the updated app (\(reason)). Your previous app is running. The source change remains on branch \(branchName), but restarting the old app will not apply it."
             releaseLockIfHeld()
             packagedArtifactPath = nil
             phase = .done
+        case .launchFailedPriorAppNotRestored(let reason):
+            runLog?.record("relaunch: previous app was not confirmed (\(reason)); recovery retained")
+            statusLine = "Iris couldn't finish the relaunch (\(reason)). The previous app was not confirmed running; its recovery information was retained. Your change remains on branch \(branchName)."
+            releaseLockIfHeld()
+            phase = .done
         case .ineligible(let reason):
+            runLog?.record("relaunch: unavailable (\(reason)); behavior unconfirmed")
             statusLine = "Iris couldn't relaunch \(appName) (\(reason)). Your change is safe on branch \(branchName)."
             releaseLockIfHeld()
             packagedArtifactPath = nil
@@ -2724,6 +4511,7 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// its own every-time consent, never remembered and never folded into the
     /// fork backup. Only meaningful for a kept change while `.done`.
     func requestPublishToPublik() {
+        guard !undoNeedsRecovery else { return }
         guard phase == .done, committedBranchName != nil, proposedDiffText != nil else { return }
         isAwaitingPublishConsent = true
     }
@@ -2737,6 +4525,7 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// Records the change to publik's public fix log and, for a feature, marks
     /// the pooled request implemented — behind this one consent only.
     func confirmPublishToPublik() {
+        guard !undoNeedsRecovery else { return }
         guard phase == .done,
               isAwaitingPublishConsent,
               let slug = activeAppSlug,
@@ -2747,9 +4536,13 @@ final class OnDemandEditCoordinator: ObservableObject {
         }
         isAwaitingPublishConsent = false
         let requestSummary = scrubbedRequest ?? "a user-requested change"
+        guard let editChangeId = changeId else { return }
+        let generation = undoGeneration
         Task { [weak self] in
             guard let self else { return }
-            if let summary = await publish(slug, kind, requestSummary) {
+            let summary = await publish(slug, kind, requestSummary)
+            guard self.acceptsExternalCompletion(changeId: editChangeId, generation: generation) else { return }
+            if let summary {
                 self.statusLine = (self.statusLine ?? "") + " \(summary)."
             } else {
                 self.statusLine = (self.statusLine ?? "") + " (Publishing wasn't available — nothing was posted.)"
@@ -2792,6 +4585,7 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// never automatic. A nil summary (backup unavailable / not connected) is
     /// not an error: the edit is safe on the local branch regardless.
     func requestForkBackup() {
+        guard !undoNeedsRecovery else { return }
         guard phase == .done,
               let branchName = committedBranchName,
               let slug = activeAppSlug,
@@ -2799,9 +4593,13 @@ final class OnDemandEditCoordinator: ObservableObject {
             statusLine = "Backup isn't set up — your edit is safe on the local branch."
             return
         }
+        guard let editChangeId = changeId else { return }
+        let generation = undoGeneration
         Task { [weak self] in
             guard let self else { return }
-            if let summary = await backUp(branchName, slug) {
+            let summary = await backUp(branchName, slug)
+            guard self.acceptsExternalCompletion(changeId: editChangeId, generation: generation) else { return }
+            if let summary {
                 self.statusLine = (self.statusLine ?? "") + " \(summary)."
             } else {
                 self.statusLine = (self.statusLine ?? "") + " (Backup wasn't available — the edit is safe locally.)"
@@ -3008,6 +4806,27 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// stays picked, so the next edit is one tap in the composer instead of a
     /// trip back through the menu bar.
     func cancel() {
+        guard !undoNeedsRecovery else { return }
+        // Packaging and relaunch callbacks must finish against the same flow.
+        if phase == .delivering || phase == .relaunching || phase == .committing {
+            statusLine = "Iris is finishing this operation safely. Please wait before starting another edit."
+            return
+        }
+        // Keep ownership and the clone lock until the engine finishes recovery.
+        // Resetting here would let a late result act on a different app or plan.
+        if editTask != nil {
+            if phase == .running || phase == .awaitingManifestConsent {
+                readerAskedToStopTheRun = true
+                manifestConsentContinuation?.resume(returning: false)
+                manifestConsentContinuation = nil
+                statusLine = isRecheckingSavedChanges
+                    ? "Stopping the recheck. Your saved code will be kept. Please wait."
+                    : "Stopping this edit and restoring its working files. Please wait."
+            } else {
+                statusLine = "Iris is finishing this operation safely. Please wait before starting another edit."
+            }
+            return
+        }
         switch phase {
         case .pickApp, .describe, .notEligible:
             backOutOfEditingEntirely()
@@ -3141,6 +4960,15 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// Every gate the design ratified, evaluated LIVE against the world right
     /// now. Any miss is an honest, user-safe refusal — never a silent bypass.
     private func eligibility(forAppSlug appSlug: String, appStack: BreakAppStack) -> Eligibility {
+        if IrisTestEnvironment.isEnabled {
+            guard CodexCLILogin.currentState().isUsable else {
+                return .refused(reason: "Iris Test uses your Codex login for its planning and editing models. Connect Codex in settings first.", offersModelKeySetup: true)
+            }
+            guard let clone = provenanceClonePath(forAppSlug: appSlug),
+                  IrisTestProjectRegistry.permitsEdit(slug: appSlug, clonePath: clone) else {
+                return .refused(reason: "Iris Test only edits its separate test copies. Your normal apps are unchanged.")
+            }
+        }
         // Provenance: guide-source clone with a live `.git`. Signed download or
         // unknown fails closed.
         guard installProvenanceStore.localPatchingIsPermitted(forAppSlug: appSlug) else {
@@ -3332,7 +5160,11 @@ final class OnDemandEditCoordinator: ObservableObject {
             return ("Iris couldn't find a change to make for that — nothing was applied.", false, false, false)
         }
         if reason.contains("failed verification") {
-            return ("Iris made a change but it didn't build or pass the tests, so it reverted everything. Nothing changed.", false, false, false)
+            if reason.contains("native-review-required") || reason.contains("native-final-review")
+                || reason.contains("adversarial") {
+                return ("The final review did not approve this change, so Iris did not install it. Your previous app is still in place.", false, false, false)
+            }
+            return ("This change did not pass all the required checks, so Iris did not install it. Your previous app is still in place.", false, false, false)
         }
         // Defensive only: `runEdit` intercepts the reader-stop result before
         // mapping, so this fires only if a future caller forgets to — and a
@@ -3343,8 +5175,37 @@ final class OnDemandEditCoordinator: ObservableObject {
         return ("Iris couldn't complete that edit — nothing changed. (\(reason))", false, false, false)
     }
 
-    private func failRun(reason: String, resolvedClonePath: String) {
-        OnDemandEditInterruptedRunRecovery.forget()
+    nonisolated static func sourceAwareFailureMessage(mapped: String, reason: String,
+        status: MaintainCommandResult?) -> String {
+        guard repositoryStatusWasRead(status) else {
+            return "Iris stopped before installing the update. It could not confirm the source files are unchanged. Review the incomplete edit before retrying. (\(reason))"
+        }
+        guard status?.outputTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true else {
+            return "Iris stopped before installing the update. Partial source changes remain and have not passed verification. Review the incomplete edit before retrying. (\(reason))"
+        }
+        return mapped
+    }
+
+    /// Preparation has not edited source. Honor Stop without invoking the
+    /// editor, deleting recovery records, or presenting a failure card.
+    private func continuePreparingEdit(runID: UUID, resolvedClonePath: String) -> Bool {
+        guard activeEditRunID == runID, phase == .running else { return false }
+        guard readerAskedToStopTheRun || Task.isCancelled else { return true }
+        let reason = "Stopped before editing. Your app and source files were not changed."
+        runLog?.finish(outcome: "stopped during preparation; no editor call")
+        runLog = nil
+        editRunner.note(reason)
+        editRunner.finishStopped()
+        readerAskedToStopTheRun = false
+        clonePathLock.release(clonePath: resolvedClonePath)
+        self.resolvedClonePath = nil
+        statusLine = reason
+        phase = .done
+        return false
+    }
+
+    private func failRun(reason: String, resolvedClonePath: String, preserveRecovery: Bool = false) {
+        if !preserveRecovery { OnDemandEditInterruptedRunRecovery.forgetUnlessReviewIsRequired() }
         clonePathLock.release(clonePath: resolvedClonePath)
         self.resolvedClonePath = nil
         phase = .failed(reason: reason)
@@ -3376,6 +5237,11 @@ final class OnDemandEditCoordinator: ObservableObject {
         }
         guard var recordToWrite = record else { return }
         recordToWrite.pathsIrisEdited = filesTouchedThisRun
+        recordToWrite.recheckRequest = scrubbedRequest
+        if let pendingRecheckIdentity {
+            recordToWrite.pendingCandidate = pendingRecheckIdentity
+            recordToWrite.requiresReviewBeforeRecovery = true
+        }
         if let waitingOn {
             recordToWrite.whatIrisWasWaitingFor = waitingOn
         }
@@ -3389,6 +5255,29 @@ final class OnDemandEditCoordinator: ObservableObject {
         }
     }
 
+    nonisolated static func repositoryStatusWasRead(_ result: MaintainCommandResult?) -> Bool {
+        guard let result else { return false }
+        guard result.exitCode == 0, !result.timedOut, result.bytesDroppedBeforeTail == 0 else { return false }
+        // The runner merges stdout and stderr. Git can emit a warning while
+        // exiting zero; only porcelain records are evidence of changed files.
+        return result.outputTail.split(separator: "\n").allSatisfy { line in
+            let bytes = Array(line.utf8)
+            let states = Set(" MADRCUT?!".utf8)
+            return bytes.count > 3 && states.contains(bytes[0]) && states.contains(bytes[1])
+                && !(bytes[0] == 32 && bytes[1] == 32) && bytes[2] == 32
+        }
+    }
+
+    nonisolated static func testBuildToolPreflightCommand(
+        isTestApplication: Bool, ecosystemIdentifier: String?
+    ) -> String? {
+        guard isTestApplication,
+              ecosystemIdentifier == "rust/tauri" || ecosystemIdentifier == "rust/cargo" else {
+            return nil
+        }
+        return "cargo --version && rustc --version"
+    }
+
     /// The reason string carried by the current terminal phase, for `statusLine`
     /// mirroring.
     private var phaseReason: String? {
@@ -3399,10 +5288,34 @@ final class OnDemandEditCoordinator: ObservableObject {
     }
 
     private func resetInFlightState() {
-        OnDemandEditInterruptedRunRecovery.forget()
+        pendingUnverifiedTestDeliveryProject = nil
+        guard editTask == nil else { return }
+        pendingRecheckIdentity = nil
+        isRecheckingSavedChanges = false
+        isPreparingSavedChangeRecheck = false
+        flowGeneration = UUID()
+        clarificationAnswerPairsForPrompt = []
+        harnessWorkflow = nil
+        harnessBehaviorAssessment = nil
+        unverifiedTestCandidateIsAvailable = false
+        unverifiedTestCandidateRegistryProject = nil
+        undoGeneration = UUID()
+        undoRecovery.reset()
+        undoIsInProgress = false
+        undoFailureMessage = nil
+        savedVersionUndoIsPending = false
+        previousVersionWasRestored = false
+        currentModelRoute = nil
+        verificationReceipt = nil
+        earnedVerification = nil
+        adversarialReviewIssues = []
+        deliveryProgress = EditDeliveryProgress()
+        OnDemandEditInterruptedRunRecovery.forgetUnlessReviewIsRequired()
         pullRequestState = .notAttempted
         changelogState = .notAttempted
         committedBranchName = nil
+        savedDeliveryIdentity = nil
+        savedDeliveryMayBeRetried = false
         changeId = nil
         scrubbedRequest = nil
         originalHeadCommit = nil
@@ -3428,6 +5341,8 @@ final class OnDemandEditCoordinator: ObservableObject {
         deliveredChangeCanBeUndone = false
         deliveredInstalledAppPath = nil
         deliveredInstalledBackupPath = nil
+        deliveredReceiptIdentifier = nil
+        pendingSavedUndoReceiptIdentifier = nil
         failureWasRateLimit = false
         dirtyCloneRefusal = nil
         isSettingAsideDirtyChanges = false
@@ -3442,6 +5357,10 @@ final class OnDemandEditCoordinator: ObservableObject {
         runLog = nil
         // Invalidate any in-flight request probe: its verdict (and watchdog)
         // must not advance a flow that has been reset out from under it.
+        requestProbeTask?.cancel()
+        requestProbeWatchdog?.cancel()
+        requestProbeTask = nil
+        requestProbeWatchdog = nil
         requestProbeGeneration += 1
         isAssessingRequest = false
         // resolvedClonePath is only cleared alongside a lock release, so a lock

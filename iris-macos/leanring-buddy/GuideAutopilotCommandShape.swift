@@ -82,6 +82,79 @@ nonisolated enum GuideAutopilotCommandShape {
         return false
     }
 
+    /// A successful global package-manager install can change the executable
+    /// search path for every later guide step. The install itself runs in a
+    /// child process, so it cannot update the persistent shell's environment;
+    /// the runner uses this predicate to reload that environment once the
+    /// command succeeds. This is deliberately narrower than "any install":
+    /// project-local `npm install` and package builds do not need a dotfile
+    /// reload and should keep their existing step timing.
+    static func installsAGlobalPackageManagerBinary(_ command: String) -> Bool {
+        let commandSegments = command
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .flatMap { line in
+                String(line)
+                    .replacingOccurrences(of: "&&", with: "\u{1F}")
+                    .replacingOccurrences(of: "||", with: "\u{1F}")
+                    .replacingOccurrences(of: ";", with: "\u{1F}")
+                    .replacingOccurrences(of: "|", with: "\u{1F}")
+                    .split(separator: "\u{1F}")
+                    .map(String.init)
+            }
+
+        for segment in commandSegments {
+            let words = segment
+                .split(whereSeparator: { $0 == " " || $0 == "\t" })
+                .map {
+                    $0.trimmingCharacters(
+                        in: CharacterSet(charactersIn: "(){}'\"")
+                    ).lowercased()
+                }
+            // Look only at the executable position. Searching every token would
+            // misclassify harmless diagnostics such as `echo npm install -g
+            // yarn` and pay for a shell refresh after a command that installed
+            // nothing. `programsEachLineWouldRun` already understands the
+            // explicit `sudo`, `env`, and `command` prefixes permitted here.
+            let executable = programsEachLineWouldRun(segment).first?.lowercased()
+            guard let executable,
+                  ["npm", "pnpm", "yarn", "bun"].contains(executable),
+                  let packageManagerIndex = words.firstIndex(of: executable) else {
+                continue
+            }
+
+            let wordsAfterPackageManager = words.dropFirst(packageManagerIndex + 1)
+            let hasInstallVerb = wordsAfterPackageManager.contains {
+                ["install", "i", "add"].contains($0)
+            }
+            let hasGlobalFlag = wordsAfterPackageManager.contains {
+                $0 == "-g"
+                    || $0 == "--global"
+                    || $0 == "--location=global"
+            }
+            if hasInstallVerb && hasGlobalFlag { return true }
+
+            // Yarn's older global form is `yarn global add <package>` and has
+            // no `-g` flag.
+            if words[packageManagerIndex] == "yarn",
+               wordsAfterPackageManager.first == "global",
+               wordsAfterPackageManager.dropFirst().first == "add" {
+                return true
+            }
+        }
+
+        // Corepack enable creates package-manager shims in a directory the
+        // shell may have loaded only at startup.
+        return commandSegments.contains { segment in
+            guard programsEachLineWouldRun(segment).first?.lowercased() == "corepack" else {
+                return false
+            }
+            let words = segment
+                .split(whereSeparator: { $0 == " " || $0 == "\t" })
+                .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "(){}'\"")).lowercased() }
+            return words.firstIndex(of: "enable") == words.startIndex + 1
+        }
+    }
+
     // MARK: - What each line of the command runs
 
     /// The program name each line of this command begins with — what a shell

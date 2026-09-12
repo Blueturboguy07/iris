@@ -17,10 +17,19 @@ struct leanring_buddyApp: App {
 
     var body: some Scene {
         // The app lives entirely in the menu bar panel managed by the AppDelegate.
-        // This empty Settings scene satisfies SwiftUI's requirement for at least
-        // one scene but is never shown (LSUIElement=true removes the app menu).
+        // Replace the standard command so it never creates a second settings
+        // window beside the existing eye/menu panel.
         Settings {
-            EmptyView()
+            SettingsPanelSceneRedirect(onOpenSettings: appDelegate.openCanonicalSettings)
+                .frame(width: 1, height: 1)
+        }
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") {
+                    appDelegate.openCanonicalSettings()
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
         }
     }
 }
@@ -30,7 +39,7 @@ struct leanring_buddyApp: App {
 @MainActor
 final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarPanelManager: MenuBarPanelManager?
-    private let companionManager = CompanionManager()
+    fileprivate let companionManager = CompanionManager()
     private var sparkleUpdaterController: SPUStandardUpdaterController?
 
     /// A guide link that arrived before the panel existed. macOS can deliver
@@ -38,8 +47,24 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     /// runs, and opening a guide into a panel that has not been created yet
     /// would drop the link on the floor.
     private var guideDeepLinkWaitingForLaunchToFinish: GuideDeepLink?
+    private var settingsRequestedBeforeLaunchFinished = false
+
+    func openCanonicalSettings() {
+        guard menuBarPanelManager != nil else {
+            settingsRequestedBeforeLaunchFinished = true
+            return
+        }
+        NotificationCenter.default.post(name: .clickyShowPanel, object: nil)
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+#if IRIS_TEST_BUILD
+        guard IrisTestEnvironment.isEnabled else {
+            NSLog("Iris Test stopped because its bundle identity does not match its build configuration.")
+            NSApp.terminate(nil)
+            return
+        }
+#endif
         print("🎯 Iris: Starting...")
         print("🎯 Iris: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
 
@@ -47,6 +72,10 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
         companionManager.start()
+        if settingsRequestedBeforeLaunchFinished {
+            settingsRequestedBeforeLaunchFinished = false
+            openCanonicalSettings()
+        }
         // Auto-open the panel if the user still needs to do something:
         // either they haven't onboarded yet, or permissions were revoked.
         if !companionManager.hasCompletedOnboarding || !companionManager.allPermissionsGranted {
@@ -81,6 +110,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleIncomingDeepLink(_ incomingURL: URL) {
+        guard !IrisTestEnvironment.isEnabled else { return }
         switch IrisDeepLinkParser.parse(incomingURL) {
         case .success(.guide(let guideDeepLink)):
             print("🎯 Iris: accepted guide deep link — slug \(guideDeepLink.slug), "
@@ -140,6 +170,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     /// startup. Uses SMAppService which shows the app in System Settings >
     /// General > Login Items, letting the user toggle it off if they want.
     private func registerAsLoginItemIfNeeded() {
+        guard !IrisTestEnvironment.isEnabled else { return }
         let loginItemService = SMAppService.mainApp
         if loginItemService.status != .enabled {
             do {
@@ -166,6 +197,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     /// Both keys must be present for updates to run at all: a feed with no key
     /// is an unauthenticated download, which is worse than no updates.
     private func startSparkleUpdater() {
+        guard !IrisTestEnvironment.isEnabled else { return }
         let bundle = Bundle.main
         let feedURL = (bundle.object(forInfoDictionaryKey: "SUFeedURL") as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)

@@ -82,6 +82,10 @@ nonisolated struct RepoRecipeNodeWebDetector: EcosystemDetector {
         // caller must handle.
         let scripts = (packageJSON["scripts"] as? [String: Any]) ?? [:]
         let declaredDependencyNames = Self.dependencyNames(in: packageJSON)
+        let electronShippingEvidence = RepoRecipeElectronShippingEvidence.inspect(
+            packageJSON: packageJSON,
+            repoRootPath: repoRootPath
+        )
 
         let chosenPackageManager = Self.resolvePackageManager(repoRootPath: repoRootPath)
         let primaryFramework = Self.resolvePrimaryFramework(
@@ -166,9 +170,19 @@ nonisolated struct RepoRecipeNodeWebDetector: EcosystemDetector {
         // artifact (Electron) contribute one; a web app has a build but no
         // relaunchable native binary (matching AppRelaunchService's stance).
         if let frameworkPackage = primaryFramework?.packageDefaultCommandLine {
-            commandsByField[.package] = RepoRecipeCommand(commandLine: frameworkPackage)
-            confidenceByField[.package] = Self.frameworkRegistryConfidence
-            provenanceByField[.package] = .frameworkRegistryDefault
+            if electronShippingEvidence.isStrong,
+               primaryFramework?.ecosystemIdentifier == "node/electron" {
+                let packageCommand = electronShippingEvidence.packagingScriptName
+                    .map { "\(chosenPackageManager.runCommandPrefix) \($0)" }
+                    ?? frameworkPackage
+                commandsByField[.package] = RepoRecipeCommand(commandLine: packageCommand)
+                confidenceByField[.package] = Self.scriptDerivedConfidence
+                provenanceByField[.package] = .explicitProjectConfig
+            } else {
+                commandsByField[.package] = RepoRecipeCommand(commandLine: frameworkPackage)
+                confidenceByField[.package] = Self.frameworkRegistryConfidence
+                provenanceByField[.package] = .frameworkRegistryDefault
+            }
         }
 
         let runtimeShapeContribution = Self.classifyRuntimeShape(
@@ -182,7 +196,8 @@ nonisolated struct RepoRecipeNodeWebDetector: EcosystemDetector {
             confidenceByField: confidenceByField,
             provenanceByField: provenanceByField,
             runtimeShapeContribution: runtimeShapeContribution,
-            matched: true
+            matched: true,
+            shippingStack: electronShippingEvidence.isStrong ? .electron : nil
         )
     }
 

@@ -769,14 +769,15 @@ struct GuideSlugEntryView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Follow an install guide")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(DS.Colors.muted)
+            Text("If you already know the guide's name, enter it below. Otherwise, choose an app above to see how to install it.")
+                .font(DS.Typography.caption)
+                .foregroundColor(DS.Colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 8) {
-                TextField("App name, e.g. cue", text: $slugInput)
+                TextField("Guide name, e.g. cue", text: $slugInput)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12))
+                    .font(DS.Typography.caption)
                     .foregroundColor(DS.Colors.ink)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)

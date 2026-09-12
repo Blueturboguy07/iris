@@ -22,6 +22,9 @@
 
 import Foundation
 import Security
+#if canImport(IrisEnvironment)
+import IrisEnvironment
+#endif
 
 /// The secrets Iris keeps. This is an enum rather than a free-form string
 /// so a future caller cannot invent another Keychain item without editing
@@ -49,6 +52,17 @@ enum KeychainSecretKind: String, CaseIterable, Sendable {
     /// (see `AssistantTransport`). Like the API key, it never reaches a publik
     /// host.
     case anthropicOAuthToken = "anthropic-oauth-token"
+
+    var reconnectLabel: String {
+        switch self {
+        case .anthropicAPIKey: return "Anthropic API key"
+        case .supabaseRefreshToken: return "publik account"
+        case .gitHubAccessToken: return "GitHub access token"
+        case .gitHubRefreshToken: return "GitHub refresh token"
+        case .openAIAPIKey: return "OpenAI API key"
+        case .anthropicOAuthToken: return "Claude Code login"
+        }
+    }
 }
 
 enum KeychainStoreError: Error, Equatable, Sendable {
@@ -68,21 +82,16 @@ enum KeychainStore {
     /// The service name every item is filed under. It matches the app's bundle
     /// identifier so a user inspecting Keychain Access sees a name they can
     /// connect to Iris rather than an opaque string.
-    static let keychainServiceName = "com.publikhq.iris"
+    static var keychainServiceName: String { IrisTestEnvironment.keychainServiceName }
 
     // MARK: - Writing
 
-    /// Stores (or replaces) a secret. Replacing is done as delete-then-add
-    /// rather than `SecItemUpdate` so the item's accessibility attribute is
-    /// re-applied every time instead of inheriting whatever an older build set.
+    /// Updates an existing secret, or adds it when absent. A denied update
+    /// must not erase the previous credential, especially during token refresh.
     static func saveSecret(_ secretValue: String, ofKind secretKind: KeychainSecretKind) throws {
         guard let secretData = secretValue.data(using: .utf8) else {
             throw KeychainStoreError.secretIsNotValidUTF8
         }
-
-        // A failure to delete is fine — the usual case is that nothing was
-        // stored yet. Only the add below is allowed to fail loudly.
-        deleteSecretIgnoringFailure(ofKind: secretKind)
 
         let addQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -96,7 +105,20 @@ enum KeychainStore {
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
         ]
 
-        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        let addStatus = KeychainReadPolicy.updateOrAdd(update: {
+            let match: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: keychainServiceName,
+                kSecAttrAccount as String: secretKind.rawValue,
+            ]
+            let replacement: [String: Any] = [
+                kSecValueData as String: secretData,
+                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+            ]
+            return SecItemUpdate(match as CFDictionary, replacement as CFDictionary)
+        }, add: {
+            SecItemAdd(addQuery as CFDictionary, nil)
+        })
         guard addStatus == errSecSuccess else {
             throw KeychainStoreError.keychainOperationFailed(status: addStatus)
         }
@@ -106,42 +128,59 @@ enum KeychainStore {
 
     /// Reads a secret, or nil when there is none.
     ///
-    /// Every failure — item missing, keychain locked, unsigned build with no
-    /// keychain access — collapses to nil on purpose. A read happens on the
-    /// launch path, and an app that refuses to start because the Keychain was
-    /// unhappy is worse than an app that asks the user to sign in again.
+    /// Convenience for callers that only need a usable credential. Account
+    /// restoration uses the detailed result so denied access is not sign-out.
     static func readSecret(ofKind secretKind: KeychainSecretKind) -> String? {
-        let readQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainServiceName,
-            kSecAttrAccount as String: secretKind.rawValue,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
+        readSecret(ofKind: secretKind, allowsUserInteraction: false)
+    }
+
+    /// Only an explicit settings action calls this, for one item per click.
+    /// The credential stays inside the store; the UI receives no secret value.
+    static func reconnectSavedSecret(ofKind secretKind: KeychainSecretKind) -> Bool {
+        readSecret(ofKind: secretKind, allowsUserInteraction: true) != nil
+    }
+
+    private static func readSecret(
+        ofKind secretKind: KeychainSecretKind, allowsUserInteraction: Bool
+    ) -> String? {
+        try? readSecretResult(ofKind: secretKind, allowsUserInteraction: allowsUserInteraction).get()
+    }
+
+    static func readSecretResult(
+        ofKind secretKind: KeychainSecretKind, allowsUserInteraction: Bool = false
+    ) -> Result<String?, KeychainStoreError> {
+        let readQuery = KeychainReadPolicy.query(
+            service: keychainServiceName, account: secretKind.rawValue,
+            returnsData: true, allowsUserInteraction: allowsUserInteraction
+        )
 
         var readResult: CFTypeRef?
-        let readStatus = SecItemCopyMatching(readQuery as CFDictionary, &readResult)
-        guard readStatus == errSecSuccess,
-              let secretData = readResult as? Data,
+        let readStatus = KeychainReadPolicy.perform(allowsUserInteraction: allowsUserInteraction) {
+            SecItemCopyMatching(readQuery as CFDictionary, &readResult)
+        }
+        if readStatus == errSecItemNotFound { return .success(nil) }
+        guard readStatus == errSecSuccess else {
+            return .failure(.keychainOperationFailed(status: readStatus))
+        }
+        guard let secretData = readResult as? Data,
               let secretValue = String(data: secretData, encoding: .utf8) else {
-            return nil
+            return .failure(.secretIsNotValidUTF8)
         }
 
         let trimmedSecretValue = secretValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmedSecretValue.isEmpty ? nil : trimmedSecretValue
+        guard !trimmedSecretValue.isEmpty else { return .failure(.secretIsNotValidUTF8) }
+        return .success(trimmedSecretValue)
     }
 
     /// Whether a secret is present, without pulling its bytes into memory.
     /// The panel uses this to decide what to show without ever handling the key.
     static func hasSecret(ofKind secretKind: KeychainSecretKind) -> Bool {
-        let existenceQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainServiceName,
-            kSecAttrAccount as String: secretKind.rawValue,
-            kSecReturnData as String: false,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        return SecItemCopyMatching(existenceQuery as CFDictionary, nil) == errSecSuccess
+        let existenceQuery = KeychainReadPolicy.query(
+            service: keychainServiceName, account: secretKind.rawValue, returnsData: false
+        )
+        return KeychainReadPolicy.perform {
+            SecItemCopyMatching(existenceQuery as CFDictionary, nil)
+        } == errSecSuccess
     }
 
     // MARK: - Deleting
@@ -154,7 +193,9 @@ enum KeychainStore {
             kSecAttrAccount as String: secretKind.rawValue,
         ]
 
-        let deleteStatus = SecItemDelete(deleteQuery as CFDictionary)
+        let deleteStatus = KeychainReadPolicy.perform {
+            SecItemDelete(deleteQuery as CFDictionary)
+        }
         // Deleting something that was never there is the caller's intent
         // already satisfied, not a failure.
         guard deleteStatus == errSecSuccess || deleteStatus == errSecItemNotFound else {
@@ -162,7 +203,4 @@ enum KeychainStore {
         }
     }
 
-    private static func deleteSecretIgnoringFailure(ofKind secretKind: KeychainSecretKind) {
-        try? deleteSecret(ofKind: secretKind)
-    }
 }

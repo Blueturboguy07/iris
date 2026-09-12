@@ -7,44 +7,44 @@ because the reader concludes the site ships malware.
 
 ## macOS
 
-**Done. A downloaded copy opens with no warning.**
+### Consumer release path
 
-`scripts/build-iris-macos.sh` picks one of two paths, the same way NitroAI's
-`electron-builder.cjs` does:
+The macOS customer artifact is fail-closed in
+`.github/workflows/iris-release.yml`. It is not uploaded as a release candidate
+unless all five distribution values are present: `CSC_LINK`,
+`CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and
+`APPLE_TEAM_ID`. Missing values fail the macOS job instead of producing an
+unsigned or unstapled fallback.
 
-- **Developer ID + notarized** when `APPLE_SIGNING_IDENTITY` names a real
-  identity. Tauri signs under the hardened runtime and, if `APPLE_ID`,
-  `APPLE_PASSWORD` and `APPLE_TEAM_ID` are set, submits to Apple and staples.
-- **Ad-hoc** otherwise, so a contributor without a certificate still gets a
-  bundle that runs locally instead of one macOS calls damaged.
+The workflow imports and checks an Apple-issued **Developer ID Application**
+identity, builds the native Release target as `com.publikhq.iris` with the
+hardened runtime, notarizes and staples the app before putting it in the dmg,
+then signs, notarizes, and staples the dmg. Finally,
+`scripts/verify-iris-macos.sh` runs with `--require-notarized`,
+`--expected-team "$APPLE_TEAM_ID"`, and `--expected-bundle-id
+com.publikhq.iris`. That strict check validates the app and the copy inside the
+dmg, both stapled tickets, the Developer ID authority, team, bundle identifier,
+hardened runtime, quarantined Gatekeeper assessment, and launch. Publication
+requires a readiness marker written only after that check passes.
 
-`scripts/verify-iris-macos.sh` is the part that was missing. It checks the
-signature, the hardened runtime flag and the team identifier, then mounts the
-dmg, copies the app out, writes the `com.apple.quarantine` attribute exactly as
-a browser download would, and asks Gatekeeper the same question it asks at
-double-click time. Finally it launches the binary and confirms it stays up —
-passing assessment and actually starting are different failures.
+The expected team is supplied to the verifier by the release configuration; it
+is not a personal-team constant in the script. The verifier can still inspect a
+local build without strict flags, but `--require-signed` requires an explicit
+expected team and `--require-notarized` requires both app and dmg tickets.
 
-Verified locally on 2026-07-27 against
-`Developer ID Application: Mann Bellani (R5R3ZS54LV)`, using the Apple ID that
-holds that certificate:
+### Local and legacy paths
 
-```
-Signature
-  PASS  signature is intact and covers every nested binary
-  PASS  signed by Developer ID Application: Mann Bellani (R5R3ZS54LV)
-  PASS  hardened runtime is enabled
-  PASS  team identifier is R5R3ZS54LV
-Notarization
-  PASS  a notarization ticket is stapled to the app
-  PASS  the dmg carries its own ticket
-Install and open
-  PASS  the dmg mounts
-  PASS  Gatekeeper accepts a quarantined copy
-  PASS  the app starts and stays running (10s)
+`scripts/build-iris-macos.sh` remains useful for local Tauri development and may
+produce an ad-hoc bundle when no Developer ID identity is available. That path
+is not a customer release. `IrisLocalSigningIdentity.swift` makes the same
+distinction: a persistent self-signed identity can stabilize permissions on one
+Mac, but it is not a Gatekeeper or notarization identity. Apple Development and
+Personal Team identities are likewise local-development credentials, not
+Developer ID distribution credentials.
 
-Ready to distribute: a downloaded copy opens with no warning.
-```
+`iris-macos/scripts/release.sh` is a legacy `makesomething` workflow targeting a
+different repository. It is not an Iris consumer release path and must not be
+used to publish the customer artifact.
 
 ### Tauri does not staple the dmg
 
@@ -54,9 +54,10 @@ A dmg with no ticket of its own has to be checked against Apple over the
 network, so the download fails on a machine that is offline or behind a filter,
 and the failure looks like a corrupt file rather than a policy decision.
 
-`build-iris-macos.sh` submits and staples the dmg itself after the bundler
-finishes. The verify script checks for both tickets separately, which is how
-this was found in the first place — the app passed and the dmg did not.
+The native release workflow now submits and staples the app before packaging,
+then submits and staples the dmg itself. The verify script checks for both
+tickets separately, which prevents a valid app from being hidden inside an
+unstapled downloaded image.
 
 ### Entitlements
 
@@ -66,19 +67,17 @@ and the web content runs in Apple's own out-of-process service — so it needs
 none of the JIT or unsigned-memory holes an Electron app does. This was checked,
 not assumed: the signed build launches and runs with an empty entitlements file.
 
-### What is left: the same thing, in CI
+### CI configuration
 
-Local builds notarize. The release workflow cannot yet, because the repository
-has no secrets. Five of them, the same five values NitroAI already has — the
-workflow deliberately reuses NitroAI's secret names so they copy straight
-across:
+The workflow deliberately reuses NitroAI's secret names so the same five
+distribution values can be managed in one place:
 
 ```
 gh secret set CSC_LINK --repo Blueturboguy07/publik
 gh secret set CSC_KEY_PASSWORD --repo Blueturboguy07/publik
 gh secret set APPLE_ID --repo Blueturboguy07/publik
 gh secret set APPLE_APP_SPECIFIC_PASSWORD --repo Blueturboguy07/publik
-gh secret set APPLE_TEAM_ID --repo Blueturboguy07/publik   # R5R3ZS54LV
+gh secret set APPLE_TEAM_ID --repo Blueturboguy07/publik
 ```
 
 `CSC_LINK` is the base64 of the Developer ID `.p12` — export it from Keychain
@@ -96,9 +95,10 @@ the top of that page. That value identifies the team rather than authenticating
 anyone, so it is the cheaper thing to hand over — but the key also has to hold a
 role that permits notarization, which is worth confirming before relying on it.
 
-Once they are set, `gh workflow run iris-release.yml` builds signed, notarized
-and stapled, and the verify step runs with `--require-notarized`, so a release
-that would not open cannot pass.
+Once they are set, `gh workflow run iris-release.yml` can produce a customer
+artifact. The strict verifier and publication marker prevent a release that is
+unsigned, assigned to the wrong team or bundle, missing a ticket, or rejected
+by Gatekeeper from being published.
 
 ## Windows
 

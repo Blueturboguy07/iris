@@ -74,7 +74,8 @@ struct GuideAutopilotRunnerTests {
     private static func runner(
         shell: FakeShellSession,
         longRunning: FakeShellSession? = nil,
-        proposer: FakeFixProposer? = nil
+        proposer: FakeFixProposer? = nil,
+        guideInstallers: [String: String] = [:]
     ) -> GuideAutopilotRunner {
         let proposer = proposer ?? FakeFixProposer()
         return GuideAutopilotRunner(
@@ -84,7 +85,8 @@ struct GuideAutopilotRunnerTests {
             guideContext: GuideAutopilotGuideContext(
                 slug: "whimprflow", version: 3, appName: "WhimprFlow",
                 platformLabel: "macOS",
-                hostsReachedByTheGuide: ["github.com"]
+                hostsReachedByTheGuide: ["github.com"],
+                commandTheGuidePublishesToInstallEachTool: guideInstallers
             ),
             // No artificial hold in tests: a fake shell returns instantly and
             // the suite must stay fast and deterministic. The pacing floor is
@@ -102,6 +104,28 @@ struct GuideAutopilotRunnerTests {
             id: id, kind: .terminal, title: "Build the app", body: "…",
             command: command,
             watch: sensitive ? IrisStepWatch(expect: [], sensitive: true) : nil
+        )
+    }
+
+    private static let sourcePinGuardCommand = """
+    (
+    if ! git config --get remote.origin.url 2>/dev/null | grep -qxF "https://example.test/source"; then
+      echo "~/fixture already exists and is not a clean copy of this app's source. Move or rename that folder, then press Try again."
+      exit 1
+    fi
+    if git status --porcelain 2>/dev/null | grep -q .; then
+      echo "~/fixture already exists and is not a clean copy of this app's source. Move or rename that folder, then press Try again."
+      exit 1
+    fi
+    git checkout 0123456789abcdef0123456789abcdef01234567
+    )
+    """
+
+    private static func sourcePinStep() -> IrisGuideStep {
+        IrisGuideStep(
+            id: "pin-source", kind: .terminal, title: "Pin source", body: "",
+            command: sourcePinGuardCommand,
+            workingDirectory: "/Users/test/fixture"
         )
     }
 
@@ -154,6 +178,98 @@ struct GuideAutopilotRunnerTests {
         #expect(recordedAZeroExit)
     }
 
+    @Test func aSuccessfulGlobalInstallRefreshesTheShellBeforeTheNextStep() async {
+        let shell = FakeShellSession(outcomes: [
+            .succeeded(workingDirectory: "/x"), // npm install -g yarn
+            .succeeded(workingDirectory: "/x"), // environment refresh
+            .succeeded(workingDirectory: "/x"), // yarn install
+        ])
+        let runner = Self.runner(shell: shell)
+
+        #expect(
+            await runner.executeStepCommand(
+                step: Self.step(command: "npm install -g yarn"),
+                stepIndex: 0,
+                totalSteps: 2
+            ) == .succeeded
+        )
+        #expect(shell.commandsRun == [
+            "npm install -g yarn",
+            GuideAutopilotShellSession.reloadTheReadersEnvironmentCommand,
+        ])
+
+        #expect(
+            await runner.executeStepCommand(
+                step: Self.step(command: "yarn install"),
+                stepIndex: 1,
+                totalSteps: 2
+            ) == .succeeded
+        )
+        #expect(shell.commandsRun.last == "yarn install")
+    }
+
+    @Test func aMissingYarnReplaysTheGuideInstallBeforeAskingTheModel() async {
+        let shell = FakeShellSession(outcomes: [
+            .failed(exitStatus: 127, workingDirectory: "/x"), // yarn install
+            .succeeded(workingDirectory: "/x"),                // npm install -g yarn
+            .succeeded(workingDirectory: "/x"),                // environment refresh
+            .succeeded(workingDirectory: "/x"),                // yarn install retry
+        ])
+        let proposer = FakeFixProposer(
+            rungA: [nil], rungB: [nil]
+        )
+        let runner = Self.runner(
+            shell: shell,
+            proposer: proposer,
+            guideInstallers: ["yarn": "npm install -g yarn"]
+        )
+
+        let result = await runner.executeStepCommand(
+            step: Self.step(command: "yarn install"), stepIndex: 6, totalSteps: 13
+        )
+
+        #expect(result == .succeeded)
+        #expect(shell.commandsRun == [
+            "yarn install",
+            "npm install -g yarn",
+            GuideAutopilotShellSession.reloadTheReadersEnvironmentCommand,
+            "yarn install",
+        ])
+        #expect(proposer.rungACalls == 0)
+        #expect(proposer.rungBCalls == 0)
+        #expect(runner.transcript.contains {
+            if case .explanation(let text) = $0 {
+                return text.contains("yarn") && text.contains("own step")
+            }
+            return false
+        })
+    }
+
+    @Test func aGuideGlobalPackageInstallMapsItsPackageManagerWithoutAWatch() {
+        let installStep = IrisGuideStep(
+            id: "install-yarn", kind: .terminal, title: "Install Yarn", body: "",
+            command: "npm install -g yarn"
+        )
+        let branch = IrisGuideBranch(
+            platform: .macos, target: nil, label: "macOS", shell: .terminal,
+            setupSteps: [],
+            steps: [
+                installStep,
+                IrisGuideStep(
+                    id: "dependencies", kind: .terminal, title: "Install dependencies", body: "",
+                    command: "yarn install"
+                ),
+            ],
+            unsupported: nil
+        )
+
+        #expect(
+            GuideSessionController.commandsThisGuidePublishesToInstallEachToolForAutopilot(
+                branch: branch
+            ) == ["yarn": "npm install -g yarn"]
+        )
+    }
+
     // MARK: - Sensitive
 
     @Test func aSensitiveStepIsNeverExecuted() async {
@@ -168,6 +284,108 @@ struct GuideAutopilotRunnerTests {
     }
 
     // MARK: - The ladder
+
+    @Test func aDirtySourcePinSurfacesTheFoundFolderWithoutEnteringTheRepairLadder() async {
+        let shell = FakeShellSession(outcomes: [
+            .succeeded(workingDirectory: "/Users/test/fixture"), // declared folder
+            .failed(exitStatus: 1, workingDirectory: "/Users/test/fixture") // source guard
+        ])
+        shell.modelTail = """
+        ~/fixture already exists and is not a clean copy of this app's source.
+         M Sources/Editor.swift
+        ?? notes/local.md
+        """
+        let proposer = FakeFixProposer(rungA: [nil], rungB: [nil])
+        let runner = Self.runner(shell: shell, proposer: proposer)
+
+        let result = await runner.executeStepCommand(
+            step: Self.sourcePinStep(), stepIndex: 5, totalSteps: 15
+        )
+
+        #expect(result == .surfacedToReader)
+        #expect(proposer.rungACalls == 0)
+        #expect(proposer.rungBCalls == 0)
+        #expect(shell.commandsRun == [
+            "cd /Users/test/fixture",
+            Self.sourcePinGuardCommand,
+        ])
+        guard case .surfacedToReader(let diagnosis, _) = runner.state else {
+            Issue.record("expected the source pin to hand the step back, got \(runner.state)")
+            return
+        }
+        #expect(diagnosis.contains("source check stopped in /Users/test/fixture"))
+        #expect(diagnosis.contains("Sources/Editor.swift"))
+        #expect(diagnosis.contains("notes/local.md"))
+        #expect(!diagnosis.contains("couldn't move into"))
+    }
+
+    @Test func sourcePinRetryRemainsAnExplicitSingleStepAndDoesNotLoopOrReclone() async {
+        let shell = FakeShellSession(outcomes: [
+            .succeeded(workingDirectory: "/Users/test/fixture"),
+            .failed(exitStatus: 1, workingDirectory: "/Users/test/fixture"),
+            .succeeded(workingDirectory: "/Users/test/fixture"),
+            .failed(exitStatus: 1, workingDirectory: "/Users/test/fixture"),
+        ])
+        shell.modelTail = "~/fixture already exists and is not a clean copy of this app's source."
+        let proposer = FakeFixProposer(rungA: [nil], rungB: [nil])
+        let runner = Self.runner(shell: shell, proposer: proposer)
+
+        _ = await runner.executeStepCommand(
+            step: Self.sourcePinStep(), stepIndex: 5, totalSteps: 15
+        )
+        _ = await runner.executeStepCommand(
+            step: Self.sourcePinStep(), stepIndex: 5, totalSteps: 15
+        )
+
+        #expect(proposer.rungACalls == 0)
+        #expect(proposer.rungBCalls == 0)
+        #expect(shell.commandsRun == [
+            "cd /Users/test/fixture",
+            Self.sourcePinGuardCommand,
+            "cd /Users/test/fixture",
+            Self.sourcePinGuardCommand,
+        ])
+        #expect(!shell.commandsRun.contains("git clone https://example.test/source"))
+    }
+
+    @Test func sourcePinNamesOnlySafeRelativePorcelainPathsAndStatesWhenNamesWereNotPrinted() {
+        let tail = """
+        ~/fixture already exists and is not a clean copy of this app's source.
+         M Sources/Editor.swift
+        ?? notes/local.md
+        ?? ../outside.md
+        ?? /private/tmp/outside.md
+        ?? \"quoted name.md\"
+        R  old.md -> new.md
+        """
+        let refusal = GuideAutopilotSourceCheckoutRefusal.detect(
+            command: Self.sourcePinGuardCommand,
+            exitStatus: 1,
+            scrubbedOutputTail: tail,
+            workingDirectory: "/Users/test/fixture"
+        )
+        #expect(refusal?.verifiedWorkingDirectory == "/Users/test/fixture")
+        #expect(refusal?.safeRelativeChangedPaths == ["Sources/Editor.swift", "notes/local.md"])
+
+        let noNames = GuideAutopilotSourceCheckoutRefusal.detect(
+            command: Self.sourcePinGuardCommand,
+            exitStatus: 1,
+            scrubbedOutputTail: "~/fixture already exists and is not a clean copy of this app's source.",
+            workingDirectory: "/Users/test/fixture"
+        )
+        #expect(noNames?.safeRelativeChangedPaths.isEmpty == true)
+        #expect(noNames?.readerFacingDiagnosis.contains("did not expose the individual changed filenames") == true)
+    }
+
+    @Test func unrelatedGitFailureIsNotLabeledAsASourcePinRefusal() {
+        let refusal = GuideAutopilotSourceCheckoutRefusal.detect(
+            command: "git status --porcelain",
+            exitStatus: 1,
+            scrubbedOutputTail: "not a clean copy",
+            workingDirectory: "/Users/test/fixture"
+        )
+        #expect(refusal == nil)
+    }
 
     @Test func aFailureIsRepairedByRungAAndTheOriginalRetried() async {
         // Original fails, fix runs clean, retry of the original succeeds.

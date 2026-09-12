@@ -73,7 +73,7 @@ Fresh checks:
   including actual disposable PTY processes and held asynchronous ownership
   cases. The merged build preserves the ownership and timeout fixes and adds the
   catalog-guide/recovery changes from upstream.
-- Harness package: 110 tests in 5 suites passed. Usability package: 134 tests
+- Harness package: 112 tests in 5 suites passed. Usability package: 134 tests
   in 17 suites passed. Those suites were rerun during final integration; the
   subsequent timeout change touches only Runner and its focused guide tests.
 - Full inert executor checks passed before the final timeout-only correction.
@@ -137,6 +137,11 @@ The earlier recorded narrow native lifecycle successes remain separate.
 5. Review caught a side-process timeout that could leave a misleading running
    state. The fix surfaces timeout or unexpected interruption for the current
    owner only, with explicit retry and no automatic command replay.
+6. Conversation compaction previously treated source-like successful output
+   such as `return false` or `throw new Error(...)` as negative evidence merely
+   because it contained a broad marker. The classifier now requires explicit
+   diagnostic phrasing for those tokens, with regression coverage for both
+   source-like success and real `Error:` output.
 
 ## Verification interpretation
 

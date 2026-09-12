@@ -68,6 +68,44 @@ func negativeEvidenceAndUserDecisionsAreNotSummarized() {
     #expect(projected[11].text == successful)
 }
 
+@Test("source-like success output is compacted instead of treated as failure")
+func sourceLikeSuccessOutputDoesNotBlockCompaction() {
+    var messages = [HarnessModelMessage(role: "user", text: "Accepted brief: inspect the implementation.")]
+    for index in 0..<9 {
+        messages.append(HarnessModelMessage(role: "assistant", text: "Inspecting source " + String(index) + "."))
+        let output = "return false // source result " + String(index) + "\n"
+            + "throw new Error(\"source example " + String(index) + "\")\n"
+            + String(repeating: "stable source line " + String(index) + "\n", count: 180)
+        messages.append(HarnessModelMessage(
+            role: "user",
+            text: "Command exit 0. Output:\n" + output + "\nNext: ONE read command."
+        ))
+    }
+
+    let projection = HarnessCodexConversationBudget.project(messages)
+    #expect(projection.compactedObservationTurnCount > 0)
+    #expect(projection.messages[2].text.contains("historical tool output truncated"))
+    #expect(projection.messages[2].text.contains("exit code 0 retained"))
+}
+
+@Test("explicit diagnostic lines remain protected")
+func explicitDiagnosticLinesRemainProtected() {
+    var messages = [HarnessModelMessage(role: "user", text: "Accepted brief: investigate the failure.")]
+    for index in 0..<4 {
+        messages.append(HarnessModelMessage(role: "assistant", text: "Result " + String(index) + "."))
+        let output = "Error: command " + String(index) + " failed\n" + String(repeating: "diagnostic detail\n", count: 500)
+        messages.append(HarnessModelMessage(
+            role: "user",
+            text: "Command exit 0. Output:\n" + output + "\nNext: ONE read command."
+        ))
+    }
+
+    let projection = HarnessCodexConversationBudget.project(messages)
+    #expect(projection.targetWasExceeded)
+    #expect(projection.messages[2].text.contains("Error: command 0 failed"))
+    #expect(!projection.messages[2].text.contains("historical tool output truncated"))
+}
+
 @Test("different numeric observations are not conflated as duplicates")
 func numericObservationsStayDistinct() {
     var messages = [HarnessModelMessage(role: "user", text: "Accepted brief: inspect the process state.")]

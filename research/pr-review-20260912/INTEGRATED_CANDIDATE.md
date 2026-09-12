@@ -57,6 +57,13 @@ Iris data.
   preview and confirmation flow; normal Iris does not expose it. Successive
   installed deliveries still retain their backups. This is not a general
   automatic storage-growth solution.
+- Managed replacement also has a default 2 GiB logical backup admission check
+  in `replaceBundleWithRecoveryReceipt`, repeated in `atomicallyReplaceBundle`
+  before the backup/swap. `BackupRetentionChecks` covers exact-cap and over-cap
+  cases. The guard can refuse an update without removing a backup; it does not
+  reclaim space or cap source/build caches. Default-policy destinations outside
+  the managed backup root are excluded. No concurrency-atomic or physical-disk
+  ceiling is claimed.
 - Cleanup checks cannot make a separate recovery writer or external filesystem
   mutation atomic with receipt deletion. Mid-pass unlink failure has not been
   forced in a deterministic test. No valuable profile cleanup was attempted.
@@ -90,25 +97,29 @@ integration pass. The fresh Xcode Test product was copied to
 `/Applications/Iris Test.app` only after the old Test bundle was moved to the
 recoverable backup above. Normal Iris was not replaced.
 
-Fresh checks:
+Recorded component checks, with their original run boundaries:
 
-- The final 175-source headless native module compiled. Source aggregate:
+- An earlier 175-source headless native module compiled with reported aggregate:
   `129b03b583a6c3ec7118a574e703512e940e594254301a0c4804a5d36661b2b6`.
+  This aggregate was not rederived for the later cleanup UI source and must not
+  certify the latest source or installed artifact. The fresh cleanup GUI build
+  and its installed hash are identified separately above. Commits after the
+  cleanup implementation through this checkpoint change review documentation.
 - The upstream-merged 175-source headless native module compiled with 262
   warnings. Guide/controller/shell regressions: 68 tests in 5 suites passed,
   including actual disposable PTY processes and held asynchronous ownership
   cases. The merged build preserves the ownership and timeout fixes and adds the
   catalog-guide/recovery changes from upstream.
 - Harness package: 112 tests in 5 suites passed. Usability package: 134 tests
-  in 17 suites passed. Those suites were rerun during final integration; the
-  subsequent timeout change touches only Runner and its focused guide tests.
+  in 17 suites passed. These are the recorded integration package runs, not a
+  claim that every suite was re-executed after every later app-source change.
 - Full inert executor checks passed before the final timeout-only correction.
-  The final module's defensive checks passed: candidate policy 7 groups,
+  The recorded module's defensive checks passed: candidate policy 7 groups,
   candidate boundary 2 groups and image-input boundary 2 groups. These are
   confined tests, not proof that all attacks are prevented.
 - Standalone backup retention 7 groups, registry 6 groups, Test app delivery 3
-  groups, and saved version lifecycle checks passed against the current
-  combined module. The canonical shared-scratch correction in the delivery
+  groups, and saved version lifecycle checks passed against the combined
+  module used for those runs. The canonical shared-scratch correction in the delivery
   fixture removes a test-only `/private/tmp` alias failure; it does not loosen
   production path checks. Repository context and source-refusal checks remain
   recorded from the preceding combined module.

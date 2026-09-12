@@ -1,6 +1,6 @@
 # Current review status matrix
 
-As of September 12, 01:45 Pacific, through the follow-up source/build work on
+As of September 12, 02:40 Pacific, through the follow-up source/build work on
 the review branch. The latest installed Test debug-library hash is
 `2186fd84c07b38dcfdf8942f0b88d4bc4e61e0600a04637047346115cc81e304`; the new
 cleanup UI was exercised and then copied into the installed Test bundle. The
@@ -23,6 +23,7 @@ boundaries. Full details are in [INTEGRATED_CANDIDATE.md](INTEGRATED_CANDIDATE.m
 | New disposable QA app lifecycle | Actual UI plus later failure | Dashboard reached, but subsequent relaunch failed with missing helper/invalid app metadata. Shared launchability checks were hardened; fresh successful full lifecycle remains unproven. |
 | Recovery primitives | Controlled disposable fixtures | Named receipt, identity, interrupted-swap, dirty-source and changed-backup cases passed. Forced UI crash and recovery after a new accepted complex change were not observed. |
 | Backup cleanup | Test-only UI plus controlled fixtures | One selected registered Test project showed a conservative preview and required explicit confirmation. One disposable obsolete backup was removed; recent/newest/existing rollback and ambiguous shared-reference cases were retained or refused safely. No automatic installation/delivery/Undo caller exists and no valuable backup was removed. Successive deliveries are not generally bounded. |
+| Backup admission budget | Source wiring plus controlled fixtures | Managed replacement checks a default 2 GiB logical backup budget and rechecks before the swap. Exact-cap and over-cap cases were tested. This may stop further updates; it is not automatic reclamation, a concurrency-atomic disk ceiling or a limit on source/build caches. |
 | Review-context selection | Component | Bounded possible-consumer selection tested under unchanged context limits. No measured live feature-success or dollar-cost improvement. |
 | Transfer intake | Actual Test UI | Scope, choices and readable plan observed. Intake only. |
 | Transfer correctness | Independent review rejection | Trials 18–21 rejected provenance/order/repeated-copy defects. No accepted transfer, install or post-transfer Undo. |

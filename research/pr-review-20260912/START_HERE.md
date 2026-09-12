@@ -1,6 +1,6 @@
 # Iris PR review package
 
-Current status, September 12 at 08:15 UTC: **draft for review, with upstream conflicts resolved**. GitHub reports the branch mergeable against `945d135`. Mergeability is not release readiness; no PR merge or release has occurred.
+Current status, September 12 at 09:40 UTC: **draft for review, with upstream conflicts resolved**. GitHub reports the branch mergeable against `945d135`. Mergeability is not release readiness; no PR merge or release has occurred.
 
 This index reflects code through `9267ebf`. The latest installed Iris Test
 debug-library SHA-256 is `2186fd84c07b38dcfdf8942f0b88d4bc4e61e0600a04637047346115cc81e304`.
@@ -25,6 +25,11 @@ build and installed evidence rather than inherit every earlier result.
   the truthful unavailable record. There is still no automatic lifecycle caller
   and successive successful deliveries remain retained; general automatic
   storage bounds are not solved.
+- The managed replacement path has a default 2 GiB logical backup admission
+  check, repeated before the swap. Over-budget updates can be refused before
+  replacement. This is not automatic reclamation, an atomic concurrency-wide
+  disk ceiling, or a cap on source/build caches. The default policy excludes
+  destinations outside the managed backup root.
 - A disposable NitroAI QA app reached its dashboard, then failed a later relaunch with a missing helper/invalid app metadata. Launchability checks were strengthened afterward. Do not count the failed relaunch as a successful lifecycle pass.
 - Saved-login Keychain access still failed on this machine. Recovery instructions do not establish fixed credential or permission continuity. Precise spatial highlighting and concurrent installation/editing remain unaccepted.
 - Build warnings remain. A matching signature, successful build or mergeable Git branch does not cover these missing behaviors.

@@ -397,6 +397,30 @@ nonisolated struct CatalogAppInventoryEntry: Identifiable, Equatable, Sendable {
     /// icon. Kept in memory with the rest of the installed-app inventory.
     var installedBundlePath: String? = nil
 
+    init(
+        slug: String,
+        name: String,
+        macBundleId: String?,
+        latestReleaseTag: String?,
+        guideSlug: String? = nil,
+        installationState: CatalogAppInstallationState,
+        updateAvailability: CatalogAppUpdateAvailability,
+        isLocallyEditable: Bool,
+        macCompatibility: CatalogMacCompatibility = .unknown,
+        installedBundlePath: String? = nil
+    ) {
+        self.slug = slug
+        self.name = name
+        self.macBundleId = macBundleId
+        self.latestReleaseTag = latestReleaseTag
+        self.guideSlug = guideSlug
+        self.installationState = installationState
+        self.updateAvailability = updateAvailability
+        self.isLocallyEditable = isLocallyEditable
+        self.macCompatibility = macCompatibility
+        self.installedBundlePath = installedBundlePath
+    }
+
     var id: String { slug }
 
     var isInstalled: Bool {

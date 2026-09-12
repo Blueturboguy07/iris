@@ -7,6 +7,7 @@ It records the installed Iris Test candidate, fresh regression checks, actual
 control interactions, terminal and guide ownership fixes, bounded source
 diagnostics and explicit saved-backup protection. It does not establish a
 successful complex-transfer feature or resolve upstream merge conflicts.
+The broader execution contract is [iris-test-whole-system-plan.md](../../docs/testing/iris-test-whole-system-plan.md); it is the working plan for the full intake, delivery, computer-use and defensive loop.
 
 Follow-ups after frozen snapshot `e79b401`: [installer retry ownership](FOLLOWUP_RETRY_OWNERSHIP.md) and [standalone package wiring](FOLLOWUP_PACKAGE_WIRING.md). The latter now passes 134 tests. The baseline findings below remain historical; these follow-ups do not establish full installer or complex-feature acceptance.
 
@@ -24,7 +25,7 @@ Test before its behavior can join this evidence.
 
 ## Decision in one minute
 
-- Native source compilation, the fresh 110-test harness suite, signing checks,
+- Native source compilation, the fresh 112-test harness suite, signing checks,
   and recorded controlled recovery probes pass. A fresh standalone usability
   package build failed on missing shared-helper wiring; that is disclosed WIP.
 - A small NitroAI search journey, and an earlier small PlantGPT journey, were

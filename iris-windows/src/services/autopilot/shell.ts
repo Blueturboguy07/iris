@@ -62,6 +62,13 @@ export interface ShellSession {
   /// Where the session currently is, for surfacing on failure.
   currentDirectory(): string;
 
+  /// The red 'Stop' escape hatch: kill the command running right now, and its
+  /// whole process tree (a `winget`/`npm` install spawns children). Distinct
+  /// from `dispose`, which tears the session down at the end of a run — `abort`
+  /// is the reader stopping a run mid-flight, and it must reach the descendants,
+  /// not just the top PowerShell. A no-op when nothing is running.
+  abort(): void;
+
   /// Shuts the session down.
   dispose(): void;
 }
@@ -100,6 +107,13 @@ export class MockShell implements ShellSession {
 
   currentDirectory(): string {
     return this.cwd;
+  }
+
+  /// Records that the escape hatch fired, so a test can assert the shell was
+  /// told to kill the running process tree.
+  aborted = false;
+  abort(): void {
+    this.aborted = true;
   }
 
   dispose(): void {

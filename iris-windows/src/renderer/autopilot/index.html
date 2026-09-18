@@ -29,7 +29,10 @@
       <!-- macOS-Terminal chrome. -->
       <div class="terminal" id="terminal">
         <div class="titlebar" id="titlebar">
-          <span class="lights"><i class="light red"></i><i class="light amber"></i><i class="light green"></i></span>
+          <!-- The red light is the escape hatch: clicking it stops the install
+               and folds this window away. Made a real control (not decoration)
+               so it is never a dead button. -->
+          <span class="lights"><button type="button" class="light red" id="stop" title="Stop the install" aria-label="Stop the install"></button><i class="light amber"></i><i class="light green"></i></span>
           <span class="title" id="title">iris — installing</span>
         </div>
         <div class="scrollback" id="scrollback" aria-live="polite"></div>

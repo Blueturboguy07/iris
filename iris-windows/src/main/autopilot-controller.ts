@@ -12,7 +12,14 @@
 import { recipeForSlug } from "../services/autopilot/recipes";
 import { recipeClonesARepo, type InstallRecipe, type RecipeOutput } from "../services/autopilot/recipe";
 import { AutopilotRunner, type AutopilotEvent, type RunnerStatus } from "../services/autopilot/runner";
+import type { FixLadder } from "../services/autopilot/fix-ladder";
 import type { ShellSession } from "../services/autopilot/shell";
+import {
+  runSetupDetour,
+  type DetourClock,
+  type ToolProbe,
+} from "../services/autopilot/setup-detour";
+import { defaultWatchExecutor, type WatchStepExecutor } from "../services/autopilot/watch";
 import { PowerShellSession } from "./powershell-session";
 import { PosixShellSession } from "./posix-shell-session";
 
@@ -65,6 +72,12 @@ export interface AutopilotHost {
   /// app refresh its list. Carries the whole `FinishedInstall`, not just the
   /// output, so provenance can be recorded at the one moment it is knowable.
   onFinished(finishedInstall: FinishedInstall): void;
+  /// The reader hit the red 'Stop': the run is over and its shell has been
+  /// killed. The host folds the autopilot window away — mirroring macOS
+  /// `onAutopilotDidStop`, which the escape hatch calls unconditionally so the
+  /// reader is never left with a window and no way out. Optional so existing
+  /// hosts/tests need not implement it.
+  onAborted?(): void;
 }
 
 export class AutopilotController {
@@ -78,20 +91,43 @@ export class AutopilotController {
   constructor(
     private readonly host: AutopilotHost,
     private readonly makeShell: () => ShellSession = defaultShell,
-    // Injected so tests can drive recipes the built-in set does not carry; in
-    // production it is the reviewed, version-pinned recipe registry.
-    private readonly resolveRecipe: (slug: string) => InstallRecipe | undefined = recipeForSlug,
+    // Injected so tests can drive recipes the built-in set does not carry. In
+    // production it is the guide-backed resolver (fetch the publik guide, derive
+    // a recipe, fall back to the built-in table only when the fetch fails), so it
+    // may answer asynchronously; a synchronous resolver (the built-in table, the
+    // test doubles) is still accepted unchanged because `await` passes a plain
+    // value straight through.
+    private readonly resolveRecipe: (
+      slug: string,
+    ) => InstallRecipe | undefined | Promise<InstallRecipe | undefined> = recipeForSlug,
+    // Builds the self-repair ladder for one install, or undefined when the app
+    // has no model key to power it — the ladder then degrades to "surface
+    // immediately". Injected so `index.ts` can wire the reader's own model
+    // provider and the OS strings while this class stays testable with none; the
+    // default gives no ladder, so a failed command surfaces exactly as before.
+    private readonly makeFixLadder: (recipe: InstallRecipe) => FixLadder | undefined = () => undefined,
+    // The setup-recovery detour's seams (tool probing + wall clock). Present in
+    // production (wired in `main/index.ts`); absent in unit tests that are not
+    // exercising the detour, in which case the detour is skipped entirely so a
+    // recipe's prerequisite checks never shell out in the suite.
+    private readonly detourSeams: { readonly probe: ToolProbe; readonly clock: DetourClock } | undefined = undefined,
+    // Builds the watch executor a `verify`/watched step blocks on. The default
+    // runs the real Windows PowerShell side signals; the visual rung stays inert
+    // until a host wires screenshot capture + a model evaluator into it. Injected
+    // (and one-per-install) so tests can hand in a fake with no OS calls.
+    private readonly makeWatchExecutor: () => WatchStepExecutor = () => defaultWatchExecutor(),
   ) {}
 
-  /// Whether Iris knows how to install this app on Windows.
-  canInstall(slug: string): boolean {
-    return this.resolveRecipe(slug) !== undefined;
+  /// Whether Iris knows how to install this app on Windows. Async because the
+  /// production resolver answers from the fetched guide.
+  async canInstall(slug: string): Promise<boolean> {
+    return (await this.resolveRecipe(slug)) !== undefined;
   }
 
   /// Begins an install and pumps it to the first thing that needs a human (or to
   /// the end). Throws only if the slug has no recipe.
   async start(slug: string): Promise<RunnerStatus> {
-    const recipe = this.resolveRecipe(slug);
+    const recipe = await this.resolveRecipe(slug);
     if (recipe === undefined) {
       throw new Error(`Iris has no Windows recipe for '${slug}'.`);
     }
@@ -109,10 +145,68 @@ export class AutopilotController {
     this.dispose();
     this.shell = this.makeShell();
     this.recipe = recipe;
+    // Captured so the detour, and the resume after it, can tell whether `abort()`
+    // ran while they were suspended: `abort()` disposes the controller, which
+    // nulls `this.shell`, so `this.shell !== installShell` is the abort signal.
+    const installShell = this.shell;
+
+    // Before the recipe's first step, walk the setup-recovery detour: check the
+    // prerequisites the recipe needs but does not install (git, node), and if
+    // any is missing, install it (winget under the grant) or send the reader to
+    // its download page and wait for it to appear. A detour that gives up
+    // surfaces here rather than marching into a recipe whose first step would
+    // fail on a missing tool. Skipped when the detour seams are not wired
+    // (unit tests that are not exercising it).
+    if (this.detourSeams !== undefined) {
+      const detour = await runSetupDetour(recipe, installShell, {
+        probe: this.detourSeams.probe,
+        clock: this.detourSeams.clock,
+        platform: process.platform,
+        autonomyGranted: true,
+        emit: (event) => this.forwardEvent(event),
+        // The red 'Stop' disposes this controller (nulling `this.shell`); once it
+        // has, the detour must stop rather than keep installing tools and opening
+        // pages behind a folded-away window. It also stops the resume below from
+        // handing a disposed shell to the runner.
+        shouldCancel: () => this.shell !== installShell,
+      });
+      // The abort raced the detour to completion: the shell it would run on is
+      // gone. End here without building the runner — the crash the old code hit
+      // was `runUntilBlocked(undefined)` after exactly this.
+      if (detour.kind === "cancelled" || this.shell !== installShell) {
+        return { type: "aborted", stepIndex: 0 };
+      }
+      if (detour.kind === "surfaced") {
+        const status: RunnerStatus = { type: "surfaced", stepIndex: 0, reason: detour.reason };
+        this.host.emitEvent({ type: "surfaced", reason: detour.reason });
+        this.dispose();
+        return status;
+      }
+    }
+
     // Granted, so the runner runs the whole vetted install hands-off (only the
-    // catastrophe floor can still stop a command).
-    this.runner = new AutopilotRunner(recipe, process.platform, true);
-    return this.pump(await this.runner.runUntilBlocked(this.shell));
+    // catastrophe floor can still stop a command). The fix ladder, when the
+    // reader has a model key, lets a failed command self-repair before it ever
+    // reaches them; the watch executor lets a `verify`/watched step confirm
+    // itself and advance without a tap. Both are undefined-tolerant.
+    this.runner = new AutopilotRunner(
+      recipe,
+      process.platform,
+      true,
+      this.makeFixLadder(recipe),
+      this.makeWatchExecutor(),
+      // Live event sink: forward each event the instant the runner emits it —
+      // exactly as the setup detour above already does — so a `handedToReader`
+      // ("your turn") or a chained run reaches the renderer as it happens, not
+      // batched when `runUntilBlocked` finally resolves after a multi-minute
+      // watch. `pump`'s `drainEvents` then returns empty, so nothing is
+      // double-sent.
+      (event) => this.forwardEvent(event),
+    );
+    // `installShell`, not `this.shell`: the guard above proved they are the same
+    // object here, and the local is provably non-undefined, so a resume never
+    // hands the runner a shell an abort disposed.
+    return this.pump(await this.runner.runUntilBlocked(installShell));
   }
 
   /// The reader tapped "run it" / "skip" on a confirm-tier command.
@@ -131,6 +225,41 @@ export class AutopilotController {
     return this.pump(await this.runner.readerFinishedCurrentStep(this.shell));
   }
 
+  /// The reader chose "Try again" on a surfaced step — re-run it from the top.
+  async retry(): Promise<RunnerStatus> {
+    if (this.runner === undefined || this.shell === undefined) {
+      throw new Error("No install is running.");
+    }
+    return this.pump(await this.runner.retryCurrentStep(this.shell));
+  }
+
+  /// The reader chose "Continue past it" on a surfaced step — skip it and go on.
+  async continuePast(): Promise<RunnerStatus> {
+    if (this.runner === undefined || this.shell === undefined) {
+      throw new Error("No install is running.");
+    }
+    return this.pump(await this.runner.continuePastCurrentStep(this.shell));
+  }
+
+  /// The red 'Stop' escape hatch. Kills the running step's process tree, marks
+  /// the run terminal (no further step runs), streams the `aborted` event to the
+  /// terminal, and folds the window away via the host. Unconditional and
+  /// idempotent — safe when nothing is running, mirroring macOS
+  /// `abortOrCloseAutopilotFromTheEscapeHatch`, so the button is never dead.
+  abort(): RunnerStatus {
+    const status: RunnerStatus = this.runner ? this.runner.abort() : { type: "aborted", stepIndex: 0 };
+    // Forward the `aborted` event (and anything else queued) before the runner
+    // is torn down, so the terminal shows the run ending.
+    for (const event of this.runner?.drainEvents() ?? []) {
+      this.host.emitEvent(event);
+    }
+    // Kill the running command's whole process tree, then tear the session down.
+    this.shell?.abort();
+    this.dispose();
+    this.host.onAborted?.();
+    return status;
+  }
+
   dispose(): void {
     this.shell?.dispose();
     this.shell = undefined;
@@ -143,12 +272,7 @@ export class AutopilotController {
   /// and opening the finished app.
   private pump(status: RunnerStatus): RunnerStatus {
     for (const event of this.runner?.drainEvents() ?? []) {
-      this.host.emitEvent(event);
-      if (event.type === "openRequested") {
-        this.host.openExternal(event.href);
-      } else if (event.type === "handedToReader") {
-        this.host.floatToGate(event.instruction, event.href);
-      }
+      this.forwardEvent(event);
     }
     if (status.type === "finished") {
       // Capture the clone path (the shell's cwd) BEFORE dispose tears the
@@ -158,6 +282,18 @@ export class AutopilotController {
       this.dispose();
     }
     return status;
+  }
+
+  /// Streams one event to the renderer and performs the app-only side effect it
+  /// implies. Shared by the runner pump and the setup detour so an `openRequested`
+  /// from either one opens its URL the same way.
+  private forwardEvent(event: AutopilotEvent): void {
+    this.host.emitEvent(event);
+    if (event.type === "openRequested") {
+      this.host.openExternal(event.href);
+    } else if (event.type === "handedToReader") {
+      this.host.floatToGate(event.instruction, event.href);
+    }
   }
 
   /// Assembles the `FinishedInstall` handed to `onFinished` from the recipe the

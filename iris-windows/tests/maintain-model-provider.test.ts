@@ -213,3 +213,37 @@ describe("firstAvailableMaintainProvider — resolution, never the funded proxy"
     expect(provider).toBeUndefined();
   });
 });
+
+describe("the per-call timeout (finding: the model call was the one unbounded wait)", () => {
+  /** A fetch that never resolves — a hung TCP connection / broken proxy. */
+  function hangingFetch(): FetchLike {
+    return () => new Promise(() => {});
+  }
+
+  it("Anthropic: a stalled request is abandoned as requestFailed rather than blocking forever", async () => {
+    const provider = new AnthropicMaintainProvider(() => "sk-ant-key", hangingFetch(), 20);
+    const detail = await failureDetail(provider.respond(A_TURN));
+    expect(detail.kind).toBe("requestFailed");
+    if (detail.kind === "requestFailed") {
+      expect(detail.reason).toMatch(/didn't respond in time/i);
+    }
+  });
+
+  it("OpenAI: a stalled request is abandoned as requestFailed rather than blocking forever", async () => {
+    const provider = new OpenAIMaintainProvider(() => "sk-openai-key", hangingFetch(), 20);
+    const detail = await failureDetail(provider.respond(A_TURN));
+    expect(detail.kind).toBe("requestFailed");
+    if (detail.kind === "requestFailed") {
+      expect(detail.reason).toMatch(/didn't respond in time/i);
+    }
+  });
+
+  it("a request that answers within the deadline is unaffected by the bound", async () => {
+    const { fetchImplementation } = recordingFetch({
+      body: JSON.stringify({ content: [{ type: "text", text: "on time" }] }),
+    });
+    // A generous bound the instant fake resolves well inside.
+    const provider = new AnthropicMaintainProvider(() => "sk-ant-key", fetchImplementation, 10_000);
+    expect(await provider.respond(A_TURN)).toBe("on time");
+  });
+});

@@ -20,6 +20,7 @@
   const trayText = document.getElementById("tray-text");
   const trayButtons = document.getElementById("tray-buttons");
   const titleEl = document.getElementById("title");
+  const stopButton = document.getElementById("stop");
 
   const MIN_COMMAND_VISIBLE_MS = 1500; // a command reads as work for at least this long
   const BETWEEN_STEPS_MS = 700; // a deliberate breath between steps
@@ -198,6 +199,14 @@
         ]);
         break;
 
+      case "fixProposed":
+        // The fix ladder's plain-English line — what the model diagnosed or what
+        // Iris is about to try — shown between the failing command and its retry.
+        stopRunningFriendlyLine();
+        addLine(`◐ ${event.diagnosis}`, "fix");
+        await sleep(180);
+        break;
+
       case "surfaced":
         if (runningCursor) {
           runningCursor.remove();
@@ -206,9 +215,30 @@
         stopRunningFriendlyLine();
         addLine(`⚠ ${event.reason}`, "info");
         if (event.failingCommand) addLine(event.failingCommand, "output");
-        showTray("Iris couldn't finish this one on its own — take it from here.", [
-          { label: "Try again", primary: true, onClick: () => resume("autopilot_reader_done") },
-        ]);
+        // The "Your turn" row, mirroring the macOS surface: Iris tried to repair
+        // this and couldn't, so the reader chooses — re-run the same step, or
+        // skip it and carry on with the rest of the install.
+        showTray(
+          "Iris couldn't finish this one on its own — take it from here.",
+          [
+            { label: "Try again", primary: true, onClick: () => resume("autopilot_retry") },
+            { label: "Continue past it", onClick: () => resume("autopilot_continue_past") },
+          ],
+          { eye: true },
+        );
+        break;
+
+      case "aborted":
+        // The reader hit the red 'Stop'. The main process kills the running
+        // process tree and folds this window away; show that the run ended so a
+        // frame that renders before the window closes reads honestly.
+        if (runningCursor) {
+          runningCursor.remove();
+          runningCursor = null;
+        }
+        stopRunningFriendlyLine();
+        hideTray();
+        addLine("■ Stopped. Iris ended the install.", "info");
         break;
 
       case "finished":
@@ -232,6 +262,21 @@
     }
   }
 
+  // The red 'Stop' escape hatch. Aborts the running step's process tree and ends
+  // the run; the main process folds this window away via `onAborted`. Guarded so
+  // a double-click can't fire two aborts.
+  let aborting = false;
+  async function stopInstall() {
+    if (aborting) return;
+    aborting = true;
+    if (stopButton) stopButton.disabled = true;
+    try {
+      await native.invoke("autopilot_abort", {});
+    } catch (error) {
+      addLine(`Iris couldn't stop cleanly: ${String(error && error.message ? error.message : error)}`, "info");
+    }
+  }
+
   let installStarted = false;
   async function beginInstall() {
     if (installStarted) return;
@@ -250,6 +295,7 @@
       return;
     }
     if (slug) titleEl.textContent = `iris — installing ${slug}`;
+    if (stopButton) stopButton.addEventListener("click", () => void stopInstall());
     native.listen("autopilot:event", (event) => enqueue(event));
     // The window opens as the eye; the main process sends "terminal" once it has
     // glided to centre, and "eye" again when we ask to collapse. The install

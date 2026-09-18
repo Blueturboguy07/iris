@@ -1,7 +1,8 @@
 import { app, BrowserWindow, dialog, ipcMain, screen, shell } from "electron";
 import { execFile } from "node:child_process";
+import os from "node:os";
 import path from "node:path";
-import { createTray } from "./tray";
+import { createTray, observeAutopilotEventForTray, setTrayInstallActive, clearTrayYourTurn } from "./tray";
 import { SettingsStore } from "./settings";
 import { CompanionManager } from "./companion";
 import { AccountSession, configuredSupabaseProject } from "./account-session";
@@ -14,6 +15,13 @@ import { classifyExternalLink, refusalMessage } from "../services/external-links
 import { boundedCommandOutput, toolSpecFor } from "../services/tool-versions";
 import { secretStorageIsAvailable } from "./secrets";
 import { AutopilotController, type FinishedInstall } from "./autopilot-controller";
+import { guideBackedRecipeResolver } from "../services/autopilot/guide-recipe-resolver";
+import type { InstallRecipe } from "../services/autopilot/recipe";
+import type { FetchLike } from "../services/guide-service";
+import { FixLadder, ModelFixProposer, hostsReachedByRecipe } from "../services/autopilot/fix-ladder";
+import { defaultWatchExecutor } from "../services/autopilot/watch";
+import { firstAvailableMaintainProvider } from "../services/maintain/model-provider";
+import { RegistryRefreshingToolProbe, RealDetourClock } from "./setup-detour-host";
 import { MaintainController, type MaintainHost } from "./maintain/controller";
 import type { MaintainAskAnswer, MaintainIncidentSnapshot } from "../services/maintain/incident-coordinator";
 
@@ -445,6 +453,8 @@ function openAutopilotWindow(slug: string): BrowserWindow {
     webPreferences: { preload: preloadPath(), contextIsolation: true, nodeIntegration: false },
   });
   const win = autopilotWindow;
+  // A run is now active, so the tray offers 'Stop the install' for its duration.
+  setTrayInstallActive(true);
   void win.loadFile(rendererPath("autopilot", "index.html"), { query: { slug } });
   win.webContents.once("did-finish-load", () => {
     if (win.isDestroyed()) return;
@@ -461,6 +471,10 @@ function openAutopilotWindow(slug: string): BrowserWindow {
   win.on("closed", () => {
     autopilotWindow = null;
     autopilot?.dispose();
+    // The run is over; drop the tray's 'Stop the install' item and any stale
+    // "your turn" state.
+    setTrayInstallActive(false);
+    clearTrayYourTurn();
   });
   return win;
 }
@@ -612,6 +626,27 @@ function maintainHost(): MaintainHost {
 /** The one autopilot controller, built lazily. Its host turns runner events into
  *  the app-only side effects: streaming to the terminal, opening links, floating
  *  to a gate, and opening the finished app. */
+/** The network the guide resolver reaches publik through — Electron's global
+ *  `fetch`, narrowed to the injectable `FetchLike` shape so the resolver stays a
+ *  pure, unit-tested module. Only the guides route is fetched, and only from the
+ *  allowlisted publik/localhost origins `guide-service` enforces. */
+const guideFetchImplementation: FetchLike = (url, init) =>
+  globalThis.fetch(url, init as RequestInit);
+
+/** The primary recipe resolver: fetch the app's publik guide, derive a recipe
+ *  from its Windows branch, and fall back to the built-in `recipes.ts` table only
+ *  when the fetch fails. This is what makes every guide with a Windows branch
+ *  auto-installable without a code change. */
+function productionRecipeResolver(slug: string): Promise<InstallRecipe | undefined> {
+  return guideBackedRecipeResolver({
+    apiBase: settings.get("publikBaseUrl"),
+    fetchImplementation: guideFetchImplementation,
+    // Desktop/local-web install for this computer; a mobile guide's branch is a
+    // later concern threaded from the deep link's `branch=windows:android`.
+    target: { platform: "windows" },
+  })(slug);
+}
+
 function autopilotController(): AutopilotController {
   if (autopilot) return autopilot;
   autopilot = new AutopilotController({
@@ -642,7 +677,13 @@ function autopilotController(): AutopilotController {
       if (granted) settings.set("autopilotAutonomyGranted", true);
       return granted;
     },
-    emitEvent: (event) => broadcast("autopilot:event", event),
+    emitEvent: (event) => {
+      broadcast("autopilot:event", event);
+      // Drive the tray's "your turn" state (tooltip, menu item, toast) off the
+      // same event stream — it raises when the run stops for the reader and
+      // clears when it moves again. See `services/autopilot/your-turn.ts`.
+      observeAutopilotEventForTray(event);
+    },
     openExternal: (url) => openExternalSafely(url),
     floatToGate: (instruction, href) => {
       // Bring the terminal to the reader and open the page a sign-in step points
@@ -680,8 +721,107 @@ function autopilotController(): AutopilotController {
       if (output.type === "local_web") openExternalSafely(output.url);
       broadcast("autopilot:finished", output);
     },
-  });
+    onAborted: () => {
+      // The reader hit 'Stop': fold the terminal away so they are never left
+      // with a window they can't get out of (macOS `onAutopilotDidStop`). The
+      // window's own 'closed' handler clears the tray's run state.
+      if (autopilotWindow && !autopilotWindow.isDestroyed()) autopilotWindow.close();
+    },
+  },
+  // Keep the default shell factory (PowerShell on Windows), and inject the
+  // guide-backed resolver as the primary path so `canInstall`/`start` answer
+  // from the fetched guide, with the built-in table as the offline fallback.
+  undefined,
+  productionRecipeResolver,
+  // The self-repair ladder, powered by the reader's own model key.
+  buildFixLadderForRecipe,
+  // The setup-recovery detour's real seams: a tool probe that re-reads the PATH
+  // from the registry (so a tool the detour just installed is seen) and the wall
+  // clock. Wiring them is what turns the detour on in production; the unit suite
+  // leaves them out and injects fakes.
+  { probe: new RegistryRefreshingToolProbe(), clock: new RealDetourClock() },
+  // The watch executor for `verify`/watched steps. Its toolVersion rung — the
+  // cheapest and most heavily-authored watch signal (every guide's `install-rust`
+  // watches for `cargo`, every tools check for git/node) — is wired to the same
+  // execFile-based `checkToolVersion` the `check_tool_version` IPC already uses,
+  // so it can actually verify in production instead of the "not wired" default
+  // that answers false forever. The visual capture/evaluation seams stay unwired
+  // here (they need the screenshot pipeline + a model transport); side-signal
+  // watching is fully live. Wrapped so a non-allowlisted tool — which
+  // `checkToolVersion` throws on, though the executor already refuses one before
+  // asking — can never escape as a rejection, only a quiet "not installed".
+  () =>
+    defaultWatchExecutor({
+      isToolInstalled: async (tool: string) => {
+        try {
+          return (await checkToolVersion(tool)).available;
+        } catch {
+          return false;
+        }
+      },
+    }));
   return autopilot;
+}
+
+/** Builds the self-repair ladder for one install. The proposer runs on the
+ *  reader's OWN model key (the same BYO Anthropic/OpenAI seam maintain mode
+ *  uses, never a publik host) via `firstAvailableMaintainProvider`; when no key
+ *  is configured the proposer is undefined and the ladder degrades to "surface
+ *  the failure at once with a clear reason" rather than hanging. Autonomy is
+ *  granted here because an autopilot run is only ever constructed after the
+ *  reader consented (see `start`). The funding is left at its default — the
+ *  reader's own credential, the only funding a Windows fix ladder ever runs on
+ *  (there is no funded proxy route for it) — so the per-install spend caps,
+ *  which exist to bound publik's spend, never stop the ladder for money the
+ *  reader alone is paying. */
+function buildFixLadderForRecipe(recipe: InstallRecipe): FixLadder {
+  const provider = firstAvailableMaintainProvider({
+    readAnthropicApiKey: () => settings.getAnthropicApiKey(),
+    readOpenAiApiKey: () => settings.getOpenAiApiKey(),
+  });
+  const proposer = provider ? new ModelFixProposer(provider) : undefined;
+  return new FixLadder(
+    proposer,
+    recipe,
+    hostsReachedByRecipe(recipe),
+    {
+      shellPath: process.platform === "win32" ? "powershell.exe" : process.env.SHELL ?? "/bin/zsh",
+      operatingSystemVersion: `${os.type()} ${os.release()}`,
+      architecture: os.arch(),
+      knownToolVersions: [],
+    },
+    process.platform,
+    true,
+    confirmFixCommandWithReader,
+  );
+}
+
+/** Asks the reader to approve one model-proposed repair the risk gate could not
+ *  read from its text — an opaque `$(...)`/backtick shape, which trips a confirm
+ *  tap at `model_proposed_fix` provenance even under the autonomy grant (opacity
+ *  is judged before the grant short-circuits; see `risk.ts`). Without this
+ *  wired, `FixLadder`'s `confirmFix` defaults to "always refuse", so a benign,
+ *  mechanically-correct opaque fix could never run and the ladder would burn
+ *  rungs declining fixes nobody was asked about. This is a real blocking prompt,
+ *  the analog of macOS `askTheReaderToConfirm(isFromAFix: true)` — the same
+ *  modal shape `ensureAutonomyGranted` uses above. */
+async function confirmFixCommandWithReader(command: string, reason: string): Promise<boolean> {
+  // The headless e2e has no one to answer a modal; decline rather than hang.
+  // Declining is the safe direction — it just means an opaque fix is not run.
+  if (process.env.IRIS_E2E === "1") return false;
+  const options = {
+    type: "question" as const,
+    buttons: ["Run this repair", "Skip it"],
+    defaultId: 1,
+    cancelId: 1,
+    message: "Iris found a repair it couldn't fully read. Run it?",
+    detail: `${reason}\n\nThe repair Iris wants to run:\n${command}`,
+  };
+  const parent = autopilotWindow && !autopilotWindow.isDestroyed() ? autopilotWindow : null;
+  const result = parent
+    ? await dialog.showMessageBox(parent, options)
+    : await dialog.showMessageBox(options);
+  return result.response === 0;
 }
 
 function handleGuideCommand(command: string, args: Record<string, unknown>): unknown {
@@ -757,6 +897,19 @@ function handleGuideCommand(command: string, args: Record<string, unknown>): unk
 
     case "autopilot_reader_done":
       return autopilotController().readerFinished();
+
+    case "autopilot_retry":
+      // The reader chose "Try again" on a surfaced (self-repair-exhausted) step.
+      return autopilotController().retry();
+
+    case "autopilot_continue_past":
+      // The reader chose "Continue past it" on a surfaced step.
+      return autopilotController().continuePast();
+
+    case "autopilot_abort":
+      // The red 'Stop': kill the running step's process tree and end the run.
+      // The host's `onAborted` folds the window away.
+      return autopilotController().abort();
 
     case "foreground_app_identity":
       // Windows has no cross-process foreground-app API without a native module.
@@ -909,6 +1062,18 @@ if (gotSingleInstanceLock) {
             settingsWindow = null;
           });
         }
+      },
+      onYourTurn: () => {
+        // Land the reader on the install that is waiting for them.
+        if (autopilotWindow && !autopilotWindow.isDestroyed()) {
+          autopilotWindow.show();
+          autopilotWindow.focus();
+        }
+      },
+      onStopInstall: () => {
+        // The tray's half of the escape hatch — same funnel as the window's red
+        // 'Stop'. `onAborted` folds the window away.
+        autopilotController().abort();
       },
       onQuit: () => app.quit(),
     });

@@ -36,11 +36,24 @@ export function psSingleQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
-/// The script Iris wraps every command in: pin the location, run the command in
-/// its own block, then report the exit code and the resulting location on marker
-/// lines the parser looks for.
+/// Rebuilds `$env:Path` from the machine and user `Path` values in the registry,
+/// the live source of truth an installer writes to. Every command runs in a fresh
+/// `powershell.exe` that inherits the Electron process's PATH — captured when Iris
+/// launched, so blind to anything installed since (a winget/rustup/uv install the
+/// autopilot just ran). Re-reading the registry per command is what lets the very
+/// next step see the tool the last step installed, without restarting Iris. This
+/// is the Windows answer to macOS's `reloadTheReadersEnvironmentIntoTheShell`.
+export const REFRESH_PATH_FROM_REGISTRY =
+  "$env:Path = " +
+  "[System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + " +
+  "[System.Environment]::GetEnvironmentVariable('Path','User')";
+
+/// The script Iris wraps every command in: refresh PATH from the registry, pin
+/// the location, run the command in its own block, then report the exit code and
+/// the resulting location on marker lines the parser looks for.
 export function wrapCommandScript(command: string, cwd: string): string {
   return [
+    REFRESH_PATH_FROM_REGISTRY,
     `Set-Location -LiteralPath ${psSingleQuote(cwd)}`,
     "$global:LASTEXITCODE = 0",
     `& { ${command} }`,
@@ -101,6 +114,10 @@ export class PowerShellSession implements ShellSession {
   // Long-running children (dev servers) kept alive for the app's lifetime and
   // killed on dispose so the runner does not leave orphans behind.
   private readonly servers: ReturnType<typeof spawn>[] = [];
+  // The PowerShell running the current foreground command, tracked so the red
+  // 'Stop' can kill it AND its whole tree (the winget/npm/build children it
+  // spawned). Null between commands.
+  private currentChild: ReturnType<typeof spawn> | null = null;
 
   constructor(startingDirectory: string = process.env.USERPROFILE ?? "C:\\") {
     this.cwd = startingDirectory;
@@ -137,7 +154,7 @@ export class PowerShellSession implements ShellSession {
     // A dev server never exits. Start it in its own PowerShell pinned to the
     // current directory, then resolve as soon as its readiness marker appears —
     // or after the grace period — while leaving it running.
-    const script = `Set-Location -LiteralPath ${psSingleQuote(this.cwd)}\n& { ${command.text} }\n`;
+    const script = `${REFRESH_PATH_FROM_REGISTRY}\nSet-Location -LiteralPath ${psSingleQuote(this.cwd)}\n& { ${command.text} }\n`;
     const child = spawn("powershell.exe", [...POWERSHELL_ARGS, "-EncodedCommand", encodeForPowerShell(script)], {
       windowsHide: true,
     });
@@ -172,11 +189,42 @@ export class PowerShellSession implements ShellSession {
     });
   }
 
+  /// The red 'Stop': kill the running command's whole process tree, then any
+  /// long-running dev servers. `taskkill /T` walks the tree from the PowerShell
+  /// down to the `winget`/`npm`/build children it launched, which a bare
+  /// `child.kill()` (a single SIGTERM to PowerShell) would orphan. Best-effort:
+  /// a child that already exited makes `taskkill` a no-op.
+  abort(): void {
+    this.killTree(this.currentChild);
+    this.currentChild = null;
+    for (const server of this.servers) {
+      this.killTree(server);
+    }
+    this.servers.length = 0;
+  }
+
+  private killTree(child: ReturnType<typeof spawn> | null): void {
+    if (!child || child.pid === undefined) {
+      return;
+    }
+    try {
+      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
+    } catch {
+      // taskkill is missing or the pid is already gone — fall through to kill().
+    }
+    try {
+      child.kill();
+    } catch {
+      // Already dead.
+    }
+  }
+
   dispose(): void {
     for (const server of this.servers) {
       server.kill();
     }
     this.servers.length = 0;
+    this.currentChild = null;
   }
 
   private spawnEncoded(script: string, deadlineMs: number): Promise<Collected | "timed_out"> {
@@ -184,6 +232,7 @@ export class PowerShellSession implements ShellSession {
       const child = spawn("powershell.exe", [...POWERSHELL_ARGS, "-EncodedCommand", encodeForPowerShell(script)], {
         windowsHide: true,
       });
+      this.currentChild = child;
       let stdout = "";
       let stderr = "";
       let settled = false;
@@ -192,11 +241,20 @@ export class PowerShellSession implements ShellSession {
           return;
         }
         settled = true;
+        if (this.currentChild === child) {
+          this.currentChild = null;
+        }
         clearTimeout(timer);
         resolve(value);
       };
       const timer = setTimeout(() => {
-        child.kill();
+        // Kill the whole tree, not just the top PowerShell. A timed-out command
+        // (including the setup detour's unattended `winget install`, which runs
+        // under the 15-minute default deadline) has launched children —
+        // winget/msiexec/the installer — that a bare `child.kill()` would orphan,
+        // left waiting on input nobody will supply. The manual red-'Stop' path
+        // already reaps the tree via `killTree`; the deadline path must too.
+        this.killTree(child);
         finish("timed_out");
       }, deadlineMs);
 

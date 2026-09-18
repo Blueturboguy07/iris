@@ -12,9 +12,31 @@
 // a wrong specific one. Pure, so `runner.ts` can call it and vitest can pin it.
 //
 
+/// Whether a command launches an interactive GUI installer and blocks until the
+/// reader dismisses its window — a `Start-Process … -Wait` on a freshly-built or
+/// downloaded installer (the `install-app` shape shared by cue, hickeyfield,
+/// nitroai, plantgpt, publikclip, simplicity, whimprflow). Iris still runs the
+/// command (it launches the wizard), but the reader must click through the window
+/// for the `-Wait` to return — so the reader needs a cue that a wizard is waiting
+/// on them, not a silent spinner. Pure and directly tested. macOS never hits this
+/// (its equivalent step is a plain `ditto` copy), so this is a Windows-idiomatic
+/// addition rather than a straight port.
+export function commandLaunchesAGuiInstaller(command: string): boolean {
+  const lowercased = command.toLowerCase();
+  return /\bstart-process\b/.test(lowercased) && /\s-wait\b/.test(lowercased);
+}
+
 export function friendlyLabel(command: string): string {
   const lowercased = command.toLowerCase();
   const mentions = (needle: string): boolean => lowercased.includes(needle);
+
+  // An interactive installer wizard is the one shape where the plain-English line
+  // must ask the reader to DO something (click through the window) rather than
+  // just narrate — checked first so its cue is never masked by a more generic
+  // match (a `Start-Process … -Wait` on `Foo-setup.exe` reads as nothing else).
+  if (commandLaunchesAGuiInstaller(command)) {
+    return "An installer window is opening — click through it, then Iris carries on…";
+  }
 
   // Order matters: the most specific shapes first, the catch-all last.
   if (mentions("git clone")) {

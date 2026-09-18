@@ -51,6 +51,61 @@ import {
 import type { FetchLike } from "../claude";
 
 /**
+ * The ceiling on how long one model call may take before it is abandoned. Every
+ * other wait in the autopilot design is explicitly bounded (a 15-minute command
+ * timeout, a bounded watch budget, a 15-minute prerequisite-poll deadline); this
+ * was the one unbounded await, sitting directly in the failure-recovery path a
+ * hung TCP connection could freeze the whole fix ladder on. Two minutes is
+ * generous for a single ~700-token completion and still bounds a broken proxy.
+ */
+export const DEFAULT_MAINTAIN_MODEL_REQUEST_TIMEOUT_MS = 120_000;
+
+/** Thrown internally when a model call outruns its timeout, so `respond` can
+ *  report it as a `requestFailed` with an honest reason rather than a raw
+ *  rejection. `FetchLike` carries no `signal`, so the underlying socket is not
+ *  cancelled — but the AWAIT is bounded, which is what keeps the ladder (and the
+ *  whole `runUntilBlocked` chain behind it) from blocking forever on one stall. */
+class MaintainModelRequestTimeout extends Error {}
+
+/**
+ * Bounds `work` to `timeoutMilliseconds`. Resolves/rejects with `work` when it
+ * settles first; rejects with `MaintainModelRequestTimeout` when the deadline
+ * wins. A non-positive/non-finite timeout means "no bound" (the await is
+ * returned unwrapped), so a caller can opt out. The timer is `unref`'d where the
+ * runtime supports it so a pending bound never by itself keeps the process alive.
+ */
+function withRequestTimeout<T>(work: Promise<T>, timeoutMilliseconds: number): Promise<T> {
+  if (!Number.isFinite(timeoutMilliseconds) || timeoutMilliseconds <= 0) {
+    return work;
+  }
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new MaintainModelRequestTimeout(`the model did not respond within ${timeoutMilliseconds}ms`));
+    }, timeoutMilliseconds);
+    (timer as { unref?: () => void }).unref?.();
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+/** The `requestFailed` reason for a call that outran its timeout — kept in one
+ *  place so both providers report a network stall the same way. */
+function requestFailureReason(error: unknown): string {
+  if (error instanceof MaintainModelRequestTimeout) {
+    return "the model didn't respond in time";
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
  * One conversational turn, provider-agnostic. `text` is plain text (the loop
  * is text-only, no tool API) — mirrors Swift's `MaintainChatTurn`.
  */
@@ -129,14 +184,19 @@ export class AnthropicMaintainProvider implements MaintainModelProviding {
 
   private readonly readAnthropicApiKey: () => string | null;
   private readonly fetchImplementation: FetchLike;
+  private readonly requestTimeoutMilliseconds: number;
 
   constructor(
     /** Reads the user's stored Anthropic key, or null when there is none. */
     readAnthropicApiKey: () => string | null,
-    fetchImplementation: FetchLike = globalThis.fetch as unknown as FetchLike
+    fetchImplementation: FetchLike = globalThis.fetch as unknown as FetchLike,
+    /** The per-call deadline; the default bounds the one wait that used to be
+     *  unbounded. A test passes a tiny value to prove the bound fires. */
+    requestTimeoutMilliseconds: number = DEFAULT_MAINTAIN_MODEL_REQUEST_TIMEOUT_MS
   ) {
     this.readAnthropicApiKey = readAnthropicApiKey;
     this.fetchImplementation = fetchImplementation;
+    this.requestTimeoutMilliseconds = requestTimeoutMilliseconds;
   }
 
   isAvailable(): boolean {
@@ -172,15 +232,18 @@ export class AnthropicMaintainProvider implements MaintainModelProviding {
 
     let response: Awaited<ReturnType<FetchLike>>;
     try {
-      response = await this.fetchImplementation(preparedRequest.url, {
-        method: preparedRequest.method,
-        headers: preparedRequest.headers,
-        body: JSON.stringify(body),
-      });
+      response = await withRequestTimeout(
+        this.fetchImplementation(preparedRequest.url, {
+          method: preparedRequest.method,
+          headers: preparedRequest.headers,
+          body: JSON.stringify(body),
+        }),
+        this.requestTimeoutMilliseconds
+      );
     } catch (error) {
       throw new MaintainModelProviderFailure({
         kind: "requestFailed",
-        reason: error instanceof Error ? error.message : String(error),
+        reason: requestFailureReason(error),
       });
     }
 
@@ -240,14 +303,19 @@ export class OpenAIMaintainProvider implements MaintainModelProviding {
 
   private readonly readOpenAiApiKey: () => string | null;
   private readonly fetchImplementation: FetchLike;
+  private readonly requestTimeoutMilliseconds: number;
 
   constructor(
     /** Reads the user's stored OpenAI key, or null when there is none. */
     readOpenAiApiKey: () => string | null,
-    fetchImplementation: FetchLike = globalThis.fetch as unknown as FetchLike
+    fetchImplementation: FetchLike = globalThis.fetch as unknown as FetchLike,
+    /** The per-call deadline; the default bounds the one wait that used to be
+     *  unbounded. A test passes a tiny value to prove the bound fires. */
+    requestTimeoutMilliseconds: number = DEFAULT_MAINTAIN_MODEL_REQUEST_TIMEOUT_MS
   ) {
     this.readOpenAiApiKey = readOpenAiApiKey;
     this.fetchImplementation = fetchImplementation;
+    this.requestTimeoutMilliseconds = requestTimeoutMilliseconds;
   }
 
   isAvailable(): boolean {
@@ -268,23 +336,26 @@ export class OpenAIMaintainProvider implements MaintainModelProviding {
 
     let response: Awaited<ReturnType<FetchLike>>;
     try {
-      response = await this.fetchImplementation(OPENAI_CHAT_COMPLETIONS_URL, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${openAiApiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: OPENAI_MODEL_ID,
-          messages,
-          max_tokens: options.maximumOutputTokens,
-          temperature: 0,
+      response = await withRequestTimeout(
+        this.fetchImplementation(OPENAI_CHAT_COMPLETIONS_URL, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${openAiApiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: OPENAI_MODEL_ID,
+            messages,
+            max_tokens: options.maximumOutputTokens,
+            temperature: 0,
+          }),
         }),
-      });
+        this.requestTimeoutMilliseconds
+      );
     } catch (error) {
       throw new MaintainModelProviderFailure({
         kind: "requestFailed",
-        reason: error instanceof Error ? error.message : String(error),
+        reason: requestFailureReason(error),
       });
     }
 
@@ -338,16 +409,24 @@ export function firstAvailableMaintainProvider(options: {
   readonly readAnthropicApiKey: () => string | null;
   readonly readOpenAiApiKey: () => string | null;
   readonly fetchImplementation?: FetchLike;
+  /** The per-call deadline for whichever provider is chosen; defaults to
+   *  `DEFAULT_MAINTAIN_MODEL_REQUEST_TIMEOUT_MS`. */
+  readonly requestTimeoutMilliseconds?: number;
 }): MaintainModelProviding | undefined {
   const anthropicProvider = new AnthropicMaintainProvider(
     options.readAnthropicApiKey,
-    options.fetchImplementation
+    options.fetchImplementation,
+    options.requestTimeoutMilliseconds
   );
   if (anthropicProvider.isAvailable()) {
     return anthropicProvider;
   }
 
-  const openAiProvider = new OpenAIMaintainProvider(options.readOpenAiApiKey, options.fetchImplementation);
+  const openAiProvider = new OpenAIMaintainProvider(
+    options.readOpenAiApiKey,
+    options.fetchImplementation,
+    options.requestTimeoutMilliseconds
+  );
   if (openAiProvider.isAvailable()) {
     return openAiProvider;
   }

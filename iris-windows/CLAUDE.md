@@ -138,20 +138,69 @@ allowlist of names, and the test table — in that order.
 the macOS Swift autopilot. It is pure and unit-tested (`tests/autopilot-*.test.ts`):
 `recipe.ts` (the schema), `risk.ts` (the command gate), `runner.ts` (the no-click
 state machine driven against a `ShellSession`), `shell.ts` (the interface +
-`MockShell`), `recipes.ts` (the built-in recipes). The real shell —
+`MockShell`), `recipes.ts` (the built-in recipes), `fix-ladder.ts` (the
+self-repair ladder), `watch.ts` (the watch-expectation executor), and
+`setup-detour.ts` (the prerequisite-recovery detour + missing-tool self-heal).
+The real shell —
 `src/main/powershell-session.ts` — spawns one PowerShell per command and threads
 the working directory forward, so it lives in `main/`; its pure parsing helpers
 are unit-tested and the whole thing is exercised end to end by
 `tests/autopilot.e2e.test.ts` on the windows-latest runner (guarded to `win32`).
 
+**Recipes are now derived from guides, not just the built-in table.** The primary
+resolver is `guide-recipe-resolver.ts`: it fetches the app's publik guide
+(`guide-service.fetchGuide`), decodes it strictly and leniently
+(`guide-model.ts`, mirroring `IrisGuideModels.swift` — unknown kind → terminal,
+unknown expectation dropped, TOTAL so a malformed payload never throws), and
+derives an `InstallRecipe` from its Windows branch (`guide-recipe.ts`). The
+`recipes.ts` table is now the OFFLINE fallback, used only when the fetch fails.
+`AutopilotController` takes an injected `resolveRecipe` (now awaitable; `canInstall`
+is async) and `main/index.ts` wires the guide-backed resolver in; the guide is
+cached by `slug:version` for the session. The derivation maps a `terminal`/`check`
+step with a command → `command` (long-running via the ported
+`GuideAutopilotCommandShape.holdsTheShellOpen` heuristics), a command-less step →
+`noop`, `open` → `open`, `permission`/`web`/`paste` → reader-handled kinds, and
+`verify` → a new `verify` kind that carries the guide's watch expectations for the
+watch-loop port (the runner self-completes `noop`/`verify`, mirroring macOS's
+nil-command → succeeded). A branch the guide marks `unsupported` (Windows + iPhone)
+resolves to a typed unsupported result, never a recipe. Setup steps become
+`recipe.prerequisites` for the setup-detour port.
+
 **Trust boundary — this relaxes the allowlist invariant.** `tool-versions.ts` says
 no command is ever built from guide text. The autopilot deliberately runs commands
-that *do* come from a recipe, so `risk.ts` is the compensating control and the
-relaxation is bounded three ways: provenance (recipes are reviewed, version-pinned
-data in this repo, not fetched-as-text guides), a three-tier gate (refuse / one
-tap / run) that mirrors the macOS `GuideAutopilotRiskAssessment.swift`, and an
-un-forgeable `ApprovedCommand` the shell is the only thing that will run. If you
-add a recipe or loosen the gate, keep those three intact and update the tests.
+that *do* come from a recipe — a built-in one, or one derived from a fetched guide
+— so `risk.ts` is the compensating control and the relaxation is bounded three
+ways: provenance (the HTTPS-fetched, version-pinned guide JSON that publik serves —
+the same provenance the macOS side runs on — decoded, never executed as text; the
+built-in `recipes.ts` entries are the same shape reviewed in-repo), a three-tier
+gate (refuse / one tap / run) that mirrors the macOS
+`GuideAutopilotRiskAssessment.swift`, and an un-forgeable `ApprovedCommand` the
+shell is the only thing that will run. If you add a recipe, change the derivation,
+or loosen the gate, keep those three intact and update the tests.
+
+**The failure-fix ladder (`fix-ladder.ts`, self-repair).** When a `command`
+step exits non-zero and a `FixLadder` is wired, the runner asks the reader's OWN
+model (the maintain BYO Anthropic/OpenAI seam, never a publik host) for ONE
+structured fix, runs it under `risk.ts` at `model_proposed_fix` provenance,
+retries the original, and only surfaces to the reader once it runs out of rungs,
+budget, or ideas. Three guardrails, ported from the macOS
+`GuideAutopilot*FixProposer` + `climbTheFixLadder`: (1) a **host allowlist** —
+`validatedFix` refuses a proposed command reaching any host the recipe's own
+commands/links do not already name (the structural answer to a hallucinated
+hostname); (2) the **stricter gate** — a model fix is assessed at
+`model_proposed_fix`, where opacity (`$()`, backticks) trips a tap even for a
+command that would otherwise run; (3) **caps + a progress guard** — 2 rungs/step,
+6 fixes/guide, 8 model calls/guide, and 5 consecutive spending-but-never-running
+steps. No key configured ⇒ the ladder surfaces immediately with a clear reason,
+it never hangs. The model transport is the Codex plain-text contract (ONE fenced
+json block → the ONE validator both routes share), because `respond()` has no
+tool-use wire format to force. Exhaustion surfaces the failing command with the
+"Try again / Continue past it" choice (`autopilot_retry` /
+`autopilot_continue_past` IPC → `AutopilotRunner.retryCurrentStep` /
+`continuePastCurrentStep`). The ladder is INJECTED (default undefined = surface
+at once, the old behaviour), so it is a small hook in `runner.ts` and the whole
+loop is unit-tested in `tests/autopilot-fix-ladder.test.ts` with a fake provider
+and a `MockShell`.
 
 **Autonomy grant (mirrors the macOS side).** For a vetted, pinned recipe the
 per-command taps are friction, so the reader grants "Let Iris take control of
@@ -168,6 +217,105 @@ not reached in production (still unit-tested at the runner level). The terminal
 shows a plain-English `friendlyLabel` per command (`friendly-label.ts`) with the
 raw command dimmed, and a spinner while running. Keep every risk pattern literal
 present in `risk.ts` — the web guide tests grep for them.
+
+**Watch-expectation executor (`watch.ts`).** The Windows analog of the macOS
+adaptive `WatchLoop`, scoped to what the runner needs: given a step's `watch`
+block (`{ sensitive?, expect: Expectation[] }`), `WatchStepExecutor.awaitStepCompletion`
+blocks — bounded — until one expectation verifies, cheapest-first (`toolVersion`
+→ `foregroundApp` → `urlHost` → `axElement` → `visual`), then the step advances
+with no tap. A `verify` step is pure watch; a reader step (sign_in/permission/manual)
+that carries a watch surfaces "your turn" up front but is auto-advanced the moment
+the watch verifies, and only handed back (with `verifierLabel`) on timeout. The
+runner emits `watchVerified`/`watchTimedOut`. Because the runner is a *pumped*
+machine (not a background timer like macOS), this is an awaitable the runner calls
+inline; every OS call is an injected seam (`WatchSeams`) with a real default, so
+the whole thing is faked in vitest. The foreground read reuses
+`app-inventory.ts`'s `GetForegroundWindow` seam; `urlHost`/`axElement` are
+PowerShell UI Automation one-liners (`buildActiveBrowserUrlCommand` /
+`buildAxElementQueryCommand`, exercised by hand via `tests/windows-only/watch-seams.ps1`
+on a real box). A `foregroundApp` expectation's guide identity (a macOS bundle id)
+is mapped to a Windows exe through a reviewed table keyed off `WINDOWS_CATALOG_APPS`.
+The `visual` rung (screenshot + a model verdict, budgeted ≤ 8/step and ≥ 10 s
+apart, NEVER for a `sensitive` step) is fully implemented and tested but its two
+seams — capture and model evaluation — default to "not wired": they need `main/`'s
+screenshot pipeline and a model transport a host injects, so side-signal watching
+works today and the visual rung lights up when a host supplies those.
+**Working-directory-aware gate.** `assess`/`approve`/`approveAfterAReaderTap` also
+take an options form (`{ provenance, autonomyGranted?, workingDirectory? }`)
+alongside the original positional one. The command text alone can't show where it
+runs, so the folder is judged separately: a Windows system folder (`C:\Windows`,
+`C:\Program Files*`, `%SystemRoot%`), a drive root, or a `..`-escape out of the
+guide's folder is refused outright — even under the grant, like the catastrophe
+floor (`forbiddenWorkingDirectory` / `escapesIntoAForbiddenPlace`). The runner
+passes the step's `workingDirectoryForPlatform` into the gate. A `model_proposed_fix`
+is also judged for opacity BEFORE the grant short-circuit, so the grant a reader
+gives a vetted install never launders an untrusted model's download-and-run or
+`-EncodedCommand` command.
+
+**The red 'Stop' escape hatch.** `ShellSession.abort()` kills the running step's
+whole process tree (`taskkill /pid … /T /F` on Windows), and `AutopilotRunner.abort()`
+puts the run in a terminal `aborted` state so no further step runs — an in-flight
+command's outcome is discarded, not surfaced. `AutopilotController.abort()` is
+unconditional and idempotent (the macOS `abortOrCloseAutopilotFromTheEscapeHatch`
+dead-button fix) and folds the window away via the host's `onAborted`. Reachable
+from the autopilot window's red traffic-light and the tray's "Stop the install".
+
+**Tray "your turn".** `services/autopilot/your-turn.ts` is a pure reducer over the
+event stream deciding when the tray says "your turn" (a sign-in/permission/manual
+step, a confirm tap, or a surfaced failure) and when to fire the one-off Windows
+toast; `main/tray.ts` is the Electron adaptor, fed from the host's `emitEvent`.
+
+### Guided install parity (Sep 2026)
+
+The five autopilot ports above (`guide-recipe*`, `fix-ladder`, `setup-detour`,
+`watch`, `risk`/`your-turn`/escape hatch) were developed concurrently and merged
+onto `windows-parity`; this section is the single map of how they compose. One
+install now runs, end to end:
+
+1. **Prerequisites detour** — `AutopilotController.start` calls `runSetupDetour`
+   (`setup-detour.ts`) before the recipe's first step: any tool the recipe
+   *verifies but does not install* (git, node) that is missing is installed via
+   winget under the grant, or the reader is sent to its download page and Iris
+   polls until it appears. A detour that gives up surfaces; it never marches into
+   a recipe whose first step would fail.
+2. **Derived recipe steps** — the recipe itself is derived from the fetched publik
+   guide (`guide-recipe-resolver.ts` → `guide-recipe.ts` → the reviewed
+   `RecipeStep` schema), the built-in `recipes.ts` table being the offline
+   fallback only.
+3. **Per step**: the **WD-aware risk gate** (`risk.ts`, judging the declared
+   folder as well as the command text) → **execute** → **watch expectations**
+   (`watch.ts`: a `verify` step, and any reader step carrying a `watch` block,
+   blocks on `WatchStepExecutor.awaitStepCompletion` and advances the moment one
+   expectation verifies, else hands to the reader). A `noop` step self-completes;
+   a `verify` step is NOT self-completing anymore.
+4. **On a failed command**, in order: **exit-127 self-heal**
+   (`trySelfHealMissingTool` re-runs the recipe's own earlier install step once
+   and retries — the cheap deterministic rung) → **fix ladder** (`fix-ladder.ts`,
+   the reader's own model proposes ONE fix, gated at `model_proposed_fix`
+   provenance behind the recipe's host allowlist, capped) → **surface "Your
+   turn"** (the tray state + the "Try again / Continue past it" choice).
+5. **Escape hatch**: `AutopilotController.abort()` (the red 'Stop', tray "Stop the
+   install") kills the running step's process tree and marks the run terminal
+   from anywhere in the flow; an in-flight outcome is discarded, never surfaced.
+
+Reconciled invariants worth keeping:
+
+- **One expectation type.** The guide's verify/watch signals decode into
+  `WatchExpectation`/`StepWatch` and the derivation carries the guide's `watch`
+  block through verbatim onto `RecipeStep.watch` — the same field the runner and
+  `watch.ts` read. (The earlier split where the derivation wrote a separate
+  `verifyExpectations` the runner never read is gone; do not reintroduce it.)
+- **The runner constructor arg order is** `(recipe, platform, autonomyGranted,
+  fixLadder?, watchExecutor?, eventSink?)`; the **controller's is** `(host,
+  makeShell?, resolveRecipe?, makeFixLadder?, detourSeams?, makeWatchExecutor?)`.
+  Every hook past `autonomyGranted`/`makeShell` is optional and undefined-tolerant,
+  so the pure suite drives the runner with none of them. `eventSink`, when set,
+  makes the runner forward each event live (the controller wires it to
+  `forwardEvent`) instead of buffering it for `drainEvents` — so a `handedToReader`
+  reaches the reader before a multi-minute watch begins, not after
+  `runUntilBlocked` finally resolves.
+- **Self-heal runs before the fix ladder** (deterministic before model), and both
+  run before anything surfaces.
 
 ## Style
 

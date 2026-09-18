@@ -165,10 +165,10 @@ describe("the autopilot controller", () => {
     expect(shell.commandsRun).toEqual(["Set-ExecutionPolicy Bypass -Scope Process"]);
   });
 
-  it("knows which apps it can install", () => {
+  it("knows which apps it can install", async () => {
     const { controller } = controllerFor(localWebRecipe);
-    expect(controller.canInstall("web")).toBe(true);
-    expect(controller.canInstall("nope")).toBe(false);
+    expect(await controller.canInstall("web")).toBe(true);
+    expect(await controller.canInstall("nope")).toBe(false);
   });
 
   it("throws when asked to install an app it has no recipe for", async () => {

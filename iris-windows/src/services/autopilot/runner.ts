@@ -15,11 +15,18 @@
 // an instruction the UI floats the eye next to.
 //
 
-import type { InstallRecipe, RecipeOutput, RecipeStep, StepCheck, StepKind } from "./recipe";
-import { commandForPlatform, workingDirectoryForPlatform } from "./recipe";
+import type { InstallRecipe, RecipeOutput, RecipeStep, StepCheck, StepKind, WatchExpectation } from "./recipe";
+import { advancesWithoutRunningAnything, commandForPlatform, workingDirectoryForPlatform } from "./recipe";
 import type { ApprovedCommand, Provenance } from "./risk";
-import { approve, approveAfterAReaderTap, assess } from "./risk";
+import { approve, approveAfterAReaderTap, assess, forbiddenWorkingDirectory } from "./risk";
 import { friendlyLabel } from "./friendly-label";
+// Type-only: the ladder is INJECTED (the controller builds it with the model
+// provider + the recipe's hosts), so the runner needs its shape, never its
+// module at runtime — which also keeps the fix-ladder↔runner import a type cycle,
+// not a value one.
+import type { FixLadder } from "./fix-ladder";
+import { firstProgramToken, selfHealStepForFailure } from "./setup-detour";
+import type { WatchStepExecutor } from "./watch";
 import {
   DEFAULT_COMMAND_TIMEOUT_MS,
   LONG_RUNNING_GRACE_MS,
@@ -84,15 +91,36 @@ export type AutopilotEvent =
   /// `text`, for a non-technical reader (see `friendly-label.ts`).
   | { readonly type: "commandStarted"; readonly text: string; readonly friendlyLabel: string }
   | { readonly type: "commandFinished"; readonly exitCode: number; readonly output: string }
+  /// The fix ladder's plain-English line for what the model diagnosed / did on a
+  /// failed command, shown between the failing command and its retry (or the
+  /// surface). Streamed by `FixLadder`, never by a clean step.
+  | { readonly type: "fixProposed"; readonly diagnosis: string }
   /// The main process should open this URL/app; opening it is the whole step.
   | { readonly type: "openRequested"; readonly href: string }
+  /// A prerequisite the recipe needs was missing, so the setup-recovery detour
+  /// began. Lists each missing tool with the page that installs it; emitted once,
+  /// before any download page is opened, by `runSetupDetour`.
+  | { readonly type: "setupDetour"; readonly missing: readonly { readonly tool: string; readonly downloadHref: string }[] }
+  /// A command died because a tool it needs was not on the PATH, and the recipe
+  /// has its own earlier step for installing that tool. Iris is re-running that
+  /// step now, before it treats the failure as a real failure.
+  | { readonly type: "installingMissingTool"; readonly tool: string; readonly command: string }
   /// Only the reader can finish this. Float the eye to it and show this.
   | { readonly type: "handedToReader"; readonly instruction: string; readonly href?: string }
   /// A command needs one explicit tap before it runs.
   | { readonly type: "needsConfirm"; readonly command: string; readonly reason: string }
   /// A command no tap can make informed; the install stops here for the reader.
   | { readonly type: "surfaced"; readonly reason: string; readonly failingCommand?: string }
+  /// A watched step's expectation verified on its own — the step advanced with
+  /// no tap. `verifiedBy` names which expectation settled it.
+  | { readonly type: "watchVerified"; readonly index: number; readonly verifiedBy: WatchExpectation["type"] }
+  /// A watched step's expectations never verified within the bounded wait, so
+  /// Iris hands it back to the reader with `verifierLabel`.
+  | { readonly type: "watchTimedOut"; readonly index: number; readonly verifierLabel: string }
   | { readonly type: "advanced"; readonly index: number }
+  /// The reader hit the red 'Stop'. The run is over; the running command's
+  /// process tree is being killed by the shell, and no further step runs.
+  | { readonly type: "aborted" }
   | { readonly type: "finished"; readonly output: RecipeOutput };
 
 /// Why the runner stopped pumping. Everything except `finished`/`sessionFailed`
@@ -110,6 +138,9 @@ export type RunnerStatus =
     }
   | { readonly type: "needsConfirm"; readonly stepIndex: number; readonly command: string; readonly reason: string }
   | { readonly type: "surfaced"; readonly stepIndex: number; readonly reason: string; readonly failingCommand?: string }
+  /// Terminal, like `finished`: the reader stopped the run from the escape
+  /// hatch. Not resumable — a new install starts a new runner.
+  | { readonly type: "aborted"; readonly stepIndex: number }
   | { readonly type: "sessionFailed" };
 
 type StepProgress = { readonly kind: "advanced" } | { readonly kind: "blocked"; readonly status: RunnerStatus };
@@ -117,7 +148,16 @@ type StepProgress = { readonly kind: "advanced" } | { readonly kind: "blocked"; 
 export class AutopilotRunner {
   private index = 0;
   private finished = false;
+  /// Set by `abort()` (the red 'Stop'). Once true the machine is terminal: the
+  /// drive loop stops before the next step, and a command whose outcome is still
+  /// in flight is discarded rather than surfaced when the killed shell returns.
+  private aborted = false;
   private events: AutopilotEvent[] = [];
+  // Steps that have already had the missing-tool self-heal run for them, so a
+  // step is repaired at most once: if it still fails as "command not found"
+  // after the recipe's own install step was re-run, it escalates (surfaces)
+  // rather than looping. Mirrors macOS running the guide's install step once.
+  private readonly selfHealedStepIds = new Set<string>();
   // The URL a dev-server step actually served on, if it differed from the recipe
   // default (e.g. Vite moved to :5174 because :5173 was taken). Used so the
   // "open" step lands on the app that is really there.
@@ -134,6 +174,28 @@ export class AutopilotRunner {
     // production an autopilot run is always granted; kept a parameter (default
     // false) so the un-granted three-tier behavior stays unit-testable.
     private readonly autonomyGranted: boolean = false,
+    // The self-repair ladder, built once per install by the controller with the
+    // reader's own model provider and this recipe's reachable hosts. Undefined
+    // keeps the old behavior EXACTLY — a failed command surfaces at once instead
+    // of trying to recover — which is what every existing caller and test relies
+    // on. When present, a non-zero exit runs the ladder before surfacing.
+    private readonly fixLadder: FixLadder | undefined = undefined,
+    // Watches a step's `watch` expectations and blocks a `verify` step until one
+    // verifies — the Windows analog of the macOS adaptive `WatchLoop`. Injected
+    // so the whole runner stays testable with a fake; undefined means "no
+    // watching wired", and a watched step then falls back to the reader handoff.
+    private readonly watchExecutor: WatchStepExecutor | undefined = undefined,
+    // A live sink for events, so the host can render them AS they happen rather
+    // than only after `runUntilBlocked` resolves. When undefined (every existing
+    // caller and the whole pure suite), the runner buffers events in `this.events`
+    // for `drainEvents` exactly as before. When present (the production controller
+    // wires it), each event is forwarded the instant it is emitted instead of
+    // buffered — so a `handedToReader` ("your turn") surfaced before a
+    // multi-minute watch reaches the reader immediately, and a long watched or
+    // chained stretch is not invisible until it ends. Mirrors the macOS drive loop
+    // mutating observable state step by step as it runs, and matches the setup
+    // detour, which already forwards its events live.
+    private readonly eventSink: ((event: AutopilotEvent) => void) | undefined = undefined,
   ) {}
 
   private commandFor(step: RecipeStep): string | undefined {
@@ -167,7 +229,14 @@ export class AutopilotRunner {
   }
 
   private emit(event: AutopilotEvent): void {
-    this.events.push(event);
+    // Live-forward when a sink is wired (production), else buffer for the caller
+    // to drain (every runner-level test). Exclusive so a wired host never sees the
+    // same event twice — a live event and then a drained copy of it.
+    if (this.eventSink !== undefined) {
+      this.eventSink(event);
+    } else {
+      this.events.push(event);
+    }
   }
 
   private advance(): void {
@@ -180,10 +249,34 @@ export class AutopilotRunner {
     return { type: "surfaced", stepIndex: this.index, reason, failingCommand };
   }
 
+  private abortedStatus(): RunnerStatus {
+    return { type: "aborted", stepIndex: this.index };
+  }
+
+  /// The red 'Stop' escape hatch. Marks the run terminal so the drive loop halts
+  /// and any in-flight command's outcome is discarded rather than surfaced; the
+  /// CALLER kills the running shell's process tree (`ShellSession.abort`). Safe
+  /// to call from any state — an already-finished or already-aborted run stays
+  /// as it is — mirroring macOS `abortOrCloseAutopilotFromTheEscapeHatch`, which
+  /// closes unconditionally.
+  abort(): RunnerStatus {
+    if (!this.aborted && !this.finished) {
+      this.aborted = true;
+      this.finished = true;
+      this.emit({ type: "aborted" });
+    }
+    return this.abortedStatus();
+  }
+
   /// Runs and auto-advances every step Iris owns until it either finishes, or
   /// reaches something only the reader can settle.
   async runUntilBlocked(shell: ShellSession): Promise<RunnerStatus> {
     for (;;) {
+      // The reader may have hit 'Stop' between steps (or while the last command
+      // was running); stop before starting another.
+      if (this.aborted) {
+        return this.abortedStatus();
+      }
       if (this.index >= this.recipe.steps.length) {
         this.finished = true;
         const output = this.effectiveOutput();
@@ -209,15 +302,100 @@ export class AutopilotRunner {
       }
 
       if (step.kind === "open") {
-        // Opening it is the entire step — no tap, no wait.
+        // Opening the link is always the first thing Iris does for this step.
         if (step.href !== undefined) {
           this.emit({ type: "openRequested", href: step.href });
         }
+        // With NO watch block, opening it IS the whole step — advance with no
+        // tap, exactly as before. With a non-empty watch (a manual GUI installer
+        // whose completion Iris can confirm: cargo on PATH, a URL host, the page's
+        // visual state — the `install-rust`/`open-store` shape live in 7 of the 18
+        // guides), opening the page is NOT the finish: the reader still has to run
+        // the installer, so the step falls through to the shared watch block below,
+        // which surfaces "your turn" up front and advances the moment the watch
+        // verifies. Mirrors macOS `stepIsFinishedOnceIrisHasOpenedIt`, which
+        // auto-advances an opened step only when its watch is empty.
+        const hasWatchToConfirm = step.watch !== undefined && step.watch.expect.length > 0;
+        if (!hasWatchToConfirm) {
+          this.advance();
+          continue;
+        }
+        // else: fall through to the shared `verify`/watch block below — reached
+        // because the block's condition includes `step.watch !== undefined`.
+      }
+
+      if (advancesWithoutRunningAnything(step.kind)) {
+        // A prose `noop` step: nothing for the command runner to do, so it
+        // succeeds the instant it is reached — the same as macOS's nil-command →
+        // succeeded. (A `verify` step is NOT self-completing anymore; it is
+        // settled by the watch block just below.)
         this.advance();
         continue;
       }
 
-      // sign_in / permission / manual: only the reader can finish it.
+      // A `verify` step, or any reader step carrying a `watch` block, is settled
+      // by watching the reader's machine rather than by a tap — the Windows
+      // analog of the macOS adaptive watch loop. A `verify` step is pure watch
+      // (Iris surfaces nothing until it either verifies or times out); a reader
+      // step (sign_in/permission/manual) that carries a watch still surfaces
+      // "your turn" up front so the reader can act, and is advanced without a tap
+      // the moment the watch verifies. A reader step with no watch falls through
+      // to the plain handoff below, unchanged.
+      if (step.kind === "verify" || step.watch !== undefined) {
+        const isReaderStep = step.kind !== "verify";
+        const readerInstruction = isReaderStep ? this.instructionFor(step) : this.verifierLabelFor(step);
+
+        if (isReaderStep) {
+          this.emit({ type: "handedToReader", instruction: readerInstruction, href: step.href });
+        }
+
+        const canWatch =
+          this.watchExecutor !== undefined &&
+          step.watch !== undefined &&
+          step.watch.expect.length > 0;
+        if (canWatch) {
+          const outcome = await this.watchExecutor!.awaitStepCompletion(step.watch!, {
+            stepTitle: step.title,
+            commandTheStepAsksFor: this.commandFor(step),
+            // The red 'Stop' cancels an in-flight watch: the executor polls this
+            // between rungs and returns promptly. Without it the watch keeps
+            // spawning PowerShell for up to its whole no-progress budget after the
+            // run is already terminal, and could still emit a stale
+            // watchVerified/advance. Mirrors macOS `WatchLoop.stopWatching()`
+            // cancelling its ticking task the instant the escape hatch fires.
+            shouldAbort: () => this.aborted,
+          });
+          // Stopped while the watch was polling: the run is terminal, so discard
+          // the outcome exactly as an in-flight command's outcome is discarded —
+          // no watchVerified, no watchTimedOut, no advance.
+          if (this.aborted || outcome.kind === "aborted") {
+            return this.abortedStatus();
+          }
+          if (outcome.kind === "verified") {
+            this.emit({ type: "watchVerified", index: this.index, verifiedBy: outcome.verifiedBy });
+            this.advance();
+            continue;
+          }
+          // Timed out: the watch could not confirm it, so hand it back.
+          this.emit({ type: "watchTimedOut", index: this.index, verifierLabel: this.verifierLabelFor(step) });
+        }
+
+        // Either nothing was watchable, or the watch timed out. A reader step
+        // already surfaced above; a verify step surfaces the handoff now.
+        if (!isReaderStep) {
+          this.emit({ type: "handedToReader", instruction: readerInstruction, href: step.href });
+        }
+        return {
+          type: "needsReader",
+          stepIndex: this.index,
+          instruction: readerInstruction,
+          href: step.href,
+          check: step.check,
+        };
+      }
+
+      // sign_in / permission / manual / web / paste with no watch: only the
+      // reader can finish it.
       const instruction = this.instructionFor(step);
       this.emit({ type: "handedToReader", instruction, href: step.href });
       return {
@@ -232,6 +410,9 @@ export class AutopilotRunner {
 
   /// The reader tapped "run it" (or declined) on a confirm-tier command.
   async confirmCurrentCommand(approved: boolean, shell: ShellSession): Promise<RunnerStatus> {
+    if (this.aborted) {
+      return this.abortedStatus();
+    }
     const step = this.currentStep();
     if (step === undefined) {
       return this.runUntilBlocked(shell);
@@ -243,7 +424,15 @@ export class AutopilotRunner {
     if (!approved) {
       return this.surface("You skipped this command, so Iris stopped here.", command);
     }
-    const approvedCommand = approveAfterAReaderTap(command, RECIPE_PROVENANCE, this.autonomyGranted);
+    // Judge against the folder the command will run in — its declared folder, or
+    // the shell's real location when it declares none — so the tap approves the
+    // command as it will actually run, not on its text alone.
+    const workingDirectory = this.gateWorkingDirectory(step, shell);
+    const approvedCommand = approveAfterAReaderTap(command, {
+      provenance: RECIPE_PROVENANCE,
+      autonomyGranted: this.autonomyGranted,
+      workingDirectory,
+    });
     if (approvedCommand === undefined) {
       return this.surface("Iris won't run this command automatically.", command);
     }
@@ -253,8 +442,25 @@ export class AutopilotRunner {
 
   /// The reader finished a sign-in / permission / manual step. Resume.
   async readerFinishedCurrentStep(shell: ShellSession): Promise<RunnerStatus> {
+    if (this.aborted) {
+      return this.abortedStatus();
+    }
     this.advance();
     return this.runUntilBlocked(shell);
+  }
+
+  /// The folder to JUDGE a step's command against: the folder the step declares,
+  /// or — when it declares none — where the shell is actually sitting right now.
+  /// The gate's working-directory floor (a system folder, a drive root, a `..`-
+  /// or embedded-`cd`-escape) must stay live for EVERY command, not only the
+  /// steps that happen to name a folder: in a multi-step recipe only the step
+  /// after the clone declares one, and if the shell's real location ever diverges
+  /// from what the recipe declares (an earlier step or a fix left a `Set-Location`
+  /// behind), an undeclared step must still be judged against where it truly runs.
+  /// Mirrors macOS `assess(_, inWorkingDirectory: step.workingDirectory ??
+  /// shellSession.currentWorkingDirectory)`.
+  private gateWorkingDirectory(step: RecipeStep, shell: ShellSession): string {
+    return workingDirectoryForPlatform(step, this.platform) ?? shell.currentDirectory();
   }
 
   private async runCommandStep(step: RecipeStep, shell: ShellSession): Promise<StepProgress> {
@@ -262,9 +468,19 @@ export class AutopilotRunner {
     if (command === undefined) {
       return { kind: "blocked", status: this.surface("This step has no command to run.") };
     }
-    const verdict = assess(command, RECIPE_PROVENANCE, this.autonomyGranted);
+    // The folder the step runs in is part of the verdict: a system folder or a
+    // `..`-escape is refused even under the grant (see `risk.ts`). When the step
+    // declares no folder, the shell's real current directory is used instead, so
+    // the floor is never silently skipped for an undeclared-folder step.
+    const workingDirectory = this.gateWorkingDirectory(step, shell);
+    const gateOptions = {
+      provenance: RECIPE_PROVENANCE,
+      autonomyGranted: this.autonomyGranted,
+      workingDirectory,
+    };
+    const verdict = assess(command, gateOptions);
     if (verdict.tier === "runs_without_asking") {
-      const approved = approve(command, RECIPE_PROVENANCE, this.autonomyGranted)!;
+      const approved = approve(command, gateOptions)!;
       return this.execute(approved, step, shell);
     }
     if (verdict.tier === "needs_a_confirm_tap") {
@@ -301,10 +517,24 @@ export class AutopilotRunner {
       }
     }
 
+    // Stopped during the (hidden) folder move; don't start the command.
+    if (this.aborted) {
+      return { kind: "blocked", status: this.abortedStatus() };
+    }
+
     this.emit({ type: "commandStarted", text: rawCommand, friendlyLabel: friendlyLabel(rawCommand) });
     const outcome: CommandOutcome = step.longRunning
       ? await shell.runLongRunning(approved, step.readyWhen, LONG_RUNNING_GRACE_MS)
       : await shell.run(approved, DEFAULT_COMMAND_TIMEOUT_MS);
+
+    // The reader hit 'Stop' while this command was in flight. The shell's
+    // process tree has been (or is being) killed, so whatever the killed
+    // command reports back — a non-zero exit, a session failure — is not a real
+    // result and must not be surfaced as a step that "didn't finish cleanly".
+    // The run is already terminal; discard the outcome.
+    if (this.aborted) {
+      return { kind: "blocked", status: this.abortedStatus() };
+    }
 
     switch (outcome.kind) {
       case "succeeded":
@@ -312,19 +542,228 @@ export class AutopilotRunner {
         this.emit({ type: "commandFinished", exitCode: 0, output: outcome.output });
         this.advance();
         return { kind: "advanced" };
-      case "failed":
+      case "failed": {
         this.emit({ type: "commandFinished", exitCode: outcome.exitCode, output: outcome.output });
-        // The failure ladder (a model proposing a fix) is a later increment; for
-        // now a failed command surfaces rather than pretending to recover.
-        return {
-          kind: "blocked",
-          status: this.surface("That command didn't finish cleanly. Here's where it stopped.", rawCommand),
-        };
+        return this.handleFailedCommand(
+          step,
+          rawCommand,
+          outcome.exitCode,
+          outcome.output,
+          approved,
+          shell,
+          "That command didn't finish cleanly. Here's where it stopped.",
+        );
+      }
+      case "timed_out": {
+        // A timeout is a failure like any other, and it gets the SAME self-heal
+        // and fix-ladder chance a non-zero exit does — otherwise a command that
+        // hangs (a `winget` waiting on an unanswerable console prompt, say) is
+        // structurally denied every repair, which a fast non-zero exit would
+        // have reached. 124 is the conventional "killed by a timeout" exit code,
+        // so the fix proposer can tell a timeout apart from a real exit. Mirrors
+        // macOS converting `.timedOut` into `.failed(exitStatus: 124)` so it
+        // flows through the identical failure ladder. `timed_out` carries no
+        // output of its own, so a plain-English line stands in.
+        const timeoutOutput = "That command took too long, so Iris stopped it.";
+        this.emit({ type: "commandFinished", exitCode: 124, output: timeoutOutput });
+        return this.handleFailedCommand(step, rawCommand, 124, timeoutOutput, approved, shell, timeoutOutput);
+      }
+      case "session_failed":
+        return { kind: "blocked", status: { type: "sessionFailed" } };
+    }
+  }
+
+  /// Shared failure handling for a command that exited non-zero OR timed out:
+  /// the cheap deterministic self-heal first (re-run the recipe's own install
+  /// step for a missing tool, mirroring macOS
+  /// `installTheMissingToolTheGuideInstallsItself` running ahead of
+  /// `climbTheFixLadder`), then the model fix ladder when one is wired, and only
+  /// then a surface with `surfaceFallback` when neither recovered it. Without a
+  /// ladder the behavior is unchanged — surface at once with that message.
+  private async handleFailedCommand(
+    step: RecipeStep,
+    rawCommand: string,
+    exitCode: number,
+    output: string,
+    approved: ApprovedCommand,
+    shell: ShellSession,
+    surfaceFallback: string,
+  ): Promise<StepProgress> {
+    const failedOutcome: Extract<CommandOutcome, { kind: "failed" }> = { kind: "failed", exitCode, output };
+    const healed = await this.trySelfHealMissingTool(step, rawCommand, failedOutcome, approved, shell);
+    if (healed !== undefined) return healed;
+    if (this.fixLadder !== undefined) {
+      return this.runFixLadder(this.fixLadder, approved, step, rawCommand, exitCode, output, shell);
+    }
+    return { kind: "blocked", status: this.surface(surfaceFallback, rawCommand) };
+  }
+
+  /// Hands a failed command to the fix ladder and translates the ladder's
+  /// verdict back into the runner's own vocabulary: a repaired step advances, a
+  /// hand-back floats the eye, and an exhausted ladder surfaces the failing
+  /// command with the diagnosis the ladder settled on (the renderer offers "Try
+  /// again / Continue past it" on that surface).
+  ///
+  /// `retryOriginal` re-runs the ALREADY-APPROVED original command — the ladder
+  /// never needs to re-approve it, because the runner minted it once and owns
+  /// where it runs. A repair may have moved the shell, so the declared folder is
+  /// re-entered first, exactly as the first run did.
+  private async runFixLadder(
+    ladder: FixLadder,
+    approved: ApprovedCommand,
+    step: RecipeStep,
+    rawCommand: string,
+    exitCode: number,
+    output: string,
+    shell: ShellSession,
+  ): Promise<StepProgress> {
+    const result = await ladder.repair({
+      step,
+      command: rawCommand,
+      exitCode,
+      output,
+      workingDirectory: shell.currentDirectory(),
+      shell,
+      retryOriginal: async () => {
+        const folder = workingDirectoryForPlatform(step, this.platform);
+        if (folder !== undefined) {
+          const moved = await this.moveInto(folder, shell);
+          if (!moved) {
+            return { kind: "failed", exitCode: 1, output: `Iris couldn't move back into ${folder} to retry.` };
+          }
+        }
+        return step.longRunning
+          ? shell.runLongRunning(approved, step.readyWhen, LONG_RUNNING_GRACE_MS)
+          : shell.run(approved, DEFAULT_COMMAND_TIMEOUT_MS);
+      },
+      emit: (event) => this.emit(event),
+      // The red 'Stop' sets `this.aborted`; the ladder polls this before each
+      // model call and fix command so a Stop halts it mid-climb instead of after
+      // it finishes spending. The shell's own `abort` kills whatever command is
+      // in flight; this stops the ladder from starting the next one.
+      shouldStop: () => this.aborted,
+    });
+
+    if (result.kind === "stopped") {
+      // The reader stopped the run while the ladder was climbing. The run is
+      // terminal; discard the ladder's outcome exactly as an in-flight command's
+      // outcome is discarded.
+      return { kind: "blocked", status: this.abortedStatus() };
+    }
+    if (result.kind === "repaired") {
+      this.advance();
+      return { kind: "advanced" };
+    }
+    if (result.kind === "hand_to_reader") {
+      this.emit({ type: "handedToReader", instruction: result.instruction });
+      return {
+        kind: "blocked",
+        status: { type: "needsReader", stepIndex: this.index, instruction: result.instruction },
+      };
+    }
+    return { kind: "blocked", status: this.surface(result.diagnosis, rawCommand) };
+  }
+
+  /// The reader chose "Try again" on a surfaced step: re-run the SAME step from
+  /// the top (its command, its folder move), rather than skipping it. Distinct
+  /// from `continuePastCurrentStep`, which skips it. Mirrors the macOS surface's
+  /// two-way "Try again / Continue past it" choice.
+  async retryCurrentStep(shell: ShellSession): Promise<RunnerStatus> {
+    return this.runUntilBlocked(shell);
+  }
+
+  /// The reader chose "Continue past it" on a surfaced step: skip the failing
+  /// step and carry on with the rest of the install.
+  async continuePastCurrentStep(shell: ShellSession): Promise<RunnerStatus> {
+    this.advance();
+    return this.runUntilBlocked(shell);
+  }
+
+  /// Repairs a "command not found" failure the recipe can fix itself: when the
+  /// failed command reached for a tool an EARLIER recipe step installs, re-run
+  /// that install step once and retry the command. Returns the resumed progress
+  /// on a repair (advanced on a clean retry, blocked/surfaced on a retry that
+  /// still failed), or undefined when this is not a self-healable failure and
+  /// the caller should surface it the ordinary way.
+  ///
+  /// Nothing here is model-proposed: the command run is one the recipe already
+  /// publishes, so it goes through the risk gate under the same provenance as
+  /// any recipe command. Once-only per step (`selfHealedStepIds`) so a genuinely
+  /// broken step escalates instead of looping.
+  private async trySelfHealMissingTool(
+    step: RecipeStep,
+    rawCommand: string,
+    outcome: Extract<CommandOutcome, { kind: "failed" }>,
+    originalApproved: ApprovedCommand,
+    shell: ShellSession,
+  ): Promise<StepProgress | undefined> {
+    if (this.selfHealedStepIds.has(step.id)) return undefined;
+    const installStep = selfHealStepForFailure(
+      this.recipe,
+      this.index,
+      rawCommand,
+      outcome.exitCode,
+      outcome.output,
+      this.platform,
+    );
+    if (installStep === undefined) return undefined;
+
+    const installCommand = this.commandFor(installStep);
+    if (installCommand === undefined) return undefined;
+    // Judge the re-run install step's command against the folder it will run in —
+    // its declared folder, or where the shell is sitting when it declares none —
+    // exactly as the per-step gate does. Reaching an earlier recipe step from the
+    // self-heal path must not skip the working-directory floor.
+    const installFolder = workingDirectoryForPlatform(installStep, this.platform);
+    const approvedInstall = approve(installCommand, {
+      provenance: RECIPE_PROVENANCE,
+      autonomyGranted: this.autonomyGranted,
+      workingDirectory: installFolder ?? shell.currentDirectory(),
+    });
+    if (approvedInstall === undefined) return undefined;
+
+    // Only now commit to the repair — from here it counts as this step's one
+    // attempt whether or not it succeeds.
+    this.selfHealedStepIds.add(step.id);
+    const missingTool = firstProgramToken(rawCommand);
+    this.emit({ type: "installingMissingTool", tool: missingTool, command: installCommand });
+
+    // Run the recipe's own install step, in the folder it declares. `moveInto`
+    // refuses a forbidden folder itself (see below), so a system-folder install
+    // folder never gets entered.
+    if (installFolder !== undefined && !(await this.moveInto(installFolder, shell))) return undefined;
+    this.emit({ type: "commandStarted", text: installCommand, friendlyLabel: friendlyLabel(installCommand) });
+    const installOutcome = await shell.run(approvedInstall, DEFAULT_COMMAND_TIMEOUT_MS);
+    if (installOutcome.kind === "session_failed") {
+      return { kind: "blocked", status: { type: "sessionFailed" } };
+    }
+    if (installOutcome.kind !== "succeeded") {
+      this.emit({
+        type: "commandFinished",
+        exitCode: installOutcome.kind === "failed" ? installOutcome.exitCode : 1,
+        output: installOutcome.kind === "failed" ? installOutcome.output : "",
+      });
+      return undefined; // install didn't take — let the caller surface the original failure
+    }
+    this.emit({ type: "commandFinished", exitCode: 0, output: installOutcome.output });
+
+    // Retry the original command, back in ITS folder. The per-command PowerShell
+    // re-reads the PATH from the registry, so the just-installed tool is visible.
+    const stepFolder = workingDirectoryForPlatform(step, this.platform);
+    if (stepFolder !== undefined && !(await this.moveInto(stepFolder, shell))) return undefined;
+    this.emit({ type: "commandStarted", text: rawCommand, friendlyLabel: friendlyLabel(rawCommand) });
+    const retry = await shell.run(originalApproved, DEFAULT_COMMAND_TIMEOUT_MS);
+    switch (retry.kind) {
+      case "succeeded":
+        if (retry.servedUrl !== undefined) this.detectedServedUrl = retry.servedUrl;
+        this.emit({ type: "commandFinished", exitCode: 0, output: retry.output });
+        this.advance();
+        return { kind: "advanced" };
+      case "failed":
+        this.emit({ type: "commandFinished", exitCode: retry.exitCode, output: retry.output });
+        return undefined; // still broken — escalate via the caller's surface
       case "timed_out":
-        return {
-          kind: "blocked",
-          status: this.surface("That command took too long, so Iris stopped it.", rawCommand),
-        };
+        return { kind: "blocked", status: this.surface("That command took too long, so Iris stopped it.", rawCommand) };
       case "session_failed":
         return { kind: "blocked", status: { type: "sessionFailed" } };
     }
@@ -346,6 +785,14 @@ export class AutopilotRunner {
   /// reader is waiting to watch; a move that FAILS is surfaced by the caller.
   private async moveInto(folder: string, shell: ShellSession): Promise<boolean> {
     if (!isAPlainFolder(folder)) return false;
+    // The single strong folder-entry gate, mirroring macOS `moveInto` calling
+    // `isASystemFolder`: a Windows system folder, a drive root, or a `..`-escape
+    // is refused even under the grant — the same absolute floor `risk.ts` applies
+    // to a step's declared workingDirectory. `isAPlainFolder` alone accepts
+    // `C:\Windows` (it only rejects `..` and shell-expandable text), so this is
+    // what protects every `moveInto` caller — including the self-heal, whose
+    // install/retry folders never route through the per-step risk gate.
+    if (forbiddenWorkingDirectory(folder) !== undefined) return false;
     const approved = approve(
       moveIntoCommandFor(folder, this.platform),
       RECIPE_PROVENANCE,
@@ -368,5 +815,17 @@ export class AutopilotRunner {
       default:
         return "Finish this step, then Iris will carry on.";
     }
+  }
+
+  /// The line shown when a watched step could not be confirmed on its own and
+  /// Iris hands it back — the step's own `verifierLabel`, or a generic sentence.
+  private verifierLabelFor(step: RecipeStep): string {
+    if (step.verifierLabel !== undefined && step.verifierLabel.length > 0) {
+      return step.verifierLabel;
+    }
+    if (step.instruction !== undefined && step.instruction.length > 0) {
+      return step.instruction;
+    }
+    return "Iris couldn't tell this step finished on its own — finish it, then it will carry on.";
   }
 }

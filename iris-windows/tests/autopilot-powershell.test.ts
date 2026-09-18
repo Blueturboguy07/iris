@@ -40,6 +40,12 @@ describe("PowerShell command wrapping", () => {
     expect(script).toContain("'Path','User'");
   });
 
+  it("silences progress records before anything runs, so no CLIXML reaches the reader", () => {
+    const script = wrapCommandScript("git status", "C:\\repo");
+    expect(script).toContain("$ProgressPreference = 'SilentlyContinue'");
+    expect(script.indexOf("$ProgressPreference")).toBeLessThan(script.indexOf(REFRESH_PATH_FROM_REGISTRY));
+  });
+
   it("encodes a script as UTF-16LE base64 that round-trips", () => {
     const encoded = encodeForPowerShell("Write-Output 'hi'");
     expect(Buffer.from(encoded, "base64").toString("utf16le")).toBe("Write-Output 'hi'");
@@ -62,6 +68,16 @@ describe("parsing a completed run", () => {
     expect(parsed.exitCode).toBe(1);
     expect(parsed.output).toContain("npm ERR!");
     expect(parsed.output).toContain("some stderr noise");
+  });
+
+  it("keeps the END of a long output — where a build prints its error — not the start", () => {
+    const filler = Array.from({ length: 2000 }, (_, i) => `   Compiling crate-${i} v0.1.0`).join("\n");
+    const stdout = [filler, "error[E0432]: unresolved import `nope`", "__IRIS_CWD__:C:\\repo", "__IRIS_CODE__:101"].join("\n");
+    const parsed = parseRun(stdout, "");
+    expect(parsed.exitCode).toBe(101);
+    expect(parsed.output.length).toBeLessThanOrEqual(8 * 1024);
+    expect(parsed.output).toContain("error[E0432]");
+    expect(parsed.output).not.toContain("Compiling crate-0 ");
   });
 
   it("treats missing markers as a failed run rather than a silent success", () => {

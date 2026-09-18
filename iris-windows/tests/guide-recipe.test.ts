@@ -228,6 +228,11 @@ describe("the derivation mapping", () => {
 
   it("marks a dev-server step long-running and a build step not", () => {
     expect(commandHoldsTheShellOpen("corepack.cmd pnpm dev")).toBe(true);
+    // The spelling the shipped Windows guides actually use: the .cmd shim.
+    expect(commandHoldsTheShellOpen("npm.cmd run dev")).toBe(true);
+    expect(commandHoldsTheShellOpen("pnpm.cmd dev")).toBe(true);
+    expect(commandHoldsTheShellOpen("bun.cmd run dev")).toBe(true);
+    expect(commandHoldsTheShellOpen("npm.cmd install")).toBe(false);
     expect(commandHoldsTheShellOpen("npm run build")).toBe(false);
     expect(commandHoldsTheShellOpen("git checkout abc123")).toBe(false);
     const guide = loadGuideFixture("openascii");

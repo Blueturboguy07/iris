@@ -30,7 +30,9 @@ nonisolated enum GuideAutopilotCommandShape {
     /// `tests/iris-guides.test.ts` mirrors it and fails a guide that adds a new one.
     static func holdsTheShellOpen(_ command: String) -> Bool {
         let patterns = [
-            #"\b(npm|pnpm|yarn|bun)\s+(run\s+)?(start|dev|watch|serve|preview|app|electron)\b"#,
+            // `(\.cmd)?` never matches on a Mac; it is here so this table stays
+            // byte-identical to the Windows port, where the guides spell `npm.cmd`.
+            #"\b(npm|pnpm|yarn|bun)(\.cmd)?\s+(run\s+)?(start|dev|watch|serve|preview|app|electron)\b"#,
             #"\bnext\s+dev\b"#,
             #"(^|\s|/)vite(\s|$)"#,
             #"\bdocker\s+compose\s+up\b(?![^\n]*\s-d\b)"#,

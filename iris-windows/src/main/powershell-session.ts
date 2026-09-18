@@ -48,11 +48,18 @@ export const REFRESH_PATH_FROM_REGISTRY =
   "[System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + " +
   "[System.Environment]::GetEnvironmentVariable('Path','User')";
 
+export const SILENCE_PROGRESS_RECORDS = "$ProgressPreference = 'SilentlyContinue'";
+
 /// The script Iris wraps every command in: refresh PATH from the registry, pin
 /// the location, run the command in its own block, then report the exit code and
 /// the resulting location on marker lines the parser looks for.
 export function wrapCommandScript(command: string, cwd: string): string {
   return [
+    // `powershell.exe -NonInteractive` serialises every progress record
+    // ("Preparing modules for first use.") to stderr as CLIXML when stderr is
+    // a pipe, and that blob then lands in the reader's transcript on every
+    // step. Progress is never useful here; silence it before anything runs.
+    SILENCE_PROGRESS_RECORDS,
     REFRESH_PATH_FROM_REGISTRY,
     `Set-Location -LiteralPath ${psSingleQuote(cwd)}`,
     "$global:LASTEXITCODE = 0",
@@ -97,7 +104,10 @@ export function parseRun(stdout: string, stderr: string): ParsedRun {
   }
 
   const combined = `${outputLines.join("\n")}\n${stderr}`.trim();
-  const output = combined.length > MAX_OUTPUT ? combined.slice(0, MAX_OUTPUT) : combined;
+  // The END of the output, not the start: a failed build prints its error last,
+  // after pages of progress. Keeping the head lost exactly the line the reader
+  // and the fix ladder needed (seen on a 5-minute `tauri build`).
+  const output = combined.length > MAX_OUTPUT ? combined.slice(-MAX_OUTPUT) : combined;
   return { exitCode, cwd, output };
 }
 
@@ -154,7 +164,7 @@ export class PowerShellSession implements ShellSession {
     // A dev server never exits. Start it in its own PowerShell pinned to the
     // current directory, then resolve as soon as its readiness marker appears —
     // or after the grace period — while leaving it running.
-    const script = `${REFRESH_PATH_FROM_REGISTRY}\nSet-Location -LiteralPath ${psSingleQuote(this.cwd)}\n& { ${command.text} }\n`;
+    const script = `${SILENCE_PROGRESS_RECORDS}\n${REFRESH_PATH_FROM_REGISTRY}\nSet-Location -LiteralPath ${psSingleQuote(this.cwd)}\n& { ${command.text} }\n`;
     const child = spawn("powershell.exe", [...POWERSHELL_ARGS, "-EncodedCommand", encodeForPowerShell(script)], {
       windowsHide: true,
     });
@@ -163,6 +173,10 @@ export class PowerShellSession implements ShellSession {
     return new Promise<CommandOutcome>((resolve) => {
       let settled = false;
       let output = "";
+      // The served URL is caught as it goes by: a dev server prints it once,
+      // early, and the rolling tail below may have scrolled it away by the time
+      // the grace period ends.
+      let servedUrl: string | undefined;
       const done = (outcome: CommandOutcome): void => {
         if (settled) {
           return;
@@ -172,15 +186,15 @@ export class PowerShellSession implements ShellSession {
         resolve(outcome);
       };
       const succeed = (): void =>
-        done({ kind: "succeeded", output: output.slice(0, MAX_OUTPUT), servedUrl: detectServedUrl(output) });
+        done({ kind: "succeeded", output, servedUrl: servedUrl ?? detectServedUrl(output) });
       const timer = setTimeout(succeed, graceMs);
 
       child.stdout?.setEncoding("utf8");
       child.stdout?.on("data", (chunk: string) => {
-        if (output.length < MAX_OUTPUT) {
-          output += chunk;
-        }
-        if (readyMarker !== undefined && output.includes(readyMarker)) succeed();
+        servedUrl ??= detectServedUrl(chunk);
+        // A rolling tail, so an early crash's last lines survive a chatty start.
+        output = (output + chunk).slice(-MAX_OUTPUT);
+        if (readyMarker !== undefined && (output.includes(readyMarker) || chunk.includes(readyMarker))) succeed();
       });
       child.on("error", () => done({ kind: "session_failed" }));
       // If the server exits on its own before it is ready, that is a failure to

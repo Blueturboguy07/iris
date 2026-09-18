@@ -66,7 +66,10 @@ export function branchKeyForTarget(target: RecipeDerivationTarget): string {
 /// Ported literally from `GuideAutopilotCommandShape.holdsTheShellOpen` — keep it
 /// a superset of the run-from-source script names any shipped guide uses.
 const COMMANDS_THAT_HOLD_THE_SHELL_OPEN: readonly RegExp[] = [
-  /\b(npm|pnpm|yarn|bun)\s+(run\s+)?(start|dev|watch|serve|preview|app|electron)\b/i,
+  // `(\.cmd)?`: on Windows the guides spell these `npm.cmd run dev` / `pnpm.cmd dev`
+  // (the .cmd shim is what PowerShell resolves), and without it every dev server
+  // ran as a blocking command until the 15-minute ceiling killed it.
+  /\b(npm|pnpm|yarn|bun)(\.cmd)?\s+(run\s+)?(start|dev|watch|serve|preview|app|electron)\b/i,
   /\bnext\s+dev\b/i,
   /(^|\s|\/)vite(\s|$)/i,
   /\bdocker\s+compose\s+up\b(?![^\n]*\s-d\b)/i,

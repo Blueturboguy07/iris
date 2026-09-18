@@ -139,6 +139,8 @@ async function main() {
     return;
   }
   const recipe = resolved.recipe;
+  console.log(`[guide-ci] resolved ${slug} windows:${target ?? "desktop"} from the ${resolved.source} (${recipe.steps.length} recipe steps, prerequisites: ${(recipe.prerequisites ?? []).map((p) => p.tool ?? p.id).join(", ") || "none"})`);
+  for (const [i, s] of recipe.steps.entries()) console.log(`[guide-ci]   ${String(i + 1).padStart(2)} ${s.kind.padEnd(10)} ${s.id}${s.longRunning ? " (long-running)" : ""}${s.posixCommand ? " (translated from POSIX)" : ""}${s.workingDirectory ? `  @ ${s.workingDirectory}` : ""}`);
   result.recipe = {
     steps: recipe.steps.map((s) => ({ id: s.id, kind: s.kind, longRunning: s.longRunning === true, translated: s.posixCommand !== undefined, workingDirectory: s.workingDirectory ?? null })),
     prerequisites: (recipe.prerequisites ?? []).map((p) => p.tool ?? p.id),
@@ -156,6 +158,7 @@ async function main() {
   let order = 0;
 
   const emit = (event) => {
+    logEvent(event);
     const stamped = { at: lib.nowIso(), ...event };
     if (event.type === "commandFinished") stamped.output = lib.tail(event.output ?? "", 40, 4_000);
     result.events.push(stamped);
@@ -244,6 +247,7 @@ async function main() {
 
   // The production prerequisite detour, with the real probe (registry PATH
   // refresh + Get-Command) and clock.
+  console.log(`[guide-ci] setup detour starting ${lib.nowIso()}`);
   try {
     const detour = await runSetupDetour(recipe, shell, {
       probe: new detourHost.RegistryRefreshingToolProbe(),
@@ -254,6 +258,7 @@ async function main() {
       shouldCancel: () => false,
     });
     result.setupDetour = detour.kind;
+    console.log(`[guide-ci] setup detour → ${detour.kind} ${detour.reason ?? ""} ${lib.nowIso()}`);
     if (detour.kind === "surfaced") {
       result.verdict = "red";
       result.notes.push(`the setup detour surfaced: ${detour.reason}`);
@@ -321,6 +326,44 @@ async function main() {
     /* ignore */
   }
   finish(result, outDir);
+}
+
+function logEvent(event) {
+  const t = lib.nowIso().slice(11, 19);
+  switch (event.type) {
+    case "stepStarted":
+      console.log(`[guide-ci ${t}] step ${event.index + 1}/${event.total} (${event.kind}) ${event.title}`);
+      break;
+    case "commandStarted":
+      console.log(`[guide-ci ${t}]   $ ${event.text.split("\n").join("\n[guide-ci]     ")}`);
+      break;
+    case "commandFinished":
+      console.log(`[guide-ci ${t}]   → exit ${event.exitCode}${event.output ? `\n[guide-ci]     ${lib.tail(event.output, 12, 1500).split("\n").join("\n[guide-ci]     ")}` : ""}`);
+      break;
+    case "handedToReader":
+      console.log(`[guide-ci ${t}]   reader: ${String(event.instruction).slice(0, 160)}`);
+      break;
+    case "openRequested":
+      console.log(`[guide-ci ${t}]   open: ${event.href}`);
+      break;
+    case "surfaced":
+      console.log(`[guide-ci ${t}]   SURFACED: ${event.reason}`);
+      break;
+    case "setupDetour":
+      console.log(`[guide-ci ${t}]   setup detour: missing ${event.missing.map((m) => m.tool).join(", ")}`);
+      break;
+    case "installingMissingTool":
+      console.log(`[guide-ci ${t}]   self-heal: installing ${event.tool}: ${event.command}`);
+      break;
+    case "needsConfirm":
+      console.log(`[guide-ci ${t}]   needs confirm: ${event.reason}`);
+      break;
+    case "finished":
+      console.log(`[guide-ci ${t}]   finished`);
+      break;
+    default:
+      console.log(`[guide-ci ${t}]   ${event.type}`);
+  }
 }
 
 /// PowerShell syntax that survives the derivation's translation is still a

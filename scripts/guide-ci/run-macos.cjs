@@ -287,6 +287,7 @@ async function main() {
     entry.order = stepNumber;
     entry.afterFirstFailure = firstFailureSeen;
     const logFile = path.join(logDir, `${String(stepNumber).padStart(2, "0")}-${step.id}.log`);
+    console.log(`[guide-ci ${lib.nowIso().slice(11, 19)}] step ${stepNumber}/${mainSteps.length} (${step.kind}) ${step.title}${step.workingDirectory ? `  @ ${step.workingDirectory}` : ""}`);
 
     if (step.kind !== "terminal" && step.kind !== "check") {
       entry.disposition = step.kind === "open" ? "open" : "reader";
@@ -486,6 +487,9 @@ function sleep(ms) {
 }
 
 function finish(result, outDir) {
+  for (const s of result.steps.filter((x) => x.order)) {
+    console.log(`[guide-ci]   ${String(s.order).padStart(2)} ${s.disposition.padEnd(22)} ${s.id.padEnd(22)} ${s.exitCode !== undefined && s.exitCode !== null ? `exit ${s.exitCode}` : ""} ${s.durationMs ? `${Math.round(s.durationMs / 1000)} s` : ""} ${s.failed ? `FAILED: ${s.failureReason}` : ""}`);
+  }
   result.finishedAt = lib.nowIso();
   lib.summarize(result);
   const file = lib.writeResult(outDir, result);

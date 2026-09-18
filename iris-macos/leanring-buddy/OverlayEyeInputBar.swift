@@ -340,10 +340,6 @@ final class OverlayEyeInputBarPanelManager {
         let heightToUse = OverlayEyeInteractionGeometry.heightTheInputBarMayActuallyUse(
             forMeasuredContentHeight: measuredContentHeight
         )
-        // Sub-point differences are layout noise, and acting on them would move
-        // the window sixty times a second while SwiftUI settles.
-        guard abs(inputBarPanel.frame.height - heightToUse) > 0.5 else { return }
-
         let barSize = CGSize(
             width: OverlayEyeInteractionGeometry.inputBarWidth,
             height: heightToUse
@@ -352,7 +348,22 @@ final class OverlayEyeInputBarPanelManager {
             barSize: barSize,
             onScreenWithFrame: frameOfTheScreenTheBarIsOn
         )
-        inputBarPanel.setFrame(CGRect(origin: barOrigin, size: barSize), display: true)
+        let frameTheBarShouldHave = CGRect(origin: barOrigin, size: barSize)
+        // Sub-point differences are layout noise, and acting on them would move
+        // the window sixty times a second while SwiftUI settles. The WHOLE frame
+        // is compared, not only the height: the hosting view is the panel's
+        // content view and grows the window itself as the content changes, so by
+        // the time this runs the height can already be right while the origin is
+        // wherever that growth left it. On a cold launch with the eye near the
+        // bottom of the screen that was a 355pt guide card grown DOWNWARD off the
+        // screen, with only its title visible and its buttons unreachable (seen
+        // live on Sep 18 2026); comparing heights alone returned early and never
+        // re-clamped it.
+        guard abs(inputBarPanel.frame.height - frameTheBarShouldHave.height) > 0.5
+            || abs(inputBarPanel.frame.origin.y - frameTheBarShouldHave.origin.y) > 0.5
+            || abs(inputBarPanel.frame.origin.x - frameTheBarShouldHave.origin.x) > 0.5
+        else { return }
+        inputBarPanel.setFrame(frameTheBarShouldHave, display: true)
     }
 
     // MARK: Who holds the keyboard

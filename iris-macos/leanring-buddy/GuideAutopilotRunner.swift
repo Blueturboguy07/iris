@@ -939,6 +939,26 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
     /// the reader's login shell. `~` is deliberately left unquoted and
     /// unexpanded here so the shell resolves it against its own HOME — the one
     /// place that always knows the right answer.
+    /// Moves the side session into the folder the main session is already in.
+    /// `folder` comes from the shell itself (`currentWorkingDirectory`), never
+    /// from a guide, so it is single-quoted for the shell instead of being held
+    /// to `isAPlainFolder`, whose whole job is to bound guide-authored text.
+    private func followTheMainSessionInto(
+        _ folder: String,
+        using session: GuideAutopilotShellSessionDriving
+    ) async -> Bool {
+        guard !folder.isEmpty, !Self.isASystemFolder(folder) else { return false }
+        let quoted = "'" + folder.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        guard let approved = GuideAutopilotRiskAssessment.approve("cd \(quoted)") else { return false }
+        let outcome = await session.run(approved, deadline: Self.folderMoveDeadline)
+        if case .succeeded = outcome { return true }
+        if case .sessionFailed = outcome,
+           case .succeeded = await session.run(approved, deadline: Self.folderMoveDeadline) {
+            return true
+        }
+        return false
+    }
+
     private static func isAPlainFolder(_ folder: String) -> Bool {
         guard !folder.isEmpty, folder.hasPrefix("~") || folder.hasPrefix("/") else { return false }
         let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~@+-/")
@@ -1141,9 +1161,14 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
     // MARK: - Dev servers
 
     private func startLongRunning(step: IrisGuideStep, command: String) async -> GuideAutopilotStepResult {
-        // The side session is about to be moved into the step's folder, so
-        // that is the folder this command will run in — assess it there.
-        let folder = step.workingDirectory ?? longRunningSession.currentWorkingDirectory
+        // The folder this dev server runs in: the one the step declares, else
+        // the one the MAIN session is standing in — the folder the reader's own
+        // `cd` steps reached. The side session is a fresh shell in the home
+        // folder and never saw those steps; a community-assembled guide
+        // (voicebox, wimprflow) declares no folder at all, and `bun run dev` /
+        // `cargo run` typed into `~` was the whole failure on the Sep 18 2026
+        // guide-ci run ("Script not found dev", "could not find Cargo.toml").
+        let folder = step.workingDirectory ?? shellSession.currentWorkingDirectory
         guard let approved = GuideAutopilotRiskAssessment.approve(
             command, inWorkingDirectory: folder
         ) else {
@@ -1158,10 +1183,17 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         }
         // The side session is its own shell and has never seen the guide's
         // `cd` steps, so a dev server is the case where an undeclared folder
-        // hurt most: `pnpm dev` in the home folder, every time. It gets the
-        // same move the main session gets.
-        if let folder = step.workingDirectory,
-           !(await moveInto(folder, using: longRunningSession)) {
+        // hurt most: `pnpm dev` in the home folder, every time. A declared
+        // folder gets the same move (and the same refusals) the main session
+        // gets; an undeclared one follows the main session's own folder, which
+        // is the shell's reported path and not guide text, so it is quoted
+        // rather than held to the plain-folder rule (a home with a space in
+        // it is still a folder the reader's steps really reached).
+        if let folder = step.workingDirectory {
+            if !(await moveInto(folder, using: longRunningSession)) {
+                return surface(diagnosis: Self.folderRefusalDiagnosis(folder), command: command)
+            }
+        } else if !(await followTheMainSessionInto(folder, using: longRunningSession)) {
             return surface(diagnosis: Self.folderRefusalDiagnosis(folder), command: command)
         }
         // Fire and don't await: a dev server never returns. If it dies within

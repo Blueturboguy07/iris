@@ -161,6 +161,29 @@ struct GuideAutopilotRunnerTests {
         #expect(long.cancelCount == 1, "the red button must cancel the long-running session too")
     }
 
+    @Test func aDevServerWithNoDeclaredFolderFollowsTheMainSessionsFolder() async {
+        // voicebox / wimprflow (community-assembled guides) declare no
+        // workingDirectory on any step. Their `run` step (`bun run dev`,
+        // `cargo run`) holds the shell open, so it runs on the side session —
+        // a fresh shell in the home folder that never saw the reader's `cd`
+        // steps. It has to follow the main session into the folder those
+        // steps reached, or the dev server starts in `~` every time.
+        let main = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/Users/x/voicebox")])
+        main.currentWorkingDirectory = "/Users/x/voicebox"
+        let long = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/Users/x/voicebox")])
+        let runner = Self.runner(shell: main, longRunning: long)
+
+        let result = await runner.executeStepCommand(
+            step: Self.step(command: "bun run dev"), stepIndex: 0, totalSteps: 5
+        )
+
+        #expect(result == .longRunningStarted)
+        // The dev server itself is fired on a detached task (it never returns),
+        // so only the move that precedes it is asserted here.
+        #expect(long.commandsRun.first == "cd '/Users/x/voicebox'", "the side session must be moved into the main session's folder first")
+        #expect(main.commandsRun.isEmpty, "the dev server never runs on the main session")
+    }
+
     // MARK: - Pacing
 
     @Test func pacingHoldsAFastCommandButNotASlowOne() {

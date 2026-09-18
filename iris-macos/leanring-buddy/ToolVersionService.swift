@@ -108,6 +108,11 @@ enum ToolVersionService {
         // with no step that could fix it, and no way for the guide to notice.
         case "cmake": return (executableName: "cmake", arguments: ["--version"])
         case "gh": return (executableName: "gh", arguments: ["--version"])
+        // plantgpt's `pull-model` step types `ollama pull …`, and `ollama` only
+        // exists once Ollama.app's first-run prompt has installed its CLI. The
+        // guide now watches for the tool on the step before; without this
+        // entry that watch could never be satisfied (guide-ci, Sep 18 2026).
+        case "ollama": return (executableName: "ollama", arguments: ["--version"])
         default: return nil
         }
     }

@@ -36,6 +36,9 @@ const TOOL_SPECS: ReadonlyMap<string, readonly [string, readonly string[]]> = ne
   // whether the winget fast path is available before it falls back to a manual
   // download page. A safe version probe like every other entry.
   ["winget", ["winget", ["--version"]] as const],
+  // Same entry as the macOS ToolVersionService: plantgpt watches for the
+  // Ollama CLI before it types `ollama pull`.
+  ["ollama", ["ollama", ["--version"]] as const],
 ]);
 
 export function toolSpecFor(tool: string): readonly [string, readonly string[]] | null {

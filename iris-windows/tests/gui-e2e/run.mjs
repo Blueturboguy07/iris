@@ -508,7 +508,14 @@ async function scenarioAutopilot(exePath) {
         "window.__ap = { events: [], finished: null, gates: [] };" +
           "window.irisNative.listen('autopilot:event', function(e){ window.__ap.events.push(e); });" +
           "window.irisNative.listen('autopilot:finished', function(o){ window.__ap.finished = o; });" +
-          "window.irisNative.listen('autopilot:gate', function(g){ window.__ap.gates.push(g); });" +
+          // A guide-derived recipe (the production resolver since windows-parity)
+          // ends on the guide's own `verify` step, which is the reader's
+          // confirmation by design: the runner hands it over and waits. Nobody is
+          // at this runner, so the harness plays the reader and acknowledges each
+          // gate a few seconds after it is raised — the clone, install and
+          // dev-server checks below are what prove the install; the gate only
+          // proves the handover happened.
+          "window.irisNative.listen('autopilot:gate', function(g){ window.__ap.gates.push(g); setTimeout(function(){ window.irisNative.invoke('autopilot_reader_done', {}).catch(function(){}); }, 3000); });" +
           "'installed'",
       );
       log(`  autopilot: waiting up to ${Math.round(AUTOPILOT_TIMEOUT_MS / 1000)}s for a real clone+install+dev-server…`);
@@ -528,6 +535,7 @@ async function scenarioAutopilot(exePath) {
         finished && finished.type === "local_web",
         JSON.stringify(finished),
       );
+      log(`  autopilot: ${(await term.eval("window.__ap.gates.length").catch(() => "?"))} reader gate(s) acknowledged on the way`);
       // Provenance fires on finish (a local_web install records "none" — the
       // decision still runs; the observable here is the finished output type,
       // asserted above; controller.recordInstallProvenance is unit-tested).

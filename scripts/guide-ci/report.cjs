@@ -21,6 +21,13 @@ function loadResults(dir) {
       // Only branch results carry `steps`; the planner's inventory and any
       // stray JSON are skipped rather than crashing the whole report.
       if (!parsed || !Array.isArray(parsed.steps)) continue;
+      // Re-derive the verdict with the current gate rules, so a result written
+      // by an older runner is classified the same way as a fresh one.
+      if (parsed.verdict === "green" || parsed.verdict === "red" || parsed.verdict === "gate") {
+        delete parsed.verdict;
+        delete parsed.firstFailure;
+        lib.summarize(parsed);
+      }
       results.push(parsed);
     } catch (error) {
       results.push({ slug: file, platform: "?", target: null, verdict: "error", steps: [], notes: [`unreadable: ${error.message}`], counts: {} });

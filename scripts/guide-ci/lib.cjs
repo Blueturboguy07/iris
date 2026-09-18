@@ -337,6 +337,24 @@ function writeResult(outDir, result) {
   return file;
 }
 
+/// A failed step that only a person could have carried past: a sign-in that
+/// waits for a browser, a phone that is not plugged in, an installer window
+/// waiting for a click. Marked so the verdict says "gate", not "red" — the
+/// command is not wrong, the runner simply has no person at it.
+const GATE_COMMANDS = /\b(wrangler login|gh auth login|vercel login|firebase login|netlify login|supabase login|az login|gcloud auth login|heroku login)\b/i;
+const GATE_OUTPUT = /Timed out waiting for authorization code|No Android connected device found|no emulators could be started|Unable to boot device|no devices\/emulators found|xcrun: error: unable to find|CLOUDFLARE_API_TOKEN/i;
+const INSTALLER_WAIT = /Start-Process\b[^\n]*-Wait/i;
+
+function classifyGate(step) {
+  if (!step.failed) return undefined;
+  const command = step.commandTyped ?? step.commandAsIrisRunsIt ?? step.command ?? "";
+  const output = step.output ?? "";
+  if (GATE_COMMANDS.test(command)) return "a sign-in that waits for a browser and a person";
+  if (INSTALLER_WAIT.test(command) && (step.exitCode === 124 || /took too long|still running/.test(step.failureReason ?? ""))) return "an installer window waiting for a click";
+  if (GATE_OUTPUT.test(output)) return "needs a signed-in account or a connected device the runner does not have";
+  return undefined;
+}
+
 /// The verdict for one branch run, from its step dispositions.
 ///   green        every command Iris would run itself exited 0
 ///   red          a command failed / timed out / was refused / killed the shell
@@ -346,6 +364,13 @@ function writeResult(outDir, result) {
 function summarize(result) {
   const commandSteps = result.steps.filter((s) => s.ran);
   const failures = commandSteps.filter((s) => s.failed);
+  for (const s of failures) {
+    const why = classifyGate(s);
+    if (why && !s.gate) {
+      s.gate = true;
+      s.gateReason = why;
+    }
+  }
   const first = failures[0];
   result.counts = {
     steps: result.steps.length,
@@ -365,7 +390,8 @@ function summarize(result) {
       stepId: first.id,
       title: first.title,
       exitCode: first.exitCode,
-      reason: first.failureReason,
+      reason: first.gate ? `${first.gateReason} — ${first.failureReason}` : first.failureReason,
+      gate: first.gate === true,
       outputTail: tail(first.output ?? "", 25, 2_500),
     };
   }
@@ -417,6 +443,7 @@ module.exports = {
   writeResult,
   resultFileName,
   summarize,
+  classifyGate,
   parseArgs,
   nowIso,
   execFileP,

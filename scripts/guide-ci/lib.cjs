@@ -21,15 +21,23 @@ async function fetchJson(url, timeoutMs = 20_000) {
   return response.json();
 }
 
+// publik's guide API is served through a CDN with a 5-minute cache and a day
+// of stale-while-revalidate. A guide changed only in Supabase (a community
+// guide) can be served stale for hours; the harness must test what is stored,
+// so every fetch carries a cache-busting query the route ignores.
+function cacheBusted(url) {
+  return `${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`;
+}
+
 async function fetchCatalog(base = DEFAULT_BASE) {
-  const body = await fetchJson(`${base}/api/iris/apps`);
+  const body = await fetchJson(cacheBusted(`${base}/api/iris/apps`));
   const apps = Array.isArray(body) ? body : body.apps;
   if (!Array.isArray(apps)) throw new Error("catalog has no apps[]");
   return apps;
 }
 
 async function fetchGuide(base, slug) {
-  return fetchJson(`${base}/api/iris/guides/${encodeURIComponent(slug)}`);
+  return fetchJson(cacheBusted(`${base}/api/iris/guides/${encodeURIComponent(slug)}`));
 }
 
 function branchKey(branch) {
@@ -345,10 +353,22 @@ const GATE_COMMANDS = /\b(wrangler login|gh auth login|vercel login|firebase log
 const GATE_OUTPUT = /Timed out waiting for authorization code|No Android connected device found|no emulators could be started|Unable to boot device|no devices\/emulators found|xcrun: error: unable to find|CLOUDFLARE_API_TOKEN/i;
 const INSTALLER_WAIT = /Start-Process\b[^\n]*-Wait/i;
 
-function classifyGate(step) {
+function classifyGate(step, allSteps = []) {
   if (!step.failed) return undefined;
   const command = step.commandTyped ?? step.commandAsIrisRunsIt ?? step.command ?? "";
   const output = step.output ?? "";
+  // "command not found" for a tool that an EARLIER reader step installs and
+  // watches for (plantgpt: Ollama.app's first-run prompt installs `ollama`).
+  // Iris waits on that step until the tool exists; the runner cannot do the
+  // reader's part, so the failure is the missing person, not the command.
+  const missing = output.match(/command not found: (\S+)|'(\S+)' is not recognized as/);
+  const missingTool = missing ? (missing[1] ?? missing[2]) : undefined;
+  if (missingTool) {
+    const installedByAReaderStep = allSteps.some(
+      (s) => s !== step && !s.ran && (s.expects ?? []).includes(`toolVersion:${missingTool}`),
+    );
+    if (installedByAReaderStep) return `needs \`${missingTool}\`, which an earlier reader step installs and Iris waits for`;
+  }
   if (GATE_COMMANDS.test(command)) return "a sign-in that waits for a browser and a person";
   if (INSTALLER_WAIT.test(command) && (step.exitCode === 124 || /took too long|still running/.test(step.failureReason ?? ""))) return "an installer window waiting for a click";
   if (GATE_OUTPUT.test(output)) return "needs a signed-in account or a connected device the runner does not have";
@@ -365,7 +385,7 @@ function summarize(result) {
   const commandSteps = result.steps.filter((s) => s.ran);
   const failures = commandSteps.filter((s) => s.failed);
   for (const s of failures) {
-    const why = classifyGate(s);
+    const why = classifyGate(s, result.steps);
     if (why && !s.gate) {
       s.gate = true;
       s.gateReason = why;
@@ -424,6 +444,7 @@ module.exports = {
   fetchJson,
   fetchCatalog,
   fetchGuide,
+  cacheBusted,
   branchKey,
   findBranch,
   allSteps,

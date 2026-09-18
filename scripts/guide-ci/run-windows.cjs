@@ -127,7 +127,9 @@ async function main() {
   // ── Resolve through the real derivation ──────────────────────────────────
   const resolved = await resolveGuideRecipe(slug, {
     apiBase: base,
-    fetchImplementation: (url, init) => fetch(url, init),
+    // The real resolver builds the URL; the CDN cache is bypassed the same way
+    // the macOS runner does it, so both test what publik has stored.
+    fetchImplementation: (url, init) => fetch(lib.cacheBusted(String(url)), init),
     target: target ? { platform: "windows", target } : { platform: "windows" },
     offlineFallback: () => undefined,
   });

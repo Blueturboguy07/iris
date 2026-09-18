@@ -267,6 +267,7 @@ async function main() {
     return;
   }
   let side; // the long-running session, started on demand
+  let lastMainCwd = home; // where the main session is standing, per its last sentinel
   let firstFailureSeen = false;
   let stepNumber = 0;
   const mainSteps = branch.steps ?? [];
@@ -348,7 +349,25 @@ async function main() {
           continue;
         }
       }
-      const moved = await moveInto(step.workingDirectory, side, entry);
+      // Mirrors GuideAutopilotRunner.startLongRunning after the Sep 18 2026
+      // fix: a declared folder gets the normal move; an undeclared one follows
+      // the MAIN session's own folder (quoted, since it is the shell's path and
+      // not guide text) instead of leaving the dev server in the home folder.
+      let moved;
+      if (step.workingDirectory) {
+        moved = await moveInto(step.workingDirectory, side, entry);
+      } else {
+        const mainFolder = lastMainCwd;
+        const outcome = mainFolder ? await side.run(`cd ${shellQuote(mainFolder)}`, FOLDER_MOVE_DEADLINE_MS) : { exitCode: 0 };
+        moved = outcome.exitCode === 0;
+        entry.followedMainSessionInto = mainFolder ?? null;
+        if (!moved) {
+          entry.disposition = "folder-refused";
+          entry.ran = true;
+          entry.failed = true;
+          entry.failureReason = `the side session could not follow the main session into ${mainFolder}`;
+        }
+      }
       if (!moved) {
         firstFailureSeen = true;
         continue;
@@ -407,6 +426,7 @@ async function main() {
     entry.durationMs = outcome.durationMs;
     entry.exitCode = outcome.exitCode ?? null;
     entry.cwdAfter = outcome.cwd ?? null;
+    if (outcome.cwd) lastMainCwd = outcome.cwd;
     entry.output = lib.tail(outcome.output);
     entry.exceededIrisDeadline = outcome.durationMs > IRIS_COMMAND_DEADLINE_MS;
     fs.writeFileSync(logFile, outcome.output);

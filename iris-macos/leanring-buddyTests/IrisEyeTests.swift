@@ -23,6 +23,7 @@
 //
 
 import CoreGraphics
+import AppKit
 import Foundation
 import Testing
 // The module follows PRODUCT_NAME, which the fork renamed to Iris.
@@ -1438,8 +1439,12 @@ struct OverlayEyeInputBarPanelTests {
             height: 355
         )
         panel.setFrame(grownOffTheScreen, display: false)
-        #expect(!Self.screenFrame.contains(panel.frame))
+        // AppKit posts didResize for that setFrame, and the manager's observer
+        // re-clamps the origin on its own — no measured-height callback needed.
+        #expect(Self.screenFrame.contains(panel.frame), "the resize observer did not pull the bar back: \(panel.frame)")
 
+        // And the measured-height path agrees, even when the height already matches.
+        panel.setFrameOrigin(CGPoint(x: frameOnScreen.origin.x, y: Self.screenFrame.minY - 300))
         panelManager.resizeTheBarToFit(measuredContentHeight: 355)
 
         guard let pulledBack = panelManager.frameOfTheBarOnScreen else {

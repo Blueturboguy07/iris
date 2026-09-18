@@ -81,6 +81,7 @@ final class OverlayEyeInputBarPanelManager {
     /// Readable (not settable) from the suite, so a frame AppKit chose on its
     /// own can be simulated before `resizeTheBarToFit` is asked to correct it.
     private(set) var inputBarPanel: OverlayEyeInputBarPanel?
+    private var barResizeObservation: NSObjectProtocol?
     private var clickOutsideMonitor: Any?
 
     /// The drag-aware "click outside dismisses the bar" rule. A left press in
@@ -253,8 +254,37 @@ final class OverlayEyeInputBarPanelManager {
         ))
 
         inputBarPanel = panel
+        // The hosting view is the panel's content view and resizes the WINDOW
+        // itself whenever the SwiftUI content's ideal size changes — anchored at
+        // the top-left, so a bar that hangs under an eye near the bottom of the
+        // screen grows downward off it. The measured-height preference does not
+        // reliably fire for that growth (a cold-launch guide card grew 44→355pt
+        // with no callback, Sep 18 2026). The window's own resize notification
+        // always does, so the bar is re-clamped from there.
+        barResizeObservation = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResizeNotification, object: panel, queue: nil
+        ) { [weak self] _ in
+            self?.keepTheBarOnScreenAfterAppKitResizedIt()
+        }
         panel.makeKeyAndOrderFront(nil)
         installClickOutsideMonitor()
+    }
+
+    /// Re-places the bar for whatever height AppKit just gave it. Only the
+    /// origin can be wrong here (the height is what it is), and `setFrameOrigin`
+    /// does not resize, so this cannot re-enter itself.
+    func keepTheBarOnScreenAfterAppKitResizedIt() {
+        guard let inputBarPanel,
+              let interactionGeometryTheBarHangsFrom,
+              let frameOfTheScreenTheBarIsOn else { return }
+        let origin = interactionGeometryTheBarHangsFrom.inputBarOriginInAppKitScreenCoordinates(
+            barSize: inputBarPanel.frame.size,
+            onScreenWithFrame: frameOfTheScreenTheBarIsOn
+        )
+        guard abs(inputBarPanel.frame.origin.y - origin.y) > 0.5
+            || abs(inputBarPanel.frame.origin.x - origin.x) > 0.5 else { return }
+        irisTrace("bar: AppKit resized the panel to \(inputBarPanel.frame); re-clamped to \(origin)")
+        inputBarPanel.setFrameOrigin(origin)
     }
 
     /// The exchange a freshly-opened bar should already be showing: the last
@@ -302,6 +332,10 @@ final class OverlayEyeInputBarPanelManager {
 
     /// Takes the bar down and hands keyboard focus back to whatever had it.
     func hideInputBar() {
+        if let barResizeObservation {
+            NotificationCenter.default.removeObserver(barResizeObservation)
+            self.barResizeObservation = nil
+        }
         removeClickOutsideMonitor()
         clickOutsideDismissal.theBarWentAwayOrTheGestureEnded()
         theImagePickerIsOpen = false

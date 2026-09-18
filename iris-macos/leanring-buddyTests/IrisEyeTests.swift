@@ -1414,6 +1414,42 @@ struct OverlayEyeInputBarPanelTests {
         #expect(Self.screenFrame.contains(panelManager.frameOfTheBarOnScreen ?? .infinite))
     }
 
+    @Test func aBarThatGrewOffTheScreenOnItsOwnIsPulledBackEvenWhenItsHeightIsAlreadyRight() {
+        // The hosting view is the panel's content view and grows the window by
+        // itself as the content changes, so the measured-height callback can
+        // arrive when the height is already right and only the ORIGIN is wrong —
+        // on a cold launch with the eye near the bottom of the screen, a 355pt
+        // guide card had grown downward off the screen with its buttons
+        // unreachable (Sep 18 2026). A height-only guard returned early there.
+        let (panelManager, _) = aBarShowingOnScreen()
+        defer { panelManager.hideInputBar() }
+        guard let frameOnScreen = panelManager.frameOfTheBarOnScreen,
+              let panel = panelManager.inputBarPanel else {
+            Issue.record("the bar was not on screen")
+            return
+        }
+
+        // What AppKit's own growth left behind: the right height, hanging off
+        // the bottom of the screen.
+        let grownOffTheScreen = CGRect(
+            x: frameOnScreen.origin.x,
+            y: Self.screenFrame.minY - 300,
+            width: frameOnScreen.width,
+            height: 355
+        )
+        panel.setFrame(grownOffTheScreen, display: false)
+        #expect(!Self.screenFrame.contains(panel.frame))
+
+        panelManager.resizeTheBarToFit(measuredContentHeight: 355)
+
+        guard let pulledBack = panelManager.frameOfTheBarOnScreen else {
+            Issue.record("the bar vanished while being pulled back")
+            return
+        }
+        #expect(pulledBack.height == 355)
+        #expect(Self.screenFrame.contains(pulledBack), "the bar was left at \(pulledBack), off the screen")
+    }
+
     @Test func theBarStaysOnItsScreenAtEverySizeItCanBe() {
         let (panelManager, _) = aBarShowingOnScreen()
         defer { panelManager.hideInputBar() }

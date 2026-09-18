@@ -76,7 +76,9 @@ private final class OverlayEyeInputBarPanel: NSPanel {
 @MainActor
 final class OverlayEyeInputBarPanelManager {
 
-    private var inputBarPanel: OverlayEyeInputBarPanel?
+    /// Readable (not settable) from the suite, so a frame AppKit chose on its
+    /// own can be simulated before `resizeTheBarToFit` is asked to correct it.
+    private(set) var inputBarPanel: OverlayEyeInputBarPanel?
     private var clickOutsideMonitor: Any?
 
     /// The drag-aware "click outside dismisses the bar" rule. A left press in

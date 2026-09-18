@@ -12,6 +12,10 @@ on:
       - "iris-macos/**"
       - ".github/workflows/iris-macos-tests.yml"
   workflow_dispatch:
+    inputs:
+      only:
+        description: "Comma-separated -only-testing targets (e.g. leanring-buddyTests/GuideAutopilotRunnerTests); empty = whole suite"
+        default: ""
 
 jobs:
   test:
@@ -24,7 +28,10 @@ jobs:
       - name: Unit tests
         run: |
           set -o pipefail
-          xcodebuild test \
+          mkdir -p build
+          ONLY=""
+          for t in $(echo "${{ inputs.only }}" | tr ',' ' '); do ONLY="$ONLY -only-testing:$t"; done
+          xcodebuild test $ONLY \
             -project iris-macos/leanring-buddy.xcodeproj \
             -scheme leanring-buddy \
             -configuration Debug \

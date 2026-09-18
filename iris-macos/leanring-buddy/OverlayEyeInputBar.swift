@@ -56,7 +56,9 @@ import SwiftUI
 /// back the moment the reader stops composing, and a window that is still
 /// *eligible* to be key can be handed the keyboard again by AppKit or by a
 /// stray click without the bar ever asking for it.
-private final class OverlayEyeInputBarPanel: NSPanel {
+/// Internal (not private) only so the suite can read the panel through
+/// `OverlayEyeInputBarPanelManager.inputBarPanel`.
+final class OverlayEyeInputBarPanel: NSPanel {
 
     /// Flipped off when the bar releases the keyboard and on again when the
     /// reader clicks back into the field.
@@ -337,7 +339,10 @@ final class OverlayEyeInputBarPanelManager {
     func resizeTheBarToFit(measuredContentHeight: CGFloat) {
         guard let inputBarPanel,
               let interactionGeometryTheBarHangsFrom,
-              let frameOfTheScreenTheBarIsOn else { return }
+              let frameOfTheScreenTheBarIsOn else {
+            irisTrace("bar: resize skipped — no panel/geometry/screen (measured=\(Int(measuredContentHeight)))")
+            return
+        }
 
         let heightToUse = OverlayEyeInteractionGeometry.heightTheInputBarMayActuallyUse(
             forMeasuredContentHeight: measuredContentHeight
@@ -351,6 +356,7 @@ final class OverlayEyeInputBarPanelManager {
             onScreenWithFrame: frameOfTheScreenTheBarIsOn
         )
         let frameTheBarShouldHave = CGRect(origin: barOrigin, size: barSize)
+        irisTrace("bar: resize measured=\(Int(measuredContentHeight)) frame=\(inputBarPanel.frame) target=\(frameTheBarShouldHave) screen=\(frameOfTheScreenTheBarIsOn)")
         // Sub-point differences are layout noise, and acting on them would move
         // the window sixty times a second while SwiftUI settles. The WHOLE frame
         // is compared, not only the height: the hosting view is the panel's

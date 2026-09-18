@@ -1,0 +1,152 @@
+name: guide-ci
+
+# Runs every command of every publik install guide on a fresh macOS and a fresh
+# Windows runner, the way Iris runs them, and posts a scoreboard. Catches a
+# guide step that fails, hangs, kills the shell, points at a dead link, or trips
+# the autopilot's risk gate — before a release ships it.
+#
+# macOS: scripts/guide-ci/run-macos.cjs mirrors GuideAutopilotShellSession.
+# Windows: scripts/guide-ci/run-windows.cjs drives the real iris-windows
+# autopilot modules from the `windows-parity` branch (the guide-backed
+# resolver + PowerShellSession + AutopilotRunner), compiled on the runner.
+
+on:
+  workflow_dispatch:
+    inputs:
+      slugs:
+        description: "Guide slugs to run, comma-separated, or 'all'"
+        default: "all"
+      platforms:
+        description: "macos,windows"
+        default: "macos,windows"
+      mobile:
+        description: "Include the phone branches (ios / android)"
+        type: boolean
+        default: true
+      max_step_minutes:
+        description: "How long the harness lets one step run (Iris's own 15-min ceiling is still recorded)"
+        default: "60"
+      base:
+        description: "publik base URL the guides are fetched from"
+        default: "https://publikhq.com"
+      parity_ref:
+        description: "iris-windows ref whose autopilot modules drive the Windows runs"
+        default: "windows-parity"
+  schedule:
+    - cron: "0 9 * * 1"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: plan
+        run: |
+          node scripts/guide-ci/plan.cjs \
+            --slugs "${{ inputs.slugs || 'all' }}" \
+            --platforms "${{ inputs.platforms || 'macos,windows' }}" \
+            --mobile "${{ inputs.mobile == false && 'false' || 'true' }}" \
+            --base "${{ inputs.base || 'https://publikhq.com' }}" \
+            --out inventory.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guide-ci-inventory
+          path: inventory.json
+
+  run:
+    needs: plan
+    if: ${{ needs.plan.outputs.count != '0' }}
+    name: ${{ matrix.slug }} ${{ matrix.platform }}:${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check out the Windows autopilot modules
+        if: matrix.platform == 'windows'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.parity_ref || 'windows-parity' }}
+          path: iris-parity
+
+      - name: Compile the Windows autopilot modules
+        if: matrix.platform == 'windows'
+        shell: bash
+        working-directory: iris-parity/iris-windows
+        run: |
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          npm ci --no-audit --no-fund
+          npm run compile
+
+      - name: Run the guide (macOS)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          node scripts/guide-ci/run-macos.cjs \
+            --slug "${{ matrix.slug }}" --target "${{ matrix.target }}" \
+            --base "${{ inputs.base || 'https://publikhq.com' }}" \
+            --max-step-minutes "${{ inputs.max_step_minutes || '60' }}" \
+            --out guide-ci-results
+
+      - name: Run the guide (Windows)
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: |
+          node scripts/guide-ci/run-windows.cjs \
+            --slug "${{ matrix.slug }}" --target "${{ matrix.target }}" \
+            --dist iris-parity/iris-windows/dist \
+            --base "${{ inputs.base || 'https://publikhq.com' }}" \
+            --max-step-minutes "${{ inputs.max_step_minutes || '60' }}" \
+            --out guide-ci-results
+
+      - name: Print this run's summary
+        if: always()
+        shell: bash
+        run: node scripts/guide-ci/report.cjs --in guide-ci-results --out guide-ci-results/SUMMARY-${{ matrix.slug }}-${{ matrix.platform }}-${{ matrix.target }}.md > /dev/null && cat guide-ci-results/SUMMARY-*.md | head -60 || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: guide-ci-${{ matrix.slug }}-${{ matrix.platform }}-${{ matrix.target }}
+          path: guide-ci-results/
+          if-no-files-found: warn
+
+  report:
+    needs: [plan, run]
+    if: always() && needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: guide-ci-*
+          merge-multiple: true
+          path: guide-ci-results
+      - name: Scoreboard
+        run: |
+          rm -f guide-ci-results/SUMMARY-*.md
+          node scripts/guide-ci/report.cjs --in guide-ci-results --out guide-ci-results/SCOREBOARD.md > /dev/null
+          head -80 guide-ci-results/SCOREBOARD.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guide-ci-scoreboard
+          path: |
+            guide-ci-results/SCOREBOARD.md
+            guide-ci-results/*.json

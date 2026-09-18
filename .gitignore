@@ -5,3 +5,4 @@ target/
 .build-local/
 *.xcuserdatad
 .DS_Store
+guide-ci-results/

@@ -7,8 +7,9 @@ name: guide-ci
 #
 # macOS: scripts/guide-ci/run-macos.cjs mirrors GuideAutopilotShellSession.
 # Windows: scripts/guide-ci/run-windows.cjs drives the real iris-windows
-# autopilot modules from the `windows-parity` branch (the guide-backed
-# resolver + PowerShellSession + AutopilotRunner), compiled on the runner.
+# autopilot modules from `main` (the guide-backed resolver + PowerShellSession
+# + AutopilotRunner, merged from windows-parity on Sep 18 2026), compiled on
+# the runner.
 
 on:
   workflow_dispatch:
@@ -30,8 +31,8 @@ on:
         description: "publik base URL the guides are fetched from"
         default: "https://publikhq.com"
       parity_ref:
-        description: "iris-windows ref whose autopilot modules drive the Windows runs"
-        default: "windows-parity"
+        description: "iris-windows ref whose autopilot modules drive the Windows runs (main since windows-parity merged)"
+        default: "main"
   schedule:
     - cron: "0 9 * * 1"
 
@@ -79,7 +80,7 @@ jobs:
         if: matrix.platform == 'windows'
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.parity_ref || 'windows-parity' }}
+          ref: ${{ inputs.parity_ref || 'main' }}
           path: iris-parity
 
       - name: Compile the Windows autopilot modules

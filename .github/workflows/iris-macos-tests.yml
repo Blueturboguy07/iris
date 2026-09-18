@@ -1,0 +1,47 @@
+name: iris-macos-tests
+
+# The Swift unit suites for Iris on macOS, on a clean runner. On the dev Mac
+# the installed app's persisted autonomy grant and keychain items leak into
+# the test host (same bundle id), which skews the risk-gate suites and can
+# hang the launch; a fresh macos-latest runner has neither.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "iris-macos/**"
+      - ".github/workflows/iris-macos-tests.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Xcode version
+        run: xcodebuild -version
+      - name: Unit tests
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project iris-macos/leanring-buddy.xcodeproj \
+            -scheme leanring-buddy \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            -derivedDataPath build/tests \
+            -resultBundlePath build/Tests.xcresult \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
+            2>&1 | tee build/xcodebuild-test.log | grep -E "Test case|Test Suite|error:|warning: .*failed|\*\* TEST" || true
+          grep -q "\*\* TEST SUCCEEDED \*\*" build/xcodebuild-test.log
+      - name: Summary
+        if: always()
+        run: |
+          echo "passed: $(grep -c 'Test case .* passed' build/xcodebuild-test.log || true)" >> "$GITHUB_STEP_SUMMARY"
+          echo "failed: $(grep -c 'Test case .* failed' build/xcodebuild-test.log || true)" >> "$GITHUB_STEP_SUMMARY"
+          grep -E "Test case .* failed" build/xcodebuild-test.log | sed -E "s/.*Test case '([^']+)'.*/- \1/" | sort -u >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: iris-macos-test-log
+          path: build/xcodebuild-test.log

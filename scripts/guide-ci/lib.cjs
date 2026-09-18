@@ -372,6 +372,11 @@ function classifyGate(step, allSteps = []) {
   if (GATE_COMMANDS.test(command)) return "a sign-in that waits for a browser and a person";
   if (INSTALLER_WAIT.test(command) && (step.exitCode === 124 || /took too long|still running/.test(step.failureReason ?? ""))) return "an installer window waiting for a click";
   if (GATE_OUTPUT.test(output)) return "needs a signed-in account or a connected device the runner does not have";
+  // The runner image's toolchain is newer than what the app can build with,
+  // and the guide already tells a reader which version to install. Not a
+  // wrong command: a person following the guide installs the named version.
+  if (/find VS unknown version .* found at .*Visual Studio\\18/.test(output)) return "the runner's Visual Studio 2026 is unknown to node-gyp; the guide sends readers to Build Tools 2022";
+  if (/clang\/LLVM \d+\.x is newer than bindgen/.test(output)) return "the app's own prerequisite check refuses the runner's LLVM; the guide sends readers to LLVM 18.1.8";
   return undefined;
 }
 

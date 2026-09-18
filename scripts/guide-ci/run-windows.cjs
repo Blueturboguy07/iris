@@ -189,7 +189,8 @@ async function main() {
         if (entry) {
           entry.durationMs = Date.now() - commandStartedAt;
           entry.exitCode = event.exitCode;
-          entry.output = lib.tail(event.output ?? "");
+          if (/#< CLIXML/.test(event.output ?? "")) entry.clixmlNoise = true;
+          entry.output = lib.tail(stripClixml(event.output ?? ""));
           entry.exceededIrisDeadline = entry.durationMs > IRIS_COMMAND_DEADLINE_MS;
           try {
             fs.writeFileSync(path.join(logDir, `${String(entry.order ?? 0).padStart(2, "0")}-${entry.id}.log`), event.output ?? "");
@@ -198,7 +199,13 @@ async function main() {
           }
           if (event.exitCode !== 0) {
             entry.failed = true;
-            entry.failureReason = event.exitCode === 124 ? "Iris's per-command ceiling stopped it (exit 124)" : `exit status ${event.exitCode}`;
+            const waitsOnAnInstaller = /Start-Process\b[^\n]*-Wait/i.test(entry.commandTyped ?? "");
+            if (event.exitCode === 124 && waitsOnAnInstaller) {
+              entry.gate = true;
+              entry.failureReason = "waits for a person to click through an installer window (Start-Process -Wait); Iris's own 15-minute ceiling would stop it with exit 124";
+            } else {
+              entry.failureReason = event.exitCode === 124 ? "Iris's per-command ceiling stopped it (exit 124)" : `exit status ${event.exitCode}`;
+            }
             firstFailureSeen = true;
           } else if (entry.exceededIrisDeadline) {
             entry.failed = true;
@@ -325,7 +332,21 @@ async function main() {
   } catch {
     /* ignore */
   }
+  if (result.steps.some((s) => s.clixmlNoise)) result.notes.push("powershell.exe printed CLIXML progress records on stderr (\"Preparing modules for first use\"), which Iris's transcript would show to the reader");
   finish(result, outDir);
+  // A dev server left running by a long-running step inherits this process's
+  // stdio pipes and would otherwise keep Node alive after the run is over.
+  process.exit(0);
+}
+
+/// powershell.exe -NonInteractive serialises progress records to stderr as
+/// CLIXML when stderr is a pipe; Iris shows that stream to the reader, so its
+/// presence is recorded (`clixmlNoise`) but stripped from the stored tail.
+function stripClixml(text) {
+  return text
+    .split(/\r?\n/)
+    .filter((line) => !line.startsWith("#< CLIXML") && !/^<Objs Version=/.test(line))
+    .join("\n");
 }
 
 function logEvent(event) {
@@ -338,7 +359,7 @@ function logEvent(event) {
       console.log(`[guide-ci ${t}]   $ ${event.text.split("\n").join("\n[guide-ci]     ")}`);
       break;
     case "commandFinished":
-      console.log(`[guide-ci ${t}]   → exit ${event.exitCode}${event.output ? `\n[guide-ci]     ${lib.tail(event.output, 12, 1500).split("\n").join("\n[guide-ci]     ")}` : ""}`);
+      console.log(`[guide-ci ${t}]   → exit ${event.exitCode}${event.output ? `\n[guide-ci]     ${lib.tail(stripClixml(event.output), 12, 1500).split("\n").join("\n[guide-ci]     ")}` : ""}`);
       break;
     case "handedToReader":
       console.log(`[guide-ci ${t}]   reader: ${String(event.instruction).slice(0, 160)}`);

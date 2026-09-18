@@ -445,6 +445,7 @@ async function main() {
 
   killEverything();
   finish(result, outDir);
+  process.exit(0);
 }
 
 function nextLocalOpenHref(mainSteps, current) {

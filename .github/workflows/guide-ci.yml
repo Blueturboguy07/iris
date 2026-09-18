@@ -57,7 +57,7 @@ jobs:
             --out inventory.json
       - uses: actions/upload-artifact@v4
         with:
-          name: guide-ci-inventory
+          name: inventory
           path: inventory.json
 
   run:

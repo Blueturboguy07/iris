@@ -356,7 +356,9 @@ function summarize(result) {
     exceededIrisDeadline: commandSteps.filter((s) => s.exceededIrisDeadline).length,
   };
   if (!result.verdict) {
-    result.verdict = failures.length === 0 ? "green" : "red";
+    if (failures.length === 0) result.verdict = "green";
+    else if (first && first.gate) result.verdict = "gate";
+    else result.verdict = "red";
   }
   if (first) {
     result.firstFailure = {

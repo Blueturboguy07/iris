@@ -9,15 +9,19 @@ const fs = require("node:fs");
 const path = require("node:path");
 const lib = require("./lib.cjs");
 
-const VERDICT_ORDER = { red: 0, error: 1, green: 2, "no-branch": 3, unsupported: 4 };
-const VERDICT_MARK = { red: "🔴 red", error: "⚠️ error", green: "🟢 green", "no-branch": "▫️ no branch", unsupported: "⬜ unsupported" };
+const VERDICT_ORDER = { red: 0, error: 1, gate: 2, green: 3, "no-branch": 4, unsupported: 5 };
+const VERDICT_MARK = { red: "🔴 red", error: "⚠️ error", gate: "🟡 gate", green: "🟢 green", "no-branch": "▫️ no branch", unsupported: "⬜ unsupported" };
 
 function loadResults(dir) {
   const results = [];
   for (const file of fs.readdirSync(dir)) {
     if (!file.endsWith(".json")) continue;
     try {
-      results.push(JSON.parse(fs.readFileSync(path.join(dir, file), "utf8")));
+      const parsed = JSON.parse(fs.readFileSync(path.join(dir, file), "utf8"));
+      // Only branch results carry `steps`; the planner's inventory and any
+      // stray JSON are skipped rather than crashing the whole report.
+      if (!parsed || !Array.isArray(parsed.steps)) continue;
+      results.push(parsed);
     } catch (error) {
       results.push({ slug: file, platform: "?", target: null, verdict: "error", steps: [], notes: [`unreadable: ${error.message}`], counts: {} });
     }
@@ -108,8 +112,8 @@ function main() {
   const by = (v) => results.filter((r) => r.verdict === v).length;
   const md = [];
   md.push(`# Guide CI scoreboard`, "");
-  md.push(`Generated ${lib.nowIso()} — ${results.length} branch runs: **${by("green")} green**, **${by("red")} red**, ${by("error")} harness errors, ${by("unsupported")} unsupported pairs, ${by("no-branch")} missing branches.`, "");
-  md.push("Every command a guide asks Iris to run was typed into the shell Iris uses on that platform (persistent login zsh on macOS; one `powershell.exe` per step through the real Windows autopilot modules). Reader-only steps (open / permission / web / paste / verify / sensitive) are not executed; their links are checked. 🔴 means a command failed, timed out, was refused, or killed the shell.", "");
+  md.push(`Generated ${lib.nowIso()} — ${results.length} branch runs: **${by("green")} green**, **${by("red")} red**, ${by("gate")} stopped at a reader gate, ${by("error")} harness errors, ${by("unsupported")} unsupported pairs, ${by("no-branch")} missing branches.`, "");
+  md.push("Every command a guide asks Iris to run was typed into the shell Iris uses on that platform (persistent login zsh on macOS; one `powershell.exe` per step through the real Windows autopilot modules). Reader-only steps (open / permission / web / paste / verify / sensitive) are not executed; their links are checked. 🔴 means a command failed, timed out, was refused, or killed the shell; 🟡 means the first thing that stopped the run was a step only a person can finish (an installer waiting for a click), with anything after it unverified.", "");
   for (const platform of ["macos", "windows"]) {
     const rows = results.filter((r) => r.platform === platform);
     if (rows.length === 0) continue;

@@ -208,7 +208,12 @@ Being explicit, because the suite's green tick does not cover these:
   instance. The *parsing* is heavily tested; the *delivery* is not.
 - **The real OAuth round trip.** URL construction and callback parsing are
   tested, including that an authorize URL's `redirect_to` produces a callback the
-  parser accepts. An actual Google sign-in is not.
+  parser accepts. An actual Google or GitHub sign-in completing in a real
+  browser, and the `iris://` callback actually reaching a running instance, is
+  not — that needs a real Windows machine. (Before 2026-09-19 this was moot:
+  every packaged build shipped with sign-in disabled outright, so nobody could
+  even reach the authorize step. It now reaches a real browser; the browser
+  side of the round trip is still unverified on real hardware.)
 - **Screen capture, the overlay, and pointing accuracy.** These need a real
   desktop with real windows on it.
 - **The transplanted guide panel rendering.** `app.js` is proven only by having
@@ -222,9 +227,21 @@ Being explicit, because the suite's green tick does not cover these:
 
 | Variable | Needed by | Without it |
 |---|---|---|
-| `IRIS_SUPABASE_URL` | funded tier sign-in | the sign-in buttons are disabled and Iris explains why |
-| `IRIS_SUPABASE_ANON_KEY` | funded tier sign-in | same |
+| `IRIS_SUPABASE_URL` | pointing a dev/staging build at a different Supabase project | falls back to publik's production project |
+| `IRIS_SUPABASE_ANON_KEY` | same | same |
 
-Both are public values. Neither is a secret, and no secret ships in the binary:
-the funded tier means publik holds the Anthropic key server-side, and the BYO
-tier means the user holds their own in DPAPI.
+Both are public values, baked in as defaults in `services/account-service.ts`
+(`DEFAULT_SUPABASE_PROJECT_URL` / `DEFAULT_SUPABASE_ANON_KEY`), mirroring
+`iris-macos/leanring-buddy/Info.plist`. Neither is a secret, and no secret
+ships in the binary: the funded tier means publik holds the Anthropic key
+server-side, and the BYO tier means the user holds their own in DPAPI.
+
+**Set both or neither.** The override is all-or-nothing — setting only one
+env var would pair a dev project's URL with production's anon key (or vice
+versa) rather than falling back cleanly.
+
+Until 2026-09-19 these had no default and nothing ever set them in a packaged
+build, so `configuredSupabaseProject()` always returned null and both sign-in
+buttons shipped permanently `disabled` — the account section explained why,
+which read as a deliberate build variant rather than the bug it was. See
+`services/account-service.ts` for the fix and its regression tests.

@@ -1,9 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AUTH_CALLBACK_URL,
   AccountServiceError,
+  DEFAULT_SUPABASE_ANON_KEY,
+  DEFAULT_SUPABASE_PROJECT_URL,
   TokenFetchLike,
   authorizationUrl,
+  configuredSupabaseProject,
   createPkceCodePair,
   exchangeAuthorizationCode,
   parseSessionResponse,
@@ -168,5 +171,57 @@ describe("session parsing and refresh timing", () => {
     expect(sessionNeedsRefresh({ accessToken: "a", refreshToken: "r", expiresAt: now + 61, userEmail: null }, now)).toBe(false);
     expect(sessionNeedsRefresh({ accessToken: "a", refreshToken: "r", expiresAt: now + 60, userEmail: null }, now)).toBe(true);
     expect(sessionNeedsRefresh({ accessToken: "a", refreshToken: "r", expiresAt: now - 1, userEmail: null }, now)).toBe(true);
+  });
+});
+
+describe("configuredSupabaseProject", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  // Regression test for the bug fixed 2026-09-19: every packaged
+  // Iris-Setup.exe ran with a clean environment (no dev's shell ever reaches
+  // a real user's machine), so a real user always hit this "no env vars set"
+  // case — and it used to return null, disabling both sign-in buttons with
+  // no visible error. This is the case a launch smoke test cannot catch: the
+  // app still opens and survives just fine with sign-in silently broken.
+  it("falls back to publik's production project when no env vars are set", () => {
+    vi.stubEnv("IRIS_SUPABASE_URL", "");
+    vi.stubEnv("IRIS_SUPABASE_ANON_KEY", "");
+    const project = configuredSupabaseProject();
+    expect(project).not.toBeNull();
+    expect(project?.projectUrl).toBe(DEFAULT_SUPABASE_PROJECT_URL);
+    expect(project?.anonymousKey).toBe(DEFAULT_SUPABASE_ANON_KEY);
+  });
+
+  it("matches the values baked into iris-macos's Info.plist, so both clients sign into the same project", () => {
+    expect(DEFAULT_SUPABASE_PROJECT_URL).toBe("https://gcbxnxwwuuqsypwevfgi.supabase.co");
+    expect(DEFAULT_SUPABASE_ANON_KEY).toBe("sb_publishable_NMoK8uAeTxAnguysrcEJSQ_bLW4X21K");
+  });
+
+  it("uses both overrides together when a dev points at a different project", () => {
+    vi.stubEnv("IRIS_SUPABASE_URL", "https://staging.supabase.co");
+    vi.stubEnv("IRIS_SUPABASE_ANON_KEY", "staging-anon-key");
+    const project = configuredSupabaseProject();
+    expect(project).toEqual({
+      projectUrl: "https://staging.supabase.co",
+      anonymousKey: "staging-anon-key",
+    });
+  });
+
+  it("ignores a half-set override rather than pairing a dev URL with the production key (or vice versa)", () => {
+    vi.stubEnv("IRIS_SUPABASE_URL", "https://staging.supabase.co");
+    vi.stubEnv("IRIS_SUPABASE_ANON_KEY", "");
+    expect(configuredSupabaseProject()).toEqual({
+      projectUrl: DEFAULT_SUPABASE_PROJECT_URL,
+      anonymousKey: DEFAULT_SUPABASE_ANON_KEY,
+    });
+
+    vi.stubEnv("IRIS_SUPABASE_URL", "");
+    vi.stubEnv("IRIS_SUPABASE_ANON_KEY", "staging-anon-key");
+    expect(configuredSupabaseProject()).toEqual({
+      projectUrl: DEFAULT_SUPABASE_PROJECT_URL,
+      anonymousKey: DEFAULT_SUPABASE_ANON_KEY,
+    });
   });
 });

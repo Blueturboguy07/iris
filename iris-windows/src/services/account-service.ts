@@ -32,6 +32,43 @@ export interface SupabaseProjectConfiguration {
   readonly anonymousKey: string;
 }
 
+/**
+ * The Supabase project publik uses, mirroring the values baked into
+ * `iris-macos/leanring-buddy/Info.plist` (`PublikSupabaseURL` /
+ * `PublikSupabaseAnonKey`). The anon key is public by design — it identifies
+ * the project and authorises nothing on its own; publikhq.com already ships
+ * this exact string in its JavaScript bundle, where any visitor can read it.
+ * Every row it can reach is gated by row-level-security policies on the
+ * server, which is where the real authorization lives. Do not "fix" this by
+ * moving it to `safeStorage` or a proxy — it was never a secret.
+ */
+export const DEFAULT_SUPABASE_PROJECT_URL = "https://gcbxnxwwuuqsypwevfgi.supabase.co";
+export const DEFAULT_SUPABASE_ANON_KEY = "sb_publishable_NMoK8uAeTxAnguysrcEJSQ_bLW4X21K";
+
+/**
+ * Resolves the Supabase project a build talks to: an `IRIS_SUPABASE_URL` /
+ * `IRIS_SUPABASE_ANON_KEY` override for dev/staging, falling back to the
+ * production values above. The override is all-or-nothing — setting only one
+ * of the two env vars would otherwise pair a dev project's URL with
+ * publik's production anon key (or vice versa), which fails in a much more
+ * confusing way than falling back to production.
+ *
+ * THE BUG THIS REPLACED: this used to read `process.env` with an empty-string
+ * fallback and no default anywhere — not in `forge.config.ts`, CI, or an
+ * `.env` file — so every packaged `Iris-Setup.exe` had this permanently return
+ * null, both sign-in buttons rendered `disabled`, and clicking them did
+ * nothing. `iris-windows.yml`'s launch smoke test only checks the app
+ * survives 10 seconds, so no CI signal ever caught it. Fixed 2026-09-19.
+ */
+export function configuredSupabaseProject(): SupabaseProjectConfiguration | null {
+  const overrideUrl = process.env.IRIS_SUPABASE_URL;
+  const overrideKey = process.env.IRIS_SUPABASE_ANON_KEY;
+  const projectUrl = overrideUrl && overrideKey ? overrideUrl : DEFAULT_SUPABASE_PROJECT_URL;
+  const anonymousKey = overrideUrl && overrideKey ? overrideKey : DEFAULT_SUPABASE_ANON_KEY;
+  if (!projectUrl || !anonymousKey) return null;
+  return { projectUrl, anonymousKey };
+}
+
 export interface SupabaseSession {
   readonly accessToken: string;
   readonly refreshToken: string;

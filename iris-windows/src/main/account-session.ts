@@ -4,9 +4,9 @@ import {
   AccountServiceError,
   AccountSignInProvider,
   PkceCodePair,
-  SupabaseProjectConfiguration,
   SupabaseSession,
   authorizationUrl,
+  configuredSupabaseProject,
   createOpaqueStateToken,
   createPkceCodePair,
   exchangeAuthorizationCode,
@@ -29,17 +29,12 @@ import { AuthCallbackDeepLink } from "../services/deep-link-parser";
  */
 
 /**
- * The Supabase project publik uses. The anon key is public by design — it
- * identifies the project and authorises nothing on its own — but it is read from
- * the environment so a build can point at a different project without a code
- * change.
+ * Re-exported so `main/index.ts` (and any other main-process caller) doesn't
+ * need to know it moved. The real definition, its production defaults, and
+ * the bug they fix live in `services/account-service.ts` — that module has no
+ * Electron import, so it's the one the unit suite can actually reach.
  */
-export function configuredSupabaseProject(): SupabaseProjectConfiguration | null {
-  const projectUrl = process.env.IRIS_SUPABASE_URL ?? "";
-  const anonymousKey = process.env.IRIS_SUPABASE_ANON_KEY ?? "";
-  if (!projectUrl || !anonymousKey) return null;
-  return { projectUrl, anonymousKey };
-}
+export { configuredSupabaseProject };
 
 interface PendingAuthorization {
   readonly codePair: PkceCodePair;

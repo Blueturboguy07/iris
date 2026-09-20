@@ -31,6 +31,15 @@ jobs:
           mkdir -p build
           ONLY=""
           for t in $(echo "${{ inputs.only }}" | tr ',' ' '); do ONLY="$ONLY -only-testing:$t"; done
+          # -parallel-testing-enabled NO: several suites (the PTY shell tests,
+          # and the Bug/Test repro+end-to-end suites that drive real windows,
+          # animations, and shells) are documented in leanring-buddy/CLAUDE.md
+          # as needing serial execution — "in parallel two of them can time
+          # out on main-actor contention (all 60 pass serially)". Without this
+          # flag xcodebuild runs them concurrently anyway, and a plain push
+          # (the whole suite, no -only-testing scope) reliably produces a wide
+          # spread of unrelated timeouts that have nothing to do with whatever
+          # the push actually changed.
           xcodebuild test $ONLY \
             -project iris-macos/leanring-buddy.xcodeproj \
             -scheme leanring-buddy \
@@ -38,6 +47,7 @@ jobs:
             -destination 'platform=macOS' \
             -derivedDataPath build/tests \
             -resultBundlePath build/Tests.xcresult \
+            -parallel-testing-enabled NO \
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
             2>&1 | tee build/xcodebuild-test.log | grep -E "Test case|Test Suite|error:|warning: .*failed|\*\* TEST" || true
           grep -q "\*\* TEST SUCCEEDED \*\*" build/xcodebuild-test.log

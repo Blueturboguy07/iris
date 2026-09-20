@@ -10,6 +10,7 @@
 import ServiceManagement
 import SwiftUI
 import Sparkle
+import UserNotifications
 
 @main
 struct leanring_buddyApp: App {
@@ -28,7 +29,7 @@ struct leanring_buddyApp: App {
 /// Manages the companion lifecycle: creates the menu bar panel and starts
 /// the companion voice pipeline on launch.
 @MainActor
-final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
+final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private var menuBarPanelManager: MenuBarPanelManager?
     private let companionManager = CompanionManager()
     private var sparkleUpdaterController: SPUStandardUpdaterController?
@@ -46,6 +47,12 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 0])
 
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
+        // So a tap on the catalog-app-update notification (the only
+        // notification Iris ever shows) reaches `userNotificationCenter(_:
+        // didReceive:)` below instead of just activating the app with
+        // nowhere for that to lead — Iris has no main window for macOS to
+        // bring forward on its own.
+        UNUserNotificationCenter.current().delegate = self
         companionManager.start()
         // Auto-open the panel if the user still needs to do something:
         // either they haven't onboarded yet, or permissions were revoked.
@@ -67,6 +74,31 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         // for the next run to refuse over. Synchronous and sub-second.
         companionManager.recoverAnyOnDemandEditIrisLeftUncommitted(at: "quit")
         companionManager.stop()
+    }
+
+    // MARK: - Notifications
+
+    /// Without this, macOS silently drops a notification delivered while Iris
+    /// is the active app instead of showing it — the standard
+    /// `UNUserNotificationCenterDelegate` gotcha. Iris has no main window to
+    /// read as "already looking at this", so the banner + sound always show.
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        [.banner, .sound]
+    }
+
+    /// A tap on the catalog-app-update notification (the only notification
+    /// Iris ever shows). `.clickyShowPanel` is the same mechanism
+    /// `OnDemandEditCard` already uses to bring the settings panel forward
+    /// from outside `MenuBarPanelManager` — the panel is where "Your publik
+    /// apps" and its "Update to…" pill live.
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        NotificationCenter.default.post(name: .clickyShowPanel, object: nil)
     }
 
     // MARK: - Deep links

@@ -14,6 +14,7 @@ import Combine
 import Foundation
 import ScreenCaptureKit
 import SwiftUI
+import UserNotifications
 
 /// The assistant's request lifecycle. Text-first flow:
 /// idle → capturing (screenshot) → thinking (Claude) → pointing (optional) → idle.
@@ -206,6 +207,21 @@ final class CompanionManager: ObservableObject {
     /// the scan it did survives the panel being closed and reopened — the
     /// alternative is a Spotlight query every time somebody glances at Iris.
     let appInventoryService = AppInventoryService()
+
+    /// Which catalog-app update this Mac has already been told about, so the
+    /// background check below (`checkForCatalogAppUpdatesAndNotifyIfNeeded`)
+    /// notifies once per newly available version rather than every time it
+    /// runs.
+    let catalogAppUpdateSeenTagsStore = CatalogAppUpdateSeenTagsStore.shared
+
+    /// Ticks the background catalog-app update check on
+    /// `catalogAppUpdateCheckInterval` while Iris is running. `AppInventoryService`
+    /// only refreshes when a panel view is on screen (`.task { await
+    /// refreshInventoryIfStale() }`), so without this timer an update sitting
+    /// on publik goes unseen until the reader happens to open the menu bar
+    /// panel themselves — this is the difference between that and an actual
+    /// proactive nudge.
+    private var catalogAppUpdateCheckTimer: Timer?
 
     /// Knows which publik apps are running *right now* and can ask them what
     /// they are doing. The inventory above answers "is it installed"; this
@@ -1037,6 +1053,7 @@ final class CompanionManager: ObservableObject {
 
         print("🔑 Iris start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()
+        startWatchingForCatalogAppUpdates()
         // Discovery is a directory listing, so it can run on a timer and costs
         // nothing. Talking to an app is not, and only happens when asked.
         appLinkService.startWatchingForRunningApps()
@@ -1429,6 +1446,8 @@ final class CompanionManager: ObservableObject {
         onDemandEditTakeoverIsUp = false
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
+        catalogAppUpdateCheckTimer?.invalidate()
+        catalogAppUpdateCheckTimer = nil
     }
 
     /// Maintain mode's always-on layer: the crash watch (event-driven, free)
@@ -1956,6 +1975,81 @@ final class CompanionManager: ObservableObject {
                 self?.refreshAllPermissions()
             }
         }
+    }
+
+    /// How often the background catalog-app update check runs once it is
+    /// ticking. Long, because it is a network fetch nobody is waiting on —
+    /// publik's own catalog sync is at most daily (`AppInventoryService`'s own
+    /// header), so checking every 45 minutes is already far more often than
+    /// the data underneath it can change.
+    private static let catalogAppUpdateCheckInterval: TimeInterval = 45 * 60
+
+    /// Starts the proactive update check: once shortly after launch (so an
+    /// update that landed while Iris was closed is not missed for up to a
+    /// full interval), then on `catalogAppUpdateCheckInterval` for as long as
+    /// Iris keeps running.
+    private func startWatchingForCatalogAppUpdates() {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            await self?.checkForCatalogAppUpdatesAndNotifyIfNeeded()
+        }
+        catalogAppUpdateCheckTimer = Timer.scheduledTimer(
+            withTimeInterval: Self.catalogAppUpdateCheckInterval, repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.checkForCatalogAppUpdatesAndNotifyIfNeeded()
+            }
+        }
+    }
+
+    /// Refreshes the catalog-app inventory — whether or not the menu bar
+    /// panel is open, which is the whole point of this running on a timer —
+    /// and, for anything with a genuinely new update since the last time this
+    /// Mac was told (`CatalogAppUpdateNotificationDecision`), shows one
+    /// consolidated system notification.
+    ///
+    /// Every newly-available update is marked as announced regardless of
+    /// whether notification permission is actually granted: the menu bar
+    /// badge and the panel's own "Update to…" pill still tell the reader
+    /// either way, and re-asking forever for a permission someone may simply
+    /// not want would be its own kind of nag. The permission ask itself never
+    /// blocks this from returning — `NotificationPermissionManager` shows the
+    /// system prompt at most once per launch and otherwise only offers System
+    /// Settings, exactly like Accessibility and Screen Recording.
+    func checkForCatalogAppUpdatesAndNotifyIfNeeded() async {
+        await appInventoryService.refreshInventory()
+
+        let newlyAvailableUpdates = CatalogAppUpdateNotificationDecision.newlyAvailableUpdates(
+            in: appInventoryService.inventoryEntries,
+            notAlreadyAnnouncedAccordingTo: catalogAppUpdateSeenTagsStore
+        )
+        guard !newlyAvailableUpdates.isEmpty else { return }
+
+        for entry in newlyAvailableUpdates {
+            if case .updateIsAvailable(let latestReleaseTag) = entry.updateAvailability {
+                catalogAppUpdateSeenTagsStore.markAsAnnounced(releaseTag: latestReleaseTag, forSlug: entry.slug)
+            }
+        }
+
+        _ = await NotificationPermissionManager.requestNotificationPermission()
+        guard await NotificationPermissionManager.hasNotificationPermission() else { return }
+
+        let (title, body) = CatalogAppUpdateNotificationDecision.consolidatedNotificationText(
+            forNewlyAvailableEntries: newlyAvailableUpdates
+        )
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        // Delivered immediately (`trigger: nil`) — this already ran the
+        // background check that decided the update is real news, so there is
+        // nothing left to wait for.
+        let request = UNNotificationRequest(
+            identifier: "iris.catalogAppUpdateAvailable.\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        try? await UNUserNotificationCenter.current().add(request)
     }
 
     /// Republishes the account service's changes as our own.

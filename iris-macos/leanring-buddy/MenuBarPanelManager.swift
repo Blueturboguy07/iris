@@ -12,6 +12,7 @@
 //
 
 import AppKit
+import Combine
 import QuartzCore
 import SwiftUI
 
@@ -53,6 +54,11 @@ private class KeyablePanel: NSPanel {
 @MainActor
 final class MenuBarPanelManager: NSObject {
     private var statusItem: NSStatusItem?
+    /// The small red dot toggled by `updateStatusItemBadge`. A subview of the
+    /// status item's button rather than baked into `makeIrisMenuBarIcon`'s
+    /// image, because that image is a template (monochrome, auto-tinted) and
+    /// a badge needs a real color that survives light/dark menu bars.
+    private var updateAvailableBadgeView: NSView?
     private var panel: NSPanel?
     private var clickOutsideMonitor: Any?
     private var dismissPanelObserver: NSObjectProtocol?
@@ -63,6 +69,11 @@ final class MenuBarPanelManager: NSObject {
     /// monitor that was just unplugged comes back onto one that exists instead
     /// of staying open where nobody can see it.
     private var screenLayoutChangeObserver: NSObjectProtocol?
+    /// Redraws the status item's badge whenever the catalog-app inventory
+    /// changes — an update appearing, disappearing (installed), or the panel
+    /// doing its own refresh — so the badge never depends on this class
+    /// polling anything itself.
+    private var appInventoryChangeCancellable: AnyCancellable?
 
     private let companionManager: CompanionManager
     private let panelWidth: CGFloat = 320
@@ -72,6 +83,12 @@ final class MenuBarPanelManager: NSObject {
         self.companionManager = companionManager
         super.init()
         createStatusItem()
+
+        appInventoryChangeCancellable = companionManager.appInventoryService.$inventoryEntries
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.updateStatusItemBadge()
+            }
 
         dismissPanelObserver = NotificationCenter.default.addObserver(
             forName: .clickyDismissPanel,
@@ -123,6 +140,7 @@ final class MenuBarPanelManager: NSObject {
     }
 
     deinit {
+        appInventoryChangeCancellable?.cancel()
         if let monitor = clickOutsideMonitor {
             NSEvent.removeMonitor(monitor)
         }
@@ -155,6 +173,49 @@ final class MenuBarPanelManager: NSObject {
         button.toolTip = "Iris — press ctrl + option to toggle"
         button.action = #selector(statusItemClicked)
         button.target = self
+
+        // A small solid dot in the icon's corner, separate from the template
+        // eye image above so it can carry a real color no menu bar tint
+        // change affects — the quiet, no-permission-needed signal that at
+        // least one installed publik app has an update. Hidden until
+        // `updateStatusItemBadge` (kept current by the inventory subscription
+        // set up in `init`) says otherwise.
+        let badgeDiameter: CGFloat = 6
+        let badgeView = NSView()
+        badgeView.wantsLayer = true
+        badgeView.layer?.backgroundColor = NSColor.systemRed.cgColor
+        badgeView.layer?.cornerRadius = badgeDiameter / 2
+        badgeView.isHidden = true
+        badgeView.translatesAutoresizingMaskIntoConstraints = false
+        button.addSubview(badgeView)
+        NSLayoutConstraint.activate([
+            badgeView.widthAnchor.constraint(equalToConstant: badgeDiameter),
+            badgeView.heightAnchor.constraint(equalToConstant: badgeDiameter),
+            badgeView.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -2),
+            badgeView.topAnchor.constraint(equalTo: button.topAnchor, constant: 2),
+        ])
+        updateAvailableBadgeView = badgeView
+    }
+
+    /// Reflects whether any installed publik app has an update available —
+    /// the menu bar's always-current, no-permission-needed signal. Kept in
+    /// sync with `AppInventoryService`'s own published inventory via the
+    /// subscription set up in `init`, so this never has to poll anything
+    /// itself.
+    private func updateStatusItemBadge() {
+        let entriesWithUpdates = companionManager.appInventoryService.installedEntriesForDisplay
+            .filter(\.hasAnUpdateAvailable)
+        updateAvailableBadgeView?.isHidden = entriesWithUpdates.isEmpty
+
+        guard let button = statusItem?.button else { return }
+        switch entriesWithUpdates.count {
+        case 0:
+            button.toolTip = "Iris — press ctrl + option to toggle"
+        case 1:
+            button.toolTip = "Iris — update available for \(entriesWithUpdates[0].name)"
+        default:
+            button.toolTip = "Iris — \(entriesWithUpdates.count) updates available"
+        }
     }
 
     /// Draws the Iris eye as a template menu bar icon: the almond lid with a

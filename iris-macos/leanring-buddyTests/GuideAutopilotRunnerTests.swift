@@ -229,6 +229,46 @@ struct GuideAutopilotRunnerTests {
         #expect(shell.commandsRun.isEmpty, "a sensitive command must never reach the shell")
     }
 
+    // MARK: - Paste step file-open (openPasteTarget)
+
+    // Reported directly against chatmany-mann's Windows install (Sep 20 2026)
+    // and confirmed to be the same bug on macOS: a `.paste` step (`set-db-id`)
+    // authors `open -e wrangler.toml` purely to open the file the reader is
+    // about to edit — never the secret itself — but `.paste` is never
+    // `stepIsAutopilotExecutable`, so the command never reached
+    // `executeStepCommand` at all. `openPasteTarget` is the fix: a separate,
+    // narrower entry point the drive loop calls for exactly this kind.
+
+    @Test func openPasteTargetRunsTheFileOpeningCommand() async {
+        let shell = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")])
+        let runner = Self.runner(shell: shell)
+        await runner.openPasteTarget(
+            step: Self.step(id: "set-db-id", command: "open -e wrangler.toml")
+        )
+        #expect(shell.commandsRun == ["open -e wrangler.toml"])
+        let loggedTheCommand = runner.transcript.contains {
+            if case .commandFromTheGuide(let text) = $0 { return text == "open -e wrangler.toml" }
+            return false
+        }
+        #expect(loggedTheCommand)
+    }
+
+    @Test func openPasteTargetNeverRunsWhenTheStepIsSensitive() async {
+        let shell = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")])
+        let runner = Self.runner(shell: shell)
+        await runner.openPasteTarget(
+            step: Self.step(id: "owner-token", command: "wrangler secret put OWNER_TOKEN", sensitive: true)
+        )
+        #expect(shell.commandsRun.isEmpty, "a sensitive paste step must never reach the shell")
+    }
+
+    @Test func openPasteTargetDoesNothingWhenTheStepHasNoCommand() async {
+        let shell = FakeShellSession(outcomes: [.succeeded(workingDirectory: "/x")])
+        let runner = Self.runner(shell: shell)
+        await runner.openPasteTarget(step: Self.step(id: "sign-up", command: nil))
+        #expect(shell.commandsRun.isEmpty)
+    }
+
     // MARK: - A dead shell session (the "silently and permanently stalls" field report)
 
     /// Reproduces the campaign's own diagnosis: `.sessionFailed` (the pty

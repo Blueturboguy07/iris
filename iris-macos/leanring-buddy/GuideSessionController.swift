@@ -2064,6 +2064,16 @@ final class GuideSessionController: ObservableObject {
                     continue
                 }
                 autoOpenIfTheStepPointsSomewhere(step)
+                // A `.paste` step may carry a command whose only job is
+                // opening the file being edited (chatmany's own guide:
+                // `open -e wrangler.toml`) — never the secret itself, which
+                // is exactly why this step is not `stepIsAutopilotExecutable`
+                // and never reaches `executeStepCommand`. Runs, but never
+                // completes the step: see `openPasteTarget`'s own header.
+                if step.kind == .paste {
+                    await runner.openPasteTarget(step: step)
+                    guard theGuideIsStillOn(stepIndexBeingDriven, having: step) else { continue }
+                }
                 if stepIsFinishedOnceIrisHasOpenedIt(step)
                     || stepIsAVestigialTerminalStepInAutopilot(step) {
                     // Nothing for the watch loop to confirm and nothing only the

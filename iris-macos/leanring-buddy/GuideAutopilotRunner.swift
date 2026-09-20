@@ -495,6 +495,46 @@ final class GuideAutopilotRunner: ObservableObject, AutopilotTerminalPresenting 
         }
     }
 
+    /// Runs a `.paste` step's command, when it has one, purely to open
+    /// whatever file the reader is about to edit — chatmany's own guide does
+    /// this with `open -e wrangler.toml` — never to move the secret itself,
+    /// which stays the reader's job by design (a `.paste` step is never
+    /// `stepIsAutopilotExecutable`, so it never reaches `executeStepCommand`
+    /// above at all). This is deliberately NOT that function: nothing here
+    /// marks the step "running", appends a step heading, or engages the
+    /// failure ladder on a non-zero exit — none of that step-completion
+    /// machinery applies to a step only the reader's own "I did it" tap can
+    /// actually finish. Whatever happens — it runs cleanly, it fails, the
+    /// risk gate declines it, there is no command at all — the step is
+    /// exactly as unfinished afterward as it was before this ran, and the
+    /// reader still has the plain-English body text either way.
+    ///
+    /// Mirrors `iris-windows`'s `AutopilotRunner.openPasteTarget` — same bug
+    /// (a paste step's command was unconditionally unreachable on both
+    /// clients), same fix shape, found and shipped on Windows first.
+    func openPasteTarget(step: IrisGuideStep) async {
+        guard let command = step.command, !command.isEmpty else { return }
+        // A sensitive step never runs anything, on either code path — the
+        // same exclusion `executeStepCommand` applies above.
+        guard step.watch?.sensitive != true else { return }
+
+        if let folder = step.workingDirectory {
+            guard await moveInto(folder, using: shellSession) else { return }
+        }
+
+        let workingDirectory = step.workingDirectory ?? shellSession.currentWorkingDirectory
+        // Never worth a confirm tap just to open a file — a step whose whole
+        // point is a courtesy open must not turn into an interruption.
+        // Anything the gate does not wave straight through is skipped
+        // outright rather than surfaced or asked about.
+        guard let approved = GuideAutopilotRiskAssessment.approve(
+            command, inWorkingDirectory: workingDirectory
+        ) else { return }
+
+        transcript.append(.commandFromTheGuide(text: command))
+        _ = await runApproved(approved)
+    }
+
     // MARK: - Running a guide command through the gate
 
     private enum GuideCommandOutcome {

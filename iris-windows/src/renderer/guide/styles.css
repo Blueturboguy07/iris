@@ -522,6 +522,38 @@ main::-webkit-scrollbar {
   transform: none;
 }
 
+/* Offered by autopilot-entry.js, next to (never instead of) Continue — the
+   reader can still do a step by hand if they'd rather. */
+.guide-actions .secondary-action {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.secondary-action {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 15px;
+  border-radius: 11px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 650;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.secondary-action:hover {
+  background: var(--surface-hover);
+  border-color: var(--accent);
+}
+
+.secondary-action:disabled {
+  opacity: 0.55;
+}
+
 .settings-panel {
   position: absolute;
   z-index: 50;

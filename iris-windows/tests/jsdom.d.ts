@@ -6,8 +6,9 @@
 // on purpose — with the DOM ambient, a stray `document` or `window` in
 // `src/main/` would typecheck instead of failing. The renderer is plain
 // JavaScript and is not typechecked at all, so nothing else needs those types.
-// The surface below is exactly what tests/guide-renderer.test.ts and
-// tests/settings-renderer.test.ts touch.
+// The surface below is exactly what tests/guide-renderer.test.ts,
+// tests/settings-renderer.test.ts, and tests/guide-autopilot-entry.test.ts
+// touch.
 //
 declare module "jsdom" {
   export interface JSDOMWindow {
@@ -16,6 +17,7 @@ declare module "jsdom" {
         textContent: string | null;
         className: string;
         disabled: boolean;
+        hidden: boolean;
         readonly style: { display: string };
         click(): void;
       } | null;

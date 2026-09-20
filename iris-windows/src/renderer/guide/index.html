@@ -8,9 +8,12 @@
     <title>Iris</title>
     <link rel="stylesheet" href="./styles.css" />
     <!-- The bridge must define window.__TAURI__ before app.js reads it. Both are
-         deferred, so they run in document order. -->
+         deferred, so they run in document order. autopilot-entry.js runs last,
+         reading app.js's window.__IRIS__ from the outside — see its own header
+         comment for why it isn't inside app.js itself. -->
     <script src="./iris-bridge.js" defer></script>
     <script src="./app.js" defer></script>
+    <script src="./autopilot-entry.js" defer></script>
   </head>
   <body>
     <div class="app-shell" id="app-shell">
@@ -105,6 +108,9 @@
           </article>
 
           <div class="guide-actions">
+            <button class="secondary-action" id="autopilot-button" type="button" hidden>
+              Let Iris run it
+            </button>
             <button class="primary-action" id="next-button" type="button">
               Continue <span aria-hidden="true">→</span>
             </button>

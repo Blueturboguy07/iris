@@ -40,6 +40,13 @@ const RECIPE_PROVENANCE: Provenance = "vetted_recipe";
 /// waiting the full command deadline for one would just hide that.
 const FOLDER_MOVE_TIMEOUT_MS = 30_000;
 
+/// Launching an editor from PowerShell (`notepad wrangler.toml`) returns as
+/// soon as the GUI process starts — it does not wait for the window to close.
+/// This is generous for that, and short enough that a paste step whose
+/// command hangs for some other reason still reaches the reader promptly
+/// instead of sitting for `DEFAULT_COMMAND_TIMEOUT_MS` (15 minutes) first.
+const OPEN_FILE_TIMEOUT_MS = 15_000;
+
 /// A folder a recipe may send the shell to: a plain path under home, the root,
 /// or a Windows drive, with nothing in it that a shell would expand, split or
 /// run.
@@ -324,6 +331,14 @@ export class AutopilotRunner {
         // because the block's condition includes `step.watch !== undefined`.
       }
 
+      if (step.kind === "paste") {
+        // Opening the file being edited, same as `open` opens its link above —
+        // a courtesy before the handoff, never the step itself. A paste step
+        // always still falls through to the reader (or its watch block) below,
+        // whatever this does or doesn't manage to do.
+        await this.openPasteTarget(step, shell);
+      }
+
       if (advancesWithoutRunningAnything(step.kind)) {
         // A prose `noop` step: nothing for the command runner to do, so it
         // succeeds the instant it is reached — the same as macOS's nil-command →
@@ -494,6 +509,64 @@ export class AutopilotRunner {
       kind: "blocked",
       status: this.surface(`Iris won't run this command automatically: ${verdict.reason}`, command),
     };
+  }
+
+  /// Runs a `paste` step's command, when it has one, purely to open whatever
+  /// file the reader is about to edit — never to move the secret itself; see
+  /// `guide-recipe.ts`'s `case "paste"` for why that's a command Iris may run
+  /// at all. This is deliberately NOT `execute()`: nothing here calls
+  /// `advance()` on success or `handleFailedCommand()` (self-heal, the fix
+  /// ladder) on failure, because none of that applies to a step only the
+  /// reader's own "I did it" tap (or a `watch`, if the step carries one) can
+  /// actually finish. Whatever happens here — it runs cleanly, it fails, it
+  /// times out, the risk gate declines it, there is no command at all — the
+  /// step is exactly as unfinished afterward as it was before, and the
+  /// reader still has the plain-English instruction either way.
+  private async openPasteTarget(step: RecipeStep, shell: ShellSession): Promise<void> {
+    const command = this.commandFor(step);
+    if (command === undefined) return;
+
+    const folder = workingDirectoryForPlatform(step, this.platform);
+    if (folder !== undefined) {
+      const moved = await this.moveInto(folder, shell);
+      if (!moved) return;
+    }
+    if (this.aborted) return;
+
+    const workingDirectory = this.gateWorkingDirectory(step, shell);
+    const gateOptions = {
+      provenance: RECIPE_PROVENANCE,
+      autonomyGranted: this.autonomyGranted,
+      workingDirectory,
+    };
+    // Never worth a confirm tap just to open a file — a step whose whole
+    // point is a courtesy open must not turn into an interruption. Anything
+    // this gate does not wave straight through is skipped outright rather
+    // than surfaced.
+    if (assess(command, gateOptions).tier !== "runs_without_asking") return;
+    const approved = approve(command, gateOptions);
+    if (approved === undefined) return;
+
+    this.emit({ type: "commandStarted", text: command, friendlyLabel: friendlyLabel(command) });
+    const outcome = await shell.run(approved, OPEN_FILE_TIMEOUT_MS);
+    if (this.aborted) return;
+    switch (outcome.kind) {
+      case "succeeded":
+        this.emit({ type: "commandFinished", exitCode: 0, output: outcome.output });
+        return;
+      case "failed":
+        this.emit({ type: "commandFinished", exitCode: outcome.exitCode, output: outcome.output });
+        return;
+      case "timed_out":
+        this.emit({
+          type: "commandFinished",
+          exitCode: 124,
+          output: "That command took too long, so Iris stopped it.",
+        });
+        return;
+      case "session_failed":
+        return; // Best-effort only — the reader still has the plain instruction.
+    }
   }
 
   private async execute(

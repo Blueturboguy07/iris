@@ -300,10 +300,39 @@ function recipeStepFromGuideStep(step: IrisGuideStep): RecipeStep {
         ...(step.href !== undefined ? { href: step.href } : {}),
       };
 
-    case "paste":
-      // Iris never types the secret — the reader moves it — so a paste step is
-      // always handed over, and it deliberately carries no command.
-      return { ...shared, kind: "paste", instruction: step.body };
+    case "paste": {
+      // Iris never types the SECRET a paste step moves — that invariant is
+      // untouched, and it's why the step is still always handed to the
+      // reader below. But a guide author can give the step a `command` whose
+      // only job is opening the file being edited — chatmany's own guide
+      // does exactly this (`notepad wrangler.toml` here, `open -e
+      // wrangler.toml` on macOS) — and running that never touches the secret
+      // value at all; it just saves the reader a filesystem hunt for a file
+      // they were never told the path to. Dropping it unconditionally (the
+      // previous behaviour) meant every guide using this idiom left the
+      // reader staring at prose with nothing open and nowhere obvious to
+      // look — reported directly against chatmany-mann's `set-db-id` step.
+      // A sensitive step still never gets a command, exactly like
+      // terminal/check.
+      if (stepIsSensitive(step) || !hasRunnableCommand(step)) {
+        return { ...shared, kind: "paste", instruction: step.body };
+      }
+      const authoredCommand = normalizeWingetAgreements(step.command as string);
+      const needsPosixTranslation = commandNeedsPosixTranslation(authoredCommand);
+      const command = needsPosixTranslation
+        ? translatePosixShellToPowerShell(authoredCommand)
+        : authoredCommand;
+      return {
+        ...shared,
+        kind: "paste",
+        instruction: step.body,
+        command,
+        ...(needsPosixTranslation ? { posixCommand: authoredCommand } : {}),
+        ...(step.workingDirectory !== undefined && step.workingDirectory !== ""
+          ? { workingDirectory: step.workingDirectory }
+          : {}),
+      };
+    }
 
     case "verify":
       // The verify step's watch expectations rode in on `shared` above; here it

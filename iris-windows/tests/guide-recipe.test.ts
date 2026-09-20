@@ -576,6 +576,24 @@ describe("sensitive commands and winget normalization", () => {
     }
   });
 
+  it("carries a non-sensitive paste step's command through, to open the file it names (chatmany-mann)", () => {
+    // Reported bug: `set-db-id` (kind "paste") authors `notepad wrangler.toml`
+    // purely to open the file the reader edits by hand — the secret itself
+    // never rides on this command — but the derivation used to drop every
+    // paste step's command unconditionally, leaving the reader with nothing
+    // open and no path to go looking for.
+    const recipe = desktopRecipe("chatmany-mann");
+    const step = recipe.steps.find((candidate) => candidate.id === "set-db-id");
+    expect(step).toBeDefined();
+    if (step === undefined) return;
+    expect(step.kind).toBe("paste");
+    expect(step.command).toBe("notepad wrangler.toml");
+    expect(step.workingDirectory).toBe("~/chatmany");
+    // The reader is still the one who finishes it — carrying the command
+    // through must not turn this into something that auto-completes.
+    expect(step.instruction).toContain("wrangler.toml");
+  });
+
   it("never derives a sensitive step into a `command` step for any guide", () => {
     for (const slug of fixtureSlugs()) {
       const guide = loadGuideFixture(slug);

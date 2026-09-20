@@ -54,6 +54,74 @@ describe("the autopilot runner", () => {
     expect(events.some((event) => event.type === "handedToReader")).toBe(false);
   });
 
+  it("runs a paste step's file-opening command, then still hands the step to the reader", async () => {
+    // Reported bug: a paste step's command exists only to open the file the
+    // reader is about to edit (chatmany-mann's real guide: `notepad
+    // wrangler.toml`) — it must run, but running it must not make the step
+    // auto-complete the way a real `command` step does.
+    const runner = new AutopilotRunner(
+      recipe([
+        {
+          id: "set-db-id",
+          title: "Put the database id in the config",
+          kind: "paste",
+          instruction: "In wrangler.toml, replace the placeholder with your database_id.",
+          command: "notepad wrangler.toml",
+        },
+      ]),
+    );
+    const shell = MockShell.alwaysSucceeds();
+
+    const status = await runner.runUntilBlocked(shell);
+    expect(status.type).toBe("needsReader");
+    expect(shell.commandsRun).toEqual(["notepad wrangler.toml"]);
+    const events = runner.drainEvents();
+    expect(events.some((event) => event.type === "commandStarted")).toBe(true);
+    expect(events.some((event) => event.type === "commandFinished")).toBe(true);
+    expect(events.some((event) => event.type === "handedToReader")).toBe(true);
+  });
+
+  it("still hands a paste step to the reader even when its opening command fails", async () => {
+    const runner = new AutopilotRunner(
+      recipe([
+        {
+          id: "set-db-id",
+          title: "Put the database id in the config",
+          kind: "paste",
+          instruction: "In wrangler.toml, replace the placeholder with your database_id.",
+          command: "notepad wrangler.toml",
+        },
+      ]),
+    );
+    const shell = new MockShell([{ kind: "failed", exitCode: 1, output: "notepad could not be found" }]);
+
+    const status = await runner.runUntilBlocked(shell);
+    // A failed courtesy-open is not a failed step — no self-heal, no fix
+    // ladder, just the ordinary reader handoff the step always gets.
+    expect(status.type).toBe("needsReader");
+    const events = runner.drainEvents();
+    expect(events.some((event) => event.type === "needsConfirm")).toBe(false);
+    expect(events.some((event) => event.type === "handedToReader")).toBe(true);
+  });
+
+  it("never runs a paste step's command when the guide gave it none", async () => {
+    const runner = new AutopilotRunner(
+      recipe([
+        {
+          id: "sign-up",
+          title: "Create an account",
+          kind: "paste",
+          instruction: "Copy your API key from the dashboard.",
+        },
+      ]),
+    );
+    const shell = MockShell.alwaysSucceeds();
+
+    const status = await runner.runUntilBlocked(shell);
+    expect(status.type).toBe("needsReader");
+    expect(shell.commandsRun).toHaveLength(0);
+  });
+
   it("stops for the reader at a sign-in, then resumes on its own", async () => {
     const runner = new AutopilotRunner(
       recipe([

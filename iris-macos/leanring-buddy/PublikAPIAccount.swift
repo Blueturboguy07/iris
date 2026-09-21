@@ -22,6 +22,7 @@
 //  so "we provisioned before asking" is not a mistake this file can express.
 //
 
+import Combine
 import Foundation
 
 // MARK: - Consent

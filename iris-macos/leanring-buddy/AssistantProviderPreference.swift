@@ -52,7 +52,10 @@ enum AssistantProviderPreference: String, CaseIterable, Sendable, Equatable {
         case .anthropicKey:
             return "Your key, your bill, straight to Anthropic. publik never sees it."
         case .codex:
-            return "Free if you already pay for ChatGPT. Iris drives the codex CLI and stores nothing."
+            // The limitation is named here rather than discovered mid-answer:
+            // `codex exec` has no tool-use wire format, so on this route Iris
+            // answers in words and cannot copy, run or open things for you.
+            return "Free if you already pay for ChatGPT. Iris drives the codex CLI and stores nothing. Answers only — it can't run things for you."
         }
     }
 }

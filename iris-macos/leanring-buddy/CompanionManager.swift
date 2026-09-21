@@ -2417,6 +2417,23 @@ final class CompanionManager: ObservableObject {
         // Per-message budgets start here, not at app launch.
         chatActionToolRunner.beginANewChatMessage()
 
+        // Codex answers through the reader's own CLI rather than an HTTPS
+        // request, so it is routed before a transport is ever resolved — asking
+        // `AssistantTransport` for one would correctly refuse, because a
+        // subprocess is not a URL.
+        //
+        // It cannot carry chat's client tools (`codex exec` has no tool-use
+        // wire format), so this route answers in words. See
+        // `CodexChatResponder` for what that costs and what it does not.
+        if accountService.resolvedChatProvider == .codex {
+            return try await CodexChatResponder.answer(
+                systemPrompt: Self.companionResponseSystemPrompt,
+                conversationHistory: conversationHistoryForTheAPI,
+                userPrompt: userPrompt,
+                images: labeledImages
+            )
+        }
+
         do {
             return try await claudeAPI.analyzeImageStreamingRunningClientTools(
                 images: labeledImages,

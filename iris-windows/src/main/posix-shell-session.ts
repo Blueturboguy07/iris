@@ -128,6 +128,13 @@ export class PosixShellSession implements ShellSession {
     }
   }
 
+  /// Asked of the processes themselves — see the interface note. A server
+  /// that died after `runLongRunning` resolved is visible here and nowhere
+  /// else.
+  longRunningStillAlive(): boolean {
+    return this.servers.some((server) => server.exitCode === null && !server.killed);
+  }
+
   dispose(): void {
     for (const server of this.servers) server.kill();
     this.servers.length = 0;

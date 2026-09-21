@@ -59,6 +59,18 @@ export interface ShellSession {
     graceMs: number,
   ): Promise<CommandOutcome>;
 
+  /// Whether a command started by `runLongRunning` is still alive RIGHT NOW,
+  /// asked of the process rather than remembered from what it printed.
+  ///
+  /// `runLongRunning` resolves once — at its readiness marker or at the end of
+  /// the grace period — and a server that dies a minute later used to go
+  /// unnoticed, because the only evidence anything held was a "Local:
+  /// http://localhost:5174/" line from before. That is precisely how the macOS
+  /// chat path told a reader their server was serving when it had been dead
+  /// for two minutes. A started server is not a running server, and the only
+  /// way to tell them apart is to re-ask.
+  longRunningStillAlive(): boolean;
+
   /// Where the session currently is, for surfacing on failure.
   currentDirectory(): string;
 
@@ -103,6 +115,13 @@ export class MockShell implements ShellSession {
   ): Promise<CommandOutcome> {
     // A started server counts as run; tests assert on `commandsRun`.
     return this.run(command, DEFAULT_COMMAND_TIMEOUT_MS);
+  }
+
+  /// Scripted: the suite sets this to model a server that died after it
+  /// started, which is the case the real implementations exist to catch.
+  longRunningIsAlive = false;
+  longRunningStillAlive(): boolean {
+    return this.longRunningIsAlive;
   }
 
   currentDirectory(): string {

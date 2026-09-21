@@ -233,6 +233,13 @@ export class PowerShellSession implements ShellSession {
     }
   }
 
+  /// Asked of the processes themselves: node sets `exitCode` the moment a
+  /// child exits, so a server that died after `runLongRunning` resolved is
+  /// visible here and nowhere else.
+  longRunningStillAlive(): boolean {
+    return this.servers.some((server) => server.exitCode === null && !server.killed);
+  }
+
   dispose(): void {
     for (const server of this.servers) {
       server.kill();

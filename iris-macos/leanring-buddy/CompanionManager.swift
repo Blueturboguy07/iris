@@ -147,6 +147,12 @@ final class CompanionManager: ObservableObject {
     /// directly, and the request pipeline below asks it which route to take.
     let accountService = AccountService()
 
+    /// The publik API credential and what the gateway last said about it. Owned
+    /// here rather than inside `AccountService` because it is not an identity:
+    /// a publik API key is a way to pay for a model, and since the funded tier
+    /// was removed it has nothing to do with being signed in at all.
+    let publikAPIAccount = PublikAPIAccount()
+
     /// What the reader's own API key has spent. Only ever told about calls; it
     /// can neither refuse one nor slow one down — the founder's ruling was that
     /// a reader paying their own bill does not need Iris inventing a ceiling on
@@ -636,10 +642,10 @@ final class CompanionManager: ObservableObject {
         // because the user can sign in, sign out, or paste a key between two
         // messages and the very next request has to respect that.
         let accountService = self.accountService
-        let publikBaseURL = self.publikBaseURL
+        let publikAPIAccount = self.publikAPIAccount
         let api = ClaudeAPI(
             resolveTransport: {
-                await accountService.currentAssistantTransport(publikBaseURL: publikBaseURL)
+                await accountService.currentAssistantTransport(publikAPIAccount: publikAPIAccount)
             },
             model: selectedModel
         )
@@ -833,12 +839,9 @@ final class CompanionManager: ObservableObject {
             ).userFacingMessage
         }
 
-        if transportError.requiresReSignIn {
-            await accountService.handleAccessTokenRejectedByServer()
-        }
         return Self.wording(
             for: transportError,
-            theReaderIsSignedIntoPublik: accountService.signedInAccount != nil
+            anotherProviderIsAlreadySetUp: accountService.anotherProviderIsAlreadySetUp
         )
     }
 
@@ -846,33 +849,26 @@ final class CompanionManager: ObservableObject {
     ///
     /// Founder report, in two parts. First: "if i am signed out just say im
     /// signed out dont say anthropic turned that key down." Then, on seeing the
-    /// first attempt at this: "yo its not the sign in."
+    /// first attempt at this: "yo its not the sign in." Both are right, and
+    /// together they say what the message has to do: lead with the cause and
+    /// the one action that fixes it, and offer an alternative only when one
+    /// genuinely exists.
     ///
-    /// Both are right, and together they say what the message has to do. The
-    /// original blamed a KEY for what was actually a lapsed Claude Code login —
-    /// wrong twice, since there is no key and nothing to paste. The obvious
-    /// correction, leading with "you're signed out", buried the real cause
-    /// under a state that was not what broke. So the base message now leads
-    /// with the cause and the one action that fixes it, and this function adds
-    /// signing in only as an ALTERNATIVE, and only when it is genuinely
-    /// available.
-    ///
-    /// The sign-in state is READ, never inferred from the route. Inferring it
-    /// would be wrong where it matters most: Tier C and the fix ladder run on
-    /// the BYO transport even for a signed-IN reader, so offering "sign in"
-    /// there would be advice they have already taken.
+    /// This used to offer "sign in to publik and use iris on us". That offer is
+    /// gone with the funded tier (`docs/assistant-credentials.md`) — signing in
+    /// no longer buys anybody a model, so saying it would be the same class of
+    /// mistake the founder reported: advice the reader cannot act on. What it
+    /// offers now is the thing that IS true — that they have another provider
+    /// already set up and can switch to it.
     nonisolated static func wording(
         for transportError: AssistantTransportError,
-        theReaderIsSignedIntoPublik: Bool
+        anotherProviderIsAlreadySetUp: Bool
     ) -> String {
         let message = transportError.userFacingMessage
-        guard !theReaderIsSignedIntoPublik else { return message }
-        switch transportError {
-        case .bringYourOwnKeyRejected, .claudeCodeLoginExpired:
-            return message + " you can also sign in to publik and use iris on us."
-        default:
+        guard anotherProviderIsAlreadySetUp, transportError.shouldOfferProviderSetup else {
             return message
         }
+        return message + " you've got another one set up in settings if you'd rather switch."
     }
 
     /// Conversation history so Claude remembers prior exchanges within a session.
@@ -1044,10 +1040,10 @@ final class CompanionManager: ObservableObject {
         // transport lives here, so the loop is handed the resolution rather than
         // ever building one.
         let accountServiceForTheWatchLoop = accountService
-        let publikBaseURLForTheWatchLoop = publikBaseURL
+        let publikAPIAccountForTheWatchLoop = publikAPIAccount
         guideSessionController.watchLoop.useTransportForVisualChecks {
             await accountServiceForTheWatchLoop.currentAssistantTransport(
-                publikBaseURL: publikBaseURLForTheWatchLoop
+                publikAPIAccount: publikAPIAccountForTheWatchLoop
             )
         }
 

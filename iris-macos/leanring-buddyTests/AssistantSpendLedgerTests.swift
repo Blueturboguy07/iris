@@ -37,7 +37,7 @@ struct AssistantSpendLedgerTests {
         let ledger = try isolatedLedger()
         let usage = AssistantTokenUsage(inputTokens: 1_000, outputTokens: 1_000)
 
-        ledger.record(model: "claude-sonnet-4-6", usage: usage, route: .publiksFundedTier)
+        ledger.record(model: "claude-sonnet-4-6", usage: usage, route: .aMeteredGatewayThatBillsSeparately)
         ledger.record(model: "claude-sonnet-4-6", usage: usage, route: .aFlatRateSubscription)
         #expect(ledger.totalCalls == 0)
         #expect(ledger.totalSpent == 0)
@@ -48,13 +48,19 @@ struct AssistantSpendLedgerTests {
         #expect(ledger.totalSpent > 0)
     }
 
-    /// A Claude Code OAuth token is the reader's OWN credential and still is not
-    /// metered — which is exactly the case a future edit is most likely to get
-    /// wrong, because it looks like the API-key case at the call site.
-    @Test("a Claude Code login is the reader's own credential and still costs nothing per query")
-    func anOAuthTokenIsNotMetered() {
-        #expect(AssistantTransport.bringYourOwnOAuthToken(anthropicOAuthToken: "sk-ant-oat-x")
-            .spendRoute == .aFlatRateSubscription)
+    /// The publik gateway is the reader's OWN money and still is not counted
+    /// here — which is exactly the case a future edit is most likely to get
+    /// wrong, because it looks like the API-key case at the call site. This
+    /// ledger prices Anthropic's list rates; the gateway bills half of list, so
+    /// counting it would overstate the bill about twofold. publik's dashboard
+    /// is the authority for that route.
+    @Test("the publik gateway is the reader's money and still is not priced here")
+    func theGatewayRouteIsNotMetered() {
+        #expect(AssistantTransport.publikAPI(
+            key: PublikAPIKey("pk_live_abc123456789_0123456789abcdef0123456789abcdef")!,
+            gatewayBaseURL: URL(string: "https://publikhq.com/api/v1")!
+        ).spendRoute == .aMeteredGatewayThatBillsSeparately)
+        #expect(!AssistantSpendRoute.aMeteredGatewayThatBillsSeparately.isMetered)
         #expect(AssistantTransport.bringYourOwnKey(anthropicAPIKey: "sk-ant-x")
             .spendRoute == .theReadersOwnAPIKey)
         #expect(!AssistantSpendRoute.aFlatRateSubscription.isMetered)

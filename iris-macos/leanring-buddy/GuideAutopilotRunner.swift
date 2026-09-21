@@ -193,26 +193,31 @@ struct GuideAutopilotFixLadderFunding {
         AnthropicBringYourOwnCredential.isAvailable || CodexCLILogin.currentState().isUsable
     }
 
+    /// What a real install on this Mac is funded by.
+    ///
+    /// SINCE THE FUNDED TIER WAS REMOVED, THE ANSWER IS ALWAYS "THE READER".
+    /// Every route the ladder can take now spends the reader's own money or
+    /// their own flat-rate plan: the publik API gateway is metered to them,
+    /// their Anthropic key is their bill, and Codex is their ChatGPT plan.
+    /// publik pays for none of it, so publik's cap has nothing left to protect
+    /// and must not apply — leaving it on would throttle an install for
+    /// somebody paying their own way, which is the opposite of what the cap was
+    /// for.
+    ///
+    /// The parameter is kept so the call site does not have to change shape,
+    /// and ignored deliberately rather than deleted: sign-in state is now
+    /// irrelevant to who pays, and a reader of this code should be told that
+    /// rather than find a function that silently stopped consulting its own
+    /// argument.
     @MainActor
     static func forThisReader(
-        whetherTheReaderIsSignedIntoPublikRightNow: @escaping @MainActor () -> Bool
+        whetherTheReaderIsSignedIntoPublikRightNow: @escaping @MainActor () -> Bool = { false }
     ) -> GuideAutopilotFixLadderFunding {
         GuideAutopilotFixLadderFunding(
             whetherPublikIsPayingForTheseCalls: {
-                // Signed in: `AssistantTransport.selectTransport` returns
-                // `.funded` for ANY signed-in reader — even one with a BYO key
-                // stored — so publik really is paying for this call and the cap
-                // it protects applies.
-                if whetherTheReaderIsSignedIntoPublikRightNow() { return true }
-                // Signed out with their own credential connected: every ladder
-                // call goes straight to Anthropic on the reader's key, publik
-                // pays nothing, and the cap has nothing to protect.
-                //
-                // Signed out with NO credential: the ladder cannot reach a model
-                // at all, so keep the funded shape and let the honest "I've used
-                // up what I can spend" message be the one that fires. That is
-                // also the safe direction to be wrong in.
-                return !readerHasTheirOwnCredential()
+                // Signing in buys no model access any more, so it cannot make
+                // publik the payer. Nothing does.
+                return false
             },
             makeAProposerOnTheReadersOwnCredential: {
                 // Anthropic first, on speed alone — Codex is about 9x slower per

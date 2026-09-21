@@ -179,10 +179,10 @@ final class AccountService: ObservableObject {
     /// key: once saved, the key is never read back into the UI layer.
     @Published private(set) var hasStoredAnthropicAPIKey: Bool = false
 
-    /// Whether a Claude Code OAuth token is connected (the CLI-login path). Like
-    /// the key flag, a Bool and never the token itself. The panel reads this to
-    /// show the CLI-login as connected and offer disconnect.
-    @Published private(set) var hasConnectedClaudeCodeLogin: Bool = false
+    /// Whether a publik API key is on this Mac, however it got here — minted
+    /// for this install or pasted from the dashboard. Like the key flag, a Bool
+    /// and never the credential itself.
+    @Published private(set) var hasPublikAPIKey: Bool = false
 
     /// Whether the reader has a usable Codex CLI login. Unlike every other flag
     /// here, this is NOT backed by a Keychain item: Iris does not hold the Codex
@@ -224,7 +224,7 @@ final class AccountService: ObservableObject {
     init(urlSession: URLSession = .shared) {
         self.urlSession = urlSession
         self.hasStoredAnthropicAPIKey = KeychainStore.hasSecret(ofKind: .anthropicAPIKey)
-        self.hasConnectedClaudeCodeLogin = KeychainStore.hasSecret(ofKind: .anthropicOAuthToken)
+        self.hasPublikAPIKey = KeychainStore.hasSecret(ofKind: .publikAPIKey)
         self.codexLoginState = CodexCLILogin.currentState()
     }
 
@@ -656,18 +656,20 @@ final class AccountService: ObservableObject {
     /// knows the rules about which credential may reach which host, and this
     /// service is the only thing that knows which credentials exist. Neither
     /// half can pick a route on its own, and that is deliberate.
+    /// Being signed in no longer grants a model route — the funded tier is gone
+    /// (`docs/assistant-credentials.md`). A publik account still matters for
+    /// claiming an install, the usage dashboard, and GitHub; it is simply not a
+    /// credential the assistant can spend any more.
     func currentAssistantTransport(
-        publikBaseURL: URL
+        publikAPIAccount: PublikAPIAccount
     ) -> Result<AssistantTransport, AssistantTransportError> {
         AssistantTransport.selectTransport(
-            isSignedIn: signedInAccount != nil,
-            publikBaseURL: publikBaseURL,
+            preference: AssistantProviderChoice.current,
+            publikAPIKey: publikAPIAccount.storedKey,
+            publikGatewayBaseURL: publikAPIAccount.gatewayBaseURL,
+            publikKeyMaySpend: publikAPIAccount.maySpendOnThisKey,
             storedAnthropicAPIKey: storedAnthropicAPIKey(),
-            storedAnthropicOAuthToken: KeychainStore.readSecret(ofKind: .anthropicOAuthToken),
-            currentAccessTokenProvider: { [weak self] in
-                guard let self else { return nil }
-                return await self.currentAccessTokenRefreshingIfNeeded()
-            }
+            codexIsUsable: codexLoginState.isUsable
         )
     }
 
@@ -683,70 +685,62 @@ final class AccountService: ObservableObject {
     /// `MaintainModelProviderResolver.firstAvailable()`.
     /// Whether asking a question can go anywhere at all.
     ///
-    /// A Codex login is deliberately not enough: chat needs the Anthropic
-    /// Messages wire format with tool-use blocks, which `codex exec` cannot
-    /// serve. A reader whose only credential is Codex can edit apps and cannot
-    /// ask questions, and the composer says so rather than offering a field
-    /// that fails on send.
+    /// Codex now counts. It answers through its own CLI rather than an HTTPS
+    /// request (`CodexChatResponder`), so it is not an `AssistantTransport` —
+    /// but from the reader's side it is a provider like the other two, and a
+    /// composer that refused to take a question from somebody who had connected
+    /// it would be wrong.
     var canAnswerQuestions: Bool {
-        signedInAccount != nil || hasStoredAnthropicAPIKey || hasConnectedClaudeCodeLogin
+        AssistantProviderChoice.isUsable(
+            AssistantProviderChoice.resolve(
+                preference: AssistantProviderChoice.current,
+                publikAPIIsReady: hasPublikAPIKey,
+                anthropicKeyIsSaved: hasStoredAnthropicAPIKey,
+                codexIsUsable: codexLoginState.isUsable
+            ),
+            publikAPIIsReady: hasPublikAPIKey,
+            anthropicKeyIsSaved: hasStoredAnthropicAPIKey,
+            codexIsUsable: codexLoginState.isUsable
+        )
+    }
+
+    /// Which provider a question would actually reach right now.
+    var resolvedChatProvider: AssistantProviderPreference? {
+        AssistantProviderChoice.resolve(
+            preference: AssistantProviderChoice.current,
+            publikAPIIsReady: hasPublikAPIKey,
+            anthropicKeyIsSaved: hasStoredAnthropicAPIKey,
+            codexIsUsable: codexLoginState.isUsable
+        )
     }
 
     var chatProviderDescription: String {
-        if signedInAccount != nil { return "Answers come from publik" }
-        if hasStoredAnthropicAPIKey { return "Answers use your Anthropic key" }
-        if hasConnectedClaudeCodeLogin { return "Answers use your Claude Code login" }
-        // Deliberately not Codex: both chat routes speak the Anthropic Messages
-        // wire format with tool-use blocks, which `codex exec` cannot serve
-        // without a translation layer and the loss of streaming.
-        return "Sign in or add a key to ask questions"
+        switch resolvedChatProvider {
+        case .publikAPI: return "Answers use publik API"
+        case .anthropicKey: return "Answers use your Anthropic key"
+        case .codex: return "Answers use your ChatGPT account"
+        case nil: return "Pick how Iris should answer"
+        }
     }
 
-    /// Which tier the next request will take, for the panel's status line.
+    /// Which route the next request will take, for the panel's status line.
     var activeTierDescription: String? {
-        if signedInAccount != nil {
-            return "publik account"
-        }
-        if hasStoredAnthropicAPIKey {
-            return "your Anthropic key"
-        }
-        if hasConnectedClaudeCodeLogin {
-            return "your Claude Code login"
-        }
-        // Codex is last for the same reason it is last in the Tier C resolver,
-        // and it is named as an app-editing credential rather than a chat one:
-        // chat speaks the Anthropic Messages wire format on both of its routes
-        // (`docs/iris-assistant-protocol.md` section 1), which a Codex login
-        // cannot serve. It powers app editing, which is where Tier C runs.
-        if hasConnectedCodexLogin {
-            return "your Codex login (app editing)"
-        }
-        return nil
+        resolvedChatProvider?.displayName
     }
 
-    // MARK: - Claude Code CLI login
-
-    /// Re-reads whether a Claude Code OAuth token is connected. Called by the
-    /// panel after a `setup-token` capture or an import so the connected state
-    /// updates without reconstructing the service.
-    func refreshClaudeCodeLoginState() {
-        hasConnectedClaudeCodeLogin = ClaudeCodeLogin.isConnected
+    /// Re-reads whether a publik API key is present. Called after provisioning
+    /// or a paste so the panel updates without reconstructing the service.
+    func refreshPublikAPIKeyState() {
+        hasPublikAPIKey = KeychainStore.hasSecret(ofKind: .publikAPIKey)
     }
 
-    /// Imports the token from an existing `claude login`, then refreshes state.
-    /// Returns the outcome so the panel can show the right message.
-    @discardableResult
-    func importClaudeCodeLogin() -> ClaudeCodeLogin.ImportOutcome {
-        let outcome = ClaudeCodeLogin.importFromExistingClaudeLogin()
-        refreshClaudeCodeLoginState()
-        return outcome
-    }
-
-    /// Forgets the connected Claude Code token. The pasted API key, a separate
-    /// credential, is untouched.
-    func disconnectClaudeCodeLogin() {
-        ClaudeCodeLogin.disconnect()
-        refreshClaudeCodeLoginState()
+    /// Whether the reader has MORE THAN ONE provider set up, so a failure on
+    /// the one in use can honestly offer switching rather than only apologising.
+    var anotherProviderIsAlreadySetUp: Bool {
+        let providersSetUp = [hasPublikAPIKey, hasStoredAnthropicAPIKey, codexLoginState.isUsable]
+            .filter { $0 }
+            .count
+        return providersSetUp > 1
     }
 
     // MARK: - Codex CLI login

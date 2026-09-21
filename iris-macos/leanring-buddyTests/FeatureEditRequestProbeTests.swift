@@ -200,15 +200,14 @@ private final class ScriptedProbeProvider: MaintainModelProviding {
         #expect(!reason.contains("error 8"))
     }
 
-    /// A lapsed Claude Code login is a rejected credential too, and it is the
-    /// commonest of the three — the tokens rotate every few hours. It must get
+    /// A rejected publik gateway key is a rejected credential too, and must get
     /// the same prefix, which is what offers the settings shortcut.
-    @Test func anExpiredClaudeCodeLoginIsAlsoARejectedCredential() {
+    @Test func aRejectedPublikKeyIsAlsoARejectedCredential() {
         let reason = MaintainTierCFixer.modelCallFailureReason(
-            for: AssistantTransportError.claudeCodeLoginExpired
+            for: AssistantTransportError.publikAPIKeyRejected
         )
         #expect(reason.hasPrefix("model credential rejected"))
-        #expect(reason.contains("reconnect"))
+        #expect(reason.contains("settings"))
     }
 
     @Test func otherTransportErrorsAlsoSpeakTheTransportsVocabulary() {

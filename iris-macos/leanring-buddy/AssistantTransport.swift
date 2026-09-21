@@ -5,96 +5,96 @@
 //  Decides where a chat request goes, and is the single place in the app that
 //  is allowed to attach credentials to one.
 //
-//  `docs/iris-assistant-protocol.md` section 1 defines exactly two routes, and
-//  they speak the identical wire format (the Anthropic Messages API, streaming
-//  SSE) so one parser serves both:
+//  `docs/assistant-credentials.md` is the cross-platform contract. There are
+//  exactly two HTTP routes here, and they speak the identical wire format (the
+//  Anthropic Messages API, streaming SSE) so one parser serves both:
 //
-//    funded  →  POST {publik}/api/assistant/chat   Authorization: Bearer <supabase access token>
-//    BYO     →  POST https://api.anthropic.com/v1/messages   x-api-key: <the user's own key>
+//    publik API  →  POST {gateway}/messages            x-api-key: pk_live_…
+//    BYO         →  POST https://api.anthropic.com/v1/messages   x-api-key: sk-ant-…
 //
-//  THE PROPERTY THIS FILE EXISTS TO PROTECT: the user's own Anthropic key is
-//  never sent to any publik host. Losing that is a ship-blocker, so it is
-//  enforced three ways rather than by convention:
+//  (The third credential a reader can pick — a Codex CLI login — is not an
+//  HTTP route at all and is not in this enum. It is a subprocess; see
+//  `CodexChatResponder.swift`.)
 //
-//    1. Structurally. `anthropicDirectChatRequest(anthropicAPIKey:)` is the ONLY
-//       function that writes an `x-api-key` header, and it takes no URL — it
-//       builds `https://api.anthropic.com/v1/messages` from a constant. There
-//       is no code path anywhere that accepts both a key and a destination, so
-//       "send the key somewhere else" is not a mistake this file can express.
+//  WHAT WENT AWAY, AND WHY IT IS NOT COMING BACK:
+//
+//    - The FUNDED tier (`POST {publik}/api/assistant/chat` on publik's own
+//      Anthropic key) is gone. It was free to anyone signed in and capped only
+//      per-user, so exposure scaled with the number of accounts — which is
+//      what kept Iris from being publicly installable at all. publik API
+//      replaces it: the same "it just works" first run, paid by the person
+//      using it. The server route stays up for older installed builds; this
+//      build never calls it.
+//    - The Claude Code OAuth token route (`sk-ant-oat…`, `claude setup-token`,
+//      importing an existing `claude login`) is gone for good. Anthropic's own
+//      terms forbid a third-party app collecting, storing or intermediating
+//      Claude.ai credentials or session tokens, or routing requests through a
+//      Free/Pro/Max plan on a user's behalf. Anthropic access here is API keys
+//      only. Do not re-add it.
+//
+//  THE PROPERTY THIS FILE EXISTS TO PROTECT: the reader's own Anthropic key is
+//  never sent to any publik host. Adding a second legitimate `x-api-key` route
+//  (the publik gateway) does not weaken that — it sharpens it, because the rule
+//  is now stated in terms of WHICH credential may reach WHICH host rather than
+//  "this header may only ever go one place":
+//
+//    1. Structurally. `anthropicDirectChatRequest(anthropicAPIKey:)` is the only
+//       function that can attach an Anthropic key, and it takes no URL — it
+//       builds `https://api.anthropic.com/v1/messages` from a constant. The
+//       publik builder takes a base URL because the gateway names its own, but
+//       it cannot be handed an Anthropic key: it takes a `PublikAPIKey`, a type
+//       whose initializer refuses anything that is not a `pk_` credential.
 //    2. By assertion. Every request leaves through `validatedRequest(_:)`, which
-//       refuses a request carrying `x-api-key` to any host but api.anthropic.com,
-//       and refuses to let a publik host see that header at all.
+//       reads the credential's own prefix and refuses any pairing but the two
+//       legal ones.
 //    3. By test. `AssistantTransportTests` asserts the property directly.
 //
 
 import Foundation
 
+// MARK: - A publik API key, as a type
+
+/// A `pk_…` gateway credential.
+///
+/// A named type rather than a `String` so the publik request builder — the one
+/// builder that accepts a destination — cannot be handed the reader's Anthropic
+/// key by a caller that mixed two variables up. The initializer is the whole
+/// point: it refuses anything that is not a publik key.
+struct PublikAPIKey: Sendable, Equatable {
+    let value: String
+
+    /// Nil unless this really is a publik gateway key.
+    init?(_ candidateValue: String) {
+        let trimmedValue = candidateValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedValue.hasPrefix(PublikAPIKey.keyPrefix) else { return nil }
+        value = trimmedValue
+    }
+
+    /// Every publik gateway key starts with this, live and test alike. It is
+    /// also what `validatedRequest` keys off to tell the two credentials apart
+    /// on the way out.
+    static let keyPrefix = "pk_"
+}
+
 // MARK: - Where a request can go
 
-/// The two model routes, and the credential each one carries.
-///
-/// The funded case holds a *provider* rather than a token because the Supabase
-/// access token is short-lived: it may need refreshing between the moment the
-/// transport was chosen and the moment a request is actually built.
+/// The two HTTP model routes, and the credential each one carries.
 enum AssistantTransport: Sendable {
-    /// The publik-funded tier. The server pins the model and caps `max_tokens`,
-    /// so the client's choice of either is ignored — see `shouldSendModelInRequestBody`.
-    case funded(
-        publikBaseURL: URL,
-        currentAccessTokenProvider: @Sendable () async -> String?
-    )
+    /// The publik API gateway. Metered to the reader, billed by publik at half
+    /// the provider's list price. The URL is supplied because the gateway names
+    /// its own base at provisioning time — but the credential is a
+    /// `PublikAPIKey`, so an Anthropic key cannot be routed here.
+    case publikAPI(key: PublikAPIKey, gatewayBaseURL: URL)
 
-    /// The user's own Anthropic key, going straight to Anthropic. The URL is
+    /// The reader's own Anthropic key, going straight to Anthropic. The URL is
     /// deliberately absent: it is a constant inside this file.
     case bringYourOwnKey(anthropicAPIKey: String)
 
-    /// The user's own Claude Code OAuth token (`sk-ant-oat…`), going straight to
-    /// Anthropic. Same isolation property as the API key — the URL is a constant
-    /// inside this file — but it authenticates with `Authorization: Bearer` plus
-    /// the OAuth beta header rather than `x-api-key`, which is how Anthropic
-    /// accepts a Claude Code token on the Messages API.
-    case bringYourOwnOAuthToken(anthropicOAuthToken: String)
-
-    /// The only host the BYO key may ever reach.
+    /// The only host an Anthropic credential may ever reach.
     static let anthropicAPIHost = "api.anthropic.com"
 
     /// The Anthropic Messages API version every direct request must declare.
     static let anthropicAPIVersion = "2023-06-01"
-
-    /// The `anthropic-beta` value that makes Anthropic accept a Claude Code
-    /// OAuth token on the Messages API. This is the public value Claude Code
-    /// itself sends; it is NOT something Iris can verify from inside this
-    /// process, so if Anthropic rotates it, an OAuth-token request starts
-    /// failing with 401 and this constant is the one line to update.
-    /// UNVERIFIED against a live token — see the CLI-login notes.
-    static let anthropicOAuthBetaHeaderValue = "oauth-2025-04-20"
-
-    /// The system-prompt sentence Anthropic requires at the head of every
-    /// request made with a Claude Code OAuth token. Anthropic enforces that an
-    /// `sk-ant-oat…` credential is only used by Claude Code, and it recognizes
-    /// Claude Code by this exact first system block — a request without it is
-    /// rejected with a synthetic `rate_limit_error` 429 (no `Retry-After`, no
-    /// quota headers), which reads like a quota problem but is not one.
-    /// Verified live on 2026-08-20: the identical request flips 429 → 200 on
-    /// this block alone. Like `anthropicOAuthBetaHeaderValue`, this is the
-    /// public value Claude Code itself sends and cannot be verified from
-    /// inside this process — if Anthropic changes it, OAuth-token requests
-    /// start failing again and this constant is the one line to update.
-    static let claudeCodeIdentitySystemBlockText =
-        "You are Claude Code, Anthropic's official CLI for Claude."
-
-    /// Whether the request body's `system` field must lead with
-    /// `claudeCodeIdentitySystemBlockText`. Only the OAuth-token route: the
-    /// funded server prepends its own system block, and a pasted API key
-    /// carries no Claude-Code-only restriction.
-    var shouldPrependClaudeCodeIdentitySystemBlock: Bool {
-        switch self {
-        case .funded, .bringYourOwnKey:
-            return false
-        case .bringYourOwnOAuthToken:
-            return true
-        }
-    }
 
     /// Where publik lives when nothing overrides it.
     static let defaultPublikBaseURLString = "https://publikhq.com"
@@ -103,117 +103,105 @@ enum AssistantTransport: Sendable {
     /// site running on localhost instead of production.
     static let publikBaseURLInfoPlistKey = "PublikAPIBaseURL"
 
-    /// Which tier this is, for UI that wants to say "funded" or "your own key"
-    /// without pattern-matching on a case that carries a secret.
+    /// Which route this is, for UI that wants to name it without pattern
+    /// matching on a case that carries a secret.
     var tierDescription: String {
         switch self {
-        case .funded:
-            return "publik account"
+        case .publikAPI:
+            return "publik API"
         case .bringYourOwnKey:
             return "your Anthropic key"
-        case .bringYourOwnOAuthToken:
-            return "your Claude Code login"
         }
     }
 
-    /// The funded route's server prepends its own system block, pins the model,
-    /// and caps `max_tokens`; sending a model it will ignore only invites a
-    /// reader of the code to believe the client picked it. On the BYO route the
-    /// model is genuinely the client's choice and must be sent.
     /// Whether a call on this transport costs the reader money PER QUERY, and
     /// so whether a dollar figure is honest to show against it.
     ///
-    /// The OAuth-token case is the one worth stating out loud: it is the
-    /// reader's own credential, so it looks like the API-key case and is not.
-    /// A Claude Code login is a flat-rate plan — the marginal cost of one more
-    /// query is zero — so pricing its tokens would invent a bill.
+    /// Both routes are metered now. The funded tier was the one route where the
+    /// reader's own money was not at stake, and it is gone.
     var spendRoute: AssistantSpendRoute {
         switch self {
-        case .funded:
-            return .publiksFundedTier
+        case .publikAPI:
+            // publik bills this one and shows the running total on its own
+            // dashboard, which is the authority. Iris's local ledger prices
+            // Anthropic list rates and would therefore be wrong here — see
+            // `AssistantSpendLedger`.
+            return .aMeteredGatewayThatBillsSeparately
         case .bringYourOwnKey:
             return .theReadersOwnAPIKey
-        case .bringYourOwnOAuthToken:
-            return .aFlatRateSubscription
         }
     }
 
-    /// Which credential a request rode on. Replaces the `isFundedTier` Bool the
-    /// 401 mapping used to take: a 401 means three different things here, and
-    /// two of them were being told to the reader as the same sentence.
+    /// Which credential a request rode on, so a 401 can be explained in terms
+    /// of the thing the reader would have to go and fix.
     enum CredentialShape: Sendable {
-        case publiksFundedTier
+        case aPublikAPIKey
         case aPastedAnthropicKey
-        /// A Claude Code login. NOT a key — you cannot "paste it again", and
-        /// telling somebody to is advice they cannot follow.
-        case aClaudeCodeLogin
     }
 
     var credentialShape: CredentialShape {
         switch self {
-        case .funded: return .publiksFundedTier
+        case .publikAPI: return .aPublikAPIKey
         case .bringYourOwnKey: return .aPastedAnthropicKey
-        case .bringYourOwnOAuthToken: return .aClaudeCodeLogin
         }
     }
 
-    var shouldSendModelInRequestBody: Bool {
+    /// Both routes take the client's model choice. The funded tier was the one
+    /// that pinned the model server-side and ignored what the client sent.
+    var shouldSendModelInRequestBody: Bool { true }
+
+    /// The publik gateway takes alias model names only — never a raw upstream
+    /// slug — so the model the client asks for has to be translated on that
+    /// route. See `PublikAPIModelAlias`.
+    var requiresPublikModelAliases: Bool {
         switch self {
-        case .funded:
-            return false
-        case .bringYourOwnKey, .bringYourOwnOAuthToken:
-            return true
+        case .publikAPI: return true
+        case .bringYourOwnKey: return false
         }
     }
 
     // MARK: - Building a request
 
     /// Produces the URL and headers for one chat request. The caller supplies
-    /// the body, which is identical for both routes apart from the `model`
-    /// field described above.
+    /// the body, which is identical for both routes apart from the model name.
     func makeChatRequest() async throws -> URLRequest {
         switch self {
-        case .funded(let publikBaseURL, let currentAccessTokenProvider):
-            guard let accessToken = await currentAccessTokenProvider(),
-                  !accessToken.isEmpty else {
-                // No usable access token means the refresh already failed. This
-                // is exactly the state the funded tier's 401 describes, so it
-                // is reported the same way rather than as a transport failure.
-                throw AssistantTransportError.signInRequired
-            }
+        case .publikAPI(let key, let gatewayBaseURL):
             return try Self.validatedRequest(
-                Self.fundedChatRequest(publikBaseURL: publikBaseURL, supabaseAccessToken: accessToken)
+                Self.publikGatewayChatRequest(key: key, gatewayBaseURL: gatewayBaseURL)
             )
 
         case .bringYourOwnKey(let anthropicAPIKey):
             return try Self.validatedRequest(
                 Self.anthropicDirectChatRequest(anthropicAPIKey: anthropicAPIKey)
             )
-
-        case .bringYourOwnOAuthToken(let anthropicOAuthToken):
-            return try Self.validatedRequest(
-                Self.anthropicDirectOAuthChatRequest(anthropicOAuthToken: anthropicOAuthToken)
-            )
         }
     }
 
-    /// The funded route. Note what this function does NOT take: an API key. The
-    /// only credential it can attach is a Supabase access token, which is a
-    /// publik-issued value that publik is supposed to see.
-    private static func fundedChatRequest(
-        publikBaseURL: URL,
-        supabaseAccessToken: String
+    /// The publik API route.
+    ///
+    /// This is the one builder that takes a destination, because the gateway
+    /// names its own base URL at provisioning time. What makes that safe is the
+    /// credential parameter's TYPE: a `PublikAPIKey` cannot be constructed from
+    /// an `sk-ant-…` string, so no caller can route the reader's Anthropic key
+    /// through here however they hold it wrong.
+    private static func publikGatewayChatRequest(
+        key: PublikAPIKey,
+        gatewayBaseURL: URL
     ) -> URLRequest {
-        let chatURL = publikBaseURL.appendingPathComponent("api/assistant/chat")
-        var fundedRequest = URLRequest(url: chatURL)
-        fundedRequest.httpMethod = "POST"
-        fundedRequest.timeoutInterval = 120
-        fundedRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        fundedRequest.setValue("Bearer \(supabaseAccessToken)", forHTTPHeaderField: "Authorization")
-        return fundedRequest
+        let messagesURL = gatewayBaseURL.appendingPathComponent("messages")
+        var gatewayRequest = URLRequest(url: messagesURL)
+        gatewayRequest.httpMethod = "POST"
+        gatewayRequest.timeoutInterval = 120
+        gatewayRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        gatewayRequest.setValue(key.value, forHTTPHeaderField: "x-api-key")
+        // The gateway speaks the Anthropic dialect on this route, so it expects
+        // the same version header a direct call would carry.
+        gatewayRequest.setValue(anthropicAPIVersion, forHTTPHeaderField: "anthropic-version")
+        return gatewayRequest
     }
 
-    /// The BYO route, and the only place `x-api-key` is ever written.
+    /// The BYO route, and the only place an Anthropic key is ever attached.
     ///
     /// There is no URL parameter on purpose. A caller cannot ask this function
     /// to send the key anywhere, because the destination is not something the
@@ -229,112 +217,123 @@ enum AssistantTransport: Sendable {
         return directRequest
     }
 
-    /// The BYO OAuth-token route, and the only place an `Authorization: Bearer`
-    /// header is paired with the OAuth `anthropic-beta` header.
-    ///
-    /// Like the API-key builder, it takes no URL: the destination is the same
-    /// constant Anthropic host, so a caller cannot ask this function to send the
-    /// token anywhere else. The `anthropic-beta: oauth-…` header it stamps is
-    /// also what `validatedRequest` keys off to guarantee an OAuth token can
-    /// only ever reach Anthropic — the funded route's Bearer header never
-    /// carries it, so the two Bearers can never be confused.
-    private static func anthropicDirectOAuthChatRequest(anthropicOAuthToken: String) -> URLRequest {
-        let anthropicMessagesURL = URL(string: "https://\(anthropicAPIHost)/v1/messages")!
-        var directRequest = URLRequest(url: anthropicMessagesURL)
-        directRequest.httpMethod = "POST"
-        directRequest.timeoutInterval = 120
-        directRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        directRequest.setValue("Bearer \(anthropicOAuthToken)", forHTTPHeaderField: "Authorization")
-        directRequest.setValue(anthropicOAuthBetaHeaderValue, forHTTPHeaderField: "anthropic-beta")
-        directRequest.setValue(anthropicAPIVersion, forHTTPHeaderField: "anthropic-version")
-        return directRequest
-    }
-
     // MARK: - The last gate before a request leaves
 
-    /// Refuses any request whose credentials and destination do not match.
+    /// Refuses any request whose credential and destination do not match.
+    ///
+    /// Two credentials now legitimately travel as `x-api-key`, so the rule is
+    /// stated per credential rather than per header:
+    ///
+    ///   - an Anthropic key (anything NOT `pk_`) may only reach api.anthropic.com
+    ///   - a publik key (`pk_`) may only reach a host publik itself is served on
     ///
     /// This duplicates what the two builders above already guarantee, and that
     /// is the point: a later refactor that merges them, adds a third route, or
     /// "helpfully" copies headers between requests trips this instead of
-    /// silently shipping the user's key to a server that should never see it.
+    /// silently shipping the reader's key to a server that should never see it.
     static func validatedRequest(_ candidateRequest: URLRequest) throws -> URLRequest {
+        guard let credential = candidateRequest.value(forHTTPHeaderField: "x-api-key") else {
+            // No credential attached: nothing for this gate to protect.
+            return candidateRequest
+        }
         let destinationHost = candidateRequest.url?.host?.lowercased()
-        let carriesBringYourOwnKey = candidateRequest.value(forHTTPHeaderField: "x-api-key") != nil
 
-        // A BYO OAuth token is identified by the OAuth `anthropic-beta` header
-        // its builder stamps. This is deliberately NOT "any Authorization:
-        // Bearer": the funded route also sends a Bearer (the Supabase token) and
-        // is SUPPOSED to reach a publik host, so keying off the OAuth beta header
-        // is what separates the user's own token from the publik-issued one.
-        let anthropicBetaHeader = candidateRequest.value(forHTTPHeaderField: "anthropic-beta")
-        let carriesBringYourOwnOAuthToken =
-            anthropicBetaHeader?.contains("oauth") == true
-
-        // Either shape of the user's own Anthropic credential — the API key or
-        // the OAuth token — may only ever reach Anthropic. Stated both as
-        // "carries a credential ⇒ host must be Anthropic" and its contrapositive
-        // so the check reads as the rule, not an implementation detail of it.
-        let carriesEitherBringYourOwnCredential =
-            carriesBringYourOwnKey || carriesBringYourOwnOAuthToken
-
-        if carriesEitherBringYourOwnCredential {
-            guard destinationHost == anthropicAPIHost else {
-                throw AssistantTransportError.bringYourOwnKeyWouldLeaveAnthropic(
+        if credential.hasPrefix(PublikAPIKey.keyPrefix) {
+            guard let destinationHost, Self.isAPublikHost(destinationHost) else {
+                throw AssistantTransportError.publikKeyWouldLeavePublik(
                     attemptedHost: destinationHost ?? "an unknown host"
                 )
             }
+            return candidateRequest
         }
 
-        if destinationHost != anthropicAPIHost && carriesEitherBringYourOwnCredential {
+        guard destinationHost == anthropicAPIHost else {
             throw AssistantTransportError.bringYourOwnKeyWouldLeaveAnthropic(
                 attemptedHost: destinationHost ?? "an unknown host"
             )
         }
-
         return candidateRequest
     }
 
-    // MARK: - Choosing between the two
+    /// Whether a host is one publik is served on. Derived from the same
+    /// allowlist `GuideService` uses for everything else Iris fetches, so there
+    /// is exactly one definition of "ours" in the app.
+    static func isAPublikHost(_ candidateHost: String) -> Bool {
+        let normalizedHost = candidateHost.lowercased()
+        if normalizedHost == "publikhq.com" || normalizedHost == "www.publikhq.com" {
+            return true
+        }
+        // A local-development build points at a site on localhost; the same
+        // origins `GuideService.normalizedAPIBase` already accepts.
+        if normalizedHost == "localhost" || normalizedHost == "127.0.0.1" {
+            return true
+        }
+        return false
+    }
+
+    // MARK: - Choosing between them
 
     /// Picks the route for the current state of the app.
     ///
-    /// Funded wins when the user is signed in, because it costs them nothing.
-    /// A stored key is the fallback. Neither is a real state the panel has to
-    /// explain, not a silent failure at request time — which is why it is a
-    /// `.failure` carrying a message rather than a nil transport.
+    /// A stored preference WINS, and a broken preference does not silently fall
+    /// through to another provider: spending somebody's money on an account they
+    /// did not choose is worse than an error message. Only when nothing is
+    /// stored does this fall back to the contract's order.
+    ///
+    /// Codex is resolved above this function, not in it — it is a subprocess
+    /// rather than a URL request, so it never becomes an `AssistantTransport`.
     static func selectTransport(
-        isSignedIn: Bool,
-        publikBaseURL: URL,
+        preference: AssistantProviderPreference?,
+        publikAPIKey: String?,
+        publikGatewayBaseURL: URL,
+        publikKeyMaySpend: Bool,
         storedAnthropicAPIKey: String?,
-        storedAnthropicOAuthToken: String? = nil,
-        currentAccessTokenProvider: @escaping @Sendable () async -> String?
+        codexIsUsable: Bool
     ) -> Result<AssistantTransport, AssistantTransportError> {
-        if isSignedIn {
-            return .success(.funded(
-                publikBaseURL: publikBaseURL,
-                currentAccessTokenProvider: currentAccessTokenProvider
-            ))
-        }
+        let usablePublikKey = publikAPIKey.flatMap { PublikAPIKey($0) }
+        let usableAnthropicKey = (storedAnthropicAPIKey?.isEmpty == false) ? storedAnthropicAPIKey : nil
 
-        // A pasted API key wins over a Claude Code token when both are present:
-        // the API key is the plainer, more reliable credential (an OAuth token
-        // depends on the beta header staying valid), so it is the safer default.
-        if let storedAnthropicAPIKey, !storedAnthropicAPIKey.isEmpty {
-            return .success(.bringYourOwnKey(anthropicAPIKey: storedAnthropicAPIKey))
-        }
+        switch preference {
+        case .publikAPI:
+            guard let usablePublikKey else {
+                return .failure(.publikAPINotSetUp)
+            }
+            guard publikKeyMaySpend else {
+                return .failure(.publikAPIStarterNotYetDisclosed)
+            }
+            return .success(.publikAPI(key: usablePublikKey, gatewayBaseURL: publikGatewayBaseURL))
 
-        if let storedAnthropicOAuthToken, !storedAnthropicOAuthToken.isEmpty {
-            return .success(.bringYourOwnOAuthToken(anthropicOAuthToken: storedAnthropicOAuthToken))
-        }
+        case .anthropicKey:
+            guard let usableAnthropicKey else {
+                return .failure(.anthropicKeyNotSaved)
+            }
+            return .success(.bringYourOwnKey(anthropicAPIKey: usableAnthropicKey))
 
-        return .failure(.noCredentialsAvailable)
+        case .codex:
+            // Chosen, but this function only builds HTTP requests. The caller
+            // is expected to have routed a Codex preference to the subprocess
+            // responder before asking for a transport, so arriving here means
+            // the CLI is no longer usable.
+            return .failure(codexIsUsable ? .codexIsNotAnHTTPTransport : .codexNotUsable)
+
+        case nil:
+            if let usablePublikKey, publikKeyMaySpend {
+                return .success(.publikAPI(key: usablePublikKey, gatewayBaseURL: publikGatewayBaseURL))
+            }
+            if let usableAnthropicKey {
+                return .success(.bringYourOwnKey(anthropicAPIKey: usableAnthropicKey))
+            }
+            if codexIsUsable {
+                return .failure(.codexIsNotAnHTTPTransport)
+            }
+            return .failure(.noCredentialsAvailable)
+        }
     }
 
     /// The publik origin this build talks to. Production unless the bundle
     /// names another, and even then only an origin `GuideService` already
     /// trusts — publik itself or localhost — so a tampered Info.plist cannot
-    /// redirect signed-in traffic to somebody else's server.
+    /// redirect traffic to somebody else's server.
     static func configuredPublikBaseURL() -> URL {
         let configuredBaseURLString = AppBundleConfiguration
             .stringValue(forKey: publikBaseURLInfoPlistKey) ?? defaultPublikBaseURLString
@@ -349,142 +348,204 @@ enum AssistantTransport: Sendable {
     }
 }
 
+// MARK: - The reader's own Anthropic credential
+
+/// Resolves the reader's OWN Anthropic key into a BYO transport. One place so
+/// the chat path, the Tier C provider and the crash-path fix adapter never each
+/// re-derive it.
+///
+/// This used to resolve two shapes — a pasted key or a Claude Code OAuth token —
+/// and pick between them. The OAuth shape is gone (see the file header), so the
+/// "which one?" precedence went with it; the type stays because three call
+/// sites depend on it and because it is the right place to put the next shape
+/// if there ever is one.
+enum AnthropicBringYourOwnCredential {
+
+    /// True when the reader has saved their own Anthropic key. Used for
+    /// eligibility gates and panel state without pulling a secret into memory.
+    static var isAvailable: Bool {
+        KeychainStore.hasSecret(ofKind: .anthropicAPIKey)
+    }
+
+    /// The BYO transport for the reader's own key, or nil when none is stored.
+    static func currentTransport() -> AssistantTransport? {
+        guard let apiKey = KeychainStore.readSecret(ofKind: .anthropicAPIKey), !apiKey.isEmpty else {
+            return nil
+        }
+        return .bringYourOwnKey(anthropicAPIKey: apiKey)
+    }
+}
+
+// MARK: - Model aliases
+
+/// The publik gateway takes alias names, never a raw upstream slug, and maps
+/// each to a tier of its own choosing. Iris's model picker speaks in Anthropic
+/// model names, so this is the translation.
+enum PublikAPIModelAlias {
+    static let fast = "publik-fast"
+    static let balanced = "publik-balanced"
+    static let smart = "publik-smart"
+
+    /// The alias to ask for, given the model the reader picked in Iris.
+    ///
+    /// Deliberately coarse: the picker offers a fast model and a capable one,
+    /// and the gateway's three tiers are the same idea. An unrecognized name
+    /// maps to `balanced` rather than failing — a new model in the picker should
+    /// degrade to a sensible tier, not break the route.
+    static func alias(forIrisModelName irisModelName: String) -> String {
+        let lowercasedName = irisModelName.lowercased()
+        if lowercasedName.contains("haiku") { return fast }
+        if lowercasedName.contains("opus") { return smart }
+        return balanced
+    }
+}
+
 // MARK: - Failures
 
 /// Every way a chat request can fail before, during, or after transport, in the
 /// vocabulary the panel uses to talk to the user.
-///
-/// The funded tier's error codes (`docs/iris-assistant-protocol.md` section 1)
-/// each map to exactly one case here, so the panel never has to interpret a
-/// status code and a raw server body is never shown to anybody.
 enum AssistantTransportError: Error, Equatable, Sendable {
-    /// Not signed in and no key stored. The one state that is the user's move.
+    /// No credential of any kind. The one state that is the reader's move.
     case noCredentialsAvailable
-    /// `sign_in_required` (HTTP 401). The session is gone or was rejected.
-    case signInRequired
+    /// publik API is the chosen provider but no key is stored yet.
+    case publikAPINotSetUp
+    /// A key exists but the first-run card has not been shown, so spending the
+    /// starter would be the "silent starter" CONTRACT section 12 forbids.
+    case publikAPIStarterNotYetDisclosed
+    /// The chosen provider is Codex, which is a subprocess and not a URL route.
+    case codexIsNotAnHTTPTransport
+    /// Codex was chosen and its CLI is no longer signed in or findable.
+    case codexNotUsable
+    /// The reader chose their own Anthropic key and none is saved.
+    case anthropicKeyNotSaved
     /// `rate_limited` (HTTP 429 + `Retry-After`).
     case rateLimited(retryAfterSeconds: Int?)
-    /// `daily_budget_exhausted` (HTTP 429 + `Retry-After`).
-    case dailyBudgetExhausted(retryAfterSeconds: Int?)
-    /// `assistant_unconfigured` (HTTP 503). Publik's own outage, not the user's.
+    /// HTTP 402 from the gateway: the wallet is empty. Carries the server's own
+    /// message and the one link it sent, which are rendered verbatim.
+    case publikAPIOutOfCredit(PublikAPIInsufficientCredit)
+    /// publik's own outage, not the reader's.
     case assistantUnavailable
-    /// `upstream_error` and every other status. Deliberately vague: the server's
-    /// body may quote the model's own words back and is never surfaced.
+    /// Deliberately vague: the server's body may quote the model's own words
+    /// back and is never surfaced.
     case requestFailed(statusCode: Int)
-    /// The user's own PASTED key was rejected by Anthropic (401 on the BYO route).
+    /// The reader's own pasted key was rejected by Anthropic (401 on BYO).
     case bringYourOwnKeyRejected
-    /// The user's connected Claude Code login was rejected (401 on the BYO
-    /// route). Split from the case above because the remedy is different and
-    /// the old shared wording — "check it's still active and paste it again" —
-    /// is impossible advice for a login there is nothing to paste. These tokens
-    /// also rotate every few hours, so this is the commonest of the three.
-    case claudeCodeLoginExpired
+    /// The gateway rejected the publik key (401).
+    case publikAPIKeyRejected
     /// The network never got there.
     case transportFailure(reason: String)
-    /// The key-isolation property was about to be violated. This should be
-    /// impossible; it exists so that if it ever happens the request dies here
+    /// The key-isolation property was about to be violated. These should be
+    /// impossible; they exist so that if it ever happens the request dies here
     /// rather than on the wire.
     case bringYourOwnKeyWouldLeaveAnthropic(attemptedHost: String)
+    case publikKeyWouldLeavePublik(attemptedHost: String)
 
     /// What the panel shows. Lowercase to match the assistant's own voice in
     /// `CompanionManager`'s prompt, which is what the same text area displays.
     var userFacingMessage: String {
         switch self {
         case .noCredentialsAvailable:
-            return "sign in with your publik account, or add your own anthropic key, and i'll be right here."
-        case .signInRequired:
-            return "your sign-in expired. sign in again and ask me one more time."
+            return "i need a model to answer with. set up publik API, add your own anthropic key, or sign in with codex — it's all in settings."
+        case .publikAPINotSetUp:
+            return "publik API isn't set up on this mac yet. open settings to finish it, or pick a different provider."
+        case .publikAPIStarterNotYetDisclosed:
+            return "open settings once to see what publik API costs, and i can start answering."
+        case .codexIsNotAnHTTPTransport:
+            return "codex answers through its own cli rather than a web request. if you're seeing this, something routed the question the wrong way — try again."
+        case .codexNotUsable:
+            return "your codex login isn't usable right now. run `codex login` in a terminal, or pick a different provider in settings."
+        case .anthropicKeyNotSaved:
+            return "you picked your own anthropic key, but there isn't one saved. paste one in settings, or pick a different provider."
         case .rateLimited(let retryAfterSeconds):
-            return "you've hit the request limit for now. \(Self.retryPhrase(forRetryAfterSeconds: retryAfterSeconds)) or add your own anthropic key to keep going."
-        case .dailyBudgetExhausted(let retryAfterSeconds):
-            return "that's today's free assistant budget used up. \(Self.retryPhrase(forRetryAfterSeconds: retryAfterSeconds)) or add your own anthropic key to keep going."
+            return "you've hit the request limit for now. \(Self.retryPhrase(forRetryAfterSeconds: retryAfterSeconds))"
+        case .publikAPIOutOfCredit(let insufficientCredit):
+            // The server's own words, verbatim. CONTRACT section 12 item 3.
+            return insufficientCredit.message
         case .assistantUnavailable:
             return "the assistant is unavailable right now. this one's on publik, not you — try again in a bit."
         case .requestFailed:
             return "hm, something went wrong reaching the assistant. check your connection and try again."
         case .bringYourOwnKeyRejected:
             return "anthropic refused the key iris has saved. check it's still active and paste it again."
-        case .claudeCodeLoginExpired:
-            return "your claude code login has expired — they only last a few hours. reconnect it in settings."
+        case .publikAPIKeyRejected:
+            return "publik refused the key saved on this mac. set publik API up again in settings."
         case .transportFailure:
             return "i couldn't reach the assistant. check your connection and try again."
         case .bringYourOwnKeyWouldLeaveAnthropic:
             return "iris stopped that request: your api key was about to go somewhere it shouldn't."
+        case .publikKeyWouldLeavePublik:
+            return "iris stopped that request: your publik key was about to go somewhere it shouldn't."
         }
     }
 
-    /// True when the right response is to put the sign-in buttons back in front
-    /// of the user rather than just showing them a message.
-    var requiresReSignIn: Bool {
+    /// The one link to show under the message, when the failure carries one.
+    /// Only the 402 does — everything else is fixed in settings, not on the web.
+    var oneLinkToOffer: String? {
         switch self {
-        case .signInRequired:
-            return true
-        case .noCredentialsAvailable, .rateLimited, .dailyBudgetExhausted, .assistantUnavailable,
-             .requestFailed, .bringYourOwnKeyRejected, .claudeCodeLoginExpired, .transportFailure,
-             .bringYourOwnKeyWouldLeaveAnthropic:
-            return false
+        case .publikAPIOutOfCredit(let insufficientCredit):
+            return insufficientCredit.linkURLString
+        default:
+            return nil
         }
     }
 
-    /// True when the user's quota, not the software, is what stopped them —
-    /// the case where offering the BYO key is genuinely useful advice.
-    var shouldOfferBringYourOwnKey: Bool {
+    /// True when the right response is to put the provider choices back in
+    /// front of the reader rather than just showing them a message.
+    var shouldOfferProviderSetup: Bool {
         switch self {
-        case .rateLimited, .dailyBudgetExhausted:
+        case .noCredentialsAvailable, .publikAPINotSetUp, .publikAPIStarterNotYetDisclosed,
+             .anthropicKeyNotSaved, .codexNotUsable, .bringYourOwnKeyRejected,
+             .publikAPIKeyRejected:
             return true
-        case .noCredentialsAvailable, .signInRequired, .assistantUnavailable, .requestFailed,
-             .bringYourOwnKeyRejected, .claudeCodeLoginExpired, .transportFailure,
-             .bringYourOwnKeyWouldLeaveAnthropic:
+        case .codexIsNotAnHTTPTransport, .rateLimited, .publikAPIOutOfCredit, .assistantUnavailable,
+             .requestFailed, .transportFailure, .bringYourOwnKeyWouldLeaveAnthropic,
+             .publikKeyWouldLeavePublik:
             return false
         }
     }
 
     private static func retryPhrase(forRetryAfterSeconds retryAfterSeconds: Int?) -> String {
         guard let retryAfterSeconds, retryAfterSeconds > 0 else {
-            return "try again shortly,"
+            return "try again shortly."
         }
         if retryAfterSeconds < 90 {
-            return "try again in \(retryAfterSeconds) seconds,"
+            return "try again in \(retryAfterSeconds) seconds."
         }
         let retryAfterMinutes = Int((Double(retryAfterSeconds) / 60.0).rounded(.up))
         if retryAfterMinutes < 90 {
-            return "try again in about \(retryAfterMinutes) minutes,"
+            return "try again in about \(retryAfterMinutes) minutes."
         }
         let retryAfterHours = Int((Double(retryAfterMinutes) / 60.0).rounded(.up))
-        return "try again in about \(retryAfterHours) hours,"
+        return "try again in about \(retryAfterHours) hours."
     }
 
     // MARK: - Mapping the server's answer
 
     /// Turns one HTTP failure into the state the user sees.
-    ///
-    /// `serverErrorCode` is the `{"error": "..."}` string the funded route
-    /// returns. It is read only to choose between two 429s that mean different
-    /// things to the user — "wait a few minutes" versus "that's it for today" —
-    /// and is never itself displayed, because an unknown code must not become
-    /// user-visible text.
     static func failure(
         forStatusCode statusCode: Int,
         serverErrorCode: String?,
         retryAfterHeaderValue: String?,
-        credentialShape: AssistantTransport.CredentialShape
+        credentialShape: AssistantTransport.CredentialShape,
+        responseBody: Data? = nil
     ) -> AssistantTransportError {
         let retryAfterSeconds = retryAfterHeaderValue.flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
 
         switch statusCode {
         case 401:
-            // One status, three meanings. publik is saying "sign in again";
-            // Anthropic is saying either "this key is bad" or "this login has
-            // expired", and those two need different advice from the reader.
             switch credentialShape {
-            case .publiksFundedTier: return .signInRequired
+            case .aPublikAPIKey: return .publikAPIKeyRejected
             case .aPastedAnthropicKey: return .bringYourOwnKeyRejected
-            case .aClaudeCodeLogin: return .claudeCodeLoginExpired
             }
+        case 402:
+            // The gateway's "your wallet is empty". Its own message and link
+            // are what the reader sees; a body we cannot parse degrades to the
+            // generic failure rather than to copy Iris made up.
+            if let responseBody, let insufficientCredit = PublikAPIInsufficientCredit.parse(responseBody: responseBody) {
+                return .publikAPIOutOfCredit(insufficientCredit)
+            }
+            return .requestFailed(statusCode: statusCode)
         case 429:
-            if serverErrorCode == "daily_budget_exhausted" {
-                return .dailyBudgetExhausted(retryAfterSeconds: retryAfterSeconds)
-            }
             return .rateLimited(retryAfterSeconds: retryAfterSeconds)
         case 503:
             return .assistantUnavailable
@@ -493,9 +554,9 @@ enum AssistantTransportError: Error, Equatable, Sendable {
         }
     }
 
-    /// Pulls the `{"error": "code"}` string out of a funded-tier failure body.
-    /// Only the code is ever read — the rest of the body is dropped on the
-    /// floor so it can never reach the panel.
+    /// Pulls the `{"error": "code"}` string out of a failure body. Only the
+    /// code is ever read — the rest of the body is dropped on the floor so it
+    /// can never reach the panel.
     static func serverErrorCode(inFailureBody failureBodyData: Data) -> String? {
         guard let failureBody = try? JSONSerialization.jsonObject(with: failureBodyData) as? [String: Any],
               let serverErrorCode = failureBody["error"] as? String,

@@ -56,20 +56,20 @@ struct CompanionPanelView: View {
     @State private var emailAddressInput: String = ""
     @State private var passwordInput: String = ""
 
-    /// The interactive `claude setup-token` capture, shown in a sheet. Its own
-    /// object so its published phase drives the sheet without the panel owning
-    /// any of the pty details.
-    @StateObject private var claudeCodeSetupSession = ClaudeCodeSetupTokenSession()
-    /// Whether the inline `claude setup-token` terminal is showing.
-    @State private var isShowingClaudeCodeSetup = false
-    /// What the reader types into the inline setup terminal, forwarded to the CLI.
-    @State private var claudeCodeSetupInput: String = ""
-    /// The one-line result of the last "Import from Claude Code" attempt.
-    @State private var claudeCodeImportMessage: String?
+    /// The publik API key while the reader is pasting one from the dashboard.
+    /// Cleared the moment it is saved and never repopulated.
+    @State private var publikAPIKeyInput: String = ""
+    /// Whether the disclosure sheet is up. Nothing may be provisioned until the
+    /// reader has accepted it — see `PublikAPIDisclosureAcceptance`.
+    @State private var isShowingPublikAPIDisclosure = false
+    /// Set while `POST /installs` is in flight, so the button can say so.
+    @State private var isProvisioningPublikAPI = false
+    /// The one-line result of the last provisioning or paste attempt.
+    @State private var publikAPISetupMessage: String?
 
-    /// The interactive `codex login` session — the OpenAI-side sibling of the
-    /// Claude one above. Same pty machinery, different success oracle (the CLI's
-    /// credential file rather than a token scraped from the output).
+    /// The interactive `codex login` session. Runs the CLI in a pty; success is
+    /// the CLI's credential file landing on disk rather than matching its
+    /// output wording.
     @StateObject private var codexSignInSession = CodexCLISignInSession()
     /// Whether the inline `codex login` terminal is showing.
     @State private var isShowingCodexSignIn = false
@@ -1167,167 +1167,296 @@ struct CompanionPanelView: View {
     }
 
     /// The pasted-key rows and the Claude Code CLI-login rows, shown together.
-    /// Rendered in BOTH the signed-out account section (a chat fallback) and the
-    /// signed-in one (where it is the only way to power app editing, since chat
-    /// is funded but editing runs on the reader's own model).
+    /// How Iris answers: the three providers, the one in use, and the publik
+    /// API card that carries the balance and the CTA.
+    ///
+    /// This used to be "bring your own credential" — a fallback under the
+    /// funded tier, which was the real answer for anyone signed in. With the
+    /// funded tier gone (`docs/assistant-credentials.md`) there is no default
+    /// that costs publik money, so this is not a fallback any more: it is the
+    /// whole of how the assistant gets a model, and it reads that way.
     private var bringYourOwnCredentialSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
+            providerPickerRows
+            publikAPICard
             bringYourOwnKeyRows
-            claudeCodeLoginRows
-            if isShowingClaudeCodeSetup {
-                claudeCodeSetupInlineView
-            }
             codexLoginRows
             if isShowingCodexSignIn {
                 codexSignInInlineView
             }
         }
-        .onAppear { accountService.refreshCodexLoginState() }
+        .onAppear {
+            accountService.refreshCodexLoginState()
+            accountService.refreshPublikAPIKeyState()
+        }
     }
 
-    // MARK: Claude Code CLI login
+    // MARK: Which provider answers
 
+    private var providerPickerRows: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("How Iris answers")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(DS.Colors.textSecondary)
+
+            ForEach(AssistantProviderPreference.allCases, id: \.rawValue) { provider in
+                Button(action: { chooseProvider(provider) }) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: providerIsSelected(provider)
+                              ? "largecircle.fill.circle"
+                              : "circle")
+                            .font(.system(size: 11))
+                            .foregroundColor(providerIsSelected(provider)
+                                             ? DS.Colors.accent
+                                             : DS.Colors.textTertiary)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(provider.displayName)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(DS.Colors.textSecondary)
+                            Text(provider.explanation)
+                                .font(.system(size: 10))
+                                .foregroundColor(DS.Colors.textTertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .pointerCursor()
+            }
+        }
+    }
+
+    private func providerIsSelected(_ provider: AssistantProviderPreference) -> Bool {
+        accountService.resolvedChatProvider == provider
+    }
+
+    private func chooseProvider(_ provider: AssistantProviderPreference) {
+        AssistantProviderChoice.current = provider
+        // The picker is also how somebody starts publik API from nothing: if
+        // they choose it and there is no key yet, put the disclosure in front
+        // of them rather than leaving a chosen-but-broken provider selected.
+        if provider == .publikAPI && !accountService.hasPublikAPIKey {
+            isShowingPublikAPIDisclosure = true
+        }
+        NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+    }
+
+    // MARK: publik API
+
+    /// The publik API card: the disclosure before provisioning, and afterwards
+    /// the balance line, the justification, and the one button.
+    ///
+    /// `CONTRACT.md` section 12 is binding here. In particular the card must be
+    /// shown at least once BEFORE any starter credit is spent — which is why
+    /// `PublikAPIAccount.maySpendOnThisKey` is false until
+    /// `recordThatTheFirstRunCardWasShown()` has run, and why this view calls it
+    /// on appear rather than somewhere more convenient.
     @ViewBuilder
-    private var claudeCodeLoginRows: some View {
-        if accountService.hasConnectedClaudeCodeLogin {
+    private var publikAPICard: some View {
+        if isShowingPublikAPIDisclosure {
+            publikAPIDisclosureRows
+        } else if accountService.hasPublikAPIKey {
+            publikAPIBalanceRows
+        } else {
+            publikAPISetUpRows
+        }
+    }
+
+    private var publikAPIDisclosureRows: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Before Iris sets this up")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(DS.Colors.textSecondary)
+
+            // The disclosure. Says what is about to happen and what it costs,
+            // in dollars, without naming the upstream provider (copy rule,
+            // CONTRACT section 12 item 5).
+            Text(Self.publikAPIWhyItCostsSentence)
+                .font(.system(size: 10))
+                .foregroundColor(DS.Colors.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("Iris will register this Mac with publik to get it a key. No account and no card needed to start.")
+                .font(.system(size: 10))
+                .foregroundColor(DS.Colors.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
             HStack(spacing: 8) {
-                Image(systemName: "terminal.fill")
+                Button(action: { acceptDisclosureAndProvision() }) {
+                    Text(isProvisioningPublikAPI ? "Setting up…" : "Set up publik API")
+                }
+                .irisTinyButton()
+                .disabled(isProvisioningPublikAPI)
+
+                Button(action: { isShowingPublikAPIDisclosure = false }) {
+                    Text("Not now")
+                }
+                .irisTextButton(fontSize: 10)
+            }
+
+            if let publikAPISetupMessage {
+                Text(publikAPISetupMessage)
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.destructiveText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            publikAPIPasteRows
+        }
+    }
+
+    private var publikAPISetUpRows: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button(action: { isShowingPublikAPIDisclosure = true }) {
+                Text("Set up publik API")
+            }
+            .irisTinyButton()
+
+            publikAPIPasteRows
+        }
+    }
+
+    /// The human route — a key from the dashboard. Always available, and the
+    /// only route at all in a build that ships no app token.
+    private var publikAPIPasteRows: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                SecureField("or paste a key: pk_live_…", text: $publikAPIKeyInput)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.ink)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(DS.Colors.surfaceRaised)
+                    )
+                    .onSubmit { savePastedPublikAPIKey() }
+
+                Button(action: { savePastedPublikAPIKey() }) {
+                    Text("Save")
+                }
+                .irisTinyButton()
+            }
+
+            Text("Keys come from publikhq.com/dashboard/api.")
+                .font(.system(size: 10))
+                .foregroundColor(DS.Colors.textTertiary)
+        }
+    }
+
+    private var publikAPIBalanceRows: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "creditcard.fill")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(DS.Colors.textTertiary)
 
-                Text("Connected via Claude Code")
+                // (a) The balance line. Dollars, never tokens or credits.
+                Text(publikAPIBalanceLine)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(DS.Colors.textSecondary)
 
                 Spacer()
 
-                Button(action: {
-                    accountService.disconnectClaudeCodeLogin()
-                    claudeCodeImportMessage = nil
-                }) {
-                    Text("Disconnect")
+                Button(action: { forgetPublikAPIKey() }) {
+                    Text("Remove")
                 }
                 .irisTextButton(fontSize: 10, isDanger: true)
             }
-        } else {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Or sign in with a CLI")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
 
-                HStack(spacing: 8) {
-                    Button(action: { startClaudeCodeSetup() }) {
-                        Text("Sign in with Claude Code")
-                    }
-                    .irisTinyButton()
+            // (b) The one-sentence justification.
+            Text(Self.publikAPIWhyItCostsSentence)
+                .font(.system(size: 10))
+                .foregroundColor(DS.Colors.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
 
-                    Button(action: { importExistingClaudeCodeLogin() }) {
-                        Text("Import login")
-                    }
-                    .irisTinyButton()
+            // (c) The primary button, and only ever one link.
+            if let (buttonTitle, linkURLString) = publikAPIPrimaryAction {
+                Button(action: { _ = ExternalLinkPolicy.openExternalURLIfAllowed(linkURLString) }) {
+                    Text(buttonTitle)
                 }
-
-                if let claudeCodeImportMessage {
-                    Text(claudeCodeImportMessage)
-                        .font(.system(size: 10))
-                        .foregroundColor(DS.Colors.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                Text("Uses your Claude Code login (via `claude setup-token`), sent only to api.anthropic.com. A Claude subscription token can be rate-limited for third-party use — a pasted API key is the most reliable option.")
-                    .font(.system(size: 10))
-                    .foregroundColor(DS.Colors.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
+                .irisTinyButton()
             }
+        }
+        .onAppear {
+            // CONTRACT section 12 item 4: the starter may not be spent until
+            // this card has been in front of the reader once.
+            companionManager.publikAPIAccount.recordThatTheFirstRunCardWasShown()
         }
     }
 
-    /// The inline `claude setup-token` terminal — shown in the panel rather than a
-    /// sheet, because the menu-bar panel is a non-activating NSPanel where a
-    /// SwiftUI sheet does not reliably present.
-    private var claudeCodeSetupInlineView: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            switch claudeCodeSetupSession.phase {
-            case .claudeNotFound:
-                Text("Claude Code isn't installed where Iris can find it. Install it, run `claude login`, or paste an API key above.")
-                    .font(.system(size: 10))
-                    .foregroundColor(DS.Colors.destructiveText)
-                    .fixedSize(horizontal: false, vertical: true)
-            case .running:
-                Text("Complete the sign-in Claude Code opened in your browser. Iris captures the token automatically.")
-                    .font(.system(size: 10))
-                    .foregroundColor(DS.Colors.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            case .captured:
-                Text("Connected! Iris will use your Claude Code login.")
-                    .font(.system(size: 10))
-                    .foregroundColor(DS.Colors.success)
-            case .finishedWithoutToken:
-                Text("That finished without a token. Try again, or paste an API key above.")
-                    .font(.system(size: 10))
-                    .foregroundColor(DS.Colors.destructiveText)
-                    .fixedSize(horizontal: false, vertical: true)
-            case .failed(let reason):
-                Text(reason)
-                    .font(.system(size: 10))
-                    .foregroundColor(DS.Colors.destructiveText)
-                    .fixedSize(horizontal: false, vertical: true)
-            case .idle:
-                EmptyView()
-            }
-
-            if !claudeCodeSetupSession.visibleTranscript.isEmpty {
-                ScrollView {
-                    Text(claudeCodeSetupSession.visibleTranscript)
-                        .font(.system(size: 9.5, design: .monospaced))
-                        .foregroundColor(DS.Colors.textSecondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                }
-                .frame(height: 130)
-                .padding(8)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(DS.Colors.surfaceRaised)
-                )
-            }
-
-            if claudeCodeSetupSession.isRunning {
-                HStack(spacing: 8) {
-                    TextField("Type here if the CLI asks for input…", text: $claudeCodeSetupInput)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 11))
-                        .foregroundColor(DS.Colors.ink)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(DS.Colors.surfaceRaised)
-                        )
-                        .onSubmit { sendClaudeCodeSetupInput() }
-
-                    Button(action: { sendClaudeCodeSetupInput() }) {
-                        Text("Send")
-                    }
-                    .irisTinyButton()
-                }
-            }
-
-            HStack {
-                Spacer()
-                Button(action: { endClaudeCodeSetup() }) {
-                    Text(claudeCodeSetupSession.phase == .captured ? "Done" : "Cancel")
-                }
-                .irisTextButton(fontSize: 10)
-            }
+    /// The balance, from the last thing the gateway said.
+    private var publikAPIBalanceLine: String {
+        guard let walletSnapshot = companionManager.publikAPIAccount.walletSnapshot else {
+            return "publik API is set up"
         }
-        .onChange(of: claudeCodeSetupSession.phase) { _, newPhase in
-            // A capture connects the credential the instant it lands.
-            if newPhase == .captured {
-                accountService.refreshClaudeCodeLoginState()
+        return "\(walletSnapshot.dollarsDescription) left on publik API"
+    }
+
+    /// The primary button's title and its single destination. Anonymous installs
+    /// are asked to link the computer; claimed ones to add a plan or a pack.
+    private var publikAPIPrimaryAction: (title: String, linkURLString: String)? {
+        guard let walletSnapshot = companionManager.publikAPIAccount.walletSnapshot else { return nil }
+        switch walletSnapshot.claimState {
+        case .anonymous:
+            guard let claimURLString = walletSnapshot.claimURLString else { return nil }
+            return ("Link this computer & pick a plan", claimURLString)
+        case .claimed:
+            guard let addCreditURLString = walletSnapshot.addCreditURLString else { return nil }
+            return ("Add a plan or pack", addCreditURLString)
+        }
+    }
+
+    /// The justification, verbatim from `CONTRACT.md` section 12 item 1(b).
+    /// Says why it costs money, in dollars, and never names the provider.
+    static let publikAPIWhyItCostsSentence =
+        "The AI model behind Iris is run by a provider that charges per use. "
+        + "publik passes that on at half the provider's list price, nothing is "
+        + "charged behind your back, and every call is visible on your dashboard."
+
+    private func acceptDisclosureAndProvision() {
+        publikAPISetupMessage = nil
+        isProvisioningPublikAPI = true
+        let account = companionManager.publikAPIAccount
+        Task { @MainActor in
+            let outcome = await account.provisionAKey(
+                havingAccepted: .readerAcceptedTheDisclosure()
+            )
+            isProvisioningPublikAPI = false
+            switch outcome {
+            case .success:
+                isShowingPublikAPIDisclosure = false
+                publikAPISetupMessage = nil
+                accountService.refreshPublikAPIKeyState()
+            case .failure(let failure):
+                publikAPISetupMessage = failure.userFacingMessage
             }
             NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
         }
+    }
+
+    private func savePastedPublikAPIKey() {
+        let candidateKey = publikAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidateKey.isEmpty else { return }
+        if companionManager.publikAPIAccount.saveKeyPastedByTheReader(candidateKey) {
+            publikAPIKeyInput = ""
+            publikAPISetupMessage = nil
+            isShowingPublikAPIDisclosure = false
+            accountService.refreshPublikAPIKeyState()
+        } else {
+            publikAPISetupMessage = "That doesn't look like a publik API key — they start with pk_live_."
+        }
+        NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+    }
+
+    private func forgetPublikAPIKey() {
+        companionManager.publikAPIAccount.forgetKey()
+        accountService.refreshPublikAPIKeyState()
+        NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
     }
 
     // MARK: Codex CLI login
@@ -1486,44 +1615,6 @@ struct CompanionPanelView: View {
         codexSignInInput = ""
         accountService.refreshCodexLoginState()
         NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
-    }
-
-    private func startClaudeCodeSetup() {
-        claudeCodeImportMessage = nil
-        isShowingClaudeCodeSetup = true
-        claudeCodeSetupSession.start()
-        NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
-    }
-
-    private func sendClaudeCodeSetupInput() {
-        let trimmed = claudeCodeSetupInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            claudeCodeSetupSession.sendReturn()
-            return
-        }
-        claudeCodeSetupSession.sendLine(trimmed)
-        claudeCodeSetupInput = ""
-    }
-
-    private func endClaudeCodeSetup() {
-        claudeCodeSetupSession.cancel()
-        isShowingClaudeCodeSetup = false
-        claudeCodeSetupInput = ""
-        NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
-    }
-
-    private func importExistingClaudeCodeLogin() {
-        let outcome = accountService.importClaudeCodeLogin()
-        switch outcome {
-        case .imported:
-            claudeCodeImportMessage = "Connected using your Claude Code login."
-        case .noClaudeCodeLoginFound:
-            claudeCodeImportMessage = "No Claude Code login found. Run `claude login`, or use Sign in with Claude Code."
-        case .couldNotReadKeychain:
-            claudeCodeImportMessage = "Iris couldn't read the Claude Code login — you may have denied the Keychain prompt."
-        case .loginHadNoUsableToken:
-            claudeCodeImportMessage = "That Claude Code login has no token Iris can use — try Sign in with Claude Code."
-        }
     }
 
     /// Validates the pasted key against Anthropic before storing it, so a typo

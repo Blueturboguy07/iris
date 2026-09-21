@@ -132,10 +132,14 @@ nonisolated enum AssistantModelPrices {
 nonisolated enum AssistantSpendRoute: String, Sendable {
     /// The reader's own API key. Metered: every token is on their bill.
     case theReadersOwnAPIKey
-    /// publik pays. Real money, but not the reader's, so it is not their total.
-    case publiksFundedTier
-    /// A Claude Code login or the Codex CLI — a flat-rate plan. The marginal
-    /// cost of one more query is zero.
+    /// The publik API gateway. The reader's money, but NOT counted here: this
+    /// ledger prices Anthropic's published list rates, and publik bills at half
+    /// of list, so counting a gateway call would overstate the bill roughly
+    /// twofold. publik's own dashboard is the authority for this route, and the
+    /// settings card links to it rather than inventing a second number.
+    case aMeteredGatewayThatBillsSeparately
+    /// The Codex CLI — a flat-rate plan. The marginal cost of one more query is
+    /// zero, so pricing its tokens would invent a bill.
     case aFlatRateSubscription
 
     var isMetered: Bool { self == .theReadersOwnAPIKey }

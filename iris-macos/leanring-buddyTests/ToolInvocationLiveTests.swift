@@ -363,8 +363,9 @@ struct ToolInvocationLiveTests {
     private static func isAnInfrastructureRefusal(_ error: Error) -> Bool {
         guard let transportError = error as? AssistantTransportError else { return false }
         switch transportError {
-        case .noCredentialsAvailable, .signInRequired, .bringYourOwnKeyRejected,
-             .rateLimited, .dailyBudgetExhausted, .assistantUnavailable:
+        case .noCredentialsAvailable, .publikAPINotSetUp, .bringYourOwnKeyRejected,
+             .publikAPIKeyRejected, .anthropicKeyNotSaved, .codexNotUsable,
+             .rateLimited, .publikAPIOutOfCredit, .assistantUnavailable:
             return true
         default:
             return false

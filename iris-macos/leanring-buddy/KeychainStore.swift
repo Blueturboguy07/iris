@@ -41,13 +41,23 @@ enum KeychainSecretKind: String, CaseIterable, Sendable {
     /// for maintain mode's Tier C novel fixes when they choose OpenAI. Like
     /// the Anthropic key, it never reaches a publik host.
     case openAIAPIKey = "openai-api-key"
-    /// A Claude Code OAuth token (`sk-ant-oat…`), obtained either from
-    /// `claude setup-token` (long-lived) or imported from an existing
-    /// `claude login`. It is a second shape of the user's OWN Anthropic
-    /// credential — sent only to `api.anthropic.com`, and with an
-    /// `Authorization: Bearer` + `anthropic-beta` pair rather than `x-api-key`
-    /// (see `AssistantTransport`). Like the API key, it never reaches a publik
-    /// host.
+    /// The publik API gateway key (`pk_live_…`), either minted for this install
+    /// by `POST /api/v1/installs` or pasted by the reader from their dashboard.
+    /// Unlike every other credential here it is SUPPOSED to reach a publik host
+    /// and only a publik host — `AssistantTransport.validatedRequest` enforces
+    /// both halves of that.
+    case publikAPIKey = "publik-api-key"
+}
+
+/// Credentials this app used to store and must not store again.
+///
+/// `anthropic-oauth-token` held a Claude Code OAuth token (`sk-ant-oat…`)
+/// captured from `claude setup-token` or imported from an existing
+/// `claude login`. Anthropic's terms forbid a third-party app collecting,
+/// storing or intermediating Claude.ai credentials, so the feature was removed
+/// — and a token an older build already wrote is deleted on launch rather than
+/// left sitting in the reader's Keychain. See `KeychainStore.deleteRetiredSecrets`.
+enum RetiredKeychainSecretKind: String, CaseIterable, Sendable {
     case anthropicOAuthToken = "anthropic-oauth-token"
 }
 
@@ -164,5 +174,67 @@ enum KeychainStore {
 
     private static func deleteSecretIgnoringFailure(ofKind secretKind: KeychainSecretKind) {
         try? deleteSecret(ofKind: secretKind)
+    }
+
+    // MARK: - Retired credentials
+
+    /// Deletes any credential an older build stored that this one is not
+    /// allowed to hold. Called once at launch.
+    ///
+    /// Removing the code that WRITES a prohibited credential is only half the
+    /// job — a reader who upgrades still has the old one on disk, and "we no
+    /// longer use it" is not the same promise as "it is gone". This is the
+    /// other half.
+    static func deleteRetiredSecrets() {
+        for retiredKind in RetiredKeychainSecretKind.allCases {
+            let deleteQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: keychainServiceName,
+                kSecAttrAccount as String: retiredKind.rawValue,
+            ]
+            SecItemDelete(deleteQuery as CFDictionary)
+        }
+    }
+
+    /// Whether a retired credential is still present. Exists for the test that
+    /// proves `deleteRetiredSecrets` actually removes one.
+    static func hasRetiredSecret(ofKind retiredKind: RetiredKeychainSecretKind) -> Bool {
+        let existenceQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainServiceName,
+            kSecAttrAccount as String: retiredKind.rawValue,
+            kSecReturnData as String: false,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        return SecItemCopyMatching(existenceQuery as CFDictionary, nil) == errSecSuccess
+    }
+
+    /// Writes a retired credential. Test-only: the deletion test needs
+    /// something to delete, and nothing in the app may create one of these.
+    static func saveRetiredSecretForTesting(
+        _ secretValue: String,
+        ofKind retiredKind: RetiredKeychainSecretKind
+    ) throws {
+        guard let secretData = secretValue.data(using: .utf8) else {
+            throw KeychainStoreError.secretIsNotValidUTF8
+        }
+        let deleteQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainServiceName,
+            kSecAttrAccount as String: retiredKind.rawValue,
+        ]
+        SecItemDelete(deleteQuery as CFDictionary)
+
+        let addQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainServiceName,
+            kSecAttrAccount as String: retiredKind.rawValue,
+            kSecValueData as String: secretData,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+        ]
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        guard addStatus == errSecSuccess else {
+            throw KeychainStoreError.keychainOperationFailed(status: addStatus)
+        }
     }
 }

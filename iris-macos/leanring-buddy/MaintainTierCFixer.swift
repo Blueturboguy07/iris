@@ -394,7 +394,7 @@ final class MaintainTierCFixer {
         guard let transportError = error as? AssistantTransportError else {
             return "model call failed: \(error.localizedDescription)"
         }
-        if transportError == .bringYourOwnKeyRejected || transportError == .claudeCodeLoginExpired {
+        if transportError == .bringYourOwnKeyRejected || transportError == .publikAPIKeyRejected {
             return "model credential rejected: \(transportError.userFacingMessage)"
         }
         if case .rateLimited = transportError {

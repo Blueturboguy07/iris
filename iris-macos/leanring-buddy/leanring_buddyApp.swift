@@ -53,6 +53,13 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotific
         // nowhere for that to lead — Iris has no main window for macOS to
         // bring forward on its own.
         UNUserNotificationCenter.current().delegate = self
+        // A build before this one could have stored a Claude Code OAuth token.
+        // Iris is not allowed to hold one (Anthropic's terms forbid a third
+        // party intermediating Claude.ai credentials), and no longer writes
+        // one — but an upgrading reader still has theirs on disk until it is
+        // actively removed. Removing the code that writes a prohibited
+        // credential is only half the job; this is the other half.
+        KeychainStore.deleteRetiredSecrets()
         companionManager.start()
         // Auto-open the panel if the user still needs to do something:
         // either they haven't onboarded yet, or permissions were revoked.

@@ -997,9 +997,12 @@ struct OverlayEyeExchangeFailureTests {
         // with an empty sentence would render as an empty card.
         for transportError: AssistantTransportError in [
             .noCredentialsAvailable,
-            .signInRequired,
+            .publikAPINotSetUp,
+            .publikAPIStarterNotYetDisclosed,
             .rateLimited(retryAfterSeconds: 30),
-            .dailyBudgetExhausted(retryAfterSeconds: nil),
+            .publikAPIOutOfCredit(
+                PublikAPIInsufficientCredit(message: "out of credit", linkURLString: nil)
+            ),
             .assistantUnavailable,
             .transportFailure(reason: "the network went away")
         ] {

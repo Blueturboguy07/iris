@@ -196,12 +196,17 @@ class ClaudeAPI {
             requestBody["stream"] = true
         }
         if transport.shouldSendModelInRequestBody {
-            requestBody["model"] = model
+            // The publik gateway takes alias names only and maps each to a tier
+            // of its own; a raw upstream slug is refused. Everywhere else the
+            // model is the reader's literal choice.
+            requestBody["model"] = transport.requiresPublikModelAliases
+                ? PublikAPIModelAlias.alias(forIrisModelName: model)
+                : model
         }
-        // Tools ride in the body, not the transport: the funded proxy
-        // allowlists them server-side and the BYO route sends them straight
-        // to Anthropic. AssistantTransport needs no change for this, and
-        // that is deliberate — do not "helpfully" move tools there.
+        // Tools ride in the body, not the transport: the gateway forwards them
+        // and the BYO route sends them straight to Anthropic. AssistantTransport
+        // needs no change for this, and that is deliberate — do not "helpfully"
+        // move tools there.
         if let tools {
             requestBody["tools"] = tools
         }
@@ -213,28 +218,16 @@ class ClaudeAPI {
 
     /// The value of the request body's `system` field for this transport.
     ///
-    /// On the OAuth-token route Anthropic accepts the request only when the
-    /// system prompt LEADS with Claude Code's own identity sentence (see
-    /// `AssistantTransport.claudeCodeIdentitySystemBlockText`), so there the
-    /// field becomes an array of text blocks — the identity first, the
-    /// caller's actual system prompt second. Everywhere else the field stays
-    /// the plain string it has always been. An empty caller prompt on the
-    /// OAuth route still sends the identity block alone, because a request
-    /// with no system prompt at all is rejected the same way.
+    /// A plain string on every route. This used to branch: the Claude Code
+    /// OAuth route required the system prompt to LEAD with Claude Code's own
+    /// identity sentence or Anthropic answered with a synthetic 429. That route
+    /// is gone — Iris is not allowed to hold a Claude.ai credential — and with
+    /// it the only reason this was ever an array.
     static func systemFieldValue(
         for transport: AssistantTransport,
         systemPrompt: String
     ) -> Any {
-        guard transport.shouldPrependClaudeCodeIdentitySystemBlock else {
-            return systemPrompt
-        }
-        var systemBlocks: [[String: Any]] = [
-            ["type": "text", "text": AssistantTransport.claudeCodeIdentitySystemBlockText]
-        ]
-        if !systemPrompt.isEmpty {
-            systemBlocks.append(["type": "text", "text": systemPrompt])
-        }
-        return systemBlocks
+        systemPrompt
     }
 
     /// Turns a non-2xx response into the user-visible state for that route.
@@ -257,7 +250,11 @@ class ClaudeAPI {
             forStatusCode: statusCode,
             serverErrorCode: serverErrorCode,
             retryAfterHeaderValue: retryAfterHeaderValue,
-            credentialShape: transport.credentialShape
+            credentialShape: transport.credentialShape,
+            // The gateway's 402 carries the sentence and the one link the reader
+            // is shown, so this failure alone needs the body. Every other status
+            // still drops it on the floor.
+            responseBody: statusCode == 402 ? failureBodyData : nil
         )
     }
 

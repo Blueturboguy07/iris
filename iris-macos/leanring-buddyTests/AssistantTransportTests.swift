@@ -2,600 +2,361 @@
 //  AssistantTransportTests.swift
 //  leanring-buddyTests
 //
-//  The security property `AssistantTransport` exists to protect —
-//  "the user's own Anthropic key is never sent to any publik host"
-//  (docs/iris-assistant-protocol.md section 1, where losing it is called a
-//  ship-blocker) — is not something a reader can confirm by looking at a
-//  request in a debugger once. It is asserted here, from both directions, so a
-//  later refactor that merges the two request builders fails loudly.
+//  The property this suite exists for: the reader's own Anthropic key never
+//  reaches a publik host, and the publik gateway key never reaches anything
+//  else.
+//
+//  Two credentials now legitimately travel as `x-api-key`, which is exactly
+//  when a rule like this stops being obvious and starts needing a test. The
+//  old suite could assert "this header only ever goes to Anthropic"; that
+//  sentence is no longer true, and a weaker version of it ("well, it goes to
+//  one of two places") would not catch the mistake that matters — sending the
+//  reader's `sk-ant-…` to publik. So the assertions below are stated per
+//  credential, both directions, including the crossed pairs that must fail.
 //
 
 import Foundation
 import Testing
-// The module follows PRODUCT_NAME, which the fork renamed to Iris.
 @testable import Iris
 
-// The helpers under test are main-actor isolated, so the suite has to be too.
-@MainActor
+@Suite("Assistant transport")
 struct AssistantTransportTests {
 
-    // MARK: - Fixtures
+    static let fakeAnthropicKey = "sk-ant-api03-not-a-real-key"
+    static let fakePublikKey = "pk_live_abc123456789_0123456789abcdef0123456789abcdef"
+    static let publikGatewayURL = URL(string: "https://publikhq.com/api/v1")!
 
-    /// A publik origin of the shape `configuredPublikBaseURL` produces.
-    private static let publikBaseURL = URL(string: "https://publikhq.com")!
+    // MARK: The publik key type
 
-    /// Stands in for a real Supabase access token. Its only requirement is
-    /// being non-empty, which is what the transport actually checks.
-    private static let fakeSupabaseAccessToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.fake.token"
-
-    /// Shaped like a real key so a failure message reads plausibly, but this
-    /// value is never sent anywhere — no test here touches the network.
-    private static let fakeAnthropicAPIKey = "sk-ant-api03-not-a-real-key-0000000000"
-
-    private static func fundedTransport(
-        publikBaseURL: URL = AssistantTransportTests.publikBaseURL,
-        accessToken: String? = AssistantTransportTests.fakeSupabaseAccessToken
-    ) -> AssistantTransport {
-        .funded(publikBaseURL: publikBaseURL, currentAccessTokenProvider: { accessToken })
+    @Test func aPublikKeyTypeRefusesAnAnthropicKey() {
+        // The whole point of the type: the one request builder that takes a
+        // destination cannot be handed the reader's Anthropic credential,
+        // however badly a caller holds it wrong.
+        #expect(PublikAPIKey(Self.fakeAnthropicKey) == nil)
+        #expect(PublikAPIKey("") == nil)
+        #expect(PublikAPIKey("definitely not a key") == nil)
+        #expect(PublikAPIKey(Self.fakePublikKey) != nil)
     }
 
-    /// Every host this app has any reason to talk to that is NOT Anthropic.
-    /// The BYO key must be absent from a request aimed at any of them.
-    private static let everyPublikHostTheKeyMustNeverReach = [
-        "https://publikhq.com",
-        "https://www.publikhq.com",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "https://gcbxnxwwuuqsypwevfgi.supabase.co",
-    ]
-
-    // MARK: - The funded route
-
-    @Test func theFundedTransportTargetsPublikAndCarriesOnlyABearerToken() async throws {
-        let fundedRequest = try await Self.fundedTransport().makeChatRequest()
-
-        #expect(fundedRequest.url?.host == "publikhq.com")
-        #expect(fundedRequest.url?.path == "/api/assistant/chat")
-        #expect(fundedRequest.httpMethod == "POST")
-        #expect(fundedRequest.value(forHTTPHeaderField: "Authorization")
-            == "Bearer \(Self.fakeSupabaseAccessToken)")
-
-        // The header that carries the user's own key must not exist on this
-        // route at all — not empty, absent.
-        #expect(fundedRequest.value(forHTTPHeaderField: "x-api-key") == nil)
-        #expect(fundedRequest.value(forHTTPHeaderField: "anthropic-version") == nil)
+    @Test func aPublikKeyTypeAcceptsATestKeyToo() {
+        #expect(PublikAPIKey("pk_test_abc123456789_0123456789abcdef0123456789abcdef") != nil)
     }
 
-    @Test func theFundedRouteHonorsALocalDevelopmentOrigin() async throws {
-        let localDevelopmentTransport = Self.fundedTransport(
-            publikBaseURL: URL(string: "http://localhost:3000")!
-        )
-        let fundedRequest = try await localDevelopmentTransport.makeChatRequest()
+    // MARK: Where each credential is allowed to go
 
-        #expect(fundedRequest.url?.absoluteString == "http://localhost:3000/api/assistant/chat")
-        #expect(fundedRequest.value(forHTTPHeaderField: "x-api-key") == nil)
+    @Test func theReadersAnthropicKeyGoesOnlyToAnthropic() async throws {
+        let transport = AssistantTransport.bringYourOwnKey(anthropicAPIKey: Self.fakeAnthropicKey)
+        let request = try await transport.makeChatRequest()
+
+        #expect(request.url?.host == AssistantTransport.anthropicAPIHost)
+        #expect(request.value(forHTTPHeaderField: "x-api-key") == Self.fakeAnthropicKey)
+        #expect(request.value(forHTTPHeaderField: "anthropic-version")
+            == AssistantTransport.anthropicAPIVersion)
     }
 
-    @Test func aFundedRequestWithNoLiveAccessTokenAsksForSignInRatherThanSendingNothing() async throws {
-        let transportWithNoToken = Self.fundedTransport(accessToken: nil)
+    @Test func thePublikKeyGoesToTheGateway() async throws {
+        let key = try #require(PublikAPIKey(Self.fakePublikKey))
+        let transport = AssistantTransport.publikAPI(key: key, gatewayBaseURL: Self.publikGatewayURL)
+        let request = try await transport.makeChatRequest()
 
-        await #expect(throws: AssistantTransportError.signInRequired) {
-            _ = try await transportWithNoToken.makeChatRequest()
+        #expect(request.url?.absoluteString == "https://publikhq.com/api/v1/messages")
+        #expect(request.value(forHTTPHeaderField: "x-api-key") == Self.fakePublikKey)
+    }
+
+    @Test func theGateIsAnAnthropicKeyHeadedAnywhereButAnthropic() {
+        var smugglingRequest = URLRequest(url: URL(string: "https://publikhq.com/api/v1/messages")!)
+        smugglingRequest.setValue(Self.fakeAnthropicKey, forHTTPHeaderField: "x-api-key")
+
+        #expect(throws: AssistantTransportError.self) {
+            _ = try AssistantTransport.validatedRequest(smugglingRequest)
         }
     }
 
-    @Test func theFundedRouteDoesNotSendAModelTheServerWillIgnore() async throws {
-        #expect(Self.fundedTransport().shouldSendModelInRequestBody == false)
-        #expect(AssistantTransport
-            .bringYourOwnKey(anthropicAPIKey: Self.fakeAnthropicAPIKey)
-            .shouldSendModelInRequestBody)
-    }
+    @Test func theGateIsAlsoAPublikKeyHeadedAnywhereButPublik() {
+        // The mirror image, and it matters for the same reason: a publik key is
+        // the reader's money, and handing it to a third party is the same class
+        // of mistake as leaking the Anthropic one.
+        var strayRequest = URLRequest(url: URL(string: "https://example.com/v1/messages")!)
+        strayRequest.setValue(Self.fakePublikKey, forHTTPHeaderField: "x-api-key")
 
-    // MARK: - The bring-your-own-key route
-
-    @Test func theBringYourOwnKeyTransportTargetsAnthropicDirectly() async throws {
-        let directRequest = try await AssistantTransport
-            .bringYourOwnKey(anthropicAPIKey: Self.fakeAnthropicAPIKey)
-            .makeChatRequest()
-
-        #expect(directRequest.url?.host == "api.anthropic.com")
-        #expect(directRequest.url?.absoluteString == "https://api.anthropic.com/v1/messages")
-        #expect(directRequest.url?.scheme == "https")
-        #expect(directRequest.value(forHTTPHeaderField: "x-api-key") == Self.fakeAnthropicAPIKey)
-        #expect(directRequest.value(forHTTPHeaderField: "anthropic-version") == "2023-06-01")
-        // Publik's own credential has no business on this route either.
-        #expect(directRequest.value(forHTTPHeaderField: "Authorization") == nil)
-    }
-
-    /// THE PROPERTY. Stated as directly as it can be stated.
-    @Test func theBringYourOwnKeyRequestNeverPointsAtAPublikHost() async throws {
-        let directRequest = try await AssistantTransport
-            .bringYourOwnKey(anthropicAPIKey: Self.fakeAnthropicAPIKey)
-            .makeChatRequest()
-
-        let destinationHost = try #require(directRequest.url?.host?.lowercased())
-        #expect(destinationHost == AssistantTransport.anthropicAPIHost)
-
-        for publikHostTheKeyMustNeverReach in Self.everyPublikHostTheKeyMustNeverReach {
-            let forbiddenHost = try #require(URL(string: publikHostTheKeyMustNeverReach)?.host?.lowercased())
-            #expect(destinationHost != forbiddenHost)
+        #expect(throws: AssistantTransportError.self) {
+            _ = try AssistantTransport.validatedRequest(strayRequest)
         }
-
-        // And the whole URL, not just the host — a path or a query cannot smuggle
-        // the destination somewhere else either.
-        let requestedURLString = try #require(directRequest.url?.absoluteString)
-        #expect(!requestedURLString.contains("publikhq"))
-        #expect(!requestedURLString.contains("supabase"))
-        #expect(!requestedURLString.contains("localhost"))
     }
 
-    /// The same property from the other side: a key can never appear on a
-    /// request whose host is not Anthropic, no matter who built that request.
-    @Test func aRequestToAnyNonAnthropicHostIsRefusedIfItCarriesTheUsersKey() async throws {
-        for publikHostTheKeyMustNeverReach in Self.everyPublikHostTheKeyMustNeverReach {
-            var smuggledRequest = URLRequest(
-                url: URL(string: "\(publikHostTheKeyMustNeverReach)/api/assistant/chat")!
-            )
-            smuggledRequest.httpMethod = "POST"
-            smuggledRequest.setValue(Self.fakeAnthropicAPIKey, forHTTPHeaderField: "x-api-key")
-
-            #expect(throws: AssistantTransportError.self) {
-                _ = try AssistantTransport.validatedRequest(smuggledRequest)
+    @Test func anAnthropicKeyMayNotRideToAnAttackersHost() {
+        for attemptedHost in ["evil.example", "publikhq.com.evil.example", "api.anthropic.com.evil.example"] {
+            var request = URLRequest(url: URL(string: "https://\(attemptedHost)/v1/messages")!)
+            request.setValue(Self.fakeAnthropicKey, forHTTPHeaderField: "x-api-key")
+            #expect(throws: AssistantTransportError.self, "host \(attemptedHost)") {
+                _ = try AssistantTransport.validatedRequest(request)
             }
         }
     }
 
-    @Test func theGateLetsThroughTheTwoRequestsThatAreActuallyLegitimate() async throws {
-        // A key going to Anthropic is fine.
-        var anthropicRequest = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
-        anthropicRequest.setValue(Self.fakeAnthropicAPIKey, forHTTPHeaderField: "x-api-key")
-        #expect(throws: Never.self) {
-            _ = try AssistantTransport.validatedRequest(anthropicRequest)
-        }
-
-        // A bearer token going to publik is fine.
-        var publikRequest = URLRequest(url: URL(string: "https://publikhq.com/api/assistant/chat")!)
-        publikRequest.setValue("Bearer \(Self.fakeSupabaseAccessToken)", forHTTPHeaderField: "Authorization")
-        #expect(throws: Never.self) {
-            _ = try AssistantTransport.validatedRequest(publikRequest)
-        }
+    @Test func aRequestCarryingNoCredentialIsNotThisGatesBusiness() throws {
+        let plainRequest = URLRequest(url: URL(string: "https://publikhq.com/api/iris/apps")!)
+        let validated = try AssistantTransport.validatedRequest(plainRequest)
+        #expect(validated.url == plainRequest.url)
     }
 
-    // MARK: - The bring-your-own OAuth-token route (Claude Code login)
-
-    /// Shaped like a real long-lived Claude Code token; never sent anywhere here.
-    private static let fakeAnthropicOAuthToken = "sk-ant-oat01-not-a-real-token-000000000000000000"
-
-    @Test func theOAuthTokenTransportTargetsAnthropicWithBearerAndTheOAuthBeta() async throws {
-        let directRequest = try await AssistantTransport
-            .bringYourOwnOAuthToken(anthropicOAuthToken: Self.fakeAnthropicOAuthToken)
-            .makeChatRequest()
-
-        #expect(directRequest.url?.absoluteString == "https://api.anthropic.com/v1/messages")
-        // The OAuth token authenticates as a Bearer, NOT x-api-key.
-        #expect(directRequest.value(forHTTPHeaderField: "Authorization")
-            == "Bearer \(Self.fakeAnthropicOAuthToken)")
-        #expect(directRequest.value(forHTTPHeaderField: "x-api-key") == nil)
-        // The beta header is what makes Anthropic accept the token, and what the
-        // gate keys off to keep it away from any publik host.
-        #expect(directRequest.value(forHTTPHeaderField: "anthropic-beta")
-            == AssistantTransport.anthropicOAuthBetaHeaderValue)
-        #expect(directRequest.value(forHTTPHeaderField: "anthropic-version") == "2023-06-01")
-        #expect(AssistantTransport
-            .bringYourOwnOAuthToken(anthropicOAuthToken: Self.fakeAnthropicOAuthToken)
-            .shouldSendModelInRequestBody)
+    @Test func localhostCountsAsPublikForADevelopmentBuild() throws {
+        var request = URLRequest(url: URL(string: "http://localhost:3000/api/v1/messages")!)
+        request.setValue(Self.fakePublikKey, forHTTPHeaderField: "x-api-key")
+        let validated = try AssistantTransport.validatedRequest(request)
+        #expect(validated.value(forHTTPHeaderField: "x-api-key") == Self.fakePublikKey)
     }
 
-    /// THE PROPERTY, for the OAuth token: it is the user's own credential too, so
-    /// a request carrying the OAuth beta header may only ever reach Anthropic.
-    @Test func anOAuthTokenRequestIsRefusedIfItWouldLeaveAnthropic() async throws {
-        for publikHostTheTokenMustNeverReach in Self.everyPublikHostTheKeyMustNeverReach {
-            var smuggledRequest = URLRequest(
-                url: URL(string: "\(publikHostTheTokenMustNeverReach)/api/assistant/chat")!
-            )
-            smuggledRequest.httpMethod = "POST"
-            smuggledRequest.setValue("Bearer \(Self.fakeAnthropicOAuthToken)", forHTTPHeaderField: "Authorization")
-            smuggledRequest.setValue(
-                AssistantTransport.anthropicOAuthBetaHeaderValue, forHTTPHeaderField: "anthropic-beta"
-            )
+    // MARK: Choosing a provider
 
-            #expect(throws: AssistantTransportError.self) {
-                _ = try AssistantTransport.validatedRequest(smuggledRequest)
-            }
-        }
-
-        // And the legitimate one still passes.
-        var anthropicRequest = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
-        anthropicRequest.setValue("Bearer \(Self.fakeAnthropicOAuthToken)", forHTTPHeaderField: "Authorization")
-        anthropicRequest.setValue(
-            AssistantTransport.anthropicOAuthBetaHeaderValue, forHTTPHeaderField: "anthropic-beta"
+    @Test func anExplicitChoiceWinsOverWhatElseIsLyingAround() {
+        // The bug this replaces: being signed in silently beat a key the reader
+        // had pasted themselves, so somebody who deliberately connected their
+        // own account could never reach it.
+        let selection = AssistantTransport.selectTransport(
+            preference: .anthropicKey,
+            publikAPIKey: Self.fakePublikKey,
+            publikGatewayBaseURL: Self.publikGatewayURL,
+            publikKeyMaySpend: true,
+            storedAnthropicAPIKey: Self.fakeAnthropicKey,
+            codexIsUsable: true
         )
-        #expect(throws: Never.self) {
-            _ = try AssistantTransport.validatedRequest(anthropicRequest)
-        }
-    }
-
-    // MARK: - Choosing a route
-
-    @Test func fundedWinsWhenSignedInAndTheStoredKeyIsTheFallback() async throws {
-        let signedInSelection = AssistantTransport.selectTransport(
-            isSignedIn: true,
-            publikBaseURL: Self.publikBaseURL,
-            storedAnthropicAPIKey: Self.fakeAnthropicAPIKey,
-            currentAccessTokenProvider: { Self.fakeSupabaseAccessToken }
-        )
-        guard case .success(.funded) = signedInSelection else {
-            Issue.record("a signed-in user should be served by the funded tier")
+        guard case .success(.bringYourOwnKey(let chosenKey)) = selection else {
+            Issue.record("expected the reader's own key to win")
             return
         }
-
-        let signedOutWithKeySelection = AssistantTransport.selectTransport(
-            isSignedIn: false,
-            publikBaseURL: Self.publikBaseURL,
-            storedAnthropicAPIKey: Self.fakeAnthropicAPIKey,
-            currentAccessTokenProvider: { nil }
-        )
-        guard case .success(.bringYourOwnKey(let selectedKey)) = signedOutWithKeySelection else {
-            Issue.record("a stored key should be used when nobody is signed in")
-            return
-        }
-        #expect(selectedKey == Self.fakeAnthropicAPIKey)
+        #expect(chosenKey == Self.fakeAnthropicKey)
     }
 
-    @Test func aClaudeCodeOAuthTokenIsTheBYOFallbackBelowAPastedKey() async throws {
-        // Signed out, only an OAuth token connected → the OAuth route.
-        let oauthOnlySelection = AssistantTransport.selectTransport(
-            isSignedIn: false,
-            publikBaseURL: Self.publikBaseURL,
+    @Test func aBrokenChoiceDoesNotSilentlySpendSomebodyElsesMoney() {
+        // The rule from docs/assistant-credentials.md: a chosen provider that
+        // has stopped working says what broke rather than quietly switching to
+        // another account.
+        let selection = AssistantTransport.selectTransport(
+            preference: .anthropicKey,
+            publikAPIKey: Self.fakePublikKey,
+            publikGatewayBaseURL: Self.publikGatewayURL,
+            publikKeyMaySpend: true,
             storedAnthropicAPIKey: nil,
-            storedAnthropicOAuthToken: Self.fakeAnthropicOAuthToken,
-            currentAccessTokenProvider: { nil }
+            codexIsUsable: false
         )
-        guard case .success(.bringYourOwnOAuthToken(let selectedToken)) = oauthOnlySelection else {
-            Issue.record("a connected Claude Code token should be used when it is the only credential")
+        guard case .failure(let failure) = selection else {
+            Issue.record("expected a failure, not a fallback onto the publik key")
             return
         }
-        #expect(selectedToken == Self.fakeAnthropicOAuthToken)
+        #expect(failure == .anthropicKeyNotSaved)
+    }
 
-        // Both present → the pasted key wins (it is the plainer credential).
-        let bothSelection = AssistantTransport.selectTransport(
-            isSignedIn: false,
-            publikBaseURL: Self.publikBaseURL,
-            storedAnthropicAPIKey: Self.fakeAnthropicAPIKey,
-            storedAnthropicOAuthToken: Self.fakeAnthropicOAuthToken,
-            currentAccessTokenProvider: { nil }
+    @Test func withNoPreferenceThePublikGatewayLeads() {
+        let selection = AssistantTransport.selectTransport(
+            preference: nil,
+            publikAPIKey: Self.fakePublikKey,
+            publikGatewayBaseURL: Self.publikGatewayURL,
+            publikKeyMaySpend: true,
+            storedAnthropicAPIKey: Self.fakeAnthropicKey,
+            codexIsUsable: true
         )
-        guard case .success(.bringYourOwnKey) = bothSelection else {
-            Issue.record("a pasted API key should win over an OAuth token when both are present")
+        guard case .success(.publikAPI) = selection else {
+            Issue.record("expected publik API to lead when nothing was chosen")
             return
         }
+    }
 
-        // Signed in → still funded, regardless of a connected token.
-        let signedInSelection = AssistantTransport.selectTransport(
-            isSignedIn: true,
-            publikBaseURL: Self.publikBaseURL,
+    @Test func withNoPreferenceAndNoPublikKeyTheReadersOwnKeyIsNext() {
+        let selection = AssistantTransport.selectTransport(
+            preference: nil,
+            publikAPIKey: nil,
+            publikGatewayBaseURL: Self.publikGatewayURL,
+            publikKeyMaySpend: false,
+            storedAnthropicAPIKey: Self.fakeAnthropicKey,
+            codexIsUsable: true
+        )
+        guard case .success(.bringYourOwnKey) = selection else {
+            Issue.record("expected the reader's own key")
+            return
+        }
+    }
+
+    @Test func aStarterThatHasNotBeenDisclosedIsNotSpent() {
+        // CONTRACT section 12 item 4, enforced where it cannot be forgotten:
+        // a provisioned key whose card has not been shown cannot build a
+        // request at all.
+        let selection = AssistantTransport.selectTransport(
+            preference: .publikAPI,
+            publikAPIKey: Self.fakePublikKey,
+            publikGatewayBaseURL: Self.publikGatewayURL,
+            publikKeyMaySpend: false,
             storedAnthropicAPIKey: nil,
-            storedAnthropicOAuthToken: Self.fakeAnthropicOAuthToken,
-            currentAccessTokenProvider: { Self.fakeSupabaseAccessToken }
+            codexIsUsable: false
         )
-        guard case .success(.funded) = signedInSelection else {
-            Issue.record("funded should still win for a signed-in user even with a connected token")
+        guard case .failure(let failure) = selection else {
+            Issue.record("expected the undisclosed starter to be refused")
             return
         }
+        #expect(failure == .publikAPIStarterNotYetDisclosed)
     }
 
-    @Test func neitherCredentialIsAStateTheUserIsToldAboutRatherThanASilentFailure() async throws {
-        let emptySelection = AssistantTransport.selectTransport(
-            isSignedIn: false,
-            publikBaseURL: Self.publikBaseURL,
+    @Test func nothingSetUpAtAllIsItsOwnState() {
+        let selection = AssistantTransport.selectTransport(
+            preference: nil,
+            publikAPIKey: nil,
+            publikGatewayBaseURL: Self.publikGatewayURL,
+            publikKeyMaySpend: false,
             storedAnthropicAPIKey: nil,
-            currentAccessTokenProvider: { nil }
+            codexIsUsable: false
         )
-
-        guard case .failure(let selectionFailure) = emptySelection else {
-            Issue.record("with no credentials at all there is no transport to return")
+        guard case .failure(let failure) = selection else {
+            Issue.record("expected a no-credentials failure")
             return
         }
-        #expect(selectionFailure == .noCredentialsAvailable)
-        // The message has to name both ways out, because both are available.
-        #expect(selectionFailure.userFacingMessage.contains("sign in"))
-        #expect(selectionFailure.userFacingMessage.contains("anthropic key"))
+        #expect(failure == .noCredentialsAvailable)
     }
 
-    // MARK: - PKCE
-
-    @Test func theCodeChallengeIsSHA256OfTheVerifierInBase64URLWithoutPadding() async throws {
-        // The worked example from RFC 7636 appendix B. Matching it proves the
-        // hash, the alphabet, and the padding rule all at once.
-        let rfc7636CodeVerifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
-        let rfc7636CodeChallenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
-
-        #expect(PKCECodeChallenge.codeChallenge(forCodeVerifier: rfc7636CodeVerifier)
-            == rfc7636CodeChallenge)
-    }
-
-    @Test func base64URLEncodingUsesTheURLSafeAlphabetAndNoPadding() async throws {
-        // Bytes chosen because standard base64 encodes them as "++++/////w==",
-        // which contains every character the URL-safe alphabet has to replace
-        // plus the padding that has to disappear.
-        let bytesThatExerciseEveryReplacement = Data([
-            0xFB, 0xEF, 0xBE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        ])
-        let encoded = PKCECodeChallenge.base64URLEncodedWithoutPadding(bytesThatExerciseEveryReplacement)
-
-        #expect(!encoded.contains("+"))
-        #expect(!encoded.contains("/"))
-        #expect(!encoded.contains("="))
-        #expect(encoded.allSatisfy { character in
-            character.isLetter || character.isNumber || character == "-" || character == "_"
-        })
-    }
-
-    @Test func everyVerifierIsFreshAndLongEnoughToBeWorthSomething() async throws {
-        let firstCodeVerifier = PKCECodeChallenge.generateCodeVerifier()
-        let secondCodeVerifier = PKCECodeChallenge.generateCodeVerifier()
-
-        #expect(firstCodeVerifier != secondCodeVerifier)
-        // RFC 7636 requires 43-128 characters. 64 random bytes base64url to 86.
-        #expect(firstCodeVerifier.count >= 43)
-        #expect(firstCodeVerifier.count <= 128)
-        #expect(!firstCodeVerifier.contains("="))
-    }
-
-    @Test func theAuthorizationURLCarriesTheChallengeTheCallbackWillBeCheckedAgainst() async throws {
-        let codeVerifier = PKCECodeChallenge.generateCodeVerifier()
-        let codeChallenge = PKCECodeChallenge.codeChallenge(forCodeVerifier: codeVerifier)
-        let opaqueStateToken = "state-token-for-this-attempt"
-
-        let authorizationURL = try AccountService.authorizationURL(
-            supabaseProjectURL: URL(string: "https://project.supabase.co")!,
-            provider: .google,
-            codeChallenge: codeChallenge,
-            opaqueStateToken: opaqueStateToken
+    @Test func codexIsNotAnHTTPTransportAndSaysSo() {
+        // Codex answers through its own CLI. It is a real provider the reader
+        // can pick, but it never becomes an AssistantTransport — the caller is
+        // meant to have routed it to the subprocess responder before asking.
+        let selection = AssistantTransport.selectTransport(
+            preference: .codex,
+            publikAPIKey: nil,
+            publikGatewayBaseURL: Self.publikGatewayURL,
+            publikKeyMaySpend: false,
+            storedAnthropicAPIKey: nil,
+            codexIsUsable: true
         )
-
-        let authorizationComponents = try #require(
-            URLComponents(url: authorizationURL, resolvingAgainstBaseURL: false)
-        )
-        let queryItemsByName = Dictionary(
-            uniqueKeysWithValues: (authorizationComponents.queryItems ?? []).map {
-                ($0.name, $0.value ?? "")
-            }
-        )
-
-        #expect(authorizationComponents.path == "/auth/v1/authorize")
-        #expect(queryItemsByName["provider"] == "google")
-        #expect(queryItemsByName["code_challenge"] == codeChallenge)
-        #expect(queryItemsByName["code_challenge_method"] == "s256")
-        // The state rides inside redirect_to so Supabase hands it back next to
-        // the code — see the comment on `AccountService.authorizationURL`.
-        #expect(queryItemsByName["redirect_to"] == "iris://auth/callback?state=\(opaqueStateToken)")
-        // The verifier itself never leaves this machine.
-        #expect(!authorizationURL.absoluteString.contains(codeVerifier))
-    }
-
-    @Test func aCallbackFromADifferentSignInAttemptIsRefused() async throws {
-        let callbackURL = URL(string: "iris://auth/callback?state=theirs&code=abc123")!
-
-        #expect(throws: AccountServiceError.theCallbackDidNotMatchThisSignInAttempt) {
-            _ = try AccountService.authorizationCode(
-                fromCallbackURL: callbackURL,
-                expectedOpaqueStateToken: "ours"
-            )
+        guard case .failure(let failure) = selection else {
+            Issue.record("expected codex to refuse to be an HTTP transport")
+            return
         }
-
-        let matchingAuthorizationCode = try AccountService.authorizationCode(
-            fromCallbackURL: callbackURL,
-            expectedOpaqueStateToken: "theirs"
-        )
-        #expect(matchingAuthorizationCode == "abc123")
+        #expect(failure == .codexIsNotAnHTTPTransport)
     }
 
-    // MARK: - Error-code mapping
+    // MARK: Model aliases
 
-    @Test func theFundedTiersErrorCodesBecomeTheRightUserVisibleState() async throws {
-        // 401 sign_in_required — the session is gone, so put sign-in back in
-        // front of the user rather than only showing a message.
-        let signInRequired = AssistantTransportError.failure(
+    @Test func thePublikRouteAsksForAliasesAndTheDirectRouteDoesNot() {
+        let key = PublikAPIKey(Self.fakePublikKey)!
+        #expect(AssistantTransport.publikAPI(key: key, gatewayBaseURL: Self.publikGatewayURL)
+            .requiresPublikModelAliases)
+        #expect(AssistantTransport.bringYourOwnKey(anthropicAPIKey: Self.fakeAnthropicKey)
+            .requiresPublikModelAliases == false)
+    }
+
+    @Test func modelNamesMapOntoTheGatewaysThreeTiers() {
+        #expect(PublikAPIModelAlias.alias(forIrisModelName: "claude-haiku-4-5") == PublikAPIModelAlias.fast)
+        #expect(PublikAPIModelAlias.alias(forIrisModelName: "claude-opus-4-1") == PublikAPIModelAlias.smart)
+        #expect(PublikAPIModelAlias.alias(forIrisModelName: "claude-sonnet-4-6") == PublikAPIModelAlias.balanced)
+        // A model the picker gains later degrades to a sensible tier rather
+        // than breaking the route.
+        #expect(PublikAPIModelAlias.alias(forIrisModelName: "something-new") == PublikAPIModelAlias.balanced)
+    }
+
+    // MARK: Failure mapping
+
+    @Test func a401IsExplainedInTermsOfTheCredentialThatWasUsed() {
+        let publikRejection = AssistantTransportError.failure(
             forStatusCode: 401,
-            serverErrorCode: "sign_in_required",
+            serverErrorCode: nil,
             retryAfterHeaderValue: nil,
-            credentialShape: .publiksFundedTier
+            credentialShape: .aPublikAPIKey
         )
-        #expect(signInRequired == .signInRequired)
-        #expect(signInRequired.requiresReSignIn)
-        #expect(signInRequired.shouldOfferBringYourOwnKey == false)
+        #expect(publikRejection == .publikAPIKeyRejected)
 
-        // 429 rate_limited, with Retry-After, becomes a quota message that
-        // names the wait and offers the way around it.
-        let rateLimited = AssistantTransportError.failure(
-            forStatusCode: 429,
-            serverErrorCode: "rate_limited",
-            retryAfterHeaderValue: "45",
-            credentialShape: .publiksFundedTier
-        )
-        #expect(rateLimited == .rateLimited(retryAfterSeconds: 45))
-        #expect(rateLimited.requiresReSignIn == false)
-        #expect(rateLimited.shouldOfferBringYourOwnKey)
-        #expect(rateLimited.userFacingMessage.contains("45 seconds"))
-
-        // 429 daily_budget_exhausted is a different sentence from rate_limited:
-        // "wait a minute" and "that's today's budget" are not the same news.
-        let dailyBudgetExhausted = AssistantTransportError.failure(
-            forStatusCode: 429,
-            serverErrorCode: "daily_budget_exhausted",
-            retryAfterHeaderValue: "7200",
-            credentialShape: .publiksFundedTier
-        )
-        #expect(dailyBudgetExhausted == .dailyBudgetExhausted(retryAfterSeconds: 7200))
-        #expect(dailyBudgetExhausted.userFacingMessage != rateLimited.userFacingMessage)
-        #expect(dailyBudgetExhausted.shouldOfferBringYourOwnKey)
-
-        // 503 assistant_unconfigured is publik's outage, and the message says so.
-        let assistantUnavailable = AssistantTransportError.failure(
-            forStatusCode: 503,
-            serverErrorCode: "assistant_unconfigured",
-            retryAfterHeaderValue: nil,
-            credentialShape: .publiksFundedTier
-        )
-        #expect(assistantUnavailable == .assistantUnavailable)
-        #expect(assistantUnavailable.requiresReSignIn == false)
-        #expect(assistantUnavailable.userFacingMessage.contains("unavailable"))
-
-        // Anything else is one generic failure. upstream_error included.
-        #expect(AssistantTransportError.failure(
-            forStatusCode: 502,
-            serverErrorCode: "upstream_error",
-            retryAfterHeaderValue: nil,
-            credentialShape: .publiksFundedTier
-        ) == .requestFailed(statusCode: 502))
-    }
-
-    @Test func a401MeansOppositeThingsOnTheTwoRoutes() async throws {
-        // Publik saying 401 means "sign in again"; Anthropic saying it means
-        // "that key is bad", and telling a BYO user to sign in would be wrong.
-        #expect(AssistantTransportError.failure(
+        let anthropicRejection = AssistantTransportError.failure(
             forStatusCode: 401,
             serverErrorCode: nil,
             retryAfterHeaderValue: nil,
             credentialShape: .aPastedAnthropicKey
-        ) == .bringYourOwnKeyRejected)
-        #expect(AssistantTransportError.bringYourOwnKeyRejected.requiresReSignIn == false)
+        )
+        #expect(anthropicRejection == .bringYourOwnKeyRejected)
     }
 
-    @Test func aMissingOrUnreadableRetryAfterStillProducesAUsableSentence() async throws {
-        let withoutRetryAfter = AssistantTransportError.failure(
-            forStatusCode: 429,
-            serverErrorCode: "rate_limited",
+    @Test func a402CarriesTheServersOwnSentenceAndExactlyOneLink() {
+        let body = Data("""
+        {"type":"error","error":{"type":"insufficient_credit",
+        "message":"You're out of credit. Link this computer and pick a plan at the link below.",
+        "top_up_url":"https://publikhq.com/claim/abc123"}}
+        """.utf8)
+
+        let failure = AssistantTransportError.failure(
+            forStatusCode: 402,
+            serverErrorCode: nil,
             retryAfterHeaderValue: nil,
-            credentialShape: .publiksFundedTier
+            credentialShape: .aPublikAPIKey,
+            responseBody: body
         )
-        #expect(withoutRetryAfter == .rateLimited(retryAfterSeconds: nil))
-        #expect(!withoutRetryAfter.userFacingMessage.isEmpty)
+        guard case .publikAPIOutOfCredit(let insufficientCredit) = failure else {
+            Issue.record("expected the 402 to be recognised")
+            return
+        }
+        #expect(insufficientCredit.message.contains("out of credit"))
+        #expect(insufficientCredit.linkURLString == "https://publikhq.com/claim/abc123")
+        // Rendered verbatim — Iris writes no copy of its own for this state.
+        #expect(failure.userFacingMessage == insufficientCredit.message)
+        #expect(failure.oneLinkToOffer == "https://publikhq.com/claim/abc123")
+    }
 
-        let withGarbageRetryAfter = AssistantTransportError.failure(
+    @Test func a402WeCannotReadDoesNotInventCopy() {
+        let failure = AssistantTransportError.failure(
+            forStatusCode: 402,
+            serverErrorCode: nil,
+            retryAfterHeaderValue: nil,
+            credentialShape: .aPublikAPIKey,
+            responseBody: Data("not json at all".utf8)
+        )
+        #expect(failure == .requestFailed(statusCode: 402))
+    }
+
+    @Test func a429CarriesTheRetryDelay() {
+        let failure = AssistantTransportError.failure(
             forStatusCode: 429,
-            serverErrorCode: "rate_limited",
-            retryAfterHeaderValue: "Wed, 21 Oct 2026 07:28:00 GMT",
-            credentialShape: .publiksFundedTier
+            serverErrorCode: nil,
+            retryAfterHeaderValue: "45",
+            credentialShape: .aPublikAPIKey
         )
-        #expect(withGarbageRetryAfter == .rateLimited(retryAfterSeconds: nil))
+        #expect(failure == .rateLimited(retryAfterSeconds: 45))
+        #expect(failure.userFacingMessage.contains("45 seconds"))
     }
 
-    @Test func onlyTheServersErrorCodeIsEverReadOutOfAFailureBody() async throws {
-        let failureBody = Data(#"{"error":"daily_budget_exhausted"}"#.utf8)
-        #expect(AssistantTransportError.serverErrorCode(inFailureBody: failureBody)
-            == "daily_budget_exhausted")
-
-        // A body that is not the shape publik produces yields nothing, rather
-        // than something that could end up quoted at the user.
-        #expect(AssistantTransportError.serverErrorCode(inFailureBody: Data("not json".utf8)) == nil)
-        #expect(AssistantTransportError.serverErrorCode(inFailureBody: Data(#"{"error":""}"#.utf8)) == nil)
-        #expect(AssistantTransportError.serverErrorCode(
-            inFailureBody: Data(#"{"message":"whatever the model just said"}"#.utf8)
-        ) == nil)
-    }
-
-    @Test func noUserFacingMessageEverQuotesAServerBody() async throws {
-        let everyFailureState: [AssistantTransportError] = [
+    @Test func everyFailureSaysSomethingAReaderCanActOn() {
+        // No case may fall through to an empty string or a status code: a
+        // reader was once shown "(… error 8.)" and had nothing to do about it.
+        let everyFailure: [AssistantTransportError] = [
             .noCredentialsAvailable,
-            .signInRequired,
-            .rateLimited(retryAfterSeconds: 30),
-            .dailyBudgetExhausted(retryAfterSeconds: nil),
+            .publikAPINotSetUp,
+            .publikAPIStarterNotYetDisclosed,
+            .codexIsNotAnHTTPTransport,
+            .codexNotUsable,
+            .anthropicKeyNotSaved,
+            .rateLimited(retryAfterSeconds: nil),
+            .publikAPIOutOfCredit(PublikAPIInsufficientCredit(message: "out of credit", linkURLString: nil)),
             .assistantUnavailable,
-            .requestFailed(statusCode: 502),
+            .requestFailed(statusCode: 500),
             .bringYourOwnKeyRejected,
-            .transportFailure(reason: "a socket said something unrepeatable"),
-            .bringYourOwnKeyWouldLeaveAnthropic(attemptedHost: "publikhq.com"),
+            .publikAPIKeyRejected,
+            .transportFailure(reason: "offline"),
+            .bringYourOwnKeyWouldLeaveAnthropic(attemptedHost: "evil.example"),
+            .publikKeyWouldLeavePublik(attemptedHost: "evil.example"),
         ]
-
-        for failureState in everyFailureState {
-            #expect(!failureState.userFacingMessage.isEmpty)
-            // The two cases that carry raw text in their payload must not put
-            // it in front of the user.
-            #expect(!failureState.userFacingMessage.contains("unrepeatable"))
-            #expect(!failureState.userFacingMessage.contains("502"))
+        for failure in everyFailure {
+            #expect(!failure.userFacingMessage.isEmpty, "\(failure)")
+            #expect(!failure.userFacingMessage.contains("error 8"), "\(failure)")
         }
     }
 
-    // MARK: - The configured origin
+    // MARK: The system field
 
-    @Test func onlyPublikOrLocalhostCanEverBeTheFundedOrigin() async throws {
-        // `configuredPublikBaseURL` reads the app bundle, which under the test
-        // runner is the xctest bundle rather than Iris — so it lands on the
-        // default. That is the assertion worth making anyway: an absent or
-        // unreadable configuration must produce publik, never nothing.
-        let configuredBaseURL = AssistantTransport.configuredPublikBaseURL()
-        #expect(configuredBaseURL.absoluteString == "https://publikhq.com")
-
-        // And the allowlist it filters through is the one GuideService already
-        // enforces, so a tampered Info.plist cannot redirect signed-in traffic.
-        #expect(GuideService.normalizedAPIBase("https://evil.example") == nil)
-        #expect(GuideService.normalizedAPIBase("https://publikhq.com.attacker.example") == nil)
-        #expect(GuideService.normalizedAPIBase("http://localhost:3000") == "http://localhost:3000")
-    }
-
-    // MARK: - The system field, per route
-
-    // Anthropic accepts a Claude Code OAuth token only when the request's
-    // system prompt LEADS with Claude Code's own identity sentence; anything
-    // else is rejected with a synthetic `rate_limit_error` 429 that carries no
-    // quota headers. Verified live 2026-08-20 — the identical request flips
-    // 429 → 200 on this block alone.
-
-    @Test func theOAuthTokenRouteLeadsWithClaudeCodesOwnIdentityBlock() {
-        let systemFieldValue = ClaudeAPI.systemFieldValue(
-            for: .bringYourOwnOAuthToken(anthropicOAuthToken: "sk-ant-oat01-fake"),
-            systemPrompt: "You are a careful software-maintenance agent."
-        )
-
-        let systemBlocks = systemFieldValue as? [[String: Any]]
-        #expect(systemBlocks?.count == 2)
-        #expect(systemBlocks?.first?["type"] as? String == "text")
-        #expect(
-            systemBlocks?.first?["text"] as? String
-                == AssistantTransport.claudeCodeIdentitySystemBlockText
-        )
-        #expect(
-            systemBlocks?.last?["text"] as? String
-                == "You are a careful software-maintenance agent."
-        )
-    }
-
-    @Test func anEmptySystemPromptOnTheOAuthRouteStillSendsTheIdentityBlockAlone() {
-        // A bare request (no system prompt at all) is rejected the same way,
-        // so the identity block must go out even when the caller has nothing
-        // to say.
-        let systemFieldValue = ClaudeAPI.systemFieldValue(
-            for: .bringYourOwnOAuthToken(anthropicOAuthToken: "sk-ant-oat01-fake"),
-            systemPrompt: ""
-        )
-
-        let systemBlocks = systemFieldValue as? [[String: Any]]
-        #expect(systemBlocks?.count == 1)
-        #expect(
-            systemBlocks?.first?["text"] as? String
-                == AssistantTransport.claudeCodeIdentitySystemBlockText
-        )
-    }
-
-    @Test func theKeyAndFundedRoutesKeepThePlainStringSystemField() async throws {
-        // A pasted API key carries no Claude-Code-only restriction, and the
-        // funded server prepends its own system block — neither route should
-        // impersonate Claude Code.
-        let keyRouteSystemField = ClaudeAPI.systemFieldValue(
-            for: .bringYourOwnKey(anthropicAPIKey: Self.fakeAnthropicAPIKey),
-            systemPrompt: "You are Iris."
-        )
-        #expect(keyRouteSystemField as? String == "You are Iris.")
-
-        let fundedRouteSystemField = ClaudeAPI.systemFieldValue(
-            for: .funded(
-                publikBaseURL: URL(string: "https://publikhq.com")!,
-                currentAccessTokenProvider: { "fake-supabase-token" }
+    @Test func theSystemPromptIsAPlainStringOnEveryRoute() {
+        // It used to become an array on the Claude Code OAuth route, which
+        // needed Claude Code's own identity sentence first. That route is gone.
+        for transport in [
+            AssistantTransport.bringYourOwnKey(anthropicAPIKey: Self.fakeAnthropicKey),
+            AssistantTransport.publikAPI(
+                key: PublikAPIKey(Self.fakePublikKey)!,
+                gatewayBaseURL: Self.publikGatewayURL
             ),
-            systemPrompt: "You are Iris."
-        )
-        #expect(fundedRouteSystemField as? String == "You are Iris.")
+        ] {
+            let systemField = ClaudeAPI.systemFieldValue(for: transport, systemPrompt: "be helpful")
+            #expect(systemField as? String == "be helpful")
+        }
     }
 }

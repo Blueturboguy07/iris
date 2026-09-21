@@ -137,6 +137,20 @@ export type FetchLike = (
   headers: { get: (name: string) => string | null };
 }>;
 
+/**
+ * A route that answers a chat turn without making an HTTP request of its own.
+ *
+ * The codex route is the only one today: it drives the reader's `codex` binary,
+ * so it cannot be expressed as a URL and a header the way the other two are.
+ */
+export interface ChatBackend {
+  respond(request: {
+    system: string;
+    messages: Array<{ role: string; content: unknown }>;
+    maxTokens: number;
+  }): Promise<string>;
+}
+
 export class ClaudeService {
   private readonly transport: AssistantTransport;
   private readonly model: string;
@@ -144,18 +158,22 @@ export class ClaudeService {
   /** Told the balance and claim state after every metered publik call, so the
    *  card can show a live number instead of the one provisioning returned. */
   private readonly reportPublikUsage?: (usage: PublikUsageSnapshot) => void;
+  /** Set only on the codex route; see `send`. */
+  private readonly chatBackend?: ChatBackend;
 
   constructor(options: {
     transport: AssistantTransport;
     model: string;
     fetchImplementation?: FetchLike;
     reportPublikUsage?: (usage: PublikUsageSnapshot) => void;
+    chatBackend?: ChatBackend;
   }) {
     this.transport = options.transport;
     this.model = options.model;
     this.fetchImplementation =
       options.fetchImplementation ?? (globalThis.fetch as unknown as FetchLike);
     this.reportPublikUsage = options.reportPublikUsage;
+    this.chatBackend = options.chatBackend;
   }
 
   async query(params: ChatQueryParams): Promise<{ text: string }> {
@@ -253,6 +271,19 @@ export class ClaudeService {
     messages: Array<{ role: string; content: unknown }>;
     maxTokens: number;
   }): Promise<string> {
+    // The codex route runs a local binary rather than making an HTTP call, so
+    // it is served by a backend rather than by a prepared request. Everything
+    // above this line — the system prompt, the image blocks, the POINT-tag
+    // parsing, the refinement pass — is shared, which is what makes this
+    // parity rather than a second client.
+    if (this.chatBackend) {
+      return this.chatBackend.respond({
+        system: options.system,
+        messages: options.messages,
+        maxTokens: options.maxTokens,
+      });
+    }
+
     const preparedRequest = await makeChatRequest(this.transport);
 
     const body: Record<string, unknown> = {

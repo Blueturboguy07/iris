@@ -11,6 +11,7 @@ import {
   userFacingMessage,
 } from "../services/assistant-transport";
 import { PublikUsageSnapshot } from "../services/publik-api";
+import { CodexChatBackend, codexIsAvailable } from "./codex-session";
 import {
   PointTag,
   parsePointTags,
@@ -44,6 +45,8 @@ export class CompanionManager {
   private readonly screenCapture = new ScreenCapture();
   private conversationHistory: ConversationEntry[] = [];
   private overlayWindows: BrowserWindow[];
+  /** Probed rather than assumed; see `refreshCodexAvailability`. */
+  private codexAvailable = false;
 
   constructor(settings: SettingsStore, account: AccountSession, overlayWindows: BrowserWindow[]) {
     this.settings = settings;
@@ -81,6 +84,9 @@ export class CompanionManager {
       transport,
       model: defaultModelForTransport(transport, this.settings.get("claudeModel")),
       reportPublikUsage: (usage) => this.recordPublikUsage(usage),
+      // Codex answers by running the reader's own binary, so it replaces the
+      // HTTP send rather than configuring one.
+      chatBackend: transport.tier === "codex" ? new CodexChatBackend() : undefined,
     });
   }
 
@@ -99,9 +105,19 @@ export class CompanionManager {
     }
   }
 
-  /** Wired in commit 2, when the codex CLI becomes a real chat route. */
+  /**
+   * Whether the reader has a usable `codex`. Probed once and cached: the
+   * answer changes only when they install or remove the CLI, and a spawn on
+   * every message would add latency to the two routes that do not need it.
+   */
   private codexIsAvailable(): boolean {
-    return false;
+    return this.codexAvailable;
+  }
+
+  /** Called at startup, and again whenever the user picks codex in settings. */
+  async refreshCodexAvailability(): Promise<boolean> {
+    this.codexAvailable = await codexIsAvailable();
+    return this.codexAvailable;
   }
 
   /**

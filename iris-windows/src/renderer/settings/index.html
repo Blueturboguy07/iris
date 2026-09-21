@@ -219,6 +219,13 @@
         : 'sk-… (optional)';
 
       el('providerPreference').value = settings.providerPreference || '';
+      // Offering a provider the reader cannot use is worse than not offering
+      // it: they pick it, it fails, and Iris deliberately will not fall back.
+      const codexOption = el('providerPreference').querySelector('option[value="codex"]');
+      codexOption.disabled = !settings.codexAvailable;
+      codexOption.textContent = settings.codexAvailable
+        ? 'My ChatGPT sign-in (codex CLI)'
+        : 'My ChatGPT sign-in — codex CLI not found';
       renderPublikSection(settings);
 
       if (!settings.secretStorageAvailable) {

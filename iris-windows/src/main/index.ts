@@ -46,6 +46,8 @@ let overlayWindows: BrowserWindow[] = [];
 const settings = new SettingsStore();
 const publikSetup = new PublikSetup(settings);
 let firstRunWindow: BrowserWindow | null = null;
+/** Mirrors the companion's probe, so settings can show the option honestly. */
+let codexAvailableCached = false;
 const account = new AccountSession(settings);
 let companion: CompanionManager;
 let maintain: MaintainController;
@@ -1011,6 +1013,7 @@ function setupIPC(): void {
     hasPublikApiKey: publikSetup.hasKey(),
     publikCard: publikSetup.cardState(false),
     buildCanProvisionAutomatically: buildCanProvisionAutomatically(),
+    codexAvailable: codexAvailableCached,
     // Maintain mode's Tier C BYO fixer key — optional, and separate from the
     // companion-chat Anthropic key above. Same "whether, never what" rule.
     hasOpenAiApiKey: Boolean(settings.getOpenAiApiKey()),
@@ -1188,6 +1191,13 @@ if (gotSingleInstanceLock) {
     // Iris knowing when it itself is out of date — see services/self-update-check.ts
     // for why this is a plain GitHub-releases poll rather than update.electronjs.org.
     startSelfUpdateWatch(settings, app.getVersion());
+
+    // Does the reader have a usable `codex`? Probed once, in the background,
+    // so a missing CLI costs nothing and a present one is simply one more
+    // option in settings.
+    void companion.refreshCodexAvailability().then((available) => {
+      codexAvailableCached = available;
+    });
 
     // Ask for credentials once, on the first launch that has none. Deliberately
     // after the tray and windows exist, so a user who closes it still lands in

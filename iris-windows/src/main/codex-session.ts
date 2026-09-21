@@ -172,3 +172,24 @@ export function codexIsAvailable(): Promise<boolean> {
     );
   });
 }
+
+/**
+ * Opens `codex login` in a real console window.
+ *
+ * Deliberately not run headlessly and scraped: the login is an interactive
+ * browser flow that ends with a credential Iris must never see or store. A
+ * visible console the reader drives themselves is both the honest shape and
+ * the only one that keeps Iris out of the credential path — which is exactly
+ * what makes this route permissible where importing a Claude.ai token is not.
+ *
+ * Windows-only by construction (`cmd /c start`), which is fine: this file only
+ * ever runs in the packaged Windows app, and the unit suite never calls it.
+ */
+export function openCodexLogin(): void {
+  // `start` needs a title argument before the command when any argument is
+  // quoted, hence the empty "".
+  execFile("cmd", ["/c", "start", "", "cmd", "/k", "codex login"], { windowsHide: true }, () => {
+    // Nothing to report: the reader can see the window, and the next
+    // availability probe is what actually tells Iris whether it worked.
+  });
+}

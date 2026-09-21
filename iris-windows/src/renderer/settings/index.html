@@ -97,6 +97,23 @@
   </section>
 
   <section>
+    <h2>Sign in with ChatGPT</h2>
+    <div class="field">
+      <div class="row">
+        <span class="status" id="codex-status">Checking…</span>
+        <span style="flex:1"></span>
+        <button id="codex-login">Sign in with Codex</button>
+        <button id="codex-recheck">Re-check</button>
+      </div>
+      <div class="note">
+        Uses the <code>codex</code> CLI and whatever plan you already pay for.
+        Iris never sees or stores the sign-in — the CLI keeps it. Slower than
+        the other two options.
+      </div>
+    </div>
+  </section>
+
+  <section>
     <h2>Account</h2>
     <div class="field">
       <div class="row">
@@ -226,6 +243,13 @@
       codexOption.textContent = settings.codexAvailable
         ? 'My ChatGPT sign-in (codex CLI)'
         : 'My ChatGPT sign-in — codex CLI not found';
+
+      const codexStatus = el('codex-status');
+      codexStatus.textContent = settings.codexAvailable
+        ? 'codex CLI found'
+        : 'codex CLI not found on this PC';
+      codexStatus.className = settings.codexAvailable ? 'status ok' : 'status';
+
       renderPublikSection(settings);
 
       if (!settings.secretStorageAvailable) {
@@ -274,6 +298,16 @@
         cta.style.display = 'none';
       }
     }
+
+    el('codex-login').addEventListener('click', () => {
+      window.iris.codexLogin();
+      el('codex-status').textContent = 'Finish signing in in the console window, then Re-check.';
+    });
+    el('codex-recheck').addEventListener('click', async () => {
+      el('codex-status').textContent = 'Checking…';
+      await window.iris.refreshCodexAvailability();
+      load();
+    });
 
     el('providerPreference').addEventListener('change', async () => {
       await window.iris.setSetting('providerPreference', el('providerPreference').value);

@@ -52,6 +52,10 @@ contextBridge.exposeInMainWorld("iris", {
   markPublikCardShown: () => ipcRenderer.invoke("publik:cardShown"),
   completeFirstRun: () => ipcRenderer.invoke("firstRun:complete"),
 
+  // Codex. Iris opens the login in a console and never sees the credential.
+  codexLogin: () => ipcRenderer.invoke("codex:login"),
+  refreshCodexAvailability: () => ipcRenderer.invoke("codex:refresh"),
+
   // Account
   signIn: (provider: "google" | "github") => ipcRenderer.invoke("account:signIn", provider),
   signOut: () => ipcRenderer.invoke("account:signOut"),

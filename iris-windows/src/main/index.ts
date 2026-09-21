@@ -16,6 +16,7 @@ import { classifyExternalLink, refusalMessage } from "../services/external-links
 import { boundedCommandOutput, toolSpecFor } from "../services/tool-versions";
 import { secretStorageIsAvailable } from "./secrets";
 import { PublikSetup } from "./publik-setup";
+import { openCodexLogin } from "./codex-session";
 import { buildCanProvisionAutomatically } from "./publik-app-token";
 import { AutopilotController, type FinishedInstall } from "./autopilot-controller";
 import { guideBackedRecipeResolver } from "../services/autopilot/guide-recipe-resolver";
@@ -1076,6 +1077,20 @@ function setupIPC(): void {
   ipcMain.handle("publik:card", (_event, isFirstRun: boolean) =>
     publikSetup.cardState(Boolean(isFirstRun))
   );
+
+  // Opens a console running `codex login`. Iris never sees the credential —
+  // the CLI owns it, which is the point of this route.
+  ipcMain.handle("codex:login", () => {
+    openCodexLogin();
+    return true;
+  });
+
+  // Re-probed after a login, so settings stops saying "not found" without a
+  // restart.
+  ipcMain.handle("codex:refresh", async () => {
+    codexAvailableCached = await companion.refreshCodexAvailability();
+    return codexAvailableCached;
+  });
 
   ipcMain.handle("firstRun:complete", () => {
     settings.set("hasCompletedFirstRun", true);

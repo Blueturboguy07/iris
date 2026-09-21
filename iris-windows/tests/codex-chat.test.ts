@@ -22,7 +22,7 @@ describe("the codex invocation", () => {
     // approval policy, and Iris must inherit none of it while spending their
     // plan on Iris's behalf.
     const args = buildCodexChatArguments({});
-    expect(args.slice(0, 4)).toEqual(["exec", "--sandbox", "read-only"].concat(["--ignore-user-config"]));
+    expect(args.slice(0, 4)).toEqual(["exec", "--sandbox", "read-only", "--ignore-user-config"]);
   });
 
   it("passes each screenshot as its own --image", () => {

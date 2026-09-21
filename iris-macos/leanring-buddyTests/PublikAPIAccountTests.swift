@@ -183,8 +183,12 @@ struct PublikAPIAccountTests {
             == "https://publikhq.com/api/v1")
         #expect(PublikAPIAccount.gatewayPath(under: gatewayRoot).absoluteString
             == "https://publikhq.com/api/v1")
-        #expect(PublikAPIAccount.gatewayPath(under: gatewayRootWithSlash).path
-            .hasSuffix("/api/v1/"))
+        // Returned untouched, trailing slash and all. (`URL.path` normalizes
+        // the slash away, which is why one suffix check covers both forms —
+        // asserting on `.path` here would assert on the normalized string and
+        // never see the slash at all.)
+        #expect(PublikAPIAccount.gatewayPath(under: gatewayRootWithSlash).absoluteString
+            == "https://publikhq.com/api/v1/")
     }
 
     // MARK: The app token

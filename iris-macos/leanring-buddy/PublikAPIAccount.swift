@@ -161,11 +161,10 @@ final class PublikAPIAccount: ObservableObject {
     /// `{base}/messages`, which reads as the latter. Appending blindly would
     /// produce `/api/v1/api/v1/messages` against a server that sent the fuller
     /// form, and a 404 on every question is an unpleasant way to find that out.
+    /// `URL.path` normalizes a trailing slash away, so one check covers both
+    /// `…/api/v1` and `…/api/v1/`.
     static func gatewayPath(under baseURL: URL) -> URL {
-        let path = baseURL.path
-        if path.hasSuffix("/api/v1") || path.hasSuffix("/api/v1/") {
-            return baseURL
-        }
+        guard !baseURL.path.hasSuffix("/api/v1") else { return baseURL }
         return baseURL.appendingPathComponent("api/v1")
     }
 

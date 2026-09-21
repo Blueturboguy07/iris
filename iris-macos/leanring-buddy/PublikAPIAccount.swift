@@ -149,9 +149,24 @@ final class PublikAPIAccount: ObservableObject {
         guard let storedBaseURLString = userDefaults.string(forKey: Self.baseURLFromProvisioningDefaultsKey),
               let allowedBaseURLString = GuideService.normalizedAPIBase(storedBaseURLString),
               let storedBaseURL = URL(string: allowedBaseURLString) else {
-            return configuredOrigin.appendingPathComponent("api/v1")
+            return Self.gatewayPath(under: configuredOrigin)
         }
-        return storedBaseURL.appendingPathComponent("api/v1")
+        return Self.gatewayPath(under: storedBaseURL)
+    }
+
+    /// Appends the gateway path unless it is already there.
+    ///
+    /// The provisioning response's `base_url` may reasonably be either the site
+    /// origin or the gateway root — the contract shows requests against
+    /// `{base}/messages`, which reads as the latter. Appending blindly would
+    /// produce `/api/v1/api/v1/messages` against a server that sent the fuller
+    /// form, and a 404 on every question is an unpleasant way to find that out.
+    static func gatewayPath(under baseURL: URL) -> URL {
+        let path = baseURL.path
+        if path.hasSuffix("/api/v1") || path.hasSuffix("/api/v1/") {
+            return baseURL
+        }
+        return baseURL.appendingPathComponent("api/v1")
     }
 
     // MARK: The key

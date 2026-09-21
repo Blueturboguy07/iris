@@ -168,6 +168,25 @@ struct PublikAPIAccountTests {
             == "https://publikhq.com/claim/abc")
     }
 
+    // MARK: Where requests go
+
+    @Test func theGatewayPathIsNotDoubledWhenTheServerAlreadySentIt() {
+        // `base_url` may reasonably be the site origin OR the gateway root —
+        // the contract shows requests against `{base}/messages`, which reads as
+        // the latter. Appending blindly would give /api/v1/api/v1/messages and
+        // a 404 on every question.
+        let origin = URL(string: "https://publikhq.com")!
+        let gatewayRoot = URL(string: "https://publikhq.com/api/v1")!
+        let gatewayRootWithSlash = URL(string: "https://publikhq.com/api/v1/")!
+
+        #expect(PublikAPIAccount.gatewayPath(under: origin).absoluteString
+            == "https://publikhq.com/api/v1")
+        #expect(PublikAPIAccount.gatewayPath(under: gatewayRoot).absoluteString
+            == "https://publikhq.com/api/v1")
+        #expect(PublikAPIAccount.gatewayPath(under: gatewayRootWithSlash).path
+            .hasSuffix("/api/v1/"))
+    }
+
     // MARK: The app token
 
     @Test func aTemplateOrMissingAppTokenLeavesTheBuildOnThePasteRoute() {

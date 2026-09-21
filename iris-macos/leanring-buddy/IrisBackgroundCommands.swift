@@ -170,18 +170,31 @@ final class IrisBackgroundCommands {
     /// liveness. Anything found dead is dropped from the registry on the way
     /// out, so the list never reports a ghost twice.
     func statuses() -> [IrisBackgroundCommandStatus] {
+        // Liveness is read for every entry FIRST, and the dead ones are
+        // dropped afterwards. Removing from `running` inside the loop is
+        // actually safe — Swift dictionaries are value types, so the iteration
+        // runs against its own copy — but it reads like a mutation-during-
+        // iteration bug, and this file is one people will come to after
+        // something lied to them.
         var result: [IrisBackgroundCommandStatus] = []
+        var idsThatHaveDied: [String] = []
+
         for (id, entry) in running {
-            let alive = Self.isAlive(pid: entry.command.pid)
-            if !alive { running.removeValue(forKey: id); forgetLeftover(entry.command) }
+            let isStillAlive = Self.isAlive(pid: entry.command.pid)
+            if !isStillAlive { idsThatHaveDied.append(id) }
             result.append(
                 IrisBackgroundCommandStatus(
                     command: entry.command,
-                    isRunning: alive,
+                    isRunning: isStillAlive,
                     recentOutput: readLogTail(atPath: entry.command.logPath)
                 )
             )
         }
+
+        for id in idsThatHaveDied {
+            if let entry = running.removeValue(forKey: id) { forgetLeftover(entry.command) }
+        }
+
         return result.sorted { $0.command.startedAt < $1.command.startedAt }
     }
 

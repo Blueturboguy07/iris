@@ -12,6 +12,10 @@
  *
  * The secrets here match `iris-macos`'s `KeychainStore`:
  *   - the user's own Anthropic API key (BYO tier)
+ *   - the publik API key this install was issued (`pk_live_…`), the default
+ *     chat route since the funded tier was removed. It reaches publik's own
+ *     gateway and nowhere else, which `services/assistant-transport.ts`
+ *     enforces per-credential rather than per-header — see its top comment.
  *   - the Supabase refresh token
  *   - maintain mode's GitHub device-flow token pair (fork-backup), the Windows
  *     analog of the pair `iris-macos` keeps in the Keychain — see
@@ -40,6 +44,7 @@ import * as path from "node:path";
 
 export type SecretName =
   | "anthropicApiKey"
+  | "publikApiKey"
   | "supabaseRefreshToken"
   | "gitHubAccessToken"
   | "gitHubRefreshToken"

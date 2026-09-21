@@ -52,7 +52,49 @@
 </head>
 <body>
   <h1>Iris</h1>
-  <div class="lede">publik's desktop companion. Text-first; chat is Anthropic-only.</div>
+  <div class="lede">publik's desktop companion. Text-first.</div>
+
+  <section>
+    <h2>How Iris answers</h2>
+    <div class="field">
+      <label for="providerPreference">Provider</label>
+      <select id="providerPreference">
+        <option value="">Pick the first one that works</option>
+        <option value="publikApi">publik API</option>
+        <option value="anthropicKey">My own Anthropic key</option>
+        <option value="codex">My ChatGPT sign-in</option>
+      </select>
+      <div class="note">
+        Chosen here, and never switched for you: if the one you pick stops working,
+        Iris says so instead of quietly spending on a different account.
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>publik API</h2>
+    <div class="field">
+      <div class="row">
+        <span class="status" id="publik-status">Checking…</span>
+      </div>
+      <div class="note" id="publik-why"></div>
+      <div class="row" style="margin-top:10px">
+        <button class="accent" id="publik-cta" style="display:none"></button>
+        <button id="publik-setup" style="display:none">Set up publik API</button>
+      </div>
+    </div>
+    <div class="field">
+      <label for="publikApiKey">Or paste a key from your dashboard</label>
+      <div class="row">
+        <input type="password" id="publikApiKey" placeholder="pk_live_…">
+        <button class="accent" id="save-publik-key">Save</button>
+        <button id="clear-publik-key">Clear</button>
+      </div>
+      <div class="note" id="publik-key-note">
+        Stored with Windows DPAPI via Electron safeStorage. It only ever goes to publik.
+      </div>
+    </div>
+  </section>
 
   <section>
     <h2>Account</h2>
@@ -65,7 +107,8 @@
         <button id="signout" style="display:none">Sign out</button>
       </div>
       <div class="note">
-        Signing in uses the funded tier: publik pays for the model and pins which one.
+        Signing in links this computer to your publik account for billing and your
+        dashboard. It does not by itself pay for anything.
         Sign-in opens your real browser, never an embedded one.
       </div>
     </div>
@@ -86,13 +129,13 @@
       </div>
     </div>
     <div class="field">
-      <label for="claudeModel">Model (your-key tier only)</label>
+      <label for="claudeModel">Model (your-key only)</label>
       <select id="claudeModel">
         <option value="claude-sonnet-4-5-20250929">Claude Sonnet 4.5</option>
         <option value="claude-opus-4-1-20250805">Claude Opus 4.1</option>
         <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5</option>
       </select>
-      <div class="note">The funded tier pins its own model, so this applies only to your own key.</div>
+      <div class="note">publik API picks its own tier, so this applies only to your own key.</div>
     </div>
   </section>
 
@@ -175,14 +218,91 @@
         ? 'A key is stored (hidden)'
         : 'sk-… (optional)';
 
+      el('providerPreference').value = settings.providerPreference || '';
+      renderPublikSection(settings);
+
       if (!settings.secretStorageAvailable) {
         el('key-note').innerHTML =
           '<span style="color:var(--error)">Windows will not let Iris encrypt secrets on this machine, ' +
           'so a key cannot be stored safely. Iris will not fall back to plain text.</span>';
         el('save-key').disabled = true;
         el('save-openai-key').disabled = true;
+        el('save-publik-key').disabled = true;
       }
     }
+
+    /**
+     * The settings half of CONTRACT section 12 (2): while the install is
+     * anonymous the button links the computer and picks a plan; once claimed it
+     * adds a plan or a pack.
+     */
+    function renderPublikSection(settings) {
+      const status = el('publik-status');
+      const cta = el('publik-cta');
+      const setup = el('publik-setup');
+      const card = settings.publikCard;
+
+      el('publikApiKey').placeholder = settings.hasPublikApiKey
+        ? 'A key is stored (hidden)'
+        : 'pk_live_…';
+
+      if (!settings.hasPublikApiKey) {
+        status.textContent = 'Not set up on this computer';
+        status.className = 'status';
+        el('publik-why').textContent = '';
+        cta.style.display = 'none';
+        setup.style.display = settings.buildCanProvisionAutomatically ? '' : 'none';
+        return;
+      }
+
+      status.textContent = card.balanceLine;
+      status.className = 'status ok';
+      el('publik-why').textContent = card.whyItCosts;
+      setup.style.display = 'none';
+      if (card.buttonUrl) {
+        cta.textContent = card.buttonLabel;
+        cta.style.display = '';
+        cta.onclick = () => window.iris.openExternal(card.buttonUrl);
+      } else {
+        cta.style.display = 'none';
+      }
+    }
+
+    el('providerPreference').addEventListener('change', async () => {
+      await window.iris.setSetting('providerPreference', el('providerPreference').value);
+      load();
+    });
+
+    el('publik-setup').addEventListener('click', async () => {
+      el('publik-setup').disabled = true;
+      el('publik-setup').textContent = 'Setting up…';
+      const result = await window.iris.provisionPublikApi();
+      el('publik-setup').disabled = false;
+      el('publik-setup').textContent = 'Set up publik API';
+      if (!result.ok) {
+        window.alert(result.message);
+        return;
+      }
+      // Seeing the balance and the reason here counts as the card — section 12 (4).
+      await window.iris.markPublikCardShown();
+      load();
+    });
+
+    el('save-publik-key').addEventListener('click', async () => {
+      const value = el('publikApiKey').value.trim();
+      if (!value) return;
+      const stored = await window.iris.setSetting('publikApiKey', value);
+      el('publikApiKey').value = '';
+      if (!stored) {
+        window.alert("That doesn't look like a publik API key, or Windows refused to store it.");
+      }
+      load();
+    });
+    el('clear-publik-key').addEventListener('click', async () => {
+      await window.iris.setSetting('publikApiKey', '');
+      el('publikApiKey').value = '';
+      load();
+    });
 
     el('save-key').addEventListener('click', async () => {
       const value = el('anthropicApiKey').value.trim();

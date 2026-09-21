@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:;">
+  <title>Welcome to Iris</title>
+  <style>
+    :root {
+      --bg: #0a0a0f;
+      --panel: rgba(255, 255, 255, 0.04);
+      --border: rgba(255, 255, 255, 0.08);
+      --text: #f0f0f5;
+      --text-dim: rgba(255, 255, 255, 0.55);
+      --text-faint: rgba(255, 255, 255, 0.32);
+      --accent: #638cff;
+      --error: #f87171;
+      --ok: #34d399;
+      --radius: 8px;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg); color: var(--text); font-size: 13px;
+      padding: 28px; height: 100vh; overflow-y: auto;
+    }
+    h1 { font-size: 19px; margin-bottom: 6px; }
+    .lede { color: var(--text-dim); margin-bottom: 22px; line-height: 1.55; }
+    .option {
+      border: 1px solid var(--border); border-radius: var(--radius);
+      background: var(--panel); padding: 14px; margin-bottom: 10px;
+    }
+    .option h2 { font-size: 13px; margin-bottom: 4px; }
+    .option p { color: var(--text-dim); line-height: 1.5; margin-bottom: 10px; }
+    .option.primary { border-color: var(--accent); }
+    button {
+      padding: 8px 14px; border: 1px solid var(--border); border-radius: var(--radius);
+      background: var(--panel); color: var(--text); font-size: 12px;
+      font-family: inherit; cursor: pointer;
+    }
+    button:hover:not(:disabled) { border-color: var(--accent); }
+    button.accent { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    input[type=password], input[type=text] {
+      width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius);
+      background: rgba(0,0,0,0.25); color: var(--text); font-size: 12px;
+      font-family: inherit; outline: none; margin-bottom: 8px;
+    }
+    input:focus { border-color: var(--accent); }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .note { color: var(--text-faint); line-height: 1.5; margin-top: 8px; }
+    .balance { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
+    .why { color: var(--text-dim); line-height: 1.55; margin-bottom: 12px; }
+    .error { color: var(--error); margin-top: 8px; line-height: 1.45; }
+    .hidden { display: none; }
+    .skip {
+      margin-top: 18px; text-align: center;
+    }
+    .skip button { border: none; background: none; color: var(--text-faint); }
+    .skip button:hover { color: var(--text-dim); text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <!-- Step 1: pick a way to reach a model. -->
+  <div id="choose">
+    <h1>Welcome to Iris</h1>
+    <p class="lede">
+      Iris installs apps for you and answers questions about what's on your screen.
+      Install guides work right away. To have Iris <em>answer</em> you, pick one of these.
+    </p>
+
+    <div class="option primary" id="publik-option">
+      <h2>Use publik API</h2>
+      <p id="publik-pitch">
+        The simplest option — Iris sets itself up and starts with free usage.
+      </p>
+      <button class="accent" id="publik-start">Set up publik API</button>
+      <div class="note" id="publik-disclosure"></div>
+      <div class="error hidden" id="publik-error"></div>
+    </div>
+
+    <div class="option">
+      <h2>Paste a publik API key</h2>
+      <p>If you already have one from your dashboard.</p>
+      <input type="password" id="publik-key" placeholder="pk_live_…" autocomplete="off">
+      <div class="row"><button id="publik-key-save">Save key</button></div>
+      <div class="error hidden" id="publik-key-error"></div>
+    </div>
+
+    <div class="option">
+      <h2>Use your own Anthropic key</h2>
+      <p>Billed to your own account. Stored on this PC and sent only to Anthropic, never to publik.</p>
+      <input type="password" id="anthropic-key" placeholder="sk-ant-…" autocomplete="off">
+      <div class="row"><button id="anthropic-key-save">Save key</button></div>
+      <div class="error hidden" id="anthropic-key-error"></div>
+    </div>
+
+    <div class="skip">
+      <button id="skip">Skip for now — I just want the install guides</button>
+    </div>
+  </div>
+
+  <!-- Step 2: the section 12 card. Shown only after provisioning succeeds. -->
+  <div id="card" class="hidden">
+    <h1>You're set up</h1>
+    <div class="option primary">
+      <div class="balance" id="card-balance"></div>
+      <div class="why" id="card-why"></div>
+      <button class="accent" id="card-button"></button>
+    </div>
+    <div class="skip"><button id="card-done">Done</button></div>
+  </div>
+
+  <script>
+    const iris = window.iris;
+
+    function show(id) {
+      document.getElementById("choose").classList.toggle("hidden", id !== "choose");
+      document.getElementById("card").classList.toggle("hidden", id !== "card");
+    }
+
+    function showError(elementId, message) {
+      const element = document.getElementById(elementId);
+      element.textContent = message;
+      element.classList.remove("hidden");
+    }
+
+    function clearError(elementId) {
+      document.getElementById(elementId).classList.add("hidden");
+    }
+
+    async function init() {
+      const settings = await iris.getSettings();
+      // A build with no app token cannot provision on its own. Saying so up
+      // front beats a button that always fails.
+      if (!settings.buildCanProvisionAutomatically) {
+        document.getElementById("publik-option").classList.remove("primary");
+        document.getElementById("publik-start").disabled = true;
+        document.getElementById("publik-pitch").textContent =
+          "This build can't set one up on its own — paste a key from your dashboard below instead.";
+      } else {
+        document.getElementById("publik-disclosure").textContent =
+          "Iris will set up publik API on this computer so it can answer you. It starts with free usage, and you will see the balance before anything is spent.";
+      }
+    }
+
+    document.getElementById("publik-start").addEventListener("click", async () => {
+      clearError("publik-error");
+      const button = document.getElementById("publik-start");
+      button.disabled = true;
+      button.textContent = "Setting up…";
+      // Consent precedes the mint: clicking this button IS the consent, and
+      // the disclosure above it is what was consented to.
+      const result = await iris.provisionPublikApi();
+      button.disabled = false;
+      button.textContent = "Set up publik API";
+      if (!result.ok) {
+        showError("publik-error", result.message);
+        return;
+      }
+      renderCard(result.card);
+    });
+
+    function renderCard(card) {
+      document.getElementById("card-balance").textContent = card.balanceLine;
+      document.getElementById("card-why").textContent = card.whyItCosts;
+      const button = document.getElementById("card-button");
+      button.textContent = card.buttonLabel;
+      button.onclick = () => {
+        if (card.buttonUrl) iris.openExternal(card.buttonUrl);
+      };
+      if (!card.buttonUrl) button.disabled = true;
+      show("card");
+      // Only now may the starter be spent — section 12 (4).
+      iris.markPublikCardShown();
+    }
+
+    document.getElementById("publik-key-save").addEventListener("click", async () => {
+      clearError("publik-key-error");
+      const key = document.getElementById("publik-key").value.trim();
+      const saved = await iris.setSetting("publikApiKey", key);
+      if (!saved) {
+        showError("publik-key-error", "That doesn't look like a publik API key, or Windows refused to store it.");
+        return;
+      }
+      await iris.setSetting("providerPreference", "publikApi");
+      await iris.completeFirstRun();
+    });
+
+    document.getElementById("anthropic-key-save").addEventListener("click", async () => {
+      clearError("anthropic-key-error");
+      const key = document.getElementById("anthropic-key").value.trim();
+      if (!key) return;
+      const saved = await iris.setSetting("anthropicApiKey", key);
+      if (!saved) {
+        showError("anthropic-key-error", "Windows wouldn't let Iris store that key securely on this machine.");
+        return;
+      }
+      await iris.setSetting("providerPreference", "anthropicKey");
+      await iris.completeFirstRun();
+    });
+
+    document.getElementById("skip").addEventListener("click", () => iris.completeFirstRun());
+    document.getElementById("card-done").addEventListener("click", () => iris.completeFirstRun());
+
+    init();
+  </script>
+</body>
+</html>

@@ -12,6 +12,7 @@ import {
  */
 
 const THE_USERS_KEY = "sk-ant-must-never-reach-publik";
+const THE_PUBLIK_KEY = "pk_live_abcdef123456_0123456789abcdef0123456789abcdef";
 
 interface SentRequest {
   url: string;
@@ -24,6 +25,7 @@ function recordingFetch(response: {
   status?: number;
   body?: string;
   retryAfter?: string | null;
+  publikHeaders?: Record<string, string>;
 }): { fetchImplementation: FetchLike; sent: SentRequest[] } {
   const sent: SentRequest[] = [];
   const fetchImplementation: FetchLike = async (url, init) => {
@@ -32,7 +34,13 @@ function recordingFetch(response: {
       ok: response.ok ?? true,
       status: response.status ?? 200,
       text: async () => response.body ?? JSON.stringify({ content: [{ type: "text", text: "hi" }] }),
-      headers: { get: (name) => (name.toLowerCase() === "retry-after" ? response.retryAfter ?? null : null) },
+      headers: {
+        get: (name) => {
+          const lowered = name.toLowerCase();
+          if (lowered === "retry-after") return response.retryAfter ?? null;
+          return response.publikHeaders?.[lowered] ?? null;
+        },
+      },
     };
   };
   return { fetchImplementation, sent };
@@ -67,36 +75,54 @@ describe("what actually goes on the wire", () => {
     expect(JSON.parse(sent[0].body).model).toBe("claude-sonnet-4-5");
   });
 
-  it("funded: hits publik with a bearer token, no x-api-key anywhere, and no model", async () => {
+  it("publik: hits the gateway with the publik key, and never the user's own", async () => {
     const { fetchImplementation, sent } = recordingFetch({});
     const transport: AssistantTransport = {
-      tier: "funded",
-      publikBaseUrl: "https://publikhq.com",
-      currentAccessToken: async () => "supabase-token",
+      tier: "publik",
+      publikApiKey: THE_PUBLIK_KEY,
+      apiBaseUrl: "https://publikhq.com/api/v1",
     };
-    await new ClaudeService({ transport, model: "claude-sonnet-4-5", fetchImplementation }).query(
+    await new ClaudeService({ transport, model: "publik-balanced", fetchImplementation }).query(
       A_QUERY
     );
 
     expect(sent).toHaveLength(1);
-    expect(sent[0].url).toBe("https://publikhq.com/api/assistant/chat");
-    expect(sent[0].headers.Authorization).toBe("Bearer supabase-token");
-
-    const headerNames = Object.keys(sent[0].headers).map((name) => name.toLowerCase());
-    expect(headerNames).not.toContain("x-api-key");
+    expect(sent[0].url).toBe("https://publikhq.com/api/v1/messages");
+    expect(sent[0].headers["x-api-key"]).toBe(THE_PUBLIK_KEY);
 
     // Not merely absent as a header — absent from the whole request.
     expect(JSON.stringify(sent[0])).not.toContain(THE_USERS_KEY);
-    // The funded server pins the model, so sending one would be a lie.
-    expect(JSON.parse(sent[0].body).model).toBeUndefined();
+    // The gateway takes an alias, and the client is the one that picks it.
+    expect(JSON.parse(sent[0].body).model).toBe("publik-balanced");
   });
 
-  it("caps max_tokens at the funded tier's documented limit", async () => {
+  it("reports the balance the gateway stamped on the response", async () => {
+    const { fetchImplementation } = recordingFetch({
+      publikHeaders: { "x-publik-balance": "182400", "x-publik-claim-state": "anonymous" },
+    });
+    const seen: Array<{ balanceMicros: number | null }> = [];
+    const transport: AssistantTransport = {
+      tier: "publik",
+      publikApiKey: THE_PUBLIK_KEY,
+      apiBaseUrl: "https://publikhq.com/api/v1",
+    };
+    await new ClaudeService({
+      transport,
+      model: "publik-balanced",
+      fetchImplementation,
+      reportPublikUsage: (usage) => seen.push(usage),
+    }).query(A_QUERY);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].balanceMicros).toBe(182_400);
+  });
+
+  it("caps max_tokens at the documented limit", async () => {
     const { fetchImplementation, sent } = recordingFetch({});
     const transport: AssistantTransport = {
-      tier: "funded",
-      publikBaseUrl: "https://publikhq.com",
-      currentAccessToken: async () => "t",
+      tier: "publik",
+      publikApiKey: THE_PUBLIK_KEY,
+      apiBaseUrl: "https://publikhq.com/api/v1",
     };
     await new ClaudeService({ transport, model: "m", fetchImplementation }).query(A_QUERY);
     expect(JSON.parse(sent[0].body).max_tokens).toBeLessThanOrEqual(2048);
@@ -119,16 +145,16 @@ describe("what actually goes on the wire", () => {
 
 describe("failures reach the user as sentences, not statuses", () => {
   it.each([
-    [401, "signInRequired"],
+    [401, "publikKeyRejected"],
     [429, "rateLimited"],
     [503, "assistantUnavailable"],
     [502, "requestFailed"],
-  ])("maps a funded %i to %s", async (status, expectedKind) => {
+  ])("maps a publik %i to %s", async (status, expectedKind) => {
     const { fetchImplementation } = recordingFetch({ ok: false, status, body: "{}" });
     const transport: AssistantTransport = {
-      tier: "funded",
-      publikBaseUrl: "https://publikhq.com",
-      currentAccessToken: async () => "t",
+      tier: "publik",
+      publikApiKey: THE_PUBLIK_KEY,
+      apiBaseUrl: "https://publikhq.com/api/v1",
     };
     const service = new ClaudeService({ transport, model: "m", fetchImplementation });
     await expect(service.query(A_QUERY)).rejects.toThrowError(AssistantTransportFailure);
@@ -141,18 +167,44 @@ describe("failures reach the user as sentences, not statuses", () => {
     const { fetchImplementation } = recordingFetch({
       ok: false,
       status: 429,
-      body: JSON.stringify({ error: "daily_budget_exhausted" }),
+      body: "{}",
       retryAfter: "120",
     });
     const transport: AssistantTransport = {
-      tier: "funded",
-      publikBaseUrl: "https://publikhq.com",
-      currentAccessToken: async () => "t",
+      tier: "publik",
+      publikApiKey: THE_PUBLIK_KEY,
+      apiBaseUrl: "https://publikhq.com/api/v1",
     };
     await new ClaudeService({ transport, model: "m", fetchImplementation })
       .query(A_QUERY)
       .catch((error: AssistantTransportFailure) => {
-        expect(error.detail).toEqual({ kind: "dailyBudgetExhausted", retryAfterSeconds: 120 });
+        expect(error.detail).toEqual({ kind: "rateLimited", retryAfterSeconds: 120 });
+      });
+  });
+
+  it("passes a 402's own message straight through to the user", async () => {
+    const { fetchImplementation } = recordingFetch({
+      ok: false,
+      status: 402,
+      body: JSON.stringify({
+        error: {
+          type: "insufficient_credit",
+          message: "Not enough publik credit for this request.",
+          claim_state: "anonymous",
+          top_up_url: "https://publikhq.com/claim/HK7F-2QWD",
+        },
+      }),
+    });
+    const transport: AssistantTransport = {
+      tier: "publik",
+      publikApiKey: THE_PUBLIK_KEY,
+      apiBaseUrl: "https://publikhq.com/api/v1",
+    };
+    await new ClaudeService({ transport, model: "m", fetchImplementation })
+      .query(A_QUERY)
+      .catch((error: AssistantTransportFailure) => {
+        expect(error.detail.kind).toBe("publikCreditExhausted");
+        expect(error.message).toBe("Not enough publik credit for this request.");
       });
   });
 

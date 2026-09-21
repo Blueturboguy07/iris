@@ -126,10 +126,9 @@
   </div>
 
   <div id="setup">
-    <p id="setup-text">Sign in with your publik account, or add your own Anthropic key.</p>
+    <p id="setup-text">Set up publik API, or add your own Anthropic key.</p>
     <div class="row">
-      <button class="primary" id="signin-google">Sign in with Google</button>
-      <button class="secondary" id="signin-github">GitHub</button>
+      <button class="primary" id="publik-setup">Set up publik API</button>
     </div>
     <div class="row">
       <input type="password" id="byo-key" placeholder="…or paste an Anthropic API key">
@@ -170,20 +169,22 @@
 
     async function refreshAccountState() {
       const settings = await window.iris.getSettings();
-      const hasCredentials = settings.signedIn || settings.hasAnthropicApiKey;
+      // Signing in no longer buys a model: the funded tier is gone, so what
+      // matters is whether this install has a credential of its own.
+      const hasCredentials = settings.hasPublikApiKey || settings.hasAnthropicApiKey;
       setupEl.classList.toggle('visible', !hasCredentials);
-      tierEl.textContent = settings.signedIn
-        ? 'publik account'
+      tierEl.textContent = settings.hasPublikApiKey
+        ? 'publik API'
         : settings.hasAnthropicApiKey ? 'your Anthropic key' : '';
 
-      if (!settings.supabaseConfigured) {
-        document.getElementById('signin-google').disabled = true;
-        document.getElementById('signin-github').disabled = true;
-        setupTextEl.textContent = 'This build has no publik account configured. Add your own Anthropic key to continue.';
+      if (!settings.buildCanProvisionAutomatically) {
+        document.getElementById('publik-setup').disabled = true;
+        setupTextEl.textContent = 'Paste an Anthropic key, or a publik API key from your dashboard in Settings.';
       }
       if (!settings.secretStorageAvailable) {
         setupTextEl.textContent = 'Windows will not let Iris encrypt stored secrets on this machine, so a key cannot be saved safely.';
         document.getElementById('save-key').disabled = true;
+        document.getElementById('publik-setup').disabled = true;
       }
       return settings;
     }
@@ -215,13 +216,28 @@
       if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); }
     });
 
-    document.getElementById('signin-google').addEventListener('click', () => {
-      window.iris.signIn('google');
-      showStatus('Finish signing in in your browser…');
-    });
-    document.getElementById('signin-github').addEventListener('click', () => {
-      window.iris.signIn('github');
-      showStatus('Finish signing in in your browser…');
+    document.getElementById('publik-setup').addEventListener('click', async () => {
+      const button = document.getElementById('publik-setup');
+      button.disabled = true;
+      showStatus('Setting up publik API…');
+      const result = await window.iris.provisionPublikApi();
+      button.disabled = false;
+      showStatus('');
+      if (!result.ok) {
+        addMessage(result.message, 'error');
+        return;
+      }
+      // Section 12 (1): the balance, the reason, and the link — before a
+      // single request is allowed to spend the starter.
+      addMessage(
+        result.card.balanceLine + ' — ' + result.card.whyItCosts,
+        'system'
+      );
+      if (result.card.buttonUrl) {
+        addMessage(result.card.buttonLabel + ': ' + result.card.buttonUrl, 'system');
+      }
+      await window.iris.markPublikCardShown();
+      await refreshAccountState();
     });
     document.getElementById('save-key').addEventListener('click', async () => {
       const keyInput = document.getElementById('byo-key');

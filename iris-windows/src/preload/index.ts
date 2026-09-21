@@ -43,6 +43,15 @@ contextBridge.exposeInMainWorld("iris", {
   getSettings: () => ipcRenderer.invoke("settings:getAll"),
   setSetting: (key: string, value: unknown) => ipcRenderer.invoke("settings:set", key, value),
 
+  // publik API. The renderer never sees the key itself — it asks the main
+  // process to provision or to accept a pasted one, and gets back only the
+  // card's rendered state (CONTRACT section 1: a desktop app's key must not
+  // enter a renderer).
+  provisionPublikApi: () => ipcRenderer.invoke("publik:provision"),
+  publikCard: (isFirstRun: boolean) => ipcRenderer.invoke("publik:card", isFirstRun),
+  markPublikCardShown: () => ipcRenderer.invoke("publik:cardShown"),
+  completeFirstRun: () => ipcRenderer.invoke("firstRun:complete"),
+
   // Account
   signIn: (provider: "google" | "github") => ipcRenderer.invoke("account:signIn", provider),
   signOut: () => ipcRenderer.invoke("account:signOut"),

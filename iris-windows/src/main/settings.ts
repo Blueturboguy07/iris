@@ -17,8 +17,46 @@ export interface SettingsSchema {
   /** Where publik lives. Overridable for local development only. */
   publikBaseUrl: string;
 
-  /** The model used on the BYO route. The funded route pins its own. */
+  /** The model used on the BYO Anthropic route. publik API uses its own
+   *  aliases (`services/publik-api.ts`), which are not user-configurable. */
   claudeModel: string;
+
+  /**
+   * Which provider the user picked: `publikApi`, `anthropicKey`, `codex`, or
+   * "" for "not chosen yet, work it out". An explicit choice is honoured even
+   * when another provider would work, and is never silently switched away
+   * from — see `services/assistant-transport.ts`'s `selectTransport`.
+   */
+  providerPreference: string;
+
+  /** This machine's `install_id` for publik API, minted once and replayed. */
+  publikInstallId: string;
+
+  /** The claim URL provisioning returned, so the settings card can offer it
+   *  long after first run. Not secret: it is a one-time code in a URL the user
+   *  is meant to open themselves. */
+  publikClaimUrl: string;
+
+  /** Where to send someone who already claimed and wants more credit. */
+  publikAddCreditUrl: string;
+
+  /** `anonymous` until this install is linked to a publik account. */
+  publikClaimState: string;
+
+  /** The last balance seen, in micros, so the card can render something
+   *  truthful before the next metered call updates it. */
+  publikBalanceMicros: number;
+
+  /** The starter the install was granted, for the first-run balance line. */
+  publikStarterMicros: number;
+
+  /**
+   * Whether the §12 card has been shown. CONTRACT.md section 12 (4) forbids
+   * spending the starter before the user has seen the balance, the reason it
+   * costs money, and the link — so this gates the first request, not just the
+   * UI.
+   */
+  publikCardHasBeenShown: boolean;
 
   // UI
   alwaysOnTop: boolean;
@@ -33,6 +71,9 @@ export interface SettingsSchema {
   /** The last guide the user opened, so the panel can offer to resume it. */
   lastGuideSlug: string;
 
+  /** False until the first-run flow has been completed once. */
+  hasCompletedFirstRun: boolean;
+
   /** The release tag (e.g. "iris-v0.9.11") the self-update check last
    *  notified about, so a reader who dismisses the notice is not shown it
    *  again every few hours for the same release — only when a newer one
@@ -43,10 +84,19 @@ export interface SettingsSchema {
 const defaults: SettingsSchema = {
   publikBaseUrl: "https://publikhq.com",
   claudeModel: "claude-sonnet-4-5-20250929",
+  providerPreference: "",
+  publikInstallId: "",
+  publikClaimUrl: "",
+  publikAddCreditUrl: "",
+  publikClaimState: "anonymous",
+  publikBalanceMicros: 0,
+  publikStarterMicros: 0,
+  publikCardHasBeenShown: false,
   alwaysOnTop: false,
   cursorBuddyEnabled: true,
   autopilotAutonomyGranted: false,
   lastGuideSlug: "",
+  hasCompletedFirstRun: false,
   lastAnnouncedUpdateTag: "",
 };
 
@@ -151,6 +201,26 @@ export class SettingsStore {
     return writeSecret("openaiApiKey", apiKey);
   }
 
+  /** The publik API key this install holds — the default chat route. */
+  getPublikApiKey(): string | null {
+    return readSecret("publikApiKey");
+  }
+
+  setPublikApiKey(apiKey: string): boolean {
+    if (!apiKey) {
+      deleteSecret("publikApiKey");
+      return true;
+    }
+    return writeSecret("publikApiKey", apiKey);
+  }
+
+  /** The gateway root, derived from `publikBaseUrl` unless provisioning moved
+   *  it. CONTRACT.md section 1 [S8]: the response wins over the default. */
+  getPublikApiBaseUrl(): string {
+    const base = this.get("publikBaseUrl").replace(/\/+$/, "");
+    return `${base}/api/v1`;
+  }
+
   getSupabaseRefreshToken(): string | null {
     return readSecret("supabaseRefreshToken");
   }
@@ -160,9 +230,15 @@ export class SettingsStore {
     else deleteSecret("supabaseRefreshToken");
   }
 
-  /** True when Iris has some way to reach a model — either tier. */
-  isConfigured(isSignedIn: boolean): boolean {
-    return isSignedIn || Boolean(this.getAnthropicApiKey());
+  /**
+   * True when Iris has some way to reach a model. Signing in is no longer one
+   * of them: the funded tier is gone, so a publik account by itself buys
+   * nothing until this install has a publik API key of its own.
+   */
+  isConfigured(codexIsAvailable = false): boolean {
+    return (
+      Boolean(this.getPublikApiKey()) || Boolean(this.getAnthropicApiKey()) || codexIsAvailable
+    );
   }
 
   private save(): void {

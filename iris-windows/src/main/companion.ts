@@ -5,9 +5,12 @@ import { AccountSession } from "./account-session";
 import { ClaudeService, ConversationEntry } from "../services/claude";
 import {
   AssistantTransportFailure,
+  defaultModelForTransport,
+  isProviderPreference,
   selectTransport,
   userFacingMessage,
 } from "../services/assistant-transport";
+import { PublikUsageSnapshot } from "../services/publik-api";
 import {
   PointTag,
   parsePointTags,
@@ -66,13 +69,39 @@ export class CompanionManager {
    * or paste a key between one message and the next.
    */
   private createClaudeService(): ClaudeService {
+    const storedPreference = this.settings.get("providerPreference");
     const transport = selectTransport({
-      isSignedIn: this.account.isSignedIn(),
-      publikBaseUrl: this.settings.get("publikBaseUrl"),
+      preference: isProviderPreference(storedPreference) ? storedPreference : null,
+      storedPublikApiKey: this.settings.getPublikApiKey(),
+      publikApiBaseUrl: this.settings.getPublikApiBaseUrl(),
       storedAnthropicApiKey: this.settings.getAnthropicApiKey(),
-      currentAccessToken: () => this.account.currentAccessToken(),
+      codexIsAvailable: this.codexIsAvailable(),
     });
-    return new ClaudeService({ transport, model: this.settings.get("claudeModel") });
+    return new ClaudeService({
+      transport,
+      model: defaultModelForTransport(transport, this.settings.get("claudeModel")),
+      reportPublikUsage: (usage) => this.recordPublikUsage(usage),
+    });
+  }
+
+  /**
+   * Keeps settings in step with what the gateway just said. The balance the
+   * card shows has to be the live one — a stale number next to a "pick a plan"
+   * button is the kind of thing that reads as a dark pattern even when it is
+   * only a caching bug.
+   */
+  private recordPublikUsage(usage: PublikUsageSnapshot): void {
+    if (usage.balanceMicros !== null) {
+      this.settings.set("publikBalanceMicros", usage.balanceMicros);
+    }
+    if (usage.claimState !== null) {
+      this.settings.set("publikClaimState", usage.claimState);
+    }
+  }
+
+  /** Wired in commit 2, when the codex CLI becomes a real chat route. */
+  private codexIsAvailable(): boolean {
+    return false;
   }
 
   /**

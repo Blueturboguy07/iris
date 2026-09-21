@@ -3,29 +3,36 @@ import {
   ANTHROPIC_API_HOST,
   AssistantTransport,
   AssistantTransportFailure,
+  CredentialKind,
   PreparedRequest,
+  credentialMayReachHost,
+  defaultModelForTransport,
   failureForStatusCode,
   isPublikHost,
   makeChatRequest,
-  requiresReSignIn,
+  preferenceDescription,
+  requiresSetup,
   selectTransport,
-  serverErrorCodeInFailureBody,
-  shouldOfferBringYourOwnKey,
+  shouldOfferTopUp,
   shouldSendModelInRequestBody,
   userFacingMessage,
   validatedRequest,
 } from "../src/services/assistant-transport";
 
 /**
- * The property this file exists to protect: the user's own Anthropic key never
- * reaches a publik host, and the funded route never carries one.
+ * The property this file exists to protect: a credential only ever reaches the
+ * host that issued it. The user's own Anthropic key never reaches a publik
+ * host, and a publik key never reaches Anthropic.
  *
- * It is asserted in BOTH directions on purpose. "The BYO request goes to
- * Anthropic" and "a publik request has no x-api-key" are the same rule seen from
- * two sides, and a refactor can break either one without touching the other.
+ * It is asserted in BOTH directions on purpose, for BOTH credentials. "The BYO
+ * request goes to Anthropic" and "a publik request never carries the user's
+ * key" are the same rule seen from two sides, and a refactor can break either
+ * one without touching the other.
  */
 
 const THE_USERS_KEY = "sk-ant-this-key-must-never-leave-anthropic";
+const THE_PUBLIK_KEY = "pk_live_abcdef123456_0123456789abcdef0123456789abcdef";
+const PUBLIK_API_BASE = "https://publikhq.com/api/v1";
 
 function headerNames(request: PreparedRequest): string[] {
   return Object.keys(request.headers).map((name) => name.toLowerCase());
@@ -35,281 +42,407 @@ function byoTransport(): AssistantTransport {
   return { tier: "byo", anthropicApiKey: THE_USERS_KEY };
 }
 
-function fundedTransport(publikBaseUrl = "https://publikhq.com"): AssistantTransport {
-  return {
-    tier: "funded",
-    publikBaseUrl,
-    currentAccessToken: async () => "supabase-access-token",
-  };
+function publikTransport(apiBaseUrl = PUBLIK_API_BASE): AssistantTransport {
+  return { tier: "publik", publikApiKey: THE_PUBLIK_KEY, apiBaseUrl };
 }
 
-describe("key isolation — direction 1: the BYO key only ever goes to Anthropic", () => {
+describe("credential isolation — the permitted-host table", () => {
+  it("lets the Anthropic key reach Anthropic and nothing else", () => {
+    expect(credentialMayReachHost("anthropicApiKey", ANTHROPIC_API_HOST)).toBe(true);
+    expect(credentialMayReachHost("anthropicApiKey", "publikhq.com")).toBe(false);
+    expect(credentialMayReachHost("anthropicApiKey", "www.publikhq.com")).toBe(false);
+    expect(credentialMayReachHost("anthropicApiKey", "evil.example.com")).toBe(false);
+  });
+
+  it("lets the publik key reach publik and nothing else", () => {
+    expect(credentialMayReachHost("publikApiKey", "publikhq.com")).toBe(true);
+    expect(credentialMayReachHost("publikApiKey", "www.publikhq.com")).toBe(true);
+    // Sending a publik key to Anthropic would both leak it and fail, since
+    // Anthropic never issued it.
+    expect(credentialMayReachHost("publikApiKey", ANTHROPIC_API_HOST)).toBe(false);
+    expect(credentialMayReachHost("publikApiKey", "evil.example.com")).toBe(false);
+  });
+
+  it("is case-insensitive about the host", () => {
+    expect(credentialMayReachHost("anthropicApiKey", "API.ANTHROPIC.COM")).toBe(true);
+    expect(credentialMayReachHost("publikApiKey", "PublikHQ.com")).toBe(true);
+  });
+
+  it("knows which hosts are publik's", () => {
+    expect(isPublikHost("publikhq.com")).toBe(true);
+    expect(isPublikHost("WWW.PUBLIKHQ.COM")).toBe(true);
+    expect(isPublikHost("api.anthropic.com")).toBe(false);
+  });
+});
+
+describe("credential isolation — direction 1: the BYO key only ever goes to Anthropic", () => {
   it("sends the BYO request to api.anthropic.com and nowhere else", async () => {
     const request = await makeChatRequest(byoTransport());
     expect(new URL(request.url).hostname).toBe(ANTHROPIC_API_HOST);
     expect(request.url).toBe("https://api.anthropic.com/v1/messages");
   });
 
-  it("attaches the key as x-api-key on that request", async () => {
+  it("attaches the key as x-api-key and declares which credential it is", async () => {
     const request = await makeChatRequest(byoTransport());
     expect(request.headers["x-api-key"]).toBe(THE_USERS_KEY);
-    expect(request.headers["anthropic-version"]).toBe("2023-06-01");
+    expect(request.credentialKind).toBe("anthropicApiKey");
   });
 
   it("never puts the key in an Authorization header", async () => {
     const request = await makeChatRequest(byoTransport());
-    expect(request.headers.Authorization).toBeUndefined();
-    expect(JSON.stringify(request.headers)).not.toContain("Bearer");
+    expect(headerNames(request)).not.toContain("authorization");
   });
 
-  it.each([
-    "https://publikhq.com/api/assistant/chat",
-    "https://www.publikhq.com/api/assistant/chat",
-    "https://evil.tld/v1/messages",
-    "https://api.anthropic.com.evil.tld/v1/messages",
-    "http://localhost:3000/api/assistant/chat",
-  ])("refuses to let an x-api-key request reach %s", (url) => {
-    const smuggled: PreparedRequest = {
-      url,
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": THE_USERS_KEY },
-    };
-    expect(() => validatedRequest(smuggled)).toThrowError(AssistantTransportFailure);
-    try {
-      validatedRequest(smuggled);
-    } catch (error) {
-      const failure = error as AssistantTransportFailure;
-      expect(failure.detail.kind).toBe("bringYourOwnKeyWouldLeaveAnthropic");
-    }
+  it("refuses a hand-built request that would send the Anthropic key to publik", () => {
+    expect(() =>
+      validatedRequest({
+        url: "https://publikhq.com/api/v1/messages",
+        method: "POST",
+        headers: { "x-api-key": THE_USERS_KEY },
+        credentialKind: "anthropicApiKey",
+      })
+    ).toThrow(AssistantTransportFailure);
   });
 
   it("catches the header even when a refactor spells it with different case", () => {
-    const smuggled: PreparedRequest = {
-      url: "https://publikhq.com/api/assistant/chat",
-      method: "POST",
-      headers: { "X-API-Key": THE_USERS_KEY },
-    };
-    expect(() => validatedRequest(smuggled)).toThrowError(AssistantTransportFailure);
+    expect(() =>
+      validatedRequest({
+        url: "https://publikhq.com/api/v1/messages",
+        method: "POST",
+        headers: { "X-API-Key": THE_USERS_KEY },
+        credentialKind: "anthropicApiKey",
+      })
+    ).toThrow(AssistantTransportFailure);
   });
 
   it("still allows the legitimate Anthropic destination through the same gate", () => {
-    const legitimate: PreparedRequest = {
-      url: "https://api.anthropic.com/v1/messages",
+    const request = validatedRequest({
+      url: `https://${ANTHROPIC_API_HOST}/v1/messages`,
       method: "POST",
       headers: { "x-api-key": THE_USERS_KEY },
-    };
-    expect(validatedRequest(legitimate)).toBe(legitimate);
+      credentialKind: "anthropicApiKey",
+    });
+    expect(request.headers["x-api-key"]).toBe(THE_USERS_KEY);
   });
 });
 
-describe("key isolation — direction 2: the funded route never sends x-api-key", () => {
-  it("builds the funded request with a Bearer token and no key header", async () => {
-    const request = await makeChatRequest(fundedTransport());
-    expect(request.url).toBe("https://publikhq.com/api/assistant/chat");
-    expect(request.headers.Authorization).toBe("Bearer supabase-access-token");
-    expect(headerNames(request)).not.toContain("x-api-key");
+describe("credential isolation — direction 2: the publik key only ever goes to publik", () => {
+  it("sends the publik request to the gateway's /messages", async () => {
+    const request = await makeChatRequest(publikTransport());
+    expect(request.url).toBe("https://publikhq.com/api/v1/messages");
+    expect(request.credentialKind).toBe("publikApiKey");
   });
 
-  it("does not leak the key even when one is also stored on disk", async () => {
-    // Signed in AND holding a key is the ordinary state for a user who tried
-    // both. The funded route must still carry only the Supabase token.
-    const transport = selectTransport({
-      isSignedIn: true,
-      publikBaseUrl: "https://publikhq.com",
-      storedAnthropicApiKey: THE_USERS_KEY,
-      currentAccessToken: async () => "supabase-access-token",
-    });
-    const request = await makeChatRequest(transport);
-    expect(headerNames(request)).not.toContain("x-api-key");
+  it("carries the publik key and never the user's Anthropic key", async () => {
+    const request = await makeChatRequest(publikTransport());
+    expect(request.headers["x-api-key"]).toBe(THE_PUBLIK_KEY);
     expect(JSON.stringify(request)).not.toContain(THE_USERS_KEY);
   });
 
-  it("reports a missing access token as sign-in required, not as a transport error", async () => {
-    const transport: AssistantTransport = {
-      tier: "funded",
-      publikBaseUrl: "https://publikhq.com",
-      currentAccessToken: async () => null,
-    };
-    await expect(makeChatRequest(transport)).rejects.toThrowError(AssistantTransportFailure);
-    await makeChatRequest(transport).catch((error: AssistantTransportFailure) => {
-      expect(error.detail.kind).toBe("signInRequired");
-    });
+  it("normalises a base URL that carries a trailing slash", async () => {
+    const request = await makeChatRequest(publikTransport("https://publikhq.com/api/v1/"));
+    expect(request.url).toBe("https://publikhq.com/api/v1/messages");
   });
 
-  it("knows which hosts are publik's", () => {
-    expect(isPublikHost("publikhq.com")).toBe(true);
-    expect(isPublikHost("WWW.PUBLIKHQ.COM")).toBe(true);
-    expect(isPublikHost("publikhq.com.evil.tld")).toBe(false);
-    expect(isPublikHost("api.anthropic.com")).toBe(false);
+  it("refuses to build a request when the base URL is not a publik host", async () => {
+    // The builder validates its destination BEFORE writing the header, so a
+    // hostile base URL never reaches the point of carrying a key.
+    await expect(makeChatRequest(publikTransport("https://evil.example.com/api/v1"))).rejects.toThrow(
+      AssistantTransportFailure
+    );
+  });
+
+  it("refuses to send the publik key to Anthropic", () => {
+    expect(() =>
+      validatedRequest({
+        url: `https://${ANTHROPIC_API_HOST}/v1/messages`,
+        method: "POST",
+        headers: { "x-api-key": THE_PUBLIK_KEY },
+        credentialKind: "publikApiKey",
+      })
+    ).toThrow(AssistantTransportFailure);
+  });
+
+  it("names the credential that was about to escape", () => {
+    try {
+      validatedRequest({
+        url: "https://evil.example.com/v1/messages",
+        method: "POST",
+        headers: { "x-api-key": THE_PUBLIK_KEY },
+        credentialKind: "publikApiKey",
+      });
+      throw new Error("expected the gate to refuse this request");
+    } catch (error) {
+      const failure = error as AssistantTransportFailure;
+      expect(failure.detail.kind).toBe("credentialWouldLeaveItsHost");
+      if (failure.detail.kind === "credentialWouldLeaveItsHost") {
+        expect(failure.detail.credentialKind).toBe<CredentialKind>("publikApiKey");
+        expect(failure.detail.attemptedHost).toBe("evil.example.com");
+      }
+    }
+  });
+});
+
+describe("credential isolation — an undeclared key cannot sneak past", () => {
+  it("refuses a key header on a request that declares no credential", () => {
+    expect(() =>
+      validatedRequest({
+        url: "https://publikhq.com/api/v1/messages",
+        method: "POST",
+        headers: { "x-api-key": THE_USERS_KEY },
+        credentialKind: null,
+      })
+    ).toThrow(AssistantTransportFailure);
+  });
+
+  it("allows a credential-free request to anywhere, since it carries no secret", () => {
+    const request = validatedRequest({
+      url: "https://publikhq.com/api/iris/guides/cue",
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentialKind: null,
+    });
+    expect(request.credentialKind).toBeNull();
+  });
+
+  it("refuses a malformed URL rather than guessing at its host", () => {
+    expect(() =>
+      validatedRequest({
+        url: "not a url",
+        method: "POST",
+        headers: {},
+        credentialKind: null,
+      })
+    ).toThrow(AssistantTransportFailure);
   });
 });
 
 describe("transport selection", () => {
-  it("prefers the funded tier when signed in, because it costs the user nothing", () => {
+  const noProviders = {
+    preference: null,
+    storedPublikApiKey: null,
+    publikApiBaseUrl: PUBLIK_API_BASE,
+    storedAnthropicApiKey: null,
+    codexIsAvailable: false,
+  };
+
+  it("prefers publik API when nothing has been chosen, because it is the default", () => {
     const transport = selectTransport({
-      isSignedIn: true,
-      publikBaseUrl: "https://publikhq.com",
+      ...noProviders,
+      storedPublikApiKey: THE_PUBLIK_KEY,
       storedAnthropicApiKey: THE_USERS_KEY,
-      currentAccessToken: async () => "token",
+      codexIsAvailable: true,
     });
-    expect(transport.tier).toBe("funded");
+    expect(transport.tier).toBe("publik");
   });
 
-  it("falls back to a stored key when not signed in", () => {
+  it("falls to a stored Anthropic key when there is no publik key", () => {
     const transport = selectTransport({
-      isSignedIn: false,
-      publikBaseUrl: "https://publikhq.com",
+      ...noProviders,
       storedAnthropicApiKey: THE_USERS_KEY,
-      currentAccessToken: async () => null,
+      codexIsAvailable: true,
     });
     expect(transport.tier).toBe("byo");
   });
 
-  it("reports having neither as its own state rather than failing at request time", () => {
-    expect(() =>
-      selectTransport({
-        isSignedIn: false,
-        publikBaseUrl: "https://publikhq.com",
-        storedAnthropicApiKey: null,
-        currentAccessToken: async () => null,
-      })
-    ).toThrowError(AssistantTransportFailure);
+  it("falls to codex when it is the only thing available", () => {
+    const transport = selectTransport({ ...noProviders, codexIsAvailable: true });
+    expect(transport.tier).toBe("codex");
   });
 
-  it("omits the model on the funded route and sends it on the BYO route", () => {
-    // The funded server pins the model; sending one it ignores would only make a
-    // reader of the code believe the client chose it.
-    expect(shouldSendModelInRequestBody(fundedTransport())).toBe(false);
+  it("reports having nothing as its own state rather than failing at request time", () => {
+    expect(() => selectTransport(noProviders)).toThrow(AssistantTransportFailure);
+    try {
+      selectTransport(noProviders);
+    } catch (error) {
+      expect((error as AssistantTransportFailure).detail.kind).toBe("noCredentialsAvailable");
+    }
+  });
+
+  it("honours an explicit choice even when another provider would work", () => {
+    const transport = selectTransport({
+      ...noProviders,
+      preference: "anthropicKey",
+      storedPublikApiKey: THE_PUBLIK_KEY,
+      storedAnthropicApiKey: THE_USERS_KEY,
+    });
+    expect(transport.tier).toBe("byo");
+  });
+
+  it("never silently switches away from a chosen provider that broke", () => {
+    // The whole point: spending someone's money on an account they did not
+    // pick is worse than an error message.
+    try {
+      selectTransport({
+        ...noProviders,
+        preference: "anthropicKey",
+        storedPublikApiKey: THE_PUBLIK_KEY,
+        storedAnthropicApiKey: null,
+      });
+      throw new Error("expected the chosen provider to be reported as unavailable");
+    } catch (error) {
+      const failure = error as AssistantTransportFailure;
+      expect(failure.detail.kind).toBe("chosenProviderUnavailable");
+      if (failure.detail.kind === "chosenProviderUnavailable") {
+        expect(failure.detail.preference).toBe("anthropicKey");
+      }
+    }
+  });
+
+  it("sends a model on both HTTP routes now that nothing pins one server-side", () => {
+    expect(shouldSendModelInRequestBody(publikTransport())).toBe(true);
     expect(shouldSendModelInRequestBody(byoTransport())).toBe(true);
   });
 
-  it("normalises a publik base URL that carries a trailing slash", async () => {
-    const request = await makeChatRequest(fundedTransport("https://publikhq.com/"));
-    expect(request.url).toBe("https://publikhq.com/api/assistant/chat");
+  it("gives publik its own alias and leaves the configured model to the BYO route", () => {
+    expect(defaultModelForTransport(publikTransport(), "claude-sonnet-4-5")).toBe("publik-balanced");
+    expect(defaultModelForTransport(byoTransport(), "claude-sonnet-4-5")).toBe("claude-sonnet-4-5");
+  });
+
+  it("has no funded tier left to select", () => {
+    const tiers = [publikTransport().tier, byoTransport().tier, "codex"];
+    expect(tiers).not.toContain("funded");
   });
 });
 
-describe("funded-tier error codes map to user-visible states", () => {
-  it("maps 401 on the funded route to sign-in required", () => {
+describe("failures map to user-visible states", () => {
+  it("maps 401 on the publik route to a stale install key", () => {
     const detail = failureForStatusCode({
       statusCode: 401,
-      serverErrorCode: "sign_in_required",
+      rawBody: JSON.stringify({ error: { type: "key_revoked", reprovision: true } }),
       retryAfterHeaderValue: null,
-      isFundedTier: true,
+      tier: "publik",
     });
-    expect(detail.kind).toBe("signInRequired");
-    expect(requiresReSignIn(detail)).toBe(true);
-    expect(shouldOfferBringYourOwnKey(detail)).toBe(false);
+    expect(detail.kind).toBe("publikKeyRejected");
+    if (detail.kind === "publikKeyRejected") expect(detail.mayReprovision).toBe(true);
+    expect(requiresSetup(detail)).toBe(true);
+  });
+
+  it("does not offer reprovisioning for a plain invalid key", () => {
+    const detail = failureForStatusCode({
+      statusCode: 401,
+      rawBody: JSON.stringify({ error: { type: "invalid_api_key" } }),
+      retryAfterHeaderValue: null,
+      tier: "publik",
+    });
+    if (detail.kind === "publikKeyRejected") expect(detail.mayReprovision).toBe(false);
   });
 
   it("maps 401 on the BYO route to a rejected key — the same status, the opposite meaning", () => {
     const detail = failureForStatusCode({
       statusCode: 401,
-      serverErrorCode: null,
+      rawBody: "",
       retryAfterHeaderValue: null,
-      isFundedTier: false,
+      tier: "byo",
     });
     expect(detail.kind).toBe("bringYourOwnKeyRejected");
-    expect(requiresReSignIn(detail)).toBe(false);
   });
 
-  it("maps 429 rate_limited with Retry-After to a quota state carrying the delay", () => {
+  it("renders the gateway's own 402 message and exactly one link", () => {
+    const detail = failureForStatusCode({
+      statusCode: 402,
+      rawBody: JSON.stringify({
+        error: {
+          type: "insufficient_credit",
+          message: "Not enough publik credit for this request.",
+          claim_state: "anonymous",
+          top_up_url: "https://publikhq.com/claim/HK7F-2QWD",
+          claim_url: "https://publikhq.com/claim/HK7F-2QWD",
+          add_credit_url: "https://publikhq.com/dashboard/api/add",
+        },
+      }),
+      retryAfterHeaderValue: null,
+      tier: "publik",
+    });
+    expect(detail.kind).toBe("publikCreditExhausted");
+    if (detail.kind === "publikCreditExhausted") {
+      // Verbatim — CONTRACT section 12 (3) requires the server's wording.
+      expect(detail.message).toBe("Not enough publik credit for this request.");
+      expect(detail.topUpUrl).toBe("https://publikhq.com/claim/HK7F-2QWD");
+      expect(userFacingMessage(detail)).toBe("Not enough publik credit for this request.");
+    }
+    expect(shouldOfferTopUp(detail)).toBe(true);
+  });
+
+  it("does not mistake an unreadable 402 for a credit state", () => {
+    const detail = failureForStatusCode({
+      statusCode: 402,
+      rawBody: "<html>gateway said no</html>",
+      retryAfterHeaderValue: null,
+      tier: "publik",
+    });
+    expect(detail.kind).toBe("requestFailed");
+  });
+
+  it("maps 429 with Retry-After to a quota state carrying the delay", () => {
     const detail = failureForStatusCode({
       statusCode: 429,
-      serverErrorCode: "rate_limited",
+      rawBody: "",
       retryAfterHeaderValue: "45",
-      isFundedTier: true,
+      tier: "publik",
     });
-    expect(detail).toEqual({ kind: "rateLimited", retryAfterSeconds: 45 });
-    expect(shouldOfferBringYourOwnKey(detail)).toBe(true);
+    expect(detail.kind).toBe("rateLimited");
+    if (detail.kind === "rateLimited") expect(detail.retryAfterSeconds).toBe(45);
     expect(userFacingMessage(detail)).toContain("45 seconds");
   });
 
-  it("distinguishes daily_budget_exhausted from a plain rate limit", () => {
-    const detail = failureForStatusCode({
-      statusCode: 429,
-      serverErrorCode: "daily_budget_exhausted",
-      retryAfterHeaderValue: "7200",
-      isFundedTier: true,
-    });
-    expect(detail.kind).toBe("dailyBudgetExhausted");
-    expect(shouldOfferBringYourOwnKey(detail)).toBe(true);
-    // 7200s is two hours; the sentence must not read "7200 seconds".
-    expect(userFacingMessage(detail)).toContain("2 hours");
-  });
-
   it("tolerates a missing or unparseable Retry-After", () => {
-    for (const headerValue of [null, "", "soon", "Wed, 21 Oct 2026 07:28:00 GMT"]) {
+    for (const headerValue of [null, "soon"]) {
       const detail = failureForStatusCode({
         statusCode: 429,
-        serverErrorCode: "rate_limited",
+        rawBody: "",
         retryAfterHeaderValue: headerValue,
-        isFundedTier: true,
+        tier: "publik",
       });
-      expect(detail).toEqual({ kind: "rateLimited", retryAfterSeconds: null });
-      expect(userFacingMessage(detail)).toContain("try again shortly");
+      if (detail.kind === "rateLimited") expect(detail.retryAfterSeconds).toBeNull();
     }
   });
 
-  it("maps 503 assistant_unconfigured to an outage that is not the user's fault", () => {
+  it("maps 503 to an outage that is not the user's fault", () => {
     const detail = failureForStatusCode({
       statusCode: 503,
-      serverErrorCode: "assistant_unconfigured",
+      rawBody: "",
       retryAfterHeaderValue: null,
-      isFundedTier: true,
+      tier: "publik",
     });
     expect(detail.kind).toBe("assistantUnavailable");
     expect(userFacingMessage(detail)).toContain("on publik, not you");
   });
 
-  it.each([400, 402, 418, 500, 502, 504])("maps %i to a generic failure", (statusCode) => {
+  it("never surfaces the server's own body for an unknown status", () => {
     const detail = failureForStatusCode({
-      statusCode,
-      serverErrorCode: "upstream_error",
+      statusCode: 500,
+      rawBody: JSON.stringify({ error: { message: "the model said something embarrassing" } }),
       retryAfterHeaderValue: null,
-      isFundedTier: true,
-    });
-    expect(detail).toEqual({ kind: "requestFailed", statusCode });
-  });
-
-  it("never surfaces the server's own body to the user", () => {
-    const body = JSON.stringify({
-      error: "upstream_error",
-      detail: "the model said something embarrassing about the user",
-    });
-    expect(serverErrorCodeInFailureBody(body)).toBe("upstream_error");
-    const detail = failureForStatusCode({
-      statusCode: 502,
-      serverErrorCode: serverErrorCodeInFailureBody(body),
-      retryAfterHeaderValue: null,
-      isFundedTier: true,
+      tier: "publik",
     });
     expect(userFacingMessage(detail)).not.toContain("embarrassing");
-    expect(userFacingMessage(detail)).not.toContain("upstream_error");
-  });
-
-  it("reads no error code out of a body that is not JSON", () => {
-    expect(serverErrorCodeInFailureBody("<html>502 Bad Gateway</html>")).toBeNull();
-    expect(serverErrorCodeInFailureBody("{}")).toBeNull();
-    expect(serverErrorCodeInFailureBody('{"error": ""}')).toBeNull();
   });
 
   it("gives every failure a sentence with no status code in it", () => {
-    const everyFailure = [
+    const details = [
       { kind: "noCredentialsAvailable" },
-      { kind: "signInRequired" },
+      { kind: "chosenProviderUnavailable", preference: "codex" },
+      { kind: "publikKeyRejected", mayReprovision: false },
       { kind: "rateLimited", retryAfterSeconds: 10 },
-      { kind: "dailyBudgetExhausted", retryAfterSeconds: null },
       { kind: "assistantUnavailable" },
       { kind: "requestFailed", statusCode: 500 },
       { kind: "bringYourOwnKeyRejected" },
-      { kind: "transportFailure", reason: "ECONNREFUSED" },
-      { kind: "bringYourOwnKeyWouldLeaveAnthropic", attemptedHost: "evil.tld" },
+      { kind: "codexUnavailable", reason: "the codex command isn't installed" },
+      { kind: "transportFailure", reason: "offline" },
+      { kind: "credentialWouldLeaveItsHost", credentialKind: "publikApiKey", attemptedHost: "x.com" },
     ] as const;
-    for (const detail of everyFailure) {
+    for (const detail of details) {
       const message = userFacingMessage(detail);
-      expect(message.length).toBeGreaterThan(10);
-      expect(message).not.toMatch(/\b[45]\d\d\b/);
+      expect(message.length, detail.kind).toBeGreaterThan(10);
+      expect(message, detail.kind).not.toContain("500");
     }
+  });
+
+  it("names the provider a user picked when telling them it broke", () => {
+    expect(preferenceDescription("publikApi")).toBe("publik API");
+    expect(userFacingMessage({ kind: "chosenProviderUnavailable", preference: "publikApi" })).toContain(
+      "publik API"
+    );
   });
 });

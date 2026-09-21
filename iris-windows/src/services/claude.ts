@@ -16,9 +16,9 @@ import {
   ANTHROPIC_API_VERSION,
   failureForStatusCode,
   makeChatRequest,
-  serverErrorCodeInFailureBody,
   shouldSendModelInRequestBody,
 } from "./assistant-transport";
+import { PublikUsageSnapshot, readPublikUsageHeaders } from "./publik-api";
 
 /** Protocol section 1: at most 50 messages per request. */
 const MAX_MESSAGES_PER_REQUEST = 50;
@@ -141,16 +141,21 @@ export class ClaudeService {
   private readonly transport: AssistantTransport;
   private readonly model: string;
   private readonly fetchImplementation: FetchLike;
+  /** Told the balance and claim state after every metered publik call, so the
+   *  card can show a live number instead of the one provisioning returned. */
+  private readonly reportPublikUsage?: (usage: PublikUsageSnapshot) => void;
 
   constructor(options: {
     transport: AssistantTransport;
     model: string;
     fetchImplementation?: FetchLike;
+    reportPublikUsage?: (usage: PublikUsageSnapshot) => void;
   }) {
     this.transport = options.transport;
     this.model = options.model;
     this.fetchImplementation =
       options.fetchImplementation ?? (globalThis.fetch as unknown as FetchLike);
+    this.reportPublikUsage = options.reportPublikUsage;
   }
 
   async query(params: ChatQueryParams): Promise<{ text: string }> {
@@ -258,7 +263,7 @@ export class ClaudeService {
     if (shouldSendModelInRequestBody(this.transport)) {
       body.model = this.model;
     }
-    if (this.transport.tier === "byo" && !preparedRequest.headers["anthropic-version"]) {
+    if (!preparedRequest.headers["anthropic-version"]) {
       preparedRequest.headers["anthropic-version"] = ANTHROPIC_API_VERSION;
     }
 
@@ -278,13 +283,19 @@ export class ClaudeService {
 
     const rawBody = await response.text();
 
+    // Read before the status check: a 402 carries the balance that just ran
+    // out, and that is exactly the number the publik card wants to show.
+    if (this.transport.tier === "publik") {
+      this.reportPublikUsage?.(readPublikUsageHeaders(response.headers));
+    }
+
     if (!response.ok) {
       throw new AssistantTransportFailure(
         failureForStatusCode({
           statusCode: response.status,
-          serverErrorCode: serverErrorCodeInFailureBody(rawBody),
+          rawBody,
           retryAfterHeaderValue: response.headers.get("Retry-After"),
-          isFundedTier: this.transport.tier === "funded",
+          tier: this.transport.tier,
         })
       );
     }

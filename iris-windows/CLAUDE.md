@@ -6,13 +6,25 @@ not been verified. This file is the architecture and the traps.
 
 ## The one rule
 
-**The user's own Anthropic key must never reach a publik host.** Losing that is
-a ship-blocker, not a bug. It is enforced structurally, by assertion, and by test
-in `src/services/assistant-transport.ts` — read the header comment there before
+**A credential only ever reaches the host that issued it.** The user's own
+Anthropic key must never be seen by a publik host, and the publik API key must
+never be seen by Anthropic. Losing either is a ship-blocker, not a bug. It is
+enforced structurally, by assertion, and by test in
+`src/services/assistant-transport.ts` — read the header comment there before
 touching anything in that file.
 
-Do not add a code path that accepts both a credential and a destination. The
-whole design is that no such function exists.
+The rule used to be the narrower "the BYO key never reaches publik", enforced by
+comparing against one hardcoded host. Since publik API became the default route
+there are two credentials and two permitted destinations, so the rule is the
+*pairing*: `PERMITTED_HOST_FOR_CREDENTIAL` is the table, `credentialMayReachHost`
+is the question, and every request declares which credential it carries so the
+gate checks the pairing rather than guessing from header names.
+
+Do not add a code path that accepts a credential and an *unvalidated*
+destination. One builder legitimately takes a base URL — provisioning is allowed
+to move the gateway — and it validates that URL against its own credential's
+permitted hosts before writing the header. Every other builder takes no URL at
+all.
 
 ## Testing is CI, not local
 
@@ -115,9 +127,14 @@ already renders that case honestly.
 
 `src/main/secrets.ts` is the only code that touches a secret at rest. The set
 today: the BYO Anthropic key (companion chat + maintain mode's Tier C), the
-Supabase refresh token, maintain mode's GitHub device-flow token pair
+publik API key this install was issued (`pk_live_…`, the default chat route),
+the Supabase refresh token, maintain mode's GitHub device-flow token pair
 (fork-backup), and the BYO OpenAI key (maintain mode's Tier C fixer only — see
-"Do NOT" below). All go through `safeStorage` (DPAPI). The access token is
+"Do NOT" below). All go through `safeStorage` (DPAPI).
+
+The publik *app token* (`pat_iris_…`, `main/publik-app-token.ts`) is NOT a
+secret and deliberately does not live here: it ships inside every binary by
+design, and is contained by being per-release, revocable and rate-limited. The access token is
 memory-only, per protocol §4.
 
 `settings.json` must stay free of secrets — it is plain text and users paste it
@@ -330,13 +347,24 @@ Follow the publik house style, which is `iris-macos/CLAUDE.md`'s:
 
 ## Do NOT
 
-- Do not add a function that takes both an API key and a URL.
-- Do not reintroduce voice, TTS, audio, or a non-Anthropic provider **into the
-  companion chat** (`services/assistant-transport.ts`, `main/companion.ts`) —
-  that surface stays Anthropic-only, full stop. This does NOT govern maintain
-  mode's Tier C fixer, which may run on a BYO OpenAI key (api.openai.com only,
-  same key-isolation rule) alongside the Anthropic one — a founder decision,
-  matching `iris-macos` maintain-mode parity. See `main/maintain/controller.ts`
+- Do not add a function that takes an API key and an unvalidated URL.
+- Do not reintroduce voice, TTS, or audio.
+- **The "companion chat is Anthropic-only, full stop" rule is retired** (founder
+  decision, 2026-09-21). It said no non-Anthropic provider may enter
+  `services/assistant-transport.ts` / `main/companion.ts`. Chat now has three
+  routes — publik API (the default), the user's own Anthropic key, and the Codex
+  CLI — because the funded tier was removed and every public install has to
+  bring its own way to pay. `docs/assistant-credentials.md` at the repo root is
+  the contract; read it before adding a fourth.
+- **Never Anthropic OAuth.** `claude setup-token`, importing an existing
+  `claude login`, or storing any `sk-ant-oat…` / Claude.ai session token is
+  prohibited by Anthropic's own terms for third-party apps ("developers may not
+  collect, store, or intermediate Claude.ai credentials or session tokens").
+  This client has never had that path and must not grow one; macOS had it and it
+  was removed. Anthropic access is API keys only. Codex is the sanctioned
+  OpenAI-side analogue, which is why it is allowed.
+- Maintain mode's Tier C fixer may still run on a BYO OpenAI key
+  (api.openai.com only, same pairing rule). See `main/maintain/controller.ts`
   and `services/maintain/model-provider.ts`.
 - Do not add a second test runner. It is vitest.
 - Do not rewrite `renderer/guide/app.js` to Windows conventions.

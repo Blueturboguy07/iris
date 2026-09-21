@@ -15,6 +15,8 @@ import {
 import { classifyExternalLink, refusalMessage } from "../services/external-links";
 import { boundedCommandOutput, toolSpecFor } from "../services/tool-versions";
 import { secretStorageIsAvailable } from "./secrets";
+import { PublikSetup } from "./publik-setup";
+import { buildCanProvisionAutomatically } from "./publik-app-token";
 import { AutopilotController, type FinishedInstall } from "./autopilot-controller";
 import { guideBackedRecipeResolver } from "../services/autopilot/guide-recipe-resolver";
 import type { InstallRecipe } from "../services/autopilot/recipe";
@@ -42,6 +44,8 @@ let settingsWindow: BrowserWindow | null = null;
 let overlayWindows: BrowserWindow[] = [];
 
 const settings = new SettingsStore();
+const publikSetup = new PublikSetup(settings);
+let firstRunWindow: BrowserWindow | null = null;
 const account = new AccountSession(settings);
 let companion: CompanionManager;
 let maintain: MaintainController;
@@ -314,6 +318,53 @@ function createSettingsWindow(): BrowserWindow {
   void window.loadFile(rendererPath("settings", "index.html"));
   window.once("ready-to-show", () => window.show());
   return window;
+}
+
+/**
+ * The first-run window. Windows had no onboarding at all before this: a new
+ * user met an empty chat box and a setup panel that only appeared once they had
+ * already typed something and been refused.
+ *
+ * It is only ever opened when Iris genuinely cannot reach a model, so an
+ * install that already has a key (or a reinstall over one) never sees it.
+ */
+function createFirstRunWindow(): BrowserWindow {
+  const window = new BrowserWindow({
+    width: 560,
+    height: 620,
+    resizable: false,
+    show: false,
+    title: "Welcome to Iris",
+    webPreferences: {
+      preload: preloadPath(),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  void window.loadFile(rendererPath("first-run", "index.html"));
+  window.once("ready-to-show", () => window.show());
+  return window;
+}
+
+/**
+ * Shows onboarding when, and only when, there is no way to reach a model. The
+ * guided-install product works without one, so this must not become a gate in
+ * front of the whole app.
+ */
+function openFirstRunWindowIfNeeded(): void {
+  if (settings.get("hasCompletedFirstRun")) return;
+  if (settings.isConfigured()) {
+    settings.set("hasCompletedFirstRun", true);
+    return;
+  }
+  if (firstRunWindow && !firstRunWindow.isDestroyed()) {
+    firstRunWindow.focus();
+    return;
+  }
+  firstRunWindow = createFirstRunWindow();
+  firstRunWindow.on("closed", () => {
+    firstRunWindow = null;
+  });
 }
 
 // MARK: - The guide panel's native commands
@@ -954,6 +1005,12 @@ function setupIPC(): void {
     ...settings.getAll(),
     // Never the key itself — only whether one is stored.
     hasAnthropicApiKey: Boolean(settings.getAnthropicApiKey()),
+    // Same rule for the publik key. The renderer gets the card's rendered
+    // state, never the credential behind it — CONTRACT section 1 is explicit
+    // that a desktop app's key must not enter a renderer.
+    hasPublikApiKey: publikSetup.hasKey(),
+    publikCard: publikSetup.cardState(false),
+    buildCanProvisionAutomatically: buildCanProvisionAutomatically(),
     // Maintain mode's Tier C BYO fixer key — optional, and separate from the
     // companion-chat Anthropic key above. Same "whether, never what" rule.
     hasOpenAiApiKey: Boolean(settings.getOpenAiApiKey()),
@@ -970,6 +1027,9 @@ function setupIPC(): void {
     if (key === "openaiApiKey") {
       return settings.setOpenAiApiKey(String(value ?? ""));
     }
+    if (key === "publikApiKey") {
+      return publikSetup.acceptPastedKey(String(value ?? ""));
+    }
     settings.set(key as never, value as never);
     if (key === "alwaysOnTop" && chatWindow && !chatWindow.isDestroyed()) {
       chatWindow.setAlwaysOnTop(Boolean(value), "screen-saver");
@@ -978,6 +1038,45 @@ function setupIPC(): void {
       if (value) startCursorBuddy();
       else stopCursorBuddy();
     }
+    return true;
+  });
+
+  // MARK: publik API setup
+  //
+  // The disclosure is shown by the renderer BEFORE this is called — consent
+  // precedes the mint (CONTRACT section 3.2 [S4]). The main process will not
+  // provision on its own initiative anywhere.
+  ipcMain.handle("publik:provision", async () => {
+    const outcome = await publikSetup.provision();
+    if (outcome.kind === "provisioned") {
+      settings.set("providerPreference", "publikApi");
+      return { ok: true as const, card: publikSetup.cardState(true) };
+    }
+    return {
+      ok: false as const,
+      reason: outcome.kind,
+      message:
+        outcome.kind === "noAppToken"
+          ? "This build can't set up publik API on its own. Paste a key from your dashboard instead."
+          : outcome.kind === "refused"
+            ? outcome.message
+            : "Iris couldn't reach publik API. Check your connection, or paste a key from your dashboard.",
+    };
+  });
+
+  // Section 12 (4): the starter is not spendable until the card has been seen.
+  ipcMain.handle("publik:cardShown", () => {
+    publikSetup.markCardShown();
+    return true;
+  });
+
+  ipcMain.handle("publik:card", (_event, isFirstRun: boolean) =>
+    publikSetup.cardState(Boolean(isFirstRun))
+  );
+
+  ipcMain.handle("firstRun:complete", () => {
+    settings.set("hasCompletedFirstRun", true);
+    if (firstRunWindow && !firstRunWindow.isDestroyed()) firstRunWindow.close();
     return true;
   });
 
@@ -1089,6 +1188,11 @@ if (gotSingleInstanceLock) {
     // Iris knowing when it itself is out of date — see services/self-update-check.ts
     // for why this is a plain GitHub-releases poll rather than update.electronjs.org.
     startSelfUpdateWatch(settings, app.getVersion());
+
+    // Ask for credentials once, on the first launch that has none. Deliberately
+    // after the tray and windows exist, so a user who closes it still lands in
+    // a working app — the guides do not need a model.
+    openFirstRunWindowIfNeeded();
 
     // A link that launched the app is sitting in this process's own argv.
     receiveDeepLinksFromArgv(process.argv);

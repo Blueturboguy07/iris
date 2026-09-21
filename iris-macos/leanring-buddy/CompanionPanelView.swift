@@ -103,7 +103,7 @@ struct CompanionPanelView: View {
         _guideSessionController = ObservedObject(wrappedValue: companionManager.guideSessionController)
         _appInventoryService = ObservedObject(wrappedValue: companionManager.appInventoryService)
         _spendLedger = ObservedObject(wrappedValue: companionManager.spendLedger)
-        _publikAPIAccount = ObservedObject(wrappedValue: publikAPIAccount)
+        _publikAPIAccount = ObservedObject(wrappedValue: companionManager.publikAPIAccount)
     }
 
     var body: some View {

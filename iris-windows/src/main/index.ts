@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { createTray, observeAutopilotEventForTray, setTrayInstallActive, clearTrayYourTurn } from "./tray";
+import { startSelfUpdateWatch } from "./self-update";
 import { SettingsStore } from "./settings";
 import { CompanionManager } from "./companion";
 import { AccountSession, configuredSupabaseProject } from "./account-session";
@@ -1084,6 +1085,10 @@ if (gotSingleInstanceLock) {
     });
 
     if (settings.get("cursorBuddyEnabled")) startCursorBuddy();
+
+    // Iris knowing when it itself is out of date — see services/self-update-check.ts
+    // for why this is a plain GitHub-releases poll rather than update.electronjs.org.
+    startSelfUpdateWatch(settings, app.getVersion());
 
     // A link that launched the app is sitting in this process's own argv.
     receiveDeepLinksFromArgv(process.argv);

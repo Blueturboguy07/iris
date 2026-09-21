@@ -32,6 +32,12 @@ export interface SettingsSchema {
 
   /** The last guide the user opened, so the panel can offer to resume it. */
   lastGuideSlug: string;
+
+  /** The release tag (e.g. "iris-v0.9.11") the self-update check last
+   *  notified about, so a reader who dismisses the notice is not shown it
+   *  again every few hours for the same release — only when a newer one
+   *  ships. See `main/self-update.ts`. */
+  lastAnnouncedUpdateTag: string;
 }
 
 const defaults: SettingsSchema = {
@@ -41,6 +47,7 @@ const defaults: SettingsSchema = {
   cursorBuddyEnabled: true,
   autopilotAutonomyGranted: false,
   lastGuideSlug: "",
+  lastAnnouncedUpdateTag: "",
 };
 
 /**

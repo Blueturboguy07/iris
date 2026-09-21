@@ -1,4 +1,4 @@
-import { Tray, Menu, nativeImage, Notification } from "electron";
+import { Tray, Menu, nativeImage, Notification, shell } from "electron";
 import path from "node:path";
 
 import type { AutopilotEvent } from "../services/autopilot/runner";
@@ -29,6 +29,7 @@ let callbacks: TrayCallbacks | null = null;
 const tracker = new YourTurnTracker();
 let waitingInstruction: string | undefined;
 let installActive = false;
+let updateAvailable: { version: string; downloadUrl: string } | null = null;
 
 export function createTray(cb: TrayCallbacks): Tray {
   callbacks = cb;
@@ -66,6 +67,14 @@ function rebuildMenu(): void {
         label: waitingInstruction ? `Your turn — ${trimForMenu(waitingInstruction)}` : "Your turn — bring Iris to front",
         click: cb.onYourTurn,
       },
+    );
+  }
+
+  if (updateAvailable) {
+    const update = updateAvailable;
+    template.push(
+      { type: "separator" },
+      { label: `Update to Iris ${update.version}`, click: () => void shell.openExternal(update.downloadUrl) },
     );
   }
 
@@ -137,6 +146,18 @@ export function clearTrayYourTurn(): void {
   tracker.observe({ type: "aborted" });
   waitingInstruction = undefined;
   tray?.setToolTip(RESTING_TOOLTIP);
+  rebuildMenu();
+}
+
+/// Tells the tray whether a newer Iris exists — set by `main/self-update.ts`'s
+/// periodic check. `null` clears the menu item (e.g. once the reader is
+/// already current). Skips the rebuild when nothing actually changed, so a
+/// recheck that finds the same release does not flicker the menu.
+export function setTrayUpdateAvailable(update: { version: string; downloadUrl: string } | null): void {
+  if (updateAvailable?.version === update?.version && updateAvailable?.downloadUrl === update?.downloadUrl) {
+    return;
+  }
+  updateAvailable = update;
   rebuildMenu();
 }
 

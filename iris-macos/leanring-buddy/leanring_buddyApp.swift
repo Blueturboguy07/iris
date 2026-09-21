@@ -60,7 +60,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotific
             menuBarPanelManager?.showPanelOnLaunch()
         }
         registerAsLoginItemIfNeeded()
-        // startSparkleUpdater()
+        startSparkleUpdater()
 
         if let guideDeepLinkWaitingForLaunchToFinish {
             self.guideDeepLinkWaitingForLaunchToFinish = nil

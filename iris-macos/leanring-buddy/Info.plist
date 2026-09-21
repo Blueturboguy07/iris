@@ -4,20 +4,21 @@
 <dict>
 	<key>LSUIElement</key>
 	<true/>
-	<!-- No SUFeedURL and no SUPublicEDKey, deliberately.
-
-	     These were inherited verbatim from the upstream template this app was
-	     forked from and pointed at github.com/julianjear/makesomething-mac-app
-	     with that project's EdDSA public key. Sparkle starts on launch, so every
-	     Iris install was asking an unrelated third party for updates and would
-	     have trusted anything they signed — an install path into the machine of
-	     every user, from a repository nobody here controls.
-
-	     Iris has no update feed of its own yet. Restoring automatic updates
-	     needs an Iris-owned appcast and an EdDSA keypair generated here, whose
-	     PUBLIC half goes in SUPublicEDKey and whose private half never leaves
-	     the signing machine. Until both exist these stay absent, and
-	     `startSparkleUpdater` refuses to start without them. -->
+	<!-- Iris's own appcast, generated on publikhq.com from the public
+	     Blueturboguy07/iris release list (see app/api/iris/appcast/route.ts in
+	     the publik repo) rather than a static file, so it is never stale. The
+	     old makesomething-mac-app feed URL and its EdDSA key are gone for good
+	     — see the Sep 20 2026 fix (commit a006639) that removed them. -->
+	<key>SUFeedURL</key>
+	<string>https://publikhq.com/api/iris/appcast</string>
+	<!-- The PUBLIC half of an EdDSA keypair generated on Sep 21 2026
+	     specifically for Iris (`generate_keys --account iris`, from the
+	     Sparkle 2.10.0 CLI distribution). The private half never touched this
+	     file or git history — it lives only in the Blueturboguy07/iris GitHub
+	     Actions secret SPARKLE_ED_PRIVATE_KEY, used by iris-release.yml to
+	     sign each release's dmg with sign_update. -->
+	<key>SUPublicEDKey</key>
+	<string>0PPUd8joCrRLsU0SZtSHbN0nryim8VSVcIX4IWC8F10=</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>Iris needs screen recording access to see your screen and help you.</string>
 	<!-- Claims the iris:// scheme so the OAuth redirect and the website's guide

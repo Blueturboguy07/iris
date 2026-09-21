@@ -188,6 +188,26 @@ jobs:
           spctl --assess --type open --context context:primary-signature -vv \
             dist/Iris-assistant.dmg
 
+      # Independent of Apple notarization: this is Sparkle's OWN signature,
+      # checked by every running copy of Iris against SUPublicEDKey before it
+      # will install an update (leanring_buddyApp.swift's startSparkleUpdater).
+      # `-p` prints nothing but the raw base64 EdDSA signature — no XML, no
+      # length/version metadata — which is exactly the contract
+      # app/api/iris/appcast/route.ts (in the publik repo) expects to find
+      # next to each release's dmg: <asset-filename>.edsig, signature only.
+      - name: Sign the dmg for Sparkle self-update
+        if: ${{ secrets.SPARKLE_ED_PRIVATE_KEY != '' }}
+        working-directory: iris-macos
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/sparkle.tar.xz" \
+            "https://github.com/sparkle-project/Sparkle/releases/download/2.10.0/Sparkle-2.10.0.tar.xz"
+          tar -xf "$RUNNER_TEMP/sparkle.tar.xz" -C "$RUNNER_TEMP" bin/sign_update
+          SIGNATURE="$(echo "$SPARKLE_ED_PRIVATE_KEY" | "$RUNNER_TEMP/bin/sign_update" --ed-key-file - -p dist/Iris-assistant.dmg)"
+          printf '%s' "$SIGNATURE" > dist/Iris-assistant.dmg.edsig
+
       - name: Check the build opens
         working-directory: iris-macos
         env:
@@ -218,6 +238,15 @@ jobs:
             iris-macos/dist/Iris-assistant.dmg
             iris-macos/dist/macos-signed.txt
           if-no-files-found: error
+
+      # Separate artifact, separate failure mode: the .edsig only exists when
+      # SPARKLE_ED_PRIVATE_KEY is set, so its absence must never fail the job
+      # the way a missing dmg should.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iris-macos-edsig
+          path: iris-macos/dist/Iris-assistant.dmg.edsig
+          if-no-files-found: ignore
 
   # Windows ships the Electron app. It used to ship iris-desktop (Tauri) — a
   # guide viewer with no maintain mode, no autopilot fix ladder and no edit
@@ -343,6 +372,11 @@ jobs:
           path: release-assets/macos
       - uses: actions/download-artifact@v4
         with:
+          name: iris-macos-edsig
+          path: release-assets/macos
+        continue-on-error: true
+      - uses: actions/download-artifact@v4
+        with:
           name: iris-windows
           path: release-assets/windows
       # Iris is meant to be a signed application on both platforms. It is not
@@ -391,4 +425,5 @@ jobs:
           gh release upload "$IRIS_TAG" \
             release-assets/macos/*.dmg \
             $(find release-assets/windows -name '*.exe') \
+            $(find release-assets/macos -name '*.edsig' 2>/dev/null) \
             --clobber

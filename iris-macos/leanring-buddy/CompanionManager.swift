@@ -827,11 +827,21 @@ final class CompanionManager: ObservableObject {
             .filter { !$0.isWhitespace && $0 != "-" && $0 != "_" }
     }
 
-    /// Turns a failed request into what the panel says, and — when the funded
-    /// tier reports the session is gone — into a refresh-or-sign-out on the
-    /// account service, so the user is shown sign-in buttons rather than the
-    /// same error over and over.
+    /// Turns a failed request into what the panel says.
     private func describeAndHandle(assistantError: Error) async -> String {
+        // The Codex chat route throws the Tier C provider's error type rather
+        // than a transport one — it is a subprocess, not a request. Those cases
+        // already carry the sentence a reader can act on ("run `codex login`",
+        // "iris can't find the codex command"), and the generic branch below
+        // would throw it away and say "check your connection" instead, which is
+        // both wrong and unactionable. That is the same mistake the "(… error
+        // 8.)" incident was, so it is handled before the fallback rather than
+        // after it.
+        if let providerError = assistantError as? MaintainModelProviderError {
+            print("⚠️ Companion response error (provider): \(providerError)")
+            return providerError.userFacingMessage
+        }
+
         guard let transportError = assistantError as? AssistantTransportError else {
             print("⚠️ Companion response error: \(assistantError)")
             return AssistantTransportError.transportFailure(

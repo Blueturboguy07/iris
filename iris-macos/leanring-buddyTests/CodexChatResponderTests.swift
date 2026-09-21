@@ -124,4 +124,21 @@ struct CodexChatResponderTests {
         )
         #expect(!prompt.contains("The attached images"))
     }
+
+    // MARK: How its failures reach the reader
+
+    @Test func aCodexFailureKeepsTheSentenceThatNamesTheFix() async {
+        // The Codex route throws the Tier C provider's error type, not a
+        // transport one. Those cases carry the actionable sentence; the chat
+        // error path's generic branch would replace it with "check your
+        // connection", which is the "(… error 8.)" mistake again.
+        for missing: MaintainModelProviderError.MissingCredential in [
+            .codexCommandNotFound, .codexLoginNotUsable,
+        ] {
+            let message = MaintainModelProviderError.noCredential(missing).userFacingMessage
+            #expect(message.contains("codex"), "did not name the tool: \(message)")
+            #expect(!message.contains("check your connection"),
+                    "fell back to the generic sentence: \(message)")
+        }
+    }
 }

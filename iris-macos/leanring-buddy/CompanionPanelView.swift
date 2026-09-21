@@ -37,6 +37,11 @@ struct CompanionPanelView: View {
     /// scanning on its own schedule, and the app list has to appear when it
     /// does rather than on the next unrelated state change.
     @ObservedObject var appInventoryService: AppInventoryService
+    /// And again for the publik API card: the balance changes when a request
+    /// comes back carrying `x-publik-balance`, which is not a moment anything
+    /// else on this panel notices. Without observing it the card would show
+    /// whatever the balance was when the panel last happened to redraw.
+    @ObservedObject var publikAPIAccount: PublikAPIAccount
 
     /// Where the pointer is inside the panel, so the eye can glance toward it.
     /// Zero (looking straight ahead) whenever the pointer is elsewhere.
@@ -98,6 +103,7 @@ struct CompanionPanelView: View {
         _guideSessionController = ObservedObject(wrappedValue: companionManager.guideSessionController)
         _appInventoryService = ObservedObject(wrappedValue: companionManager.appInventoryService)
         _spendLedger = ObservedObject(wrappedValue: companionManager.spendLedger)
+        _publikAPIAccount = ObservedObject(wrappedValue: publikAPIAccount)
     }
 
     var body: some View {
@@ -1385,13 +1391,13 @@ struct CompanionPanelView: View {
         .onAppear {
             // CONTRACT section 12 item 4: the starter may not be spent until
             // this card has been in front of the reader once.
-            companionManager.publikAPIAccount.recordThatTheFirstRunCardWasShown()
+            publikAPIAccount.recordThatTheFirstRunCardWasShown()
         }
     }
 
     /// The balance, from the last thing the gateway said.
     private var publikAPIBalanceLine: String {
-        guard let walletSnapshot = companionManager.publikAPIAccount.walletSnapshot else {
+        guard let walletSnapshot = publikAPIAccount.walletSnapshot else {
             return "publik API is set up"
         }
         return "\(walletSnapshot.dollarsDescription) left on publik API"
@@ -1400,7 +1406,7 @@ struct CompanionPanelView: View {
     /// The primary button's title and its single destination. Anonymous installs
     /// are asked to link the computer; claimed ones to add a plan or a pack.
     private var publikAPIPrimaryAction: (title: String, linkURLString: String)? {
-        guard let walletSnapshot = companionManager.publikAPIAccount.walletSnapshot else { return nil }
+        guard let walletSnapshot = publikAPIAccount.walletSnapshot else { return nil }
         switch walletSnapshot.claimState {
         case .anonymous:
             guard let claimURLString = walletSnapshot.claimURLString else { return nil }
@@ -1421,7 +1427,7 @@ struct CompanionPanelView: View {
     private func acceptDisclosureAndProvision() {
         publikAPISetupMessage = nil
         isProvisioningPublikAPI = true
-        let account = companionManager.publikAPIAccount
+        let account = publikAPIAccount
         Task { @MainActor in
             let outcome = await account.provisionAKey(
                 havingAccepted: .readerAcceptedTheDisclosure()
@@ -1442,7 +1448,7 @@ struct CompanionPanelView: View {
     private func savePastedPublikAPIKey() {
         let candidateKey = publikAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !candidateKey.isEmpty else { return }
-        if companionManager.publikAPIAccount.saveKeyPastedByTheReader(candidateKey) {
+        if publikAPIAccount.saveKeyPastedByTheReader(candidateKey) {
             publikAPIKeyInput = ""
             publikAPISetupMessage = nil
             isShowingPublikAPIDisclosure = false
@@ -1454,7 +1460,7 @@ struct CompanionPanelView: View {
     }
 
     private func forgetPublikAPIKey() {
-        companionManager.publikAPIAccount.forgetKey()
+        publikAPIAccount.forgetKey()
         accountService.refreshPublikAPIKeyState()
         NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
     }

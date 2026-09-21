@@ -184,10 +184,14 @@ struct ChatPromptLiveTests {
     @MainActor
     private func ask(_ question: String, screen: SimulatedScreen) async throws -> GradedReply {
         let accountService = AccountService()
+        // Whichever provider this machine has set up answers — the same
+        // resolution the app itself uses. A live test that pinned one route
+        // would be testing a route rather than the prompt.
+        let publikAPIAccount = PublikAPIAccount()
         let api = ClaudeAPI(
             resolveTransport: {
                 await accountService.currentAssistantTransport(
-                    publikBaseURL: URL(string: "https://publikhq.com")!
+                    publikAPIAccount: publikAPIAccount
                 )
             }
         )

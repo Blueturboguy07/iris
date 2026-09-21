@@ -220,17 +220,32 @@ struct Test6FundingLatchReproTests {
         let stepsThatFinished = resultOfStep.filter { $0.value == .succeeded }.keys.count
 
         // And the route those calls take once signed in, from the real
-        // selector — this is why "publik is paying" is the right reading.
+        // selector.
+        //
+        // THE ANSWER CHANGED, AND THAT IS THE POINT. This block used to prove
+        // "publik is paying" — signing in returned the funded route even for a
+        // reader with their own key stored, which is what made the cap the
+        // right reading. There is no funded route now
+        // (docs/assistant-credentials.md), so signing in buys no model access
+        // at all and the reader's own credential is what answers. Kept rather
+        // than deleted because it is the regression test for exactly that: if
+        // a signed-in reader ever again gets a route they did not pay for,
+        // this reads "publik pays" and the funding model has silently come
+        // back.
         var routeAfterSigningIn = "unknown"
         if case .success(let transport) = AssistantTransport.selectTransport(
-            isSignedIn: true,
-            publikBaseURL: URL(string: "https://publikhq.com")!,
+            preference: nil,
+            publikAPIKey: nil,
+            publikGatewayBaseURL: URL(string: "https://publikhq.com/api/v1")!,
+            publikKeyMaySpend: false,
             storedAnthropicAPIKey: "sk-ant-api03-the-readers-own-key",
-            currentAccessTokenProvider: { "access" }
+            codexIsUsable: false
         ) {
-            if case .funded = transport { routeAfterSigningIn = "funded (publik pays)" }
-            else { routeAfterSigningIn = "the reader's own credential" }
+            if case .bringYourOwnKey = transport { routeAfterSigningIn = "the reader's own credential" }
+            else { routeAfterSigningIn = "publik pays" }
         }
+        #expect(routeAfterSigningIn == "the reader's own credential",
+                "signing in must not buy a model route any more")
 
         print("""
         [funding] calls billed to publik: \(publikPays.timesTheLadderAskedTheModel)

@@ -43,6 +43,21 @@
 	     editing it cannot point signed-in traffic at an arbitrary server. -->
 	<key>PublikAPIBaseURL</key>
 	<string>https://publikhq.com</string>
+	<!-- The build's public app token (`pat_iris_<32>`), the machine route into
+	     POST /api/v1/installs. Injected, never committed: Xcode expands the
+	     build setting at build time, so a release passes
+	     `PUBLIK_APP_TOKEN=pat_iris_…` to xcodebuild (scripts/release-app-token.sh
+	     reads it from the gitignored .publik-app-token, CI from the repo secret
+	     of the same name).
+
+	     An undefined setting expands to the empty string, and
+	     PublikAPIAccount.buildAppToken refuses both that and any value without
+	     the `pat_` prefix — so a developer build, or one where the injection was
+	     forgotten, falls back to the paste route instead of sending nonsense to
+	     the gateway on every launch. That fallback is the supported state for
+	     any build without a token, not a degraded one. -->
+	<key>PublikAppToken</key>
+	<string>$(PUBLIK_APP_TOKEN)</string>
 	<key>PublikSupabaseURL</key>
 	<string>https://gcbxnxwwuuqsypwevfgi.supabase.co</string>
 	<!-- PUBLIC VALUE, NOT A SECRET. This is the Supabase anonymous (publishable)

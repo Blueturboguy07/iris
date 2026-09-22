@@ -54,6 +54,10 @@ class GatedShell implements ShellSession {
     release?.();
   }
 
+  longRunningStillAlive(): boolean {
+    return false;
+  }
+
   currentDirectory(): string {
     return this.cwd;
   }

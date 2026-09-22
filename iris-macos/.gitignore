@@ -29,3 +29,16 @@ tools/edit-battery/fixtures/*/work/.git/
 # that NOTHING in the battery reads (the tokens are committed already signed).
 # iris is a public repo; this never goes near it.
 tools/edit-battery/fixtures/*/oracle/secret/*.pem
+
+# The publik app token this Mac bakes into a LOCAL release build
+# (`pat_iris_<32>`, read by scripts/release-app-token.sh into the xcodebuild
+# PUBLIK_APP_TOKEN setting). CI gets its own copy from the PUBLIK_APP_TOKEN
+# repo secret; this file exists because macOS releases are cut locally, where
+# that secret is unreachable.
+#
+# The token is public by construction — it ships inside every binary and the
+# gateway is built for that (per-release, revocable by timestamp, IP rate
+# limited, small starter). But "readable by anyone who unpacks a dmg" and
+# "in a public git history forever, for every release at once" are different
+# risks. iris is a public repo. This never goes near it.
+.publik-app-token

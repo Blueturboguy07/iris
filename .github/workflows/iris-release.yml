@@ -87,15 +87,31 @@ jobs:
           echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
           echo "signed=true" >> "$GITHUB_OUTPUT"
 
+      # PUBLIK_APP_TOKEN is a build setting, which Info.plist's PublikAppToken
+      # entry expands (`$(PUBLIK_APP_TOKEN)`). Unset, it expands to empty and
+      # PublikAPIAccount.buildAppToken falls back to the paste route, which is
+      # the supported state for a build with no token. Passed on the command
+      # line rather than committed: `iris` is a public repo.
+      #
+      # A local release does the same thing with its own token — see
+      # iris-macos/scripts/release-app-token.sh, since macOS releases are cut
+      # by hand where this secret is unreachable.
       - name: Build Iris.app
         working-directory: iris-macos
         env:
           SIGNED: ${{ steps.signing.outputs.signed }}
+          PUBLIK_APP_TOKEN: ${{ secrets.PUBLIK_APP_TOKEN }}
         run: |
           set -euo pipefail
+          if [ -n "${PUBLIK_APP_TOKEN:-}" ]; then
+            echo "Baking a ${#PUBLIK_APP_TOKEN}-character publik app token into Info.plist."
+          else
+            echo "No PUBLIK_APP_TOKEN secret — this build falls back to the paste route."
+          fi
           if [ "$SIGNED" = "true" ]; then
             xcodebuild -project leanring-buddy.xcodeproj -scheme leanring-buddy \
               -configuration Release -derivedDataPath build \
+              PUBLIK_APP_TOKEN="${PUBLIK_APP_TOKEN:-}" \
               CODE_SIGN_IDENTITY="$APPLE_SIGNING_IDENTITY" \
               CODE_SIGN_STYLE=Manual \
               ENABLE_HARDENED_RUNTIME=YES \
@@ -104,6 +120,7 @@ jobs:
           else
             xcodebuild -project leanring-buddy.xcodeproj -scheme leanring-buddy \
               -configuration Release -derivedDataPath build \
+              PUBLIK_APP_TOKEN="${PUBLIK_APP_TOKEN:-}" \
               CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
               build
           fi
@@ -195,13 +212,24 @@ jobs:
       # length/version metadata — which is exactly the contract
       # app/api/iris/appcast/route.ts (in the publik repo) expects to find
       # next to each release's dmg: <asset-filename>.edsig, signature only.
+      # The emptiness check is in the script, NOT in an `if:`. GitHub does not
+      # expose the `secrets` context to step-level `if` conditions, and a
+      # workflow that references it there does not fail that step — the whole
+      # RUN is rejected before anything executes, with only "this run likely
+      # failed because of a workflow file issue" to go on. That took out every
+      # release run, macOS and Windows alike, until 0.9.12 caught it.
       - name: Sign the dmg for Sparkle self-update
-        if: ${{ secrets.SPARKLE_ED_PRIVATE_KEY != '' }}
         working-directory: iris-macos
         env:
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
         run: |
           set -euo pipefail
+          if [ -z "${SPARKLE_ED_PRIVATE_KEY:-}" ]; then
+            echo "No SPARKLE_ED_PRIVATE_KEY set — skipping the Sparkle signature."
+            echo "The appcast skips a release whose dmg has no .edsig beside it,"
+            echo "so this build simply will not be offered as an update."
+            exit 0
+          fi
           curl -fsSL -o "$RUNNER_TEMP/sparkle.tar.xz" \
             "https://github.com/sparkle-project/Sparkle/releases/download/2.10.0/Sparkle-2.10.0.tar.xz"
           tar -xf "$RUNNER_TEMP/sparkle.tar.xz" -C "$RUNNER_TEMP" bin/sign_update
@@ -279,6 +307,54 @@ jobs:
 
       - name: Unit tests
         run: npm test
+
+      # Substituted AFTER the suite runs, so the tests keep exercising the
+      # empty default (the shipping state for any build without a token), and
+      # BEFORE `npm run make`, so the packaged bundle carries the real one.
+      #
+      # The token is public by construction — it ships inside every binary —
+      # but it is still injected rather than committed, because `iris` is a
+      # public repo and a token in git history is harvestable by everyone at
+      # once instead of by whoever unpacks an installer.
+      #
+      # The missing-secret check is in the script, NOT in an `if:`. GitHub does
+      # not expose the `secrets` context to step-level `if`, and referencing it
+      # there does not skip the step — it rejects the whole run before anything
+      # executes. That took out every release run until 0.9.12 caught it; do
+      # not reintroduce the shape here.
+      - name: Bake the publik app token
+        env:
+          PUBLIK_APP_TOKEN: ${{ secrets.PUBLIK_APP_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${PUBLIK_APP_TOKEN:-}" ]; then
+            echo "No PUBLIK_APP_TOKEN secret — shipping without one."
+            echo "Auto-provisioning stays off and every install falls back to"
+            echo "pasting a key from publikhq.com/dashboard/api."
+            exit 0
+          fi
+          node -e '
+            const fs = require("fs");
+            const file = "src/main/publik-app-token.ts";
+            const token = process.env.PUBLIK_APP_TOKEN.trim();
+            if (!token.startsWith("pat_iris_")) {
+              console.error("PUBLIK_APP_TOKEN is not a pat_iris_ token; refusing to bake it.");
+              process.exit(1);
+            }
+            const before = fs.readFileSync(file, "utf8");
+            const target = `const BAKED_APP_TOKEN = "";`;
+            if (!before.includes(target)) {
+              console.error("Could not find the BAKED_APP_TOKEN placeholder in " + file + ".");
+              console.error("Someone changed its shape — fix this step rather than shipping an empty token.");
+              process.exit(1);
+            }
+            // JSON.stringify, not string concatenation: it is the escaping the
+            // value has to survive to remain a valid TS string literal.
+            const after = before.replace(target, "const BAKED_APP_TOKEN = " + JSON.stringify(token) + ";");
+            fs.writeFileSync(file, after);
+            console.log("Baked a " + token.length + "-character app token into " + file + ".");
+          '
 
       - name: Make the installer
         run: npm run make

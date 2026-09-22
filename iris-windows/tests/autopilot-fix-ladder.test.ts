@@ -619,6 +619,10 @@ class OnRunShell implements ShellSession {
     this.onRun();
     return this.inner.runLongRunning(command, readyMarker, graceMs);
   }
+  longRunningStillAlive(): boolean {
+    return false;
+  }
+
   currentDirectory(): string {
     return this.inner.currentDirectory();
   }

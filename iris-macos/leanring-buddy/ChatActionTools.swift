@@ -2,9 +2,17 @@
 //  ChatActionTools.swift
 //  leanring-buddy
 //
-//  The three things a chat message can actually DO — put text on the reader's
-//  clipboard, run one command on their Mac, and open a publik install guide at
-//  the eye — plus the gate the command passes before it runs.
+//  The four things a chat message can actually DO — put text on the reader's
+//  clipboard, run one command on their Mac, open a publik install guide at the
+//  eye, and look at what it has left running — plus the gate the command
+//  passes before it runs.
+//
+//  The fourth is younger than the others and exists because of one incident:
+//  `npm run dev` was run in the foreground lane, killed at the 120-second
+//  deadline, and reported to the reader as "still serving". A command that is
+//  meant to outlive the call now says so (`keepRunning`), and whether it is
+//  actually alive is answered by asking the kernel on every call rather than
+//  by remembering a line of stdout. See `IrisBackgroundCommands`.
 //
 //  Until this file existed, chat was structurally incapable of doing either:
 //  `buildRequestBody` was called with no tools on the chat route, ever, so a
@@ -58,6 +66,7 @@ enum ChatActionTools {
     static let clipboardToolName = "put_text_on_the_clipboard"
     static let runCommandToolName = "run_a_command_in_the_terminal"
     static let openInstallGuideToolName = "open_an_install_guide"
+    static let backgroundCommandsToolName = "check_on_background_commands"
 
     /// How many rounds of client-executed tools one chat message may spend.
     /// A round is one model turn's worth of tool calls, so this is the ceiling
@@ -98,6 +107,14 @@ enum ChatActionTools {
         on their machine, and use it when the honest answer depends on what \
         the machine actually says rather than on what you remember.
 
+        A COMMAND THAT NEVER EXITS NEEDS keepRunning: true. A dev server, a \
+        watcher, anything that holds a port — `npm run dev`, `vite`, `next \
+        dev`, `rails s`, `python -m http.server` — runs until something stops \
+        it. Without keepRunning such a command is killed at the deadline and \
+        WHATEVER IT WAS SERVING DIES WITH IT, however healthy its output \
+        looked before that. With keepRunning it is left running and you are \
+        told, from the machine itself, whether it actually survived.
+
         One command per call. Do not chain unrelated commands with && or ; to \
         get around that — the reader is shown what runs, and a chain hides it.
 
@@ -127,6 +144,46 @@ enum ChatActionTools {
                     command does. The reader is shown this verbatim when a command needs \
                     their approval, so write it for them, not for you.
                     """,
+                ],
+                "keepRunning": [
+                    "type": "boolean",
+                    "description": """
+                    True for a command that is meant to keep running — a dev server, a \
+                    watcher, anything holding a port. It is started and left alive, and the \
+                    result tells you whether it was still there a moment later. False (the \
+                    default) runs to completion under a deadline.
+                    """,
+                ],
+            ],
+        ],
+    ]
+
+    /// The fourth thing chat can do: look at what it left running.
+    ///
+    /// This exists because the alternative is remembering, and remembering is
+    /// what failed. A model that started a dev server two turns ago has a
+    /// "ready on :5174" line in its context and no way to know the process
+    /// died since — so it says the server is up, because the last evidence it
+    /// saw said so. Every call here re-asks the kernel.
+    static let checkBackgroundCommandsTool: [String: Any] = [
+        "name": backgroundCommandsToolName,
+        "description": """
+        Look at the commands Iris has left running, with a LIVE check of each \
+        one — whether the process is alive right now, and the last thing it \
+        printed. Call it before telling the reader that something you started \
+        earlier is still up: the output you remember is not evidence, and a \
+        server can be gone by the time they look.
+
+        Pass stopId to stop one of them.
+        """,
+        "input_schema": [
+            "type": "object",
+            "additionalProperties": false,
+            "required": [],
+            "properties": [
+                "stopId": [
+                    "type": "string",
+                    "description": "The id of a running command to stop. Omit to only look.",
                 ],
             ],
         ],
@@ -182,6 +239,7 @@ enum ChatActionTools {
             putTextOnTheClipboardTool,
             runACommandInTheTerminalTool,
             openAnInstallGuideTool,
+            checkBackgroundCommandsTool,
             GuideAutopilotFixProposer.webSearchTool,
         ]
     }
@@ -281,6 +339,8 @@ final class ChatActionToolRunner {
             return await runOneCommandThroughTheGate(toolInput)
         case ChatActionTools.openInstallGuideToolName:
             return await openTheInstallGuide(toolInput)
+        case ChatActionTools.backgroundCommandsToolName:
+            return await reportOnBackgroundCommands(toolInput)
         default:
             // web_search runs on Anthropic's side and never arrives here. A
             // name Iris does not have still gets a straight answer rather than
@@ -450,13 +510,54 @@ final class ChatActionToolRunner {
         hasDoneAnythingForThisChatMessage = true
         irisTrace("chat/command: running (\(commandsRunForThisChatMessage) of \(Self.maximumCommandsPerChatMessage))")
 
+        // The long-running lane. Asked for explicitly by the model, gated by
+        // exactly the same assessment the foreground lane just passed.
+        let modelAskedToKeepItRunning = (toolInput["keepRunning"] as? Bool) == true
+        if modelAskedToKeepItRunning {
+            return await startInTheBackground(approvedCommand)
+        }
+
+        // The structural half of the fix, and the half that does not depend on
+        // a model reading a tool description. `holdsTheShellOpen` already
+        // knows a dev server when it sees one — the autopilot has used it for
+        // exactly this since the NitroAI `npm run app` incident. A command it
+        // recognises is REFUSED in the foreground lane rather than run, killed
+        // at the deadline, and then described from its own startup banner.
+        // That is the sequence that told a reader their server was serving
+        // when it had been dead for two minutes, and this is what makes it
+        // unreachable rather than merely discouraged.
+        if GuideAutopilotCommandShape.holdsTheShellOpen(commandText) {
+            irisTrace("chat/command: refused foreground run of a shell-holding command")
+            return ClaudeClientToolResult(
+                contentText: """
+                NOT RUN — this command does not exit on its own, so running it here would \
+                mean killing it at the \(Int(Self.commandDeadlineSeconds))-second deadline \
+                and leaving nothing running. Call this tool again with keepRunning: true to \
+                start it properly and be told whether it survived.
+                """,
+                isError: true
+            )
+        }
+
         let outcome = await runTheApprovedCommand(approvedCommand)
         irisTrace("chat/command: exit=\(outcome.exitCode) timedOut=\(outcome.timedOut)")
 
         var report = "Exit code: \(outcome.exitCode)"
         if outcome.timedOut {
-            report += " — Iris stopped it after \(Int(Self.commandDeadlineSeconds)) seconds."
-                + " It may not have finished what it was doing."
+            // This wording is load-bearing. It used to read "Iris stopped it
+            // after 120 seconds. It may not have finished what it was doing",
+            // which a model read as "possibly incomplete" and reported to a
+            // reader as "but it's still serving" — about a process that had
+            // been killed. Say killed, say what that means for anything it
+            // was serving, and say what to do instead.
+            report += """
+                 — TERMINATED. Iris killed this process after \
+                \(Int(Self.commandDeadlineSeconds)) seconds because it had not exited. \
+                IT IS NOT RUNNING NOW. Anything it was serving — a dev server, a watcher, \
+                a port — died with it, no matter how healthy the output below looks. Do \
+                not tell the reader it is up. If it was meant to keep running, say so and \
+                start it again with keepRunning: true.
+                """
         }
         report += "\n\n"
         report += outcome.scrubbedOutputTail.isEmpty
@@ -469,6 +570,125 @@ final class ChatActionToolRunner {
         // ran succeeded: a command exiting non-zero ran perfectly well and its
         // exit code is the answer. Only a command that never ran is an error.
         return ClaudeClientToolResult(contentText: report, isError: outcome.timedOut)
+    }
+
+    // MARK: - The long-running lane
+
+    /// Starts an approved command and leaves it alive.
+    ///
+    /// The report says only what the kernel confirmed a moment ago. There is
+    /// deliberately no "started successfully" path that does not include a
+    /// liveness check — that shape is what let a dead server be described as
+    /// serving.
+    private func startInTheBackground(
+        _ approvedCommand: GuideAutopilotApprovedCommand
+    ) async -> ClaudeClientToolResult {
+        let outcome = await IrisBackgroundCommands.shared.start(
+            approvedCommand,
+            workingDirectory: NSHomeDirectory()
+        )
+
+        switch outcome {
+        case .running(let record):
+            irisTrace("chat/command: background \(record.id) alive")
+            let output = Self.scrubbedForTheModel(
+                IrisBackgroundCommands.shared.readLogTail(atPath: record.logPath)
+            )
+            return ClaudeClientToolResult(
+                contentText: """
+                RUNNING — started and still alive \
+                \(Int(IrisBackgroundCommands.settleSeconds)) seconds later, checked against \
+                the process itself rather than its output. Its id is \(record.id); pass that \
+                as stopId to \(ChatActionTools.backgroundCommandsToolName) to stop it, and call that \
+                tool to re-check it later rather than assuming it is still up.
+
+                What it has printed so far:
+                \(output.isEmpty ? "(nothing yet)" : output)
+
+                Read the real port out of that output if it names one. Do not state a port \
+                it has not printed.
+                """,
+                isError: false
+            )
+
+        case .exitedImmediately(let exitCode, let output):
+            return ClaudeClientToolResult(
+                contentText: """
+                DIED IMMEDIATELY — it was started and was already gone \
+                \(Int(IrisBackgroundCommands.settleSeconds)) seconds later, exit code \
+                \(exitCode). It is NOT running. Tell the reader it failed and what the \
+                output says; do not describe it as starting up or still compiling.
+
+                Output:
+                \(Self.scrubbedForTheModel(output))
+                """,
+                isError: true
+            )
+
+        case .couldNotStart(let reason):
+            return ClaudeClientToolResult(
+                contentText: "NOT RUN — Iris could not start it: \(reason)",
+                isError: true
+            )
+
+        case .tooMany:
+            return ClaudeClientToolResult(
+                contentText: """
+                NOT RUN — Iris is already holding \
+                \(IrisBackgroundCommands.maximumConcurrent) background commands. Call \
+                \(ChatActionTools.backgroundCommandsToolName) to see them and stop one first.
+                """,
+                isError: true
+            )
+        }
+    }
+
+    /// Lists what is running, re-checked against the machine on every call.
+    private func reportOnBackgroundCommands(
+        _ toolInput: [String: Any]
+    ) async -> ClaudeClientToolResult {
+        let registry = IrisBackgroundCommands.shared
+
+        if let stopId = (toolInput["stopId"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !stopId.isEmpty {
+            let stopped = registry.stop(id: stopId)
+            return ClaudeClientToolResult(
+                contentText: stopped
+                    ? "STOPPED — \(stopId) has been terminated and is no longer running."
+                    : "No background command with id \(stopId). Call this tool with no stopId to see what is actually there.",
+                isError: !stopped
+            )
+        }
+
+        let statuses = registry.statuses()
+        guard !statuses.isEmpty else {
+            return ClaudeClientToolResult(
+                contentText: """
+                Iris is not holding any background commands. Nothing you started earlier is \
+                running. If the reader is looking for a server, it is not up.
+                """,
+                isError: false
+            )
+        }
+
+        let lines = statuses.map { status -> String in
+            let output = Self.scrubbedForTheModel(status.recentOutput)
+            return """
+            \(status.command.id) — \(status.isRunning ? "RUNNING" : "NOT RUNNING (it has died)")
+            command: \(status.command.commandText)
+            last output:
+            \(output.isEmpty ? "(nothing)" : output)
+            """
+        }
+
+        return ClaudeClientToolResult(
+            contentText: """
+            Checked against the processes themselves just now:
+
+            \(lines.joined(separator: "\n\n"))
+            """,
+            isError: false
+        )
     }
 
     // MARK: - How a command actually runs

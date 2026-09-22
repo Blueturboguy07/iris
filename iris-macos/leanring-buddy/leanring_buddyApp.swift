@@ -64,6 +64,11 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotific
 
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 0])
 
+        // A crash cannot leave a dev server Iris started bound to a port with
+        // nothing holding its handle. A clean quit goes through
+        // `stopEverything` below; this catches the unclean one.
+        IrisBackgroundCommands.shared.reapLeftovers()
+
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
         // So a tap on the catalog-app-update notification (the only
         // notification Iris ever shows) reaches `userNotificationCenter(_:
@@ -102,6 +107,10 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotific
         // say — must not leave Iris's half-written edits in the reader's clone
         // for the next run to refuse over. Synchronous and sub-second.
         companionManager.recoverAnyOnDemandEditIrisLeftUncommitted(at: "quit")
+        // A process Iris started is Iris's to clean up. Leaving a dev server
+        // on a port after the app that started it has quit is its own bug
+        // report.
+        IrisBackgroundCommands.shared.stopEverything()
         companionManager.stop()
     }
 

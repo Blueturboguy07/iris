@@ -528,7 +528,17 @@
    */
   function commandToRun(step) {
     if (!step || !step.command) return "";
-    if (!step.workingDirectory) return step.command;
+    // Every non-empty block this function returns is pasted verbatim, and the
+    // guide panel lets a reader click "Copy" on the very next step before
+    // pressing Enter on this one. A block that does not end in its own
+    // newline leaves its last line sitting unsubmitted at the prompt, so the
+    // next paste's first line lands ON that line instead of below it — e.g.
+    // "cd cue" (no trailing newline) + "cd ~/cue\n..." pastes as one merged
+    // line, "cd cuecd ~/cue", which PowerShell rejects. Ending every return
+    // with "\n" makes each copied block self-terminating: pasting it always
+    // submits its own last line, so a second paste — Enter pressed or not —
+    // always starts its own line instead of extending the previous one.
+    if (!step.workingDirectory) return `${step.command}\n`;
     // Most clone steps are already written `cd ~` and declare `~` as their
     // folder — the declaration records what was already true. Prepending
     // regardless would show `cd ~` twice on every guide's clone step, which
@@ -537,9 +547,9 @@
     // only: nothing here guesses whether some other `cd` reaches the same
     // place, because a wrong guess drops the line the fix exists to add.
     if (step.command.split("\n")[0].trim() === `cd ${step.workingDirectory}`) {
-      return step.command;
+      return `${step.command}\n`;
     }
-    return `cd ${step.workingDirectory}\n${step.command}`;
+    return `cd ${step.workingDirectory}\n${step.command}\n`;
   }
 
   function validateGuide(candidate) {

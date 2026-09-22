@@ -637,7 +637,14 @@ export class AutopilotRunner {
         // macOS converting `.timedOut` into `.failed(exitStatus: 124)` so it
         // flows through the identical failure ladder. `timed_out` carries no
         // output of its own, so a plain-English line stands in.
-        const timeoutOutput = "That command took too long, so Iris stopped it.";
+        // Says TERMINATED, not "stopped". The macOS chat path learned this the
+        // expensive way: "Iris stopped it after 120 seconds. It may not have
+        // finished what it was doing" was read as "possibly incomplete" and
+        // relayed to a reader as "but it's still serving", about a process that
+        // no longer existed. Anything the command was serving went with it.
+        const timeoutOutput =
+          "That command took too long, so Iris terminated it. It is no longer running, and " +
+          "anything it was serving — a dev server, a watcher, a port — stopped with it.";
         this.emit({ type: "commandFinished", exitCode: 124, output: timeoutOutput });
         return this.handleFailedCommand(step, rawCommand, 124, timeoutOutput, approved, shell, timeoutOutput);
       }

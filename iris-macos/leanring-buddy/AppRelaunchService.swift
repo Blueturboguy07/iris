@@ -36,6 +36,7 @@
 //
 
 import AppKit
+import Darwin
 import Foundation
 
 /// The outcome of packaging a fresh, launchable artifact from the clone. The
@@ -516,6 +517,10 @@ final class AppRelaunchService {
         /// build output, so there is nothing to replace. Not an error — the
         /// caller launches the build-dir artifact as it always did.
         case noInstalledCopyToReplace
+        /// The requested artifact or selected installed target failed a
+        /// security/identity validation. The caller must not launch it as a
+        /// fallback.
+        case deliveryRejected(reason: String)
         /// An installed copy exists but replacing it failed (an unwritable
         /// /Applications, a copy or swap error). Nothing was left half-installed
         /// — the installed app is intact — and the caller falls back to the
@@ -536,34 +541,57 @@ final class AppRelaunchService {
         clonePath: String
     ) async -> InstalledDeliveryResult {
         let bundleId = macBundleId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !bundleId.isEmpty,
-              FileManager.default.fileExists(atPath: freshBuildArtifactPath) else {
-            return .deliveryFailed(reason: "the freshly built app is not on disk to install")
+        guard !bundleId.isEmpty else {
+            return .deliveryRejected(reason: "the requested app has no bundle identifier")
         }
-        let appBundleName = URL(fileURLWithPath: freshBuildArtifactPath).lastPathComponent
-        guard let installedPath = Self.installedAppPath(
+        let freshArtifactPath: String
+        switch Self.validateFreshDeliveryArtifact(
+            at: freshBuildArtifactPath,
+            expectedBundleId: bundleId,
+            insideClonePath: clonePath
+        ) {
+        case .valid(let path):
+            freshArtifactPath = path
+        case .invalid(let reason):
+            return .deliveryRejected(reason: reason)
+        }
+        let appBundleName = URL(fileURLWithPath: freshArtifactPath).lastPathComponent
+        let installedPath: String
+        switch Self.installedAppPath(
             forBundleId: bundleId, appBundleName: appBundleName, excludingClonePath: clonePath
-        ) else {
+        ) {
+        case .selected(let path):
+            installedPath = path
+        case .absent:
             return .noInstalledCopyToReplace
+        case .rejected(let reason):
+            return .deliveryRejected(reason: reason)
+        }
+        let installedTargetPath: String
+        switch Self.validateInstalledDeliveryTarget(at: installedPath, expectedBundleId: bundleId) {
+        case .valid(let path):
+            installedTargetPath = path
+        case .invalid(let reason):
+            return .deliveryRejected(reason: reason)
         }
         // Read both signing identities BEFORE the swap, so the disclosure is
         // about the app being replaced rather than the one that replaced it.
-        let freshTeam = await Self.developerTeamIdentifier(atPath: freshBuildArtifactPath)
-        let installedTeam = await Self.developerTeamIdentifier(atPath: installedPath)
+        let freshTeam = await Self.developerTeamIdentifier(atPath: freshArtifactPath)
+        let installedTeam = await Self.developerTeamIdentifier(atPath: installedTargetPath)
         let grantsMayReset = freshTeam == nil || installedTeam == nil || freshTeam != installedTeam
 
         let backupPath = Self.deliveryBackupPath(forBundleId: bundleId, appBundleName: appBundleName)
         let swap = await Task.detached(priority: .userInitiated) {
             Self.atomicallyReplaceBundle(
-                installedPath: installedPath,
-                withBundleAt: freshBuildArtifactPath,
+                installedPath: installedTargetPath,
+                withBundleAt: freshArtifactPath,
                 snapshotTo: backupPath
             )
         }.value
         switch swap {
         case .success:
             return .replacedInstalledApp(
-                installedPath: installedPath, backupPath: backupPath, grantsMayReset: grantsMayReset
+                installedPath: installedTargetPath, backupPath: backupPath, grantsMayReset: grantsMayReset
             )
         case .failure(let reason):
             return .deliveryFailed(reason: reason)
@@ -587,44 +615,254 @@ final class AppRelaunchService {
 
     // MARK: - Delivery helpers (nonisolated: pure filesystem + argv tool work)
 
-    /// The installed copy of `bundleId` to replace, or nil when the only copy is
-    /// the clone's own build output. Considers Launch Services' registered copy
-    /// and `/Applications/<Name>.app` on disk, both filtered so nothing inside
-    /// `clonePath` is ever returned, and prefers a copy in /Applications.
+    nonisolated enum DeliveryBundleValidation: Equatable, Sendable {
+        case valid(path: String)
+        case invalid(reason: String)
+    }
+
+    /// Validate the new bundle before any delivery-side path is selected or
+    /// written. The artifact must be a real directory inside the real clone,
+    /// and its bundle id must come from its own Info.plist.
+    nonisolated static func validateFreshDeliveryArtifact(
+        at artifactPath: String,
+        expectedBundleId: String,
+        insideClonePath clonePath: String
+    ) -> DeliveryBundleValidation {
+        let trimmedClonePath = clonePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedClonePath.isEmpty,
+              !artifactPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !expectedBundleId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .invalid(reason: "the clone path, artifact, or bundle identifier is empty")
+        }
+        let requestedCloneURL = URL(fileURLWithPath: trimmedClonePath)
+        let requestedArtifactURL = URL(fileURLWithPath: artifactPath)
+        guard isRealDirectoryWithoutSymlink(requestedCloneURL) else {
+            return .invalid(reason: "the clone path is not a real directory")
+        }
+        guard isRealDirectoryWithoutSymlink(requestedArtifactURL) else {
+            return .invalid(reason: "the freshly built app is not a real bundle directory")
+        }
+        let cloneURL = requestedCloneURL.standardizedFileURL.resolvingSymlinksInPath()
+        let artifactURL = requestedArtifactURL.standardizedFileURL.resolvingSymlinksInPath()
+        guard isCanonicalDescendant(artifactURL, of: cloneURL) else {
+            return .invalid(reason: "the freshly built app is outside the requested clone")
+        }
+        guard isRealRegularFile(artifactURL.appendingPathComponent("Contents/Info.plist")) else {
+            return .invalid(reason: "the freshly built app has no real Info.plist")
+        }
+        guard let actualBundleId = Bundle(url: artifactURL)?.bundleIdentifier else {
+            return .invalid(reason: "the freshly built app has no readable bundle identifier")
+        }
+        guard actualBundleId == expectedBundleId else {
+            return .invalid(reason: "the freshly built app's bundle identifier doesn't match the requested app")
+        }
+        return .valid(path: artifactURL.path)
+    }
+
+    /// Validate a selected Launch Services or /Applications candidate and
+    /// canonicalize the path used by the subsequent snapshot and swap.
+    nonisolated static func validateInstalledDeliveryTarget(
+        at installedPath: String,
+        expectedBundleId: String
+    ) -> DeliveryBundleValidation {
+        guard !installedPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !expectedBundleId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .invalid(reason: "the installed app path or bundle identifier is empty")
+        }
+        let requestedURL = URL(fileURLWithPath: installedPath)
+        guard isRealDirectoryWithoutSymlink(requestedURL) else {
+            return .invalid(reason: "the selected installed app is not a real bundle directory")
+        }
+        let canonicalURL = requestedURL.standardizedFileURL.resolvingSymlinksInPath()
+        guard isRealRegularFile(canonicalURL.appendingPathComponent("Contents/Info.plist")) else {
+            return .invalid(reason: "the selected installed app has no real Info.plist")
+        }
+        guard let actualBundleId = Bundle(url: canonicalURL)?.bundleIdentifier else {
+            return .invalid(reason: "the selected installed app has no readable bundle identifier")
+        }
+        guard actualBundleId == expectedBundleId else {
+            return .invalid(reason: "the selected installed app's bundle identifier doesn't match the requested app")
+        }
+        return .valid(path: canonicalURL.path)
+    }
+
+    /// Selection distinguishes absence from an unsafe duplicate-copy state.
+    enum InstalledDeliveryTargetResolution: Equatable {
+        case selected(path: String)
+        case absent
+        case rejected(reason: String)
+    }
+
+    /// Resolve current running copies before trusting Launch Services, which
+    /// may still point at an older copy after the reader opened another one.
     nonisolated static func installedAppPath(
         forBundleId bundleId: String,
         appBundleName: String,
         excludingClonePath clonePath: String
-    ) -> String? {
+    ) -> InstalledDeliveryTargetResolution {
         let registered = NSWorkspace.shared
             .urlForApplication(withBundleIdentifier: bundleId)?.path
         let applicationsCopy = "/Applications/\(appBundleName)"
-        let applicationsPath = FileManager.default.fileExists(atPath: applicationsCopy)
-            ? applicationsCopy : nil
-        return chooseInstalledBundlePath(
-            registeredPath: registered, applicationsPath: applicationsPath, clonePath: clonePath
+        // Keep the expected path even when it currently doesn't exist: the
+        // pure resolver distinguishes a stale ENOENT path from an unsafe one.
+        let applicationsPath = applicationsCopy
+        let runningInstances = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId)
+            .filter { !$0.isTerminated && $0.bundleIdentifier == bundleId }
+        let runningPaths = runningInstances.map { $0.bundleURL?.path }
+        return resolveInstalledDeliveryTarget(
+            bundleId: bundleId,
+            registeredPath: registered,
+            applicationsPath: applicationsPath,
+            runningPaths: runningPaths,
+            clonePath: clonePath
         )
     }
 
-    /// Pure: pick which candidate is "the installed app" to replace. Anything
-    /// inside `clonePath` (the build output) is excluded; a copy under
-    /// /Applications wins over any other registered location. nil when no
-    /// candidate survives — the caller then leaves the installed side untouched.
-    nonisolated static func chooseInstalledBundlePath(
+    nonisolated static func resolveInstalledDeliveryTarget(
+        bundleId: String,
         registeredPath: String?,
         applicationsPath: String?,
+        runningPaths: [String?],
         clonePath: String
-    ) -> String? {
-        let clonePrefix = clonePath.hasSuffix("/") ? clonePath : clonePath + "/"
-        func outsideClone(_ path: String) -> Bool {
-            !clonePath.isEmpty ? (path != clonePath && !path.hasPrefix(clonePrefix)) : true
+    ) -> InstalledDeliveryTargetResolution {
+        guard !bundleId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !clonePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              isRealDirectoryWithoutSymlink(URL(fileURLWithPath: clonePath)) else {
+            return .rejected(reason: "The clone root is not a real directory. No installed app was replaced.")
         }
-        var candidates: [String] = []
-        if let registeredPath, outsideClone(registeredPath) { candidates.append(registeredPath) }
-        if let applicationsPath, outsideClone(applicationsPath), !candidates.contains(applicationsPath) {
-            candidates.append(applicationsPath)
+        let cloneURL = URL(fileURLWithPath: clonePath).standardizedFileURL.resolvingSymlinksInPath()
+        enum Candidate {
+            case eligible(String)
+            case cloneOwned
+            case invalid
+            case missing
+            case absent
         }
-        return candidates.first { $0.hasPrefix("/Applications/") } ?? candidates.first
+        func classify(_ path: String?) -> Candidate {
+            guard let path else { return .absent }
+            switch inspectDirectoryPathWithoutFollowingSymlinks(URL(fileURLWithPath: path)) {
+            case .missing:
+                let canonicalURL = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+                if canonicalURL.path == cloneURL.path || isCanonicalDescendant(canonicalURL, of: cloneURL) {
+                    return .cloneOwned
+                }
+                return .missing
+            case .invalid:
+                return .invalid
+            case .directory:
+                break
+            }
+            let canonicalURL = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+            if canonicalURL.path == cloneURL.path || isCanonicalDescendant(canonicalURL, of: cloneURL) {
+                return .cloneOwned
+            }
+            switch validateInstalledDeliveryTarget(at: path, expectedBundleId: bundleId) {
+            case .valid(let canonicalPath):
+                return .eligible(canonicalPath)
+            case .invalid:
+                return .invalid
+            }
+        }
+        var runningCopies = Set<String>()
+        var invalidRunningCopyWasObserved = false
+        for path in runningPaths {
+            guard let path else {
+                invalidRunningCopyWasObserved = true
+                continue
+            }
+            switch classify(path) {
+            case .eligible(let canonicalPath):
+                runningCopies.insert(canonicalPath)
+            case .cloneOwned:
+                // A running copy from the source clone is not the separately
+                // installed target being resolved.
+                continue
+            case .invalid, .missing, .absent:
+                // These paths came from processes already matched by bundle id.
+                // Losing one during filesystem validation is conflict evidence,
+                // not proof that no app is running. Nil is handled above too.
+                invalidRunningCopyWasObserved = true
+            }
+        }
+        guard !invalidRunningCopyWasObserved else {
+            return .rejected(reason: "A running copy of this app could not be validated. Quit it and retry; no installed app was replaced.")
+        }
+        guard runningCopies.count <= 1 else {
+            return .rejected(reason: "Multiple copies of this app are running. Quit the extra copies and retry; no installed app was replaced.")
+        }
+        let applicationsCandidate = classify(applicationsPath)
+        let registeredCandidate = classify(registeredPath)
+        let invalidExternalCandidateWasObserved: Bool = {
+            if case .invalid = applicationsCandidate { return true }
+            if case .invalid = registeredCandidate { return true }
+            return false
+        }()
+        if case .eligible(let applicationsCopy) = applicationsCandidate {
+            if let runningCopy = runningCopies.first, runningCopy != applicationsCopy {
+                return .rejected(reason: "A different copy of this app is running than the copy in Applications. Quit the extra copy and retry; no installed app was replaced.")
+            }
+            return .selected(path: applicationsCopy)
+        }
+        if let runningCopy = runningCopies.first { return .selected(path: runningCopy) }
+        if case .eligible(let registeredCopy) = registeredCandidate {
+            return .selected(path: registeredCopy)
+        }
+        guard !invalidExternalCandidateWasObserved else {
+            return .rejected(reason: "An observed installed app candidate could not be validated. No installed app was replaced.")
+        }
+        return .absent
+    }
+
+    private enum DirectoryPathInspection {
+        case directory
+        case missing
+        case invalid
+    }
+
+    /// lstat distinguishes a genuinely absent path (ENOENT) from a dangling
+    /// symlink or an unreadable candidate. Walk existing prefixes on ENOENT so
+    /// a missing child beneath a dangling symlink is not treated as absence.
+    nonisolated private static func inspectDirectoryPathWithoutFollowingSymlinks(
+        _ url: URL
+    ) -> DirectoryPathInspection {
+        var attributes = stat()
+        guard lstat(url.path, &attributes) != 0 else {
+            return (attributes.st_mode & S_IFMT) == S_IFDIR ? .directory : .invalid
+        }
+        guard errno == ENOENT else { return .invalid }
+
+        var componentURL = url.standardizedFileURL
+        while componentURL.path != "/" {
+            if lstat(componentURL.path, &attributes) == 0 {
+                if (attributes.st_mode & S_IFMT) == S_IFLNK {
+                    let resolvedPrefix = componentURL.resolvingSymlinksInPath()
+                    var resolvedAttributes = stat()
+                    guard lstat(resolvedPrefix.path, &resolvedAttributes) == 0 else {
+                        return .invalid
+                    }
+                }
+            } else if errno != ENOENT {
+                return .invalid
+            }
+            componentURL.deleteLastPathComponent()
+        }
+        return .missing
+    }
+
+    nonisolated private static func isRealDirectoryWithoutSymlink(_ url: URL) -> Bool {
+        if case .directory = inspectDirectoryPathWithoutFollowingSymlinks(url) { return true }
+        return false
+    }
+
+    nonisolated private static func isRealRegularFile(_ url: URL) -> Bool {
+        var attributes = stat()
+        return lstat(url.path, &attributes) == 0 && (attributes.st_mode & S_IFMT) == S_IFREG
+    }
+
+    nonisolated private static func isCanonicalDescendant(_ candidate: URL, of root: URL) -> Bool {
+        let rootPath = root.path
+        let rootPrefix = rootPath == "/" ? "/" : rootPath + "/"
+        return candidate.path != rootPath && candidate.path.hasPrefix(rootPrefix)
     }
 
     /// Where a pre-delivery snapshot of an installed bundle is kept so a delivery

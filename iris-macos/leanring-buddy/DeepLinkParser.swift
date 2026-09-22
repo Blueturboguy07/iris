@@ -108,7 +108,7 @@ enum IrisDeepLinkParser {
     private static let authCallbackPathSegment = "callback"
 
     /// A slug is at most this many UTF-8 bytes, matching `valid_slug` in main.rs.
-    private static let maximumSlugByteCount = 64
+    private nonisolated static let maximumSlugByteCount = 64
 
     /// The web panel can be many steps ahead, but nothing sane is past a
     /// hundred; the UI clamps to the guide's real step count anyway.
@@ -283,7 +283,7 @@ enum IrisDeepLinkParser {
     /// lowercase-or-digit-or-hyphen, which together mean a slug can neither
     /// start nor end with a hyphen and can never contain an uppercase letter.
     /// `GuideService` reuses this so a fetched slug is held to the same rule.
-    static func isValidGuideSlug(_ slug: String) -> Bool {
+    nonisolated static func isValidGuideSlug(_ slug: String) -> Bool {
         let slugBytes = Array(slug.utf8)
         guard !slugBytes.isEmpty, slugBytes.count <= maximumSlugByteCount else {
             return false
@@ -353,17 +353,17 @@ enum IrisDeepLinkParser {
         }
     }
 
-    private static func isASCIIAlphanumeric(_ byte: UInt8) -> Bool {
+    private nonisolated static func isASCIIAlphanumeric(_ byte: UInt8) -> Bool {
         isASCIIDigit(byte)
             || isASCIILowercaseLetter(byte)
             || (byte >= UInt8(ascii: "A") && byte <= UInt8(ascii: "Z"))
     }
 
-    private static func isASCIILowercaseLetter(_ byte: UInt8) -> Bool {
+    private nonisolated static func isASCIILowercaseLetter(_ byte: UInt8) -> Bool {
         byte >= UInt8(ascii: "a") && byte <= UInt8(ascii: "z")
     }
 
-    private static func isASCIIDigit(_ byte: UInt8) -> Bool {
+    private nonisolated static func isASCIIDigit(_ byte: UInt8) -> Bool {
         byte >= UInt8(ascii: "0") && byte <= UInt8(ascii: "9")
     }
 }

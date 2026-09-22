@@ -18,10 +18,19 @@ struct leanring_buddyApp: App {
 
     var body: some Scene {
         // The app lives entirely in the menu bar panel managed by the AppDelegate.
-        // This empty Settings scene satisfies SwiftUI's requirement for at least
-        // one scene but is never shown (LSUIElement=true removes the app menu).
+        // Keep SwiftUI's Settings scene as an invisible handoff to the one
+        // menu-bar panel, so system callers never create a sibling window.
         Settings {
-            EmptyView()
+            SettingsPanelSceneRedirect(onOpenSettings: appDelegate.openCanonicalSettings)
+                .frame(width: 1, height: 1)
+        }
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") {
+                    appDelegate.openCanonicalSettings()
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
         }
     }
 }
@@ -32,6 +41,7 @@ struct leanring_buddyApp: App {
 final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private var menuBarPanelManager: MenuBarPanelManager?
     private let companionManager = CompanionManager()
+    private var settingsRequestedBeforeLaunchFinished = false
     private var sparkleUpdaterController: SPUStandardUpdaterController?
 
     /// A guide link that arrived before the panel existed. macOS can deliver
@@ -39,6 +49,14 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotific
     /// runs, and opening a guide into a panel that has not been created yet
     /// would drop the link on the floor.
     private var guideDeepLinkWaitingForLaunchToFinish: GuideDeepLink?
+
+    func openCanonicalSettings() {
+        guard menuBarPanelManager != nil else {
+            settingsRequestedBeforeLaunchFinished = true
+            return
+        }
+        NotificationCenter.default.post(name: .clickyShowPanel, object: nil)
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("🎯 Iris: Starting...")
@@ -61,6 +79,10 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotific
         // credential is only half the job; this is the other half.
         KeychainStore.deleteRetiredSecrets()
         companionManager.start()
+        if settingsRequestedBeforeLaunchFinished {
+            settingsRequestedBeforeLaunchFinished = false
+            openCanonicalSettings()
+        }
         // Auto-open the panel if the user still needs to do something:
         // either they haven't onboarded yet, or permissions were revoked.
         if !companionManager.hasCompletedOnboarding || !companionManager.allPermissionsGranted {

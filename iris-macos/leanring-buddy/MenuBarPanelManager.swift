@@ -69,6 +69,9 @@ final class MenuBarPanelManager: NSObject {
     /// monitor that was just unplugged comes back onto one that exists instead
     /// of staying open where nobody can see it.
     private var screenLayoutChangeObserver: NSObjectProtocol?
+    private var isApplyingProgrammaticFrame = false
+    private var pendingPlacementUpdates = SettingsPanelPlacementUpdates()
+    private var placementSaveTask: Task<Void, Never>?
     /// Redraws the status item's badge whenever the catalog-app inventory
     /// changes — an update appearing, disappearing (installed), or the panel
     /// doing its own refresh — so the badge never depends on this class
@@ -76,7 +79,7 @@ final class MenuBarPanelManager: NSObject {
     private var appInventoryChangeCancellable: AnyCancellable?
 
     private let companionManager: CompanionManager
-    private let panelWidth: CGFloat = 320
+    private let panelWidth: CGFloat = MenuBarPanelPlacement.narrowestWidth
     private let panelHeight: CGFloat = 380
 
     init(companionManager: CompanionManager) {
@@ -140,6 +143,10 @@ final class MenuBarPanelManager: NSObject {
     }
 
     deinit {
+        placementSaveTask?.cancel()
+        for observer in panelPlacementObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
         appInventoryChangeCancellable?.cancel()
         if let monitor = clickOutsideMonitor {
             NSEvent.removeMonitor(monitor)
@@ -267,16 +274,28 @@ final class MenuBarPanelManager: NSObject {
     /// Toggles the panel open/closed. Used by both the status item click
     /// and the global summon hotkey.
     private func togglePanel() {
-        if let panel, panel.isVisible {
-            hidePanel()
-        } else {
-            showPanel()
-        }
+        routeSettingsRequest(.toggle)
     }
 
     // MARK: - Panel Lifecycle
 
     private func showPanel() {
+        routeSettingsRequest(.show)
+    }
+
+    private func routeSettingsRequest(_ request: SettingsPanelRouting.Request) {
+        switch SettingsPanelRouting.action(
+            for: request, panelExists: panel != nil, panelIsVisible: panel?.isVisible == true
+        ) {
+        case .hideExisting:
+            hidePanel()
+            return
+        case .createAndShow, .showExisting:
+            presentPanel()
+        }
+    }
+
+    private func presentPanel() {
         if panel == nil {
             createPanel()
         }
@@ -289,16 +308,18 @@ final class MenuBarPanelManager: NSObject {
     }
 
     private func hidePanel() {
+        persistSettledPanelPlacement()
         panel?.orderOut(nil)
         removeClickOutsideMonitor()
     }
 
     private func createPanel() {
         let companionPanelView = CompanionPanelView(companionManager: companionManager)
-            .frame(width: panelWidth)
+            .frame(minWidth: MenuBarPanelPlacement.narrowestWidth, maxWidth: .infinity)
 
         let hostingView = NSHostingView(rootView: companionPanelView)
         hostingView.frame = NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight)
+        hostingView.autoresizingMask = [.width, .height]
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = .clear
 
@@ -343,16 +364,26 @@ final class MenuBarPanelManager: NSObject {
         panelPlacementObservers = [
             NotificationCenter.default.addObserver(
                 forName: NSWindow.didMoveNotification, object: menuBarPanel, queue: .main
-            ) { [weak menuBarPanel] _ in
-                guard let menuBarPanel else { return }
-                MenuBarPanelPlacement.shared.remember(origin: menuBarPanel.frame.origin)
+            ) { [weak self, weak menuBarPanel] _ in
+                MainActor.assumeIsolated {
+                    guard let self, let menuBarPanel, !self.isApplyingProgrammaticFrame else { return }
+                    self.pendingPlacementUpdates.recordMove(
+                        to: menuBarPanel.frame.origin, isProgrammatic: false
+                    )
+                    self.scheduleSettledPanelPlacementSave()
+                }
             },
             NotificationCenter.default.addObserver(
                 forName: NSWindow.didEndLiveResizeNotification, object: menuBarPanel, queue: .main
-            ) { [weak menuBarPanel] _ in
-                guard let menuBarPanel else { return }
-                MenuBarPanelPlacement.shared.remember(size: menuBarPanel.frame.size)
-                MenuBarPanelPlacement.shared.remember(origin: menuBarPanel.frame.origin)
+            ) { [weak self, weak menuBarPanel] _ in
+                MainActor.assumeIsolated {
+                    guard let self, let menuBarPanel, !self.isApplyingProgrammaticFrame else { return }
+                    self.pendingPlacementUpdates.recordResize(
+                        to: menuBarPanel.frame.size, origin: menuBarPanel.frame.origin,
+                        isProgrammatic: false
+                    )
+                    self.scheduleSettledPanelPlacementSave()
+                }
             },
         ]
     }
@@ -360,8 +391,33 @@ final class MenuBarPanelManager: NSObject {
     /// Kept so the observers can be torn down with the panel.
     private var panelPlacementObservers: [NSObjectProtocol] = []
 
+    private func scheduleSettledPanelPlacementSave() {
+        placementSaveTask?.cancel()
+        placementSaveTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 200_000_000)
+                while NSEvent.pressedMouseButtons != 0 {
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                }
+            } catch { return }
+            guard !Task.isCancelled else { return }
+            self?.persistSettledPanelPlacement()
+        }
+    }
+
+    private func persistSettledPanelPlacement() {
+        placementSaveTask?.cancel()
+        placementSaveTask = nil
+        let update = pendingPlacementUpdates.takeSettledUpdate()
+        if let origin = update.origin { MenuBarPanelPlacement.shared.remember(origin: origin) }
+        if let size = update.size { MenuBarPanelPlacement.shared.remember(size: size) }
+    }
+
     private func positionPanelBelowStatusItem() {
         guard let panel else { return }
+        if panel.isVisible, NSEvent.pressedMouseButtons != 0 || panel.inLiveResize { return }
+        isApplyingProgrammaticFrame = true
+        defer { isApplyingProgrammaticFrame = false }
 
         // Once the reader has moved or resized it, it stays where they put it.
         // Re-snapping it under the menu bar icon on every open would make the
@@ -376,7 +432,8 @@ final class MenuBarPanelManager: NSObject {
             let origin = MenuBarPanelPlacement.clampedOrigin(
                 storedOrigin, panelSize: size, visibleFrames: visibleFrames
             )
-            panel.setFrame(NSRect(origin: origin, size: size), display: true)
+            let targetFrame = NSRect(origin: origin, size: size)
+            if panel.frame != targetFrame { panel.setFrame(targetFrame, display: true) }
             return
         }
         guard let buttonWindow = statusItem?.button?.window else { return }

@@ -374,12 +374,25 @@ struct GuidePanelView: View {
                 .lineSpacing(2.5)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Button(action: {
-                guideSessionController.restartTheGuide()
-            }) {
-                Text("Start over")
+            HStack(spacing: 12) {
+                Button(action: {
+                    guideSessionController.restartTheGuide()
+                }) {
+                    Text("Start over")
+                }
+                .irisTextButton(fontSize: 10)
+
+                Spacer(minLength: 0)
+
+                Button(action: {
+                    // Completion is the only state that renders this card, so
+                    // closing here cannot abandon an active install step.
+                    guideSessionController.closeTheGuide()
+                }) {
+                    Text("Done")
+                }
+                .irisPrimaryPill(isFullWidth: false, isCompact: true)
             }
-            .irisTextButton(fontSize: 10)
             .padding(.top, 2)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

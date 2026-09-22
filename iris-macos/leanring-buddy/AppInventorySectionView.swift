@@ -57,7 +57,11 @@ nonisolated enum CatalogAppDiscovery {
         fromInventory inventoryEntries: [CatalogAppInventoryEntry],
         matchingSearchText searchText: String
     ) -> [CatalogAppInventoryEntry] {
-        let notAlreadyInstalled = inventoryEntries.filter { !$0.isInstalled }
+        let notAlreadyInstalled = inventoryEntries.filter {
+            CatalogMacDiscoveryPolicy.mayShowInDeliberateSearch(
+                isInstalled: $0.isInstalled, compatibility: $0.macCompatibility
+            )
+        }
         let matching = appsMatching(searchText, within: notAlreadyInstalled)
         return matching.sorted { leftEntry, rightEntry in
             leftEntry.name.localizedCaseInsensitiveCompare(rightEntry.name) == .orderedAscending
@@ -72,7 +76,11 @@ nonisolated enum CatalogAppDiscovery {
         fromInventory inventoryEntries: [CatalogAppInventoryEntry],
         limit: Int = numberOfStarterSuggestions
     ) -> [CatalogAppInventoryEntry] {
-        let notAlreadyInstalled = inventoryEntries.filter { !$0.isInstalled }
+        let notAlreadyInstalled = inventoryEntries.filter {
+            CatalogMacDiscoveryPolicy.maySuggest(
+                isInstalled: $0.isInstalled, compatibility: $0.macCompatibility
+            )
+        }
         let ordered = notAlreadyInstalled.sorted { leftEntry, rightEntry in
             let leftHasARelease = leftEntry.latestReleaseTag != nil
             let rightHasARelease = rightEntry.latestReleaseTag != nil
@@ -122,13 +130,13 @@ struct AppInventorySectionView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Your publik apps")
-                .font(.system(size: 11, weight: .semibold))
+            Text("Your apps")
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(DS.Colors.textSecondary)
 
             if installedEntries.isEmpty {
                 Text(emptyStateMessage)
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
@@ -164,15 +172,16 @@ struct AppInventorySectionView: View {
         if let lastRefreshFailureMessage = appInventoryService.lastRefreshFailureMessage {
             return lastRefreshFailureMessage
         }
-        if appInventoryService.isRefreshing || appInventoryService.inventoryEntries.isEmpty {
-            return "Looking for publik apps on this Mac…"
+        if appInventoryService.isRefreshing || appInventoryService.lastSuccessfulRefreshCompletedAt == nil {
+            return "Looking for supported apps on this Mac…"
         }
-        return "No publik apps found on this Mac yet."
+        return "No supported apps found yet. Explore a Mac app below to get started."
     }
 
     @ViewBuilder
     private func installedAppRow(for installedEntry: CatalogAppInventoryEntry) -> some View {
         HStack(spacing: 8) {
+            CatalogAppIconView(entry: installedEntry)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
                     Text(installedEntry.name)
@@ -317,11 +326,16 @@ struct DiscoverAppsSectionView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Discover apps")
-                .font(.system(size: 11, weight: .semibold))
+            Text("Find apps for Mac")
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(DS.Colors.textSecondary)
 
             searchField
+
+            Text("Choose an app to see its details and installation options in your browser.")
+                .font(DS.Typography.caption)
+                .foregroundColor(DS.Colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             content
         }
@@ -342,15 +356,15 @@ struct DiscoverAppsSectionView: View {
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(DS.Colors.textTertiary)
 
-            TextField("Search publik apps", text: $searchText)
+            TextField("Search apps by name", text: $searchText)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12))
+                .font(.system(size: 13))
                 .foregroundColor(DS.Colors.ink)
 
             if !searchText.isEmpty {
                 Button(action: { searchText = "" }) {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 12))
+                        .font(.system(size: 13))
                         .foregroundColor(DS.Colors.textTertiary)
                 }
                 .buttonStyle(.plain)
@@ -380,7 +394,7 @@ struct DiscoverAppsSectionView: View {
             // The catalog has not arrived yet — still loading, or the network is
             // down. Either way there is nothing honest to filter.
             Text(catalogUnavailableMessage)
-                .font(.system(size: 11))
+                .font(.system(size: 13))
                 .foregroundColor(DS.Colors.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
         } else if trimmedSearchText.isEmpty {
@@ -409,14 +423,14 @@ struct DiscoverAppsSectionView: View {
         )
         if starterSuggestions.isEmpty {
             // Every catalog app is already installed. A pleasant dead end.
-            Text("You've installed every publik app for Mac. Search to find them again.")
-                .font(.system(size: 11))
+            Text("No more confirmed Mac apps to suggest. Search to check another app's compatibility.")
+                .font(.system(size: 13))
                 .foregroundColor(DS.Colors.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
             VStack(alignment: .leading, spacing: 6) {
                 Text("START HERE")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .tracking(0.8)
                     .foregroundColor(DS.Colors.quiet)
 
@@ -436,8 +450,8 @@ struct DiscoverAppsSectionView: View {
             matchingSearchText: trimmedSearchText
         )
         if matchingEntries.isEmpty {
-            Text("No apps match \u{201C}\(trimmedSearchText)\u{201D}.")
-                .font(.system(size: 11))
+            Text("No Mac apps match \u{201C}\(trimmedSearchText)\u{201D}.")
+                .font(.system(size: 13))
                 .foregroundColor(DS.Colors.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
@@ -450,7 +464,7 @@ struct DiscoverAppsSectionView: View {
 
                 if hiddenCount > 0 {
                     Text("\(hiddenCount) more — keep typing to narrow it down.")
-                        .font(.system(size: 10))
+                        .font(.system(size: 13))
                         .foregroundColor(DS.Colors.textTertiary)
                         .padding(.top, 2)
                 }
@@ -467,6 +481,7 @@ struct DiscoverAppsSectionView: View {
     /// pill on the right opens the install guide here, at the eye.
     private func discoverAppRow(for discoverableEntry: CatalogAppInventoryEntry) -> some View {
         HStack(spacing: 8) {
+            CatalogAppIconView(entry: discoverableEntry)
             Button(action: { openPublikPage(for: discoverableEntry) }) {
                 HStack(spacing: 8) {
                     VStack(alignment: .leading, spacing: 1) {
@@ -519,11 +534,13 @@ struct DiscoverAppsSectionView: View {
     /// so, because that is the difference between "read about it" and "Iris
     /// can put it on this Mac".
     private func subtitle(for discoverableEntry: CatalogAppInventoryEntry) -> String {
-        let installability = discoverableEntry.hasAnInstallGuide ? "guide available" : "view on publik"
-        if let latestReleaseTag = discoverableEntry.latestReleaseTag {
-            return "\(latestReleaseTag) · \(installability)"
+        guard discoverableEntry.macCompatibility.isConfirmedForThisMac else {
+            return "Mac compatibility not confirmed · view details"
         }
-        return installability.prefix(1).uppercased() + installability.dropFirst()
+        if let latestReleaseTag = discoverableEntry.latestReleaseTag {
+            return "\(discoverableEntry.macCompatibility.discoveryDescription) · \(latestReleaseTag)"
+        }
+        return discoverableEntry.macCompatibility.discoveryDescription
     }
 
     private func openPublikPage(for discoverableEntry: CatalogAppInventoryEntry) {

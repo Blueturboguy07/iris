@@ -87,6 +87,7 @@ struct CompanionPanelView: View {
     /// and the reader has not seen it — and is re-openable from the "See how Iris
     /// works" link below. See `IrisSetupHelperWalkthrough` / `FirstRunSetupHelper`.
     @State private var isShowingSetupHelper = false
+    @AppStorage("irisSettingsSection") private var settingsPage: SettingsPanelRouting.Page = .general
     @State private var setupHelperWalkthrough = IrisSetupHelperWalkthrough()
     /// Persists that the reader has met the helper, so it never nags twice.
     /// A stored value rather than a fresh one each render so the seen flag is
@@ -156,7 +157,9 @@ struct CompanionPanelView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
         }
-        .frame(width: 320)
+        // Keep the content at the manager's compact minimum while allowing a
+        // reader-resized panel to use its full persisted width.
+        .frame(minWidth: MenuBarPanelPlacement.narrowestWidth, maxWidth: .infinity)
         .background(panelBackground)
         // The eye follows the pointer around the panel, the way the pill's
         // `--look-x/--look-y` did. Straight ahead when the pointer leaves.
@@ -185,6 +188,9 @@ struct CompanionPanelView: View {
         // The inventory finishes scanning after the panel has already been
         // measured, so the rows it adds need the same re-fit a guide does.
         .onChange(of: appInventoryService.installedEntriesForDisplay.count) { _, _ in
+            NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
+        }
+        .onChange(of: settingsPage) { _, _ in
             NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
         }
         // The first time the panel opens fully set up, meet the reader with the
@@ -252,62 +258,52 @@ struct CompanionPanelView: View {
                 Spacer()
                     .frame(height: 12)
 
-                modelPickerRow
+                settingsSectionPicker
                     .padding(.horizontal, 16)
 
                 Spacer()
-                    .frame(height: 10)
+                    .frame(height: 12)
 
-                autopilotAutonomyRow
-                    .padding(.horizontal, 16)
+                Group {
+                    switch settingsPage {
+                    case .general:
+                        VStack(alignment: .leading, spacing: 10) {
+                            modelPickerRow
+                            Divider()
+                            autopilotAutonomyRow
+                            editTerminalMinimizeRow
+                        }
+                    case .connections:
+                        accountSection
+                    case .apps:
+                        VStack(alignment: .leading, spacing: 14) {
+                            GuideSlugEntryView(guideSessionController: guideSessionController)
 
-                Spacer()
-                    .frame(height: 10)
+                            AppInventorySectionView(
+                                appInventoryService: appInventoryService,
+                                appLinkService: companionManager.appLinkService,
+                                onEditApp: { installedEntry in
+                                    companionManager.requestOnDemandEdit(forEntry: installedEntry)
+                                }
+                            )
 
-                editTerminalMinimizeRow
-                    .padding(.horizontal, 16)
-
-                Spacer()
-                    .frame(height: 14)
-
-                GuideSlugEntryView(guideSessionController: guideSessionController)
-                    .padding(.horizontal, 16)
-
-                Spacer()
-                    .frame(height: 14)
-
-                AppInventorySectionView(
-                    appInventoryService: appInventoryService,
-                    appLinkService: companionManager.appLinkService,
-                    onEditApp: { installedEntry in
-                        companionManager.requestOnDemandEdit(forEntry: installedEntry)
+                            // The installed apps are above; this is where the
+                            // reader finds the rest of the catalog.
+                            DiscoverAppsSectionView(
+                                appInventoryService: appInventoryService,
+                                onInstallWithIris: { discoverableEntry in
+                                    let guideSlugToOpen = discoverableEntry.guideSlug ?? discoverableEntry.slug
+                                    Task {
+                                        await guideSessionController.openLatestVersionOfGuide(
+                                            slug: guideSlugToOpen
+                                        )
+                                    }
+                                }
+                            )
+                        }
                     }
-                )
-                    .padding(.horizontal, 16)
-
-                Spacer()
-                    .frame(height: 14)
-
-                // "It is hard to know which repos to install after the first
-                // one." The installed apps are above; this is where the reader
-                // finds the rest of the catalog and picks the next one.
-                DiscoverAppsSectionView(
-                    appInventoryService: appInventoryService,
-                    onInstallWithIris: { discoverableEntry in
-                        // The catalog names the guide's slug; it is the app's
-                        // own slug for every listing today, but the catalog is
-                        // the authority if that ever differs.
-                        let guideSlugToOpen = discoverableEntry.guideSlug ?? discoverableEntry.slug
-                        Task { await guideSessionController.openLatestVersionOfGuide(slug: guideSlugToOpen) }
-                    }
-                )
-                    .padding(.horizontal, 16)
-
-                Spacer()
-                    .frame(height: 14)
-
-                accountSection
-                    .padding(.horizontal, 16)
+                }
+                .padding(.horizontal, 16)
             }
 
             if !companionManager.allPermissionsGranted {
@@ -324,6 +320,21 @@ struct CompanionPanelView: View {
 
                 startButton
                     .padding(.horizontal, 16)
+            }
+        }
+    }
+
+    private var settingsSectionPicker: some View {
+        HStack(spacing: 4) {
+            ForEach(SettingsPanelRouting.Page.allCases, id: \.self) { page in
+                Button { settingsPage = page } label: {
+                    Text(page.rawValue)
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(maxWidth: .infinity, minHeight: 30)
+                }
+                .buttonStyle(IrisSettingsSectionStyle(isSelected: settingsPage == page))
+                .accessibilityLabel("Settings section: \(page.rawValue)")
+                .accessibilityAddTraits(settingsPage == page ? .isSelected : [])
             }
         }
     }
@@ -530,51 +541,60 @@ struct CompanionPanelView: View {
 
     private var accessibilityPermissionRow: some View {
         let isGranted = companionManager.hasAccessibilityPermission
-        return HStack {
-            HStack(spacing: 8) {
-                Image(systemName: "hand.raised")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
-                    .frame(width: 16)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                HStack(spacing: 8) {
+                    Image(systemName: "hand.raised")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
+                        .frame(width: 16)
 
-                Text("Accessibility")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
+                    Text("Accessibility")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+                }
+
+                Spacer()
+
+                if isGranted {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(DS.Colors.success)
+                            .frame(width: 6, height: 6)
+                        Text("Granted")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(DS.Colors.success)
+                    }
+                } else {
+                    HStack(spacing: 6) {
+                        Button(action: {
+                            WindowPositionManager.requestAccessibilityPermission()
+                        }) {
+                            Text("Grant")
+                        }
+                        .irisPrimaryPill(isFullWidth: false, isCompact: true)
+
+                        Button(action: {
+                            WindowPositionManager.revealAppInFinder()
+                            WindowPositionManager.openAccessibilitySettings()
+                        }) {
+                            Text("Find App")
+                        }
+                        .irisTinyButton()
+                    }
+                }
             }
 
-            Spacer()
-
-            if isGranted {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(DS.Colors.success)
-                        .frame(width: 6, height: 6)
-                    Text("Granted")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(DS.Colors.success)
+            if AccessibilityPermissionRecovery.shouldShowRepairInstructions(isGranted: isGranted) {
+                DisclosureGroup(AccessibilityPermissionRecovery.disclosureTitle) {
+                    Text(AccessibilityPermissionRecovery.repairInstructions)
+                        .font(.system(size: 11))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 3)
                 }
-            } else {
-                HStack(spacing: 6) {
-                    Button(action: {
-                        // Triggers the system accessibility prompt (AXIsProcessTrustedWithOptions)
-                        // on first attempt, then opens System Settings on subsequent attempts.
-                        WindowPositionManager.requestAccessibilityPermission()
-                    }) {
-                        Text("Grant")
-                    }
-                    .irisPrimaryPill(isFullWidth: false, isCompact: true)
-
-                    Button(action: {
-                        // Reveals the app in Finder so the user can drag it into
-                        // the Accessibility list if it doesn't appear automatically
-                        // (common with unsigned dev builds).
-                        WindowPositionManager.revealAppInFinder()
-                        WindowPositionManager.openAccessibilitySettings()
-                    }) {
-                        Text("Find App")
-                    }
-                    .irisTinyButton()
-                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(DS.Colors.textSecondary)
             }
         }
         .padding(.vertical, 6)
@@ -846,14 +866,16 @@ struct CompanionPanelView: View {
         .padding(.vertical, 4)
     }
 
-    /// One sentence saying which provider answers questions and which one edits
-    /// apps, because they are genuinely different and can be connected at once.
+    /// One sentence naming both routes. Screen help shares the selected chat
+    /// provider; app edits use the separate maintain provider when connected.
     private var whoServesWhichHalf: String {
+        let answerProvider = accountService.resolvedChatProvider?.displayName
+            ?? "the selected chat provider"
         let editProvider = MaintainModelProviderResolver.firstAvailable()?.displayName
         guard let editProvider else {
-            return "Answers only. No provider is connected for editing apps yet."
+            return "Screen help uses \(answerProvider). App edits are not connected yet."
         }
-        return "Answers only — editing apps runs on \(editProvider)."
+        return "Screen help uses \(answerProvider). App edits use \(editProvider)."
     }
 
     private func modelOptionButton(label: String, modelID: String) -> some View {

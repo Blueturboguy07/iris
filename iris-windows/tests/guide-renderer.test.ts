@@ -178,41 +178,78 @@ describe("the guide panel and the folder a step runs in", () => {
     const panel = await openPanel([RESUME_STEP]);
     // Before the wiring this was the bare build line, and a reader who had just
     // opened a shell was one paste away from exit 127 in their home folder.
+    // Trailing "\n": see "always ends the block with its own newline" below.
     expect(panel.commandOnScreen()).toBe(
-      "cd ~/hickeyfield\nui/node_modules/.bin/tauri build --bundles app"
+      "cd ~/hickeyfield\nui/node_modules/.bin/tauri build --bundles app\n"
     );
   });
 
   it("copies the folder along with the command", async () => {
     const panel = await openPanel([RESUME_STEP]);
     expect(await panel.copy()).toBe(
-      "cd ~/hickeyfield\nui/node_modules/.bin/tauri build --bundles app"
+      "cd ~/hickeyfield\nui/node_modules/.bin/tauri build --bundles app\n"
     );
   });
 
-  it("leaves a step that declares no folder exactly as the guide wrote it", async () => {
+  it("leaves a step that declares no folder exactly as the guide wrote it, plus its own trailing newline", async () => {
     const panel = await openPanel([UNDECLARED_STEP]);
-    expect(panel.commandOnScreen()).toBe("git --version");
-    expect(await panel.copy()).toBe("git --version");
+    expect(panel.commandOnScreen()).toBe("git --version\n");
+    expect(await panel.copy()).toBe("git --version\n");
   });
 
   it("does not tell the reader to `cd ~` twice on the clone step", async () => {
     const panel = await openPanel([CLONE_STEP]);
-    expect(panel.commandOnScreen()).toBe(CLONE_STEP.command);
-    expect(await panel.copy()).toBe(CLONE_STEP.command);
+    expect(panel.commandOnScreen()).toBe(`${CLONE_STEP.command}\n`);
+    expect(await panel.copy()).toBe(`${CLONE_STEP.command}\n`);
   });
 
   it("keeps the folder on a step reached by resuming, not only on the first one", async () => {
     // The reported case is not step one. It is the reader who comes back and is
     // put back on step N, in a shell that never ran the `cd` in step N-1.
     const panel = await openPanel([ENTER_FOLDER_STEP, RESUME_STEP]);
-    expect(panel.commandOnScreen()).toBe("cd ~\ncd hickeyfield");
+    expect(panel.commandOnScreen()).toBe("cd ~\ncd hickeyfield\n");
     await panel.advance();
     expect(panel.commandOnScreen()).toBe(
-      "cd ~/hickeyfield\nui/node_modules/.bin/tauri build --bundles app"
+      "cd ~/hickeyfield\nui/node_modules/.bin/tauri build --bundles app\n"
     );
     expect(await panel.copy()).toBe(
-      "cd ~/hickeyfield\nui/node_modules/.bin/tauri build --bundles app"
+      "cd ~/hickeyfield\nui/node_modules/.bin/tauri build --bundles app\n"
     );
+  });
+
+  it("always ends the copied block with its own newline, so a second copy pasted right after (no Enter pressed) never lands on the same line", async () => {
+    // The reported bug (cue-windows-multiline-paste-collapses-commands): a
+    // reader copies "enter-folder" ("cd cue"), pastes into PowerShell without
+    // pressing Enter, then copies the very next step ("pin-source") and pastes
+    // again right after. With no trailing newline on the first block, its last
+    // line sat unsubmitted at the prompt and the second paste's first line
+    // landed on it — "cd cue" + "cd ~/cue" pasted as one merged
+    // "cd cuecd ~/cue", which PowerShell rejected. Every block this function
+    // returns must end in "\n" so that concatenating two copies with ZERO
+    // separating bytes (the no-Enter-pressed case) still produces one newline
+    // between the first block's last line and the second block's first line.
+    const enterFolder = { ...ENTER_FOLDER_STEP, command: "cd cue" };
+    const pinSource = {
+      id: "pin-source",
+      kind: "terminal",
+      title: "Review and pin the commit",
+      body: "",
+      command: "git checkout 90aa366ce27e8ae9f5b86f8cffa791338abdd9a2",
+      workingDirectory: "~/cue",
+      verifierLabel: "",
+    };
+    const panel = await openPanel([enterFolder, pinSource]);
+    // The "shows the reader the folder" / "copies the folder along with the
+    // command" tests above establish commandOnScreen() and copy() always
+    // agree, so reading the displayed text avoids re-driving the primary
+    // button's own copy/advance state machine here.
+    const block1 = panel.commandOnScreen();
+    await panel.advance(); // "Copy" (step 1), then "I ran it" — moves to pin-source.
+    const block2 = panel.commandOnScreen();
+    expect(block1.endsWith("\n")).toBe(true);
+    const collapsed = block1 + block2; // exactly what two back-to-back pastes with no Enter produce
+    expect(collapsed).not.toContain("cd cuecd");
+    expect(collapsed.split("\n")).toContain("cd cue");
+    expect(collapsed.split("\n")).toContain("cd ~/cue");
   });
 });

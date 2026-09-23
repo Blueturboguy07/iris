@@ -307,6 +307,11 @@ enum OverlayEyePastedImageReader {
 @MainActor
 final class OverlayEyePastedImageAttachment: ObservableObject {
 
+    struct MessageBatch {
+        let images: [OverlayEyePastedImage]
+        fileprivate let attachmentIdentifiers: [UUID]
+    }
+
     /// One bar is open at a time, and the things that put an image on it (a
     /// keystroke in that bar's window, a drop on it, the picker) and the thing
     /// that spends them (the next message) are files apart with no object in
@@ -315,6 +320,7 @@ final class OverlayEyePastedImageAttachment: ObservableObject {
     static let shared = OverlayEyePastedImageAttachment()
 
     @Published private(set) var theImagesTheReaderAttached: [OverlayEyePastedImage] = []
+    private var attachmentIdentifiers: [UUID] = []
 
     /// True while a drag is over the bar, so the bar can say "drop to attach"
     /// before the reader lets go. Set and cleared by the drop target.
@@ -332,28 +338,57 @@ final class OverlayEyePastedImageAttachment: ObservableObject {
     func attach(contentsOf images: [OverlayEyePastedImage]) {
         guard !images.isEmpty else { return }
         var combined = theImagesTheReaderAttached + images
+        var combinedIdentifiers = attachmentIdentifiers + images.map { _ in UUID() }
         let overflow = combined.count - OverlayEyePastedImageReader.mostImagesOneMessageMayCarry
         if overflow > 0 {
             combined.removeFirst(overflow)
+            combinedIdentifiers.removeFirst(overflow)
         }
         theImagesTheReaderAttached = combined
+        attachmentIdentifiers = combinedIdentifiers
     }
 
     /// The × on one thumbnail.
     func remove(_ image: OverlayEyePastedImage) {
-        theImagesTheReaderAttached.removeAll { $0 == image }
+        let retained = zip(attachmentIdentifiers, theImagesTheReaderAttached)
+            .filter { $0.1 != image }
+        attachmentIdentifiers = retained.map(\.0)
+        theImagesTheReaderAttached = retained.map(\.1)
     }
 
     /// The bar going away.
     func removeAllAttachments() {
         theImagesTheReaderAttached = []
+        attachmentIdentifiers = []
         aDragIsHoveringOverTheBar = false
+    }
+
+    /// Captures the exact attachments owned by one in-flight message without
+    /// removing them before screen capture and focus validation have succeeded.
+    func snapshotForMessage() -> MessageBatch {
+        MessageBatch(
+            images: theImagesTheReaderAttached,
+            attachmentIdentifiers: attachmentIdentifiers
+        )
+    }
+
+    /// Consumes only the snapshotted attachment identities. If the reader adds
+    /// a byte-identical image during capture, its distinct identity survives.
+    func consume(_ batch: MessageBatch) {
+        let consumedIdentifiers = Set(batch.attachmentIdentifiers)
+        let retained = zip(attachmentIdentifiers, theImagesTheReaderAttached)
+            .filter { !consumedIdentifiers.contains($0.0) }
+        attachmentIdentifiers = retained.map(\.0)
+        theImagesTheReaderAttached = retained.map(\.1)
     }
 
     /// Hands the images to the message being sent and forgets them in the
     /// same move.
     func takeTheImagesForThisMessage() -> [OverlayEyePastedImage] {
-        defer { theImagesTheReaderAttached = [] }
+        defer {
+            theImagesTheReaderAttached = []
+            attachmentIdentifiers = []
+        }
         return theImagesTheReaderAttached
     }
 }

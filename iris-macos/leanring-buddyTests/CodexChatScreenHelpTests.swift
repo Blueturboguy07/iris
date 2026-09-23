@@ -49,6 +49,290 @@ struct CodexChatScreenHelpTests {
         #expect(nextRequestRoute.logsFailureDetails)
     }
 
+    @Test func screenHelpCaptureDoesNotVerifyAChangedForegroundWindowDuringCapture() async throws {
+        let foregroundBeforeCapture = CompanionManager.AskCaptureForegroundSnapshot(
+            bundleIdentifier: "com.example.reader",
+            processIdentifier: 41,
+            applicationName: "Reader",
+            windowTitle: "Document A",
+            focusedWindowIdentity: UUID(uuidString: "00000000-0000-0000-0000-000000000041"),
+            focusedWindowFrame: CGRect(x: 10, y: 20, width: 800, height: 600)
+        )
+        let changedForegroundContexts = [
+            CompanionManager.AskCaptureForegroundSnapshot(
+                bundleIdentifier: "com.example.other",
+                processIdentifier: 41,
+                applicationName: "Other",
+                windowTitle: "Document A",
+                focusedWindowIdentity: foregroundBeforeCapture.focusedWindowIdentity,
+                focusedWindowFrame: foregroundBeforeCapture.focusedWindowFrame
+            ),
+            CompanionManager.AskCaptureForegroundSnapshot(
+                bundleIdentifier: "com.example.reader",
+                processIdentifier: 42,
+                applicationName: "Reader",
+                windowTitle: "Document A",
+                focusedWindowIdentity: foregroundBeforeCapture.focusedWindowIdentity,
+                focusedWindowFrame: foregroundBeforeCapture.focusedWindowFrame
+            ),
+            CompanionManager.AskCaptureForegroundSnapshot(
+                bundleIdentifier: "com.example.reader",
+                processIdentifier: 41,
+                applicationName: "Reader",
+                windowTitle: "Document A",
+                focusedWindowIdentity: UUID(uuidString: "00000000-0000-0000-0000-000000000042"),
+                focusedWindowFrame: foregroundBeforeCapture.focusedWindowFrame
+            ),
+            CompanionManager.AskCaptureForegroundSnapshot(
+                bundleIdentifier: "com.example.reader",
+                processIdentifier: 41,
+                applicationName: "Reader",
+                windowTitle: "Document A",
+                focusedWindowIdentity: foregroundBeforeCapture.focusedWindowIdentity,
+                focusedWindowFrame: CGRect(x: 11.1, y: 20, width: 800, height: 600)
+            ),
+            CompanionManager.AskCaptureForegroundSnapshot(
+                bundleIdentifier: "com.example.reader",
+                processIdentifier: 41,
+                applicationName: "Reader",
+                windowTitle: "Document A",
+                focusedWindowIdentity: foregroundBeforeCapture.focusedWindowIdentity,
+                focusedWindowFrame: CGRect(x: 10, y: 20, width: 801.1, height: 600)
+            )
+        ]
+
+        for changedForegroundContext in changedForegroundContexts {
+            var currentForegroundContext = foregroundBeforeCapture
+            var captureWasRequested = false
+            let result = try await CompanionManager.captureScreenHelpWhileForegroundContextStaysCurrent(
+                readForeground: { currentForegroundContext },
+                capture: {
+                    captureWasRequested = true
+                    await Task.yield()
+                    currentForegroundContext = changedForegroundContext
+                    return "captured screen"
+                }
+            )
+
+            #expect(captureWasRequested)
+            #expect(result.capturedValue == "captured screen")
+            #expect(result.windowContext == .changed)
+        }
+    }
+
+    @Test func screenHelpCaptureWithoutWindowIdentityKeepsOrdinaryHelpUnverified() async throws {
+        let withoutWindowIdentity = CompanionManager.AskCaptureForegroundSnapshot(
+            bundleIdentifier: "com.example.reader",
+            processIdentifier: 41,
+            applicationName: "Reader",
+            windowTitle: "Document A",
+            focusedWindowIdentity: nil,
+            focusedWindowFrame: nil
+        )
+        let result = try await CompanionManager.captureScreenHelpWhileForegroundContextStaysCurrent(
+            readForeground: { withoutWindowIdentity },
+            capture: {
+                await Task.yield()
+                return "captured screen"
+            }
+        )
+
+        #expect(result.capturedValue == "captured screen")
+        #expect(result.windowContext == .unavailable)
+        #expect(result.foreground.promptNote(irisBundleIdentifier: "com.example.iris") == nil)
+    }
+
+    @Test func screenHelpCaptureRetainsTheSnapshotWhenForegroundContextDoesNotChange() async throws {
+        let foreground = CompanionManager.AskCaptureForegroundSnapshot(
+            bundleIdentifier: "com.example.reader",
+            processIdentifier: 41,
+            applicationName: "Reader",
+            windowTitle: "Document A",
+            focusedWindowIdentity: UUID(uuidString: "00000000-0000-0000-0000-000000000041"),
+            focusedWindowFrame: CGRect(x: 10, y: 20, width: 800, height: 600)
+        )
+        var captureWasRequested = false
+
+        let result = try await CompanionManager.captureScreenHelpWhileForegroundContextStaysCurrent(
+            readForeground: { foreground },
+            capture: {
+                captureWasRequested = true
+                await Task.yield()
+                return "captured screen"
+            }
+        )
+
+        #expect(captureWasRequested)
+        #expect(result.capturedValue == "captured screen")
+        #expect(result.foreground == foreground)
+        #expect(result.windowContext == .verified)
+        #expect(result.foreground.promptNote(irisBundleIdentifier: "com.example.iris")?.contains("Document A") == true)
+    }
+
+    @Test func screenHelpCaptureDoesNotRequireOptionalApplicationNameForStableWindow() async throws {
+        let foreground = CompanionManager.AskCaptureForegroundSnapshot(
+            bundleIdentifier: "com.example.reader",
+            processIdentifier: 41,
+            applicationName: nil,
+            windowTitle: "Document A",
+            focusedWindowIdentity: UUID(uuidString: "00000000-0000-0000-0000-000000000041"),
+            focusedWindowFrame: CGRect(x: 10, y: 20, width: 800, height: 600)
+        )
+        let result = try await CompanionManager.captureScreenHelpWhileForegroundContextStaysCurrent(
+            readForeground: { foreground },
+            capture: { "captured screen" }
+        )
+
+        #expect(result.capturedValue == "captured screen")
+        #expect(result.windowContext == .verified)
+        #expect(result.foreground.promptNote(irisBundleIdentifier: "com.example.iris") == nil)
+    }
+
+    @Test func screenHelpCaptureNeverStartsWhenIrisItselfIsFrontmost() async {
+        let currentProcessIdentifier = ProcessInfo.processInfo.processIdentifier
+        let irisForegroundSnapshots = [
+            CompanionManager.AskCaptureForegroundSnapshot(
+                bundleIdentifier: "com.example.nativeTestHost",
+                processIdentifier: currentProcessIdentifier,
+                applicationName: "Iris Test Host",
+                windowTitle: "Iris",
+                focusedWindowIdentity: nil,
+                focusedWindowFrame: nil
+            ),
+            CompanionManager.AskCaptureForegroundSnapshot(
+                bundleIdentifier: "com.publikhq.iris",
+                processIdentifier: currentProcessIdentifier + 1,
+                applicationName: "Iris",
+                windowTitle: nil,
+                focusedWindowIdentity: nil,
+                focusedWindowFrame: nil
+            ),
+            CompanionManager.AskCaptureForegroundSnapshot(
+                bundleIdentifier: "com.publikhq.iris.test",
+                processIdentifier: currentProcessIdentifier + 2,
+                applicationName: "Iris Test",
+                windowTitle: nil,
+                focusedWindowIdentity: nil,
+                focusedWindowFrame: nil
+            )
+        ]
+
+        for foreground in irisForegroundSnapshots {
+            var captureWasRequested = false
+            do {
+                _ = try await CompanionManager.captureScreenHelpWhileForegroundContextStaysCurrent(
+                    readForeground: { foreground },
+                    isIrisForeground: {
+                        CompanionManager.isIrisForegroundSnapshot(
+                            $0,
+                            irisBundleIdentifier: "com.example.nativeTestHost",
+                            currentProcessIdentifier: currentProcessIdentifier
+                        )
+                    },
+                    waitForForegroundUpdate: {},
+                    capture: {
+                        captureWasRequested = true
+                        return "captured screen"
+                    }
+                )
+                Issue.record("Expected Iris to refuse its own frontmost window")
+            } catch {
+                #expect(!captureWasRequested)
+            }
+        }
+    }
+
+    @Test func screenHelpWaitsForExternalForegroundToSettleAfterIrisHandsBackFocus() async throws {
+        let currentProcessIdentifier = ProcessInfo.processInfo.processIdentifier
+        let irisForeground = CompanionManager.AskCaptureForegroundSnapshot(
+            bundleIdentifier: "com.publikhq.iris.test",
+            processIdentifier: currentProcessIdentifier + 1,
+            applicationName: "Iris Test",
+            windowTitle: nil,
+            focusedWindowIdentity: nil,
+            focusedWindowFrame: nil
+        )
+        let externalForeground = CompanionManager.AskCaptureForegroundSnapshot(
+            bundleIdentifier: "com.example.reader",
+            processIdentifier: 41,
+            applicationName: "Reader",
+            windowTitle: "Document A",
+            focusedWindowIdentity: UUID(uuidString: "00000000-0000-0000-0000-000000000041"),
+            focusedWindowFrame: CGRect(x: 10, y: 20, width: 800, height: 600)
+        )
+        var foregroundSnapshots = [irisForeground, externalForeground, externalForeground, externalForeground]
+        var foregroundReadCount = 0
+        var captureWasRequested = false
+
+        let result = try await CompanionManager.captureScreenHelpWhileForegroundContextStaysCurrent(
+            readForeground: {
+                foregroundReadCount += 1
+                return foregroundSnapshots.isEmpty ? externalForeground : foregroundSnapshots.removeFirst()
+            },
+            isIrisForeground: {
+                CompanionManager.isIrisForegroundSnapshot(
+                    $0,
+                    irisBundleIdentifier: "com.publikhq.iris.test",
+                    currentProcessIdentifier: currentProcessIdentifier
+                )
+            },
+            waitForForegroundUpdate: {},
+            capture: {
+                captureWasRequested = true
+                #expect(foregroundReadCount == 3)
+                return "captured screen"
+            }
+        )
+
+        #expect(captureWasRequested)
+        #expect(result.foreground == externalForeground)
+        #expect(result.windowContext == .verified)
+    }
+
+    @Test func screenHelpCaptureUsesWindowIdentityRatherThanTitleForVerification() async throws {
+        let foregroundBeforeCapture = CompanionManager.AskCaptureForegroundSnapshot(
+            bundleIdentifier: "com.example.reader",
+            processIdentifier: 41,
+            applicationName: "Reader",
+            windowTitle: "Document A",
+            focusedWindowIdentity: UUID(uuidString: "00000000-0000-0000-0000-000000000041"),
+            focusedWindowFrame: CGRect(x: 10, y: 20, width: 800, height: 600)
+        )
+        let foregroundAfterCapture = CompanionManager.AskCaptureForegroundSnapshot(
+            bundleIdentifier: "com.example.reader",
+            processIdentifier: 41,
+            applicationName: "Reader",
+            windowTitle: "Document B",
+            focusedWindowIdentity: foregroundBeforeCapture.focusedWindowIdentity,
+            focusedWindowFrame: CGRect(x: 10.5, y: 20, width: 800, height: 600)
+        )
+        var currentForeground = foregroundBeforeCapture
+
+        let result = try await CompanionManager.captureScreenHelpWhileForegroundContextStaysCurrent(
+            readForeground: { currentForeground },
+            capture: {
+                currentForeground = foregroundAfterCapture
+                return "captured screen"
+            }
+        )
+
+        #expect(result.windowContext == .verified)
+        #expect(result.foreground.promptNote(irisBundleIdentifier: "com.example.iris")?.contains("Document A") == true)
+    }
+
+    @Test func screenHelpAttachmentBatchConsumesOnlyOriginalAttachmentIdentities() {
+        let attachmentStore = OverlayEyePastedImageAttachment()
+        let image = OverlayEyePastedImage(imageData: Data([1, 2, 3]), pixelWidth: 1, pixelHeight: 1)
+        attachmentStore.attach(image)
+        let batch = attachmentStore.snapshotForMessage()
+        attachmentStore.attach(image)
+        #expect(attachmentStore.theImagesTheReaderAttached == [image, image])
+
+        attachmentStore.consume(batch)
+
+        #expect(attachmentStore.theImagesTheReaderAttached == [image])
+    }
+
     @Test func selectedCodexImageStagingFailsClosedOnAnyWriteError() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("iris-codex-image-stage-\(UUID().uuidString)", isDirectory: true)

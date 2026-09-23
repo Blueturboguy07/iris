@@ -27,6 +27,165 @@ enum CompanionAssistantState {
 
 @MainActor
 final class CompanionManager: ObservableObject {
+    struct AskCaptureForegroundSnapshot: Equatable, Sendable {
+        let bundleIdentifier: String?
+        let processIdentifier: pid_t?
+        let applicationName: String?
+        let windowTitle: String?
+        let focusedWindowIdentity: UUID?
+        let focusedWindowFrame: CGRect?
+
+        var hasFocusedWindowIdentityAndFrame: Bool {
+            focusedWindowIdentity != nil && focusedWindowFrame != nil
+        }
+
+        func representsSameApplicationProcess(as other: Self) -> Bool {
+            guard let bundleIdentifier, let processIdentifier else { return false }
+            return bundleIdentifier == other.bundleIdentifier
+                && processIdentifier == other.processIdentifier
+        }
+
+        func representsSameVerifiedWindow(as other: Self) -> Bool {
+            guard let bundleIdentifier, let processIdentifier,
+                  let focusedWindowIdentity, let focusedWindowFrame,
+                  bundleIdentifier == other.bundleIdentifier,
+                  processIdentifier == other.processIdentifier,
+                  focusedWindowIdentity == other.focusedWindowIdentity,
+                  let otherFrame = other.focusedWindowFrame else {
+                return false
+            }
+            return Self.framesMatch(focusedWindowFrame, otherFrame)
+        }
+
+        private static func framesMatch(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+            abs(lhs.origin.x - rhs.origin.x) <= 1
+                && abs(lhs.origin.y - rhs.origin.y) <= 1
+                && abs(lhs.size.width - rhs.size.width) <= 1
+                && abs(lhs.size.height - rhs.size.height) <= 1
+        }
+
+        func promptNote(irisBundleIdentifier: String?) -> String? {
+            guard focusedWindowIdentity != nil, focusedWindowFrame != nil,
+                  let applicationName, !applicationName.isEmpty,
+                  bundleIdentifier != irisBundleIdentifier else {
+                return nil
+            }
+            var note = "[The app the reader is working in right now is \(applicationName)."
+            if let windowTitle, !windowTitle.isEmpty {
+                note += " Its front window is titled \"\(windowTitle)\"."
+            }
+            note += " The screenshot shows every window on the display at once, so when the"
+            note += " question is about \"my screen\" or \"this\", answer about \(applicationName)"
+            note += " unless they clearly mean something else.]"
+            return note
+        }
+    }
+
+    enum AskCaptureWindowContext: Equatable {
+        case verified
+        case unavailable
+        case changed
+    }
+
+    private static let foregroundSettlementMaximumPolls = 24
+    private static let foregroundSettlementPollNanoseconds: UInt64 = 12_000_000
+
+    static func isIrisForegroundSnapshot(
+        _ snapshot: AskCaptureForegroundSnapshot,
+        irisBundleIdentifier: String?,
+        currentProcessIdentifier: pid_t
+    ) -> Bool {
+        if snapshot.processIdentifier == currentProcessIdentifier {
+            return true
+        }
+        guard let bundleIdentifier = snapshot.bundleIdentifier else { return false }
+        return bundleIdentifier == irisBundleIdentifier
+            || bundleIdentifier == "com.publikhq.iris"
+            || bundleIdentifier == "com.publikhq.iris.test"
+    }
+
+    /// Keeps any foreground note and spatial answer tied to the same verified
+    /// window across asynchronous work. If window identity is unavailable or
+    /// changes, ordinary screen help still proceeds without a note or pointing.
+    static func captureScreenHelpWhileForegroundContextStaysCurrent<CapturedValue>(
+        readForeground: () -> AskCaptureForegroundSnapshot,
+        isIrisForeground: (AskCaptureForegroundSnapshot) -> Bool = { _ in false },
+        waitForForegroundUpdate: (() async throws -> Void)? = nil,
+        capture: () async throws -> CapturedValue
+    ) async throws -> (
+        capturedValue: CapturedValue,
+        foreground: AskCaptureForegroundSnapshot,
+        windowContext: AskCaptureWindowContext
+    ) {
+        var previousExternalForeground: AskCaptureForegroundSnapshot?
+        var foregroundBeforeCapture: AskCaptureForegroundSnapshot?
+        for poll in 0..<foregroundSettlementMaximumPolls {
+            try Task.checkCancellation()
+            let currentForeground = readForeground()
+            if !isIrisForeground(currentForeground),
+               currentForeground.bundleIdentifier != nil,
+               currentForeground.processIdentifier != nil {
+                if let previousExternalForeground,
+                   previousExternalForeground.representsSameApplicationProcess(as: currentForeground) {
+                    foregroundBeforeCapture = currentForeground
+                    break
+                }
+                previousExternalForeground = currentForeground
+            } else {
+                previousExternalForeground = nil
+            }
+            if poll + 1 < foregroundSettlementMaximumPolls {
+                if let waitForForegroundUpdate {
+                    try await waitForForegroundUpdate()
+                } else {
+                    try await Task.sleep(nanoseconds: foregroundSettlementPollNanoseconds)
+                }
+            }
+        }
+        guard let foregroundBeforeCapture else {
+            throw ScreenHelpCaptureError.irisIsFrontmost
+        }
+        let capturedValue = try await capture()
+        let foregroundAfterCapture = readForeground()
+        let windowContext: AskCaptureWindowContext
+        if foregroundBeforeCapture.representsSameVerifiedWindow(as: foregroundAfterCapture) {
+            windowContext = .verified
+        } else if foregroundBeforeCapture.representsSameApplicationProcess(as: foregroundAfterCapture),
+                  !foregroundBeforeCapture.hasFocusedWindowIdentityAndFrame,
+                  !foregroundAfterCapture.hasFocusedWindowIdentityAndFrame {
+            windowContext = .unavailable
+        } else {
+            windowContext = .changed
+        }
+        return (
+            capturedValue,
+            foregroundBeforeCapture,
+            windowContext
+        )
+    }
+
+    private enum ScreenHelpCaptureError: Error {
+        case foregroundChanged
+        case irisIsFrontmost
+
+        var userFacingMessage: String {
+            switch self {
+            case .foregroundChanged:
+                return "the app or window changed while i was looking. bring it forward and ask again."
+            case .irisIsFrontmost:
+                return "switch to the app you want me to look at, then ask again."
+            }
+        }
+    }
+
+    private struct FocusedWindowIdentityEntry {
+        let processIdentifier: pid_t
+        let element: AXUIElement
+        let identifier: UUID
+    }
+
+    private static var focusedWindowIdentityEntries: [FocusedWindowIdentityEntry] = []
+
     @Published private(set) var assistantState: CompanionAssistantState = .idle
     @Published private(set) var chatResponseIsPending = false
     /// The most recent message the user submitted from the panel text field.
@@ -2735,16 +2894,34 @@ final class CompanionManager: ObservableObject {
             var dispatchedRoute: ChatResponseRoute?
 
             do {
-                // What this message looks at: every connected screen, exactly
-                // as before, plus whatever the reader attached to the bar
-                // (pasted, dropped, or picked). `takeTheImagesForThisMessage`
-                // spends the attachments, so they ride one message and one only.
-                let (labeledImages, screenCaptures) = try await CompanionScreenCaptureUtility
-                    .imageryForOneChatMessage(
-                        theReaderAttached: OverlayEyePastedImageAttachment.shared.takeTheImagesForThisMessage()
-                    )
-
+                // Keep explicit ownership of this message's attachments. They
+                // are consumed only after capture and foreground checks pass.
+                let attachmentBatch = OverlayEyePastedImageAttachment.shared.snapshotForMessage()
+                let capturedScreenHelp = try await Self.captureScreenHelpWhileForegroundContextStaysCurrent(
+                    readForeground: {
+                        Self.askCaptureForegroundSnapshot(for: NSWorkspace.shared.frontmostApplication)
+                    },
+                    isIrisForeground: { snapshot in
+                        Self.isIrisForegroundSnapshot(
+                            snapshot,
+                            irisBundleIdentifier: Bundle.main.bundleIdentifier,
+                            currentProcessIdentifier: ProcessInfo.processInfo.processIdentifier
+                        )
+                    },
+                    capture: {
+                        try await CompanionScreenCaptureUtility.imageryForOneChatMessage(
+                            theReaderAttached: attachmentBatch.images
+                        )
+                    }
+                )
                 guard isCurrentChatResponse(responseIdentifier) else { return }
+                guard capturedScreenHelp.windowContext != .changed else {
+                    throw ScreenHelpCaptureError.foregroundChanged
+                }
+                OverlayEyePastedImageAttachment.shared.consume(attachmentBatch)
+                let labeledImages = capturedScreenHelp.capturedValue.labeledImages
+                let screenCaptures = capturedScreenHelp.capturedValue.screenCaptures
+                let foregroundWhenCaptured = capturedScreenHelp.foreground
 
                 assistantState = .thinking
 
@@ -2825,19 +3002,17 @@ final class CompanionManager: ObservableObject {
                 // The watch loop learned this months ago and passes exactly this
                 // pair. Chat never did.
                 let promptWithFrontmostApp: String = {
-                    guard let frontmostApplication = NSWorkspace.shared.frontmostApplication,
-                          let applicationName = frontmostApplication.localizedName,
-                          frontmostApplication.bundleIdentifier != Bundle.main.bundleIdentifier
-                    else {
+                    guard capturedScreenHelp.windowContext == .verified,
+                          foregroundWhenCaptured.representsSameVerifiedWindow(
+                            as: Self.askCaptureForegroundSnapshot(for: NSWorkspace.shared.frontmostApplication)
+                          ) else {
                         return promptWithMachineFacts
                     }
-                    var note = "[The app the reader is working in right now is \(applicationName)."
-                    if let windowTitle = Self.titleOfTheFrontmostWindow(), !windowTitle.isEmpty {
-                        note += " Its front window is titled \"\(windowTitle)\"."
+                    guard let note = foregroundWhenCaptured.promptNote(
+                        irisBundleIdentifier: Bundle.main.bundleIdentifier
+                    ) else {
+                        return promptWithMachineFacts
                     }
-                    note += " The screenshot shows every window on the display at once, so when the"
-                    note += " question is about \"my screen\" or \"this\", answer about \(applicationName)"
-                    note += " unless they clearly mean something else.]"
                     return promptWithMachineFacts + "\n\n" + note
                 }()
 
@@ -2851,6 +3026,13 @@ final class CompanionManager: ObservableObject {
                 )
 
                 guard isCurrentChatResponse(responseIdentifier) else { return }
+
+                // The provider call can outlast a window switch or resize.
+                // Never fly to coordinates derived from an older window image.
+                let focusedWindowIsStillCurrent = capturedScreenHelp.windowContext == .verified
+                    && foregroundWhenCaptured.representsSameVerifiedWindow(
+                        as: Self.askCaptureForegroundSnapshot(for: NSWorkspace.shared.frontmostApplication)
+                    )
 
                 // Parse the [POINT:...] tag from Claude's response
                 let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
@@ -2872,7 +3054,7 @@ final class CompanionManager: ObservableObject {
                 // Switch to pointing BEFORE setting the location so the triangle
                 // becomes visible and can fly to the target. Without this, the
                 // spinner hides the triangle and the flight animation is invisible.
-                let hasPointCoordinate = parseResult.coordinate != nil
+                let hasPointCoordinate = parseResult.coordinate != nil && focusedWindowIsStillCurrent
                 if hasPointCoordinate {
                     assistantState = .pointing
                 }
@@ -2888,6 +3070,7 @@ final class CompanionManager: ObservableObject {
                 }()
 
                 if let pointCoordinate = parseResult.coordinate,
+                   focusedWindowIsStillCurrent,
                    let targetScreenCapture {
                     guard isCurrentChatResponse(responseIdentifier) else { return }
                     // Claude's coordinates are in the screenshot's pixel space
@@ -2965,10 +3148,15 @@ final class CompanionManager: ObservableObject {
                             + CodexChatResponder.failureDiagnosticClass(for: error)
                     )
                 }
-                let failureMessage = await describeAndHandle(
-                    assistantError: error,
-                    logFailureDetails: dispatchedRoute?.logsFailureDetails ?? true
-                )
+                let failureMessage: String
+                if let captureError = error as? ScreenHelpCaptureError {
+                    failureMessage = captureError.userFacingMessage
+                } else {
+                    failureMessage = await describeAndHandle(
+                        assistantError: error,
+                        logFailureDetails: dispatchedRoute?.logsFailureDetails ?? true
+                    )
+                }
                 guard isCurrentChatResponse(responseIdentifier) else { return }
                 // Never the raw server body: `describeAndHandle` maps the
                 // failure to one of a fixed set of sentences, and takes care of
@@ -3140,25 +3328,93 @@ final class CompanionManager: ObservableObject {
 
     /// Parses a [POINT:x,y:label:screenN] or [POINT:none] tag from the end of Claude's response.
     /// Returns the display text (tag removed) and the optional coordinate + label + screen number.
-    /// The title of the frontmost window, read through accessibility.
-    ///
-    /// Best-effort by design: without the Accessibility grant, or for an app
-    /// that exposes no title, this is nil and the caller simply names the app
-    /// without it. A missing title must never cost the reader the app name,
-    /// which is the more useful half.
-    static func titleOfTheFrontmostWindow() -> String? {
+    static func askCaptureForegroundSnapshot(
+        for application: NSRunningApplication?
+    ) -> AskCaptureForegroundSnapshot {
+        let focusedWindow = application.flatMap {
+            focusedWindowSnapshot(processIdentifier: $0.processIdentifier)
+        }
+        return AskCaptureForegroundSnapshot(
+            bundleIdentifier: application?.bundleIdentifier,
+            processIdentifier: application?.processIdentifier,
+            applicationName: application?.localizedName,
+            windowTitle: focusedWindow?.title,
+            focusedWindowIdentity: focusedWindow?.identity,
+            focusedWindowFrame: focusedWindow?.frame
+        )
+    }
+
+    private static func focusedWindowSnapshot(
+        processIdentifier: pid_t
+    ) -> (title: String?, identity: UUID, frame: CGRect)? {
         guard AXIsProcessTrusted() else { return nil }
-        guard let frontmostApplication = NSWorkspace.shared.frontmostApplication else { return nil }
-        let applicationElement = AXUIElementCreateApplication(frontmostApplication.processIdentifier)
+        let applicationElement = AXUIElementCreateApplication(processIdentifier)
         var focusedWindow: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             applicationElement, kAXFocusedWindowAttribute as CFString, &focusedWindow
-        ) == .success, let window = focusedWindow else { return nil }
+        ) == .success, let focusedWindow,
+              CFGetTypeID(focusedWindow) == AXUIElementGetTypeID() else { return nil }
+        let window = focusedWindow as! AXUIElement
+
         var title: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &title)
+
+        var positionValue: CFTypeRef?
+        var sizeValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
-            window as! AXUIElement, kAXTitleAttribute as CFString, &title
-        ) == .success else { return nil }
-        return title as? String
+            window, kAXPositionAttribute as CFString, &positionValue
+        ) == .success,
+        AXUIElementCopyAttributeValue(
+            window, kAXSizeAttribute as CFString, &sizeValue
+        ) == .success,
+        let positionValue, let sizeValue,
+        CFGetTypeID(positionValue) == AXValueGetTypeID(),
+        CFGetTypeID(sizeValue) == AXValueGetTypeID() else {
+            return nil
+        }
+
+        var origin = CGPoint.zero
+        var dimensions = CGSize.zero
+        guard AXValueGetValue(positionValue as! AXValue, .cgPoint, &origin),
+              AXValueGetValue(sizeValue as! AXValue, .cgSize, &dimensions),
+              origin.x.isFinite, origin.y.isFinite,
+              dimensions.width.isFinite, dimensions.height.isFinite,
+              dimensions.width > 0, dimensions.height > 0 else {
+            return nil
+        }
+
+        return (
+            title as? String,
+            focusedWindowIdentifier(for: window, processIdentifier: processIdentifier),
+            CGRect(origin: origin, size: dimensions)
+        )
+    }
+
+    /// AXUIElement values can be re-created between reads; CFEqual, not title
+    /// or frame, establishes whether the focused accessibility object is the
+    /// same window. The bounded cache only retains the most recent 32 windows.
+    private static func focusedWindowIdentifier(
+        for window: AXUIElement,
+        processIdentifier: pid_t
+    ) -> UUID {
+        if let entry = focusedWindowIdentityEntries.first(where: {
+            $0.processIdentifier == processIdentifier && CFEqual($0.element, window)
+        }) {
+            return entry.identifier
+        }
+
+        let entry = FocusedWindowIdentityEntry(
+            processIdentifier: processIdentifier,
+            element: window,
+            identifier: UUID()
+        )
+        focusedWindowIdentityEntries.append(entry)
+        if focusedWindowIdentityEntries.count > 32 {
+            focusedWindowIdentityEntries.removeFirst(
+                focusedWindowIdentityEntries.count - 32
+            )
+        }
+        return entry.identifier
     }
 
     static func parsePointingCoordinates(from fullResponseText: String) -> PointingParseResult {

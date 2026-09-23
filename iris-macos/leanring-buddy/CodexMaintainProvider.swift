@@ -44,6 +44,330 @@
 //
 
 import Foundation
+import Darwin
+
+nonisolated struct CodexExecProcessIdentity: Hashable, Sendable {
+    let processIdentifier: pid_t
+    let userIdentifier: uid_t
+    let processGroupIdentifier: pid_t
+    let startSeconds: UInt64
+    let startMicroseconds: UInt64
+}
+
+/// Pure gate for group-wide signals. Current membership must be complete and
+/// every member must still be one of the identities captured from this request.
+nonisolated enum CodexExecProcessGroupSignalPolicy {
+    static func maySignalOwnedGroup(
+        leader: CodexExecProcessIdentity,
+        callerProcessGroupIdentifier: pid_t,
+        recordedMembers: Set<CodexExecProcessIdentity>,
+        currentMembers: [CodexExecProcessIdentity],
+        enumerationWasComplete: Bool
+    ) -> Bool {
+        guard enumerationWasComplete,
+              leader.processIdentifier > 0,
+              leader.processGroupIdentifier == leader.processIdentifier,
+              leader.processGroupIdentifier != callerProcessGroupIdentifier,
+              recordedMembers.contains(leader),
+              !currentMembers.isEmpty else { return false }
+        return currentMembers.allSatisfy {
+            $0.processGroupIdentifier == leader.processGroupIdentifier
+                && $0.userIdentifier == leader.userIdentifier
+                && recordedMembers.contains($0)
+        }
+    }
+}
+
+/// One Codex invocation's process ownership. Darwin proc metadata is used only
+/// to signal a verified private process group; uncertainty falls back to the
+/// exact, birth-checked leader PID and never to a numeric group guess.
+private nonisolated final class CodexExecProcessLifecycle: @unchecked Sendable {
+    private struct Snapshot {
+        let identity: CodexExecProcessIdentity
+        let parentProcessIdentifier: pid_t
+    }
+
+    private static let maximumGroupMembers = 128
+    private static let maximumAncestryDepth = 32
+    private static let escalationDelayNanoseconds: UInt64 = 3_000_000_000
+
+    private let lock = NSLock()
+    private let leader: CodexExecProcessIdentity?
+    private var recordedMembers = Set<CodexExecProcessIdentity>()
+    private var terminationWasRequested = false
+
+    init(processIdentifier: pid_t) {
+        leader = Self.snapshot(processIdentifier)?.identity
+        if let leader,
+           let initialMembers = Self.captureOwnedGroup(leader: leader, callerGroup: getpgrp()) {
+            recordedMembers = Set(initialMembers)
+        } else if let leader {
+            recordedMembers = [leader]
+        }
+    }
+
+    func observeCurrentOwnedMembers() {
+        guard let leader,
+              let currentMembers = Self.captureOwnedGroup(leader: leader, callerGroup: getpgrp()) else { return }
+        lock.lock()
+        recordedMembers.formUnion(currentMembers)
+        lock.unlock()
+    }
+
+    func terminate() {
+        lock.lock()
+        guard !terminationWasRequested else {
+            lock.unlock()
+            return
+        }
+        terminationWasRequested = true
+        lock.unlock()
+
+        guard let leader else { return }
+        let callerGroup = getpgrp()
+        let captured = Self.captureOwnedGroup(leader: leader, callerGroup: callerGroup)
+        if let captured,
+           CodexExecProcessGroupSignalPolicy.maySignalOwnedGroup(
+               leader: leader,
+               callerProcessGroupIdentifier: callerGroup,
+               recordedMembers: Set(captured),
+               currentMembers: captured,
+               enumerationWasComplete: true
+           ),
+           killpg(leader.processGroupIdentifier, SIGTERM) == 0 {
+            lock.lock()
+            recordedMembers.formUnion(captured)
+            lock.unlock()
+        } else {
+            lock.lock()
+            if let captured { recordedMembers.formUnion(captured) }
+            let membersToSignal = recordedMembers
+            lock.unlock()
+            for identity in membersToSignal {
+                Self.signalIfStillSame(identity, signal: SIGTERM)
+            }
+        }
+
+        Task.detached { [self] in
+            try? await Task.sleep(nanoseconds: Self.escalationDelayNanoseconds)
+            escalate()
+        }
+    }
+
+    private func escalate() {
+        lock.lock()
+        let recorded = recordedMembers
+        lock.unlock()
+        guard let leader, !recorded.isEmpty else { return }
+
+        if let current = Self.currentGroupMembers(
+               processGroupIdentifier: leader.processGroupIdentifier,
+               userIdentifier: leader.userIdentifier
+           ),
+           CodexExecProcessGroupSignalPolicy.maySignalOwnedGroup(
+               leader: leader,
+               callerProcessGroupIdentifier: getpgrp(),
+               recordedMembers: recorded,
+               currentMembers: current,
+               enumerationWasComplete: true
+           ) {
+            _ = killpg(leader.processGroupIdentifier, SIGKILL)
+            return
+        }
+
+        // A reused group, unknown member, or incomplete census forbids a group
+        // signal. Revalidate and signal only exact same-birth PIDs we recorded.
+        for identity in recorded {
+            Self.signalIfStillSame(identity, signal: SIGKILL)
+        }
+    }
+
+    private static func signalIfStillSame(_ identity: CodexExecProcessIdentity, signal: Int32) {
+        guard let current = snapshot(identity.processIdentifier)?.identity,
+              current == identity else { return }
+        _ = kill(identity.processIdentifier, signal)
+    }
+
+    private static func captureOwnedGroup(
+        leader: CodexExecProcessIdentity,
+        callerGroup: pid_t
+    ) -> [CodexExecProcessIdentity]? {
+        guard leader.processGroupIdentifier == leader.processIdentifier,
+              leader.processGroupIdentifier != callerGroup,
+              snapshot(leader.processIdentifier)?.identity == leader,
+              getpgid(leader.processIdentifier) == leader.processGroupIdentifier,
+              let pids = processGroupMembers(leader.processGroupIdentifier),
+              pids.contains(leader.processIdentifier) else { return nil }
+
+        let members = pids.compactMap(snapshot)
+        guard members.count == pids.count,
+              members.allSatisfy({
+                  $0.identity.processGroupIdentifier == leader.processGroupIdentifier
+                      && $0.identity.userIdentifier == leader.userIdentifier
+              }),
+              members.allSatisfy({ isDescendant($0, of: leader) }) else { return nil }
+
+        // Reject a changing or saturated group census instead of signaling a
+        // partial view. The leader must still be the same process at this point.
+        guard let confirmedPIDs = processGroupMembers(leader.processGroupIdentifier),
+              confirmedPIDs.sorted() == pids.sorted() else { return nil }
+        let confirmedMembers = confirmedPIDs.compactMap(snapshot)
+        guard confirmedMembers.count == members.count,
+              Set(confirmedMembers.map(\.identity)) == Set(members.map(\.identity)),
+              snapshot(leader.processIdentifier)?.identity == leader else { return nil }
+        return members.map(\.identity)
+    }
+
+    private static func isDescendant(_ member: Snapshot, of leader: CodexExecProcessIdentity) -> Bool {
+        if member.identity == leader { return true }
+        var parent = member.parentProcessIdentifier
+        var visited = Set<pid_t>()
+        for _ in 0..<maximumAncestryDepth {
+            if parent == leader.processIdentifier { return true }
+            guard parent > 0, visited.insert(parent).inserted,
+                  let ancestor = snapshot(parent),
+                  ancestor.identity.userIdentifier == leader.userIdentifier else { return false }
+            parent = ancestor.parentProcessIdentifier
+        }
+        return false
+    }
+
+    private static func processGroupMembers(_ processGroupIdentifier: pid_t) -> [pid_t]? {
+        var pids = [pid_t](repeating: 0, count: maximumGroupMembers)
+        let count = pids.withUnsafeMutableBufferPointer { buffer in
+            proc_listpgrppids(
+                processGroupIdentifier,
+                buffer.baseAddress,
+                Int32(buffer.count * MemoryLayout<pid_t>.stride)
+            )
+        }
+        guard count > 0, count < Int32(maximumGroupMembers) else { return nil }
+        return Array(pids.prefix(Int(count)))
+    }
+
+    private static func currentGroupMembers(
+        processGroupIdentifier: pid_t,
+        userIdentifier: uid_t
+    ) -> [CodexExecProcessIdentity]? {
+        guard let pids = processGroupMembers(processGroupIdentifier) else { return nil }
+        let members = pids.compactMap(snapshot).map(\.identity)
+        guard members.count == pids.count,
+              members.allSatisfy({
+                  $0.processGroupIdentifier == processGroupIdentifier
+                      && $0.userIdentifier == userIdentifier
+              }) else { return nil }
+        return members
+    }
+
+    private static func snapshot(_ processIdentifier: pid_t) -> Snapshot? {
+        guard processIdentifier > 0 else { return nil }
+        var info = proc_bsdinfo()
+        let byteCount = Int32(MemoryLayout<proc_bsdinfo>.size)
+        let result = proc_pidinfo(
+            processIdentifier,
+            PROC_PIDTBSDINFO,
+            0,
+            &info,
+            byteCount
+        )
+        guard result == byteCount,
+              info.pbi_pid == UInt32(processIdentifier) else { return nil }
+        return Snapshot(
+            identity: CodexExecProcessIdentity(
+                processIdentifier: processIdentifier,
+                userIdentifier: info.pbi_uid,
+                processGroupIdentifier: pid_t(info.pbi_pgid),
+                startSeconds: info.pbi_start_tvsec,
+                startMicroseconds: info.pbi_start_tvusec
+            ),
+            parentProcessIdentifier: pid_t(info.pbi_ppid)
+        )
+    }
+}
+
+/// Cancellation owned by one foreground Codex chat request. Edit calls omit
+/// this token and retain their existing process lifecycle.
+final class CodexExecCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    private var ownedProcess: Process?
+    private var lifecycle: CodexExecProcessLifecycle?
+
+    func throwIfCancelled() throws {
+        lock.lock()
+        let wasCancelled = cancelled
+        lock.unlock()
+        if wasCancelled { throw CancellationError() }
+    }
+
+    func register(_ process: Process) -> Bool {
+        let processLifecycle = CodexExecProcessLifecycle(processIdentifier: process.processIdentifier)
+        lock.lock()
+        ownedProcess = process
+        lifecycle = processLifecycle
+        let wasCancelled = cancelled
+        lock.unlock()
+        if wasCancelled { processLifecycle.terminate() }
+        return !wasCancelled
+    }
+
+    func unregister(_ process: Process) {
+        lock.lock()
+        if ownedProcess === process {
+            ownedProcess = nil
+            lifecycle = nil
+        }
+        lock.unlock()
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let processLifecycle = lifecycle
+        lock.unlock()
+        processLifecycle?.terminate()
+    }
+
+    func terminateForTimeout(_ process: Process) {
+        lock.lock()
+        let processLifecycle = ownedProcess === process ? lifecycle : nil
+        lock.unlock()
+        processLifecycle?.terminate()
+    }
+
+    func observeCurrentOwnedMembers(_ process: Process) {
+        lock.lock()
+        let processLifecycle = ownedProcess === process ? lifecycle : nil
+        lock.unlock()
+        processLifecycle?.observeCurrentOwnedMembers()
+    }
+}
+
+/// Fails closed for screen-help so every image named in the prompt is actually
+/// delivered. The edit route retains its existing best-effort default.
+nonisolated enum CodexExecImageStager {
+    static func stage(
+        _ imageDataList: [Data],
+        in directory: URL,
+        requireAllImages: Bool,
+        write: (Data, URL) throws -> Void = { data, url in try data.write(to: url) }
+    ) throws -> [String] {
+        var paths: [String] = []
+        for (index, data) in imageDataList.enumerated() {
+            let imageURL = directory.appendingPathComponent("attachment-\(index).png")
+            do {
+                try write(data, imageURL)
+                paths.append(imageURL.path)
+            } catch {
+                guard requireAllImages else { continue }
+                throw MaintainModelProviderError.requestFailed(
+                    "Iris could not prepare every screenshot for Codex screen help, so no request was sent. Try again."
+                )
+            }
+        }
+        return paths
+    }
+}
 
 // MARK: - Building one `codex exec` invocation (pure)
 
@@ -529,6 +853,8 @@ final class CodexMaintainProvider: MaintainModelProviding {
         model: String?,
         webSearchEnabled: Bool,
         timeoutSeconds: TimeInterval,
+        cancellation: CodexExecCancellation? = nil,
+        requireAllImages: Bool = false,
         // The pause between empty-reply retries (see
         // `maximumEmptyReplyRetriesPerStep`). Defaults to the real backoff; a
         // test drives it to 0 to exercise the whole retry ladder in
@@ -540,13 +866,16 @@ final class CodexMaintainProvider: MaintainModelProviding {
             ?? Double(emptyReplyRetryWaitSeconds)
         var emptyReplyRetriesRemaining = maximumEmptyReplyRetriesPerStep
         while true {
+            try cancellation?.throwIfCancelled()
             if let assistantMessage = try await runCodexExecOnce(
                 codexBinaryPath: codexBinaryPath,
                 promptText: promptText,
                 attachedImagePNGDataList: attachedImagePNGDataList,
                 model: model,
                 webSearchEnabled: webSearchEnabled,
-                timeoutSeconds: timeoutSeconds
+                timeoutSeconds: timeoutSeconds,
+                cancellation: cancellation,
+                requireAllImages: requireAllImages
             ) {
                 return assistantMessage
             }
@@ -565,8 +894,13 @@ final class CodexMaintainProvider: MaintainModelProviding {
                     + "(\(emptyReplyRetriesRemaining) retries left)"
             )
             if backoffSeconds > 0 {
-                try? await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
+                if cancellation == nil {
+                    try? await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
+                } else {
+                    try await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
+                }
             }
+            try cancellation?.throwIfCancelled()
         }
     }
 
@@ -581,8 +915,11 @@ final class CodexMaintainProvider: MaintainModelProviding {
         attachedImagePNGDataList: [Data],
         model: String?,
         webSearchEnabled: Bool,
-        timeoutSeconds: TimeInterval
+        timeoutSeconds: TimeInterval,
+        cancellation: CodexExecCancellation? = nil,
+        requireAllImages: Bool = false
     ) async throws -> String? {
+        try cancellation?.throwIfCancelled()
         // A scratch directory per call: it is the agent's working root, and it
         // is deliberately EMPTY and outside any repo, so even a read-only shell
         // has nothing of the reader's to look at.
@@ -595,12 +932,11 @@ final class CodexMaintainProvider: MaintainModelProviding {
 
         let finalMessageURL = scratchDirectoryURL.appendingPathComponent("final-message.txt")
 
-        var attachedImagePaths: [String] = []
-        for (index, imagePNGData) in attachedImagePNGDataList.enumerated() {
-            let imageURL = scratchDirectoryURL.appendingPathComponent("attachment-\(index).png")
-            guard (try? imagePNGData.write(to: imageURL)) != nil else { continue }
-            attachedImagePaths.append(imageURL.path)
-        }
+        let attachedImagePaths = try CodexExecImageStager.stage(
+            attachedImagePNGDataList,
+            in: scratchDirectoryURL,
+            requireAllImages: requireAllImages
+        )
 
         let arguments = try CodexExecInvocation.validated(
             CodexExecInvocation.arguments(
@@ -626,7 +962,10 @@ final class CodexMaintainProvider: MaintainModelProviding {
         process.standardError = standardErrorPipe
 
         do {
+            try cancellation?.throwIfCancelled()
             try process.run()
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             throw MaintainModelProviderError.requestFailed(
                 "iris found the codex command but couldn't start it. reinstall it "
@@ -634,18 +973,38 @@ final class CodexMaintainProvider: MaintainModelProviding {
                     + "settings, then try again. the system said: \(error.localizedDescription)"
             )
         }
+        let cancellationAllowsRequest = cancellation?.register(process) ?? true
+        defer { cancellation?.unregister(process) }
+
+        let outputCollector = PipeCollector(
+            fileHandle: standardOutputPipe.fileHandleForReading,
+            timeoutSeconds: timeoutSeconds,
+            onTimeout: { cancellation?.terminateForTimeout(process) },
+            onActivity: { cancellation?.observeCurrentOwnedMembers(process) }
+        )
+        let errorCollector = PipeCollector(
+            fileHandle: standardErrorPipe.fileHandleForReading,
+            timeoutSeconds: timeoutSeconds,
+            onTimeout: { cancellation?.terminateForTimeout(process) },
+            onActivity: { cancellation?.observeCurrentOwnedMembers(process) }
+        )
+
+        async let stdoutRead = outputCollector.collectText()
+        async let stderrRead = errorCollector.collectText()
+
+        if !cancellationAllowsRequest {
+            await waitUntilExitOffMainQueue(process)
+            _ = try? await stdoutRead
+            _ = try? await stderrRead
+            throw CancellationError()
+        }
 
         // Feed the prompt and close stdin so the CLI stops waiting for more.
         if let promptData = promptText.data(using: .utf8) {
             standardInputPipe.fileHandleForWriting.write(promptData)
         }
         try? standardInputPipe.fileHandleForWriting.close()
-
-        // Drain both pipes on their own threads. A `codex exec --json` run can
-        // emit more than a pipe buffer holds, and a full pipe would deadlock the
-        // child against a parent that is only waiting on exit.
-        let outputCollector = PipeCollector(fileHandle: standardOutputPipe.fileHandleForReading)
-        let errorCollector = PipeCollector(fileHandle: standardErrorPipe.fileHandleForReading)
+        cancellation?.observeCurrentOwnedMembers(process)
 
         // The watchdog ESCALATES, and that escalation is load-bearing. A single
         // `terminate()` (SIGTERM) is not enough: a `codex exec` blocked on a
@@ -660,27 +1019,29 @@ final class CodexMaintainProvider: MaintainModelProviding {
         // not a transient empty.
         let watchdog = Task {
             try await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
-            guard process.isRunning else { return }
-            let processIdentifier = process.processIdentifier
-            process.terminate()
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            guard process.isRunning else { return }
-            // SIGKILL the group; fall back to the single pid if the group send
-            // is rejected (e.g. the child changed its own process group).
-            if killpg(processIdentifier, SIGKILL) != 0 {
-                kill(processIdentifier, SIGKILL)
+            if let cancellation {
+                cancellation.terminateForTimeout(process)
+            } else {
+                guard process.isRunning else { return }
+                let processIdentifier = process.processIdentifier
+                process.terminate()
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard process.isRunning else { return }
+                // Edit calls retain their established timeout behavior. Chat
+                // calls use the identity-checked invocation lifecycle above.
+                if killpg(processIdentifier, SIGKILL) != 0 {
+                    kill(processIdentifier, SIGKILL)
+                }
             }
         }
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                process.waitUntilExit()
-                continuation.resume()
-            }
+        await waitUntilExitOffMainQueue(process)
+        defer {
+            watchdog.cancel()
         }
-        watchdog.cancel()
+        try cancellation?.throwIfCancelled()
 
-        let standardOutputText = outputCollector.collectedText()
-        let standardErrorText = errorCollector.collectedText()
+        let (standardOutputText, standardErrorText) = try await (stdoutRead, stderrRead)
+        try cancellation?.throwIfCancelled()
         // Kept so a harness can ask what tools this turn actually used. The
         // provider protocol returns only the assistant's text, and whether the
         // model REACHED for web search is not in the text — it is in the event
@@ -708,35 +1069,133 @@ final class CodexMaintainProvider: MaintainModelProviding {
         // empty here is a transient, not proof the model refused.
         return nil
     }
+
+    private nonisolated static func waitUntilExitOffMainQueue(_ process: Process) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                process.waitUntilExit()
+                continuation.resume()
+            }
+        }
+    }
 }
 
 // MARK: - Pipe draining
 
-/// Reads a pipe to EOF on a background thread and hands back what it got.
-///
-/// This exists because the obvious `readDataToEndOfFile()` on the calling thread
-/// serializes the two pipes: stderr cannot be drained until stdout has closed,
-/// so a child that fills its stderr buffer first blocks forever. Both are read
-/// concurrently here.
+/// Drains one pipe asynchronously on a private queue. A descendant can inherit
+/// its write descriptor after the owned child exits, so EOF has its own finite
+/// bound. Concurrent stdout/stderr collectors prevent either pipe filling up.
 private nonisolated final class PipeCollector: @unchecked Sendable {
-    private let lock = NSLock()
+    private let fileHandle: FileHandle
+    private let queue = DispatchQueue(label: "iris.codex.pipe-drain", qos: .utility)
+    private var source: DispatchSourceRead?
+    private var timeoutSource: DispatchSourceTimer?
     private var collectedData = Data()
-    private let finishedReading = DispatchSemaphore(value: 0)
+    private var result: Result<String, Error>?
+    private var continuation: CheckedContinuation<String, Error>?
+    private var hasStartedCollecting = false
+    private var hasObservedActivity = false
 
-    init(fileHandle: FileHandle) {
-        Thread.detachNewThread { [self] in
-            let data = fileHandle.readDataToEndOfFile()
-            lock.lock()
-            collectedData = data
-            lock.unlock()
-            finishedReading.signal()
+    private let onTimeout: (() -> Void)?
+    private let onActivity: (() -> Void)?
+
+    init(
+        fileHandle: FileHandle,
+        timeoutSeconds: TimeInterval,
+        onTimeout: (() -> Void)? = nil,
+        onActivity: (() -> Void)? = nil
+    ) {
+        self.fileHandle = fileHandle
+        self.onTimeout = onTimeout
+        self.onActivity = onActivity
+        let readSource = DispatchSource.makeReadSource(
+            fileDescriptor: fileHandle.fileDescriptor,
+            queue: queue
+        )
+        source = readSource
+        readSource.setEventHandler { [weak self] in self?.readAvailableBytes() }
+
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timeoutSource = timer
+        timer.setEventHandler { [weak self] in
+            self?.onTimeout?()
+            self?.finish(.failure(MaintainModelProviderError.requestFailed(
+                "codex exec output pipes did not close within the per-attempt deadline; no partial response was used."
+            )))
+        }
+        timer.schedule(deadline: .now() + max(0, timeoutSeconds))
+        readSource.resume()
+        timer.resume()
+    }
+
+    func collectText() async throws -> String {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                queue.async {
+                    guard !self.hasStartedCollecting else {
+                        continuation.resume(throwing: MaintainModelProviderError.requestFailed(
+                            "codex exec output was collected more than once."
+                        ))
+                        return
+                    }
+                    self.hasStartedCollecting = true
+                    if let result = self.result {
+                        continuation.resume(with: result)
+                    } else {
+                        self.continuation = continuation
+                    }
+                }
+            }
+        } onCancel: {
+            self.queue.async { self.finish(.failure(CancellationError())) }
         }
     }
 
-    func collectedText() -> String {
-        finishedReading.wait()
-        lock.lock()
-        defer { lock.unlock() }
-        return String(data: collectedData, encoding: .utf8) ?? ""
+    func cancel() {
+        queue.async { self.finish(.failure(CancellationError())) }
+    }
+
+    private func readAvailableBytes() {
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        let count = buffer.withUnsafeMutableBytes { bytes in
+            Darwin.read(fileHandle.fileDescriptor, bytes.baseAddress, bytes.count)
+        }
+        if count > 0 {
+            collectedData.append(contentsOf: buffer.prefix(count))
+            if !hasObservedActivity {
+                hasObservedActivity = true
+                onActivity?()
+            }
+            return
+        }
+        if count == 0 {
+            finish(.success(String(data: collectedData, encoding: .utf8) ?? ""))
+            return
+        }
+        if errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK { return }
+        finish(.failure(MaintainModelProviderError.requestFailed(
+            "codex exec could not read its output pipe (errno \(errno)); no partial response was used."
+        )))
+    }
+
+    private func finish(_ result: Result<String, Error>) {
+        guard self.result == nil else { return }
+        self.result = result
+        if let source {
+            // The cancel handler owns close so queued read events cannot observe
+            // an fd that has already been reused for another resource.
+            source.setEventHandler {}
+            source.setCancelHandler { [fileHandle] in try? fileHandle.close() }
+            source.cancel()
+        } else {
+            try? fileHandle.close()
+        }
+        source = nil
+        timeoutSource?.setEventHandler {}
+        timeoutSource?.cancel()
+        timeoutSource = nil
+        let continuation = self.continuation
+        self.continuation = nil
+        continuation?.resume(with: result)
     }
 }

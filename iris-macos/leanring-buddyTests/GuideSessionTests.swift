@@ -21,7 +21,14 @@ struct GuideSessionTests {
 
     @Test func resumeLandsOnTheSavedStepAndSurvivesAVersionBump() async throws {
         let guideService = try Self.guideServiceAnsweredByTheStub()
-        let controller = GuideSessionController(guideService: guideService)
+        let fixturePreferences = try #require(UserDefaults(
+            suiteName: "com.publik.iris.tests.resume.\(UUID().uuidString)"
+        ))
+        let expectedGitPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("lunara/.git").path
+        let controller = Self.isolatedController(
+            guideService: guideService, preferences: fixturePreferences
+        )
 
         await controller.openGuide(
             slug: "lunara",
@@ -39,7 +46,13 @@ struct GuideSessionTests {
 
         // Reopening the same guide at the same version puts the reader back
         // where they stopped rather than at the top.
-        let controllerReopeningTheSameGuide = GuideSessionController(guideService: guideService)
+        let controllerReopeningTheSameGuide = Self.isolatedController(
+            guideService: guideService, preferences: fixturePreferences
+        )
+        controllerReopeningTheSameGuide.repositoryExistsAtPath = { gitPath in
+            #expect(gitPath == expectedGitPath)
+            return gitPath == expectedGitPath
+        }
         await controllerReopeningTheSameGuide.openGuide(
             slug: "lunara",
             requestedVersion: 2,
@@ -61,7 +74,13 @@ struct GuideSessionTests {
         // `Test6ProgressDurabilityReproTests` covers the other half — a version
         // whose steps genuinely changed — which this stub cannot express,
         // because it serves identical steps for every version of a slug.
-        let controllerOpeningTheNewVersion = GuideSessionController(guideService: guideService)
+        let controllerOpeningTheNewVersion = Self.isolatedController(
+            guideService: guideService, preferences: fixturePreferences
+        )
+        controllerOpeningTheNewVersion.repositoryExistsAtPath = { gitPath in
+            #expect(gitPath == expectedGitPath)
+            return gitPath == expectedGitPath
+        }
         await controllerOpeningTheNewVersion.openGuide(
             slug: "lunara",
             requestedVersion: 3,
@@ -72,6 +91,23 @@ struct GuideSessionTests {
         #expect(controllerOpeningTheNewVersion.guideBeingFollowed?.version == 3)
         #expect(controllerOpeningTheNewVersion.currentStepIndex == 2)
         #expect(controllerOpeningTheNewVersion.stepTheReaderIsLookingAt?.id == "studio")
+
+        // The saved step is still rejected when the clone is missing. This
+        // checks the production guard without creating a real home fixture.
+        let controllerWithMissingClone = Self.isolatedController(
+            guideService: guideService, preferences: fixturePreferences
+        )
+        controllerWithMissingClone.repositoryExistsAtPath = { gitPath in
+            #expect(gitPath == expectedGitPath)
+            return false
+        }
+        await controllerWithMissingClone.openGuide(
+            slug: "lunara",
+            requestedVersion: 3,
+            branchKeyFromDeepLink: "macos:android",
+            stepIndexFromDeepLink: nil
+        )
+        #expect(controllerWithMissingClone.currentStepIndex == 0)
     }
 
     @Test func aLinkThatNamesAStepOverridesWhatThisMachineRemembers() async throws {
@@ -111,7 +147,12 @@ struct GuideSessionTests {
     /// that the picker's exact call fires that request.
     @Test func openingAGuideFromThePickerAsksToSurfaceItsCard() async throws {
         let guideService = try Self.guideServiceAnsweredByTheStub()
-        let controller = GuideSessionController(guideService: guideService)
+        let fixturePreferences = try #require(UserDefaults(
+            suiteName: "com.publik.iris.tests.picker.\(UUID().uuidString)"
+        ))
+        let controller = Self.isolatedController(
+            guideService: guideService, preferences: fixturePreferences
+        )
 
         var timesTheGuideCardWasAskedToSurface = 0
         controller.surfaceTheGuideCardAtTheEye = {
@@ -418,6 +459,20 @@ struct GuideSessionTests {
     }
 
     // MARK: - Test fixtures
+
+    private static func isolatedController(
+        guideService: GuideService,
+        preferences: UserDefaults
+    ) -> GuideSessionController {
+        GuideSessionController(
+            guideService: guideService,
+            watchLoop: WatchLoop(
+                preferencesStore: preferences, drivesItsOwnTickTimer: false
+            ),
+            lastFollowedGuideMemory: LastFollowedGuideMemory(userDefaults: preferences),
+            observeAppActivations: false
+        )
+    }
 
     /// The failing slugs the stub knows, paired with the version to ask for.
     /// Each one exercises a different branch of `GuideService`'s status mapping.

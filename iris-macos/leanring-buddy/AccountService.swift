@@ -228,6 +228,15 @@ final class AccountService: ObservableObject {
         self.codexLoginState = CodexCLILogin.currentState()
     }
 
+    /// Builds the real service without inspecting Keychain or the Codex CLI.
+    /// Only used by isolated manager tests.
+    init(inertForTesting: Void) {
+        self.urlSession = URLSession(configuration: .ephemeral)
+        self.hasStoredAnthropicAPIKey = false
+        self.hasPublikAPIKey = false
+        self.codexLoginState = .codexNotInstalled
+    }
+
     // MARK: - Restoring a previous session
 
     /// Trades the stored refresh token for a fresh access token at launch, so a

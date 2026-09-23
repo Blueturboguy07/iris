@@ -668,6 +668,7 @@ struct OverlayEyeInputBarView: View {
     /// Editing is the default because opening an app is a deliberate act and
     /// editing it is the reason to have done it. Asking is one tap away.
     @State private var composerMode: ComposerMode = .edit
+    @State private var stopButtonIsHovered = false
 
     /// The fix/feature choice, which decides the honesty label and the commit
     /// trailer, so it is a real choice and not a convenience.
@@ -1142,7 +1143,14 @@ struct OverlayEyeInputBarView: View {
                     editKindRow
                 }
             } else {
-                modelSelectorRow
+                if accountService.resolvedChatProvider == .codex {
+                    Text("Codex CLI default for screen-help requests")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                } else {
+                    modelSelectorRow
+                }
             }
             // With nothing attached this is EmptyView, so the bar is byte for
             // byte the bar it has always been until the reader pastes a picture.
@@ -1543,16 +1551,37 @@ struct OverlayEyeInputBarView: View {
 
             closeButton
 
-            Button {
-                sendWhatIsTyped()
-            } label: {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundColor(theSendButtonIsLive ? DS.Colors.accent : DS.Colors.quiet)
+            if companionManager.chatResponseIsPending {
+                Button {
+                    companionManager.stopCurrentAskResponse()
+                } label: {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(DS.Colors.accent)
+                        .frame(width: 28, height: 28)
+                        .background {
+                            Circle().fill(stopButtonIsHovered ? DS.Colors.accent.opacity(0.16) : .clear)
+                        }
+                }
+                .buttonStyle(.plain)
+                .pointerCursor()
+                .onHover { stopButtonIsHovered = $0 }
+                .contentShape(Circle())
+                .accessibilityIdentifier("askStopResponse")
+                .accessibilityLabel("Stop response")
+                .help("Stop the current response")
+            } else {
+                Button {
+                    sendWhatIsTyped()
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundColor(theSendButtonIsLive ? DS.Colors.accent : DS.Colors.quiet)
+                }
+                .buttonStyle(.plain)
+                .pointerCursor(isEnabled: theSendButtonIsLive)
+                .disabled(!theSendButtonIsLive)
             }
-            .buttonStyle(.plain)
-            .pointerCursor(isEnabled: theSendButtonIsLive)
-            .disabled(!theSendButtonIsLive)
         }
     }
 
@@ -1862,22 +1891,30 @@ struct OverlayEyeInputBarView: View {
         .background(IrisShellBackground(cornerRadius: DS.CornerRadius.large))
     }
 
-    /// The spinner and the sentence saying which part of the work is happening.
-    /// Both are driven by the same `assistantState` that spins the eye's own
-    /// track, so a spinning eye and an idle-looking bar cannot happen.
+    /// The spinner is shown only while a chat response is actually pending.
+    /// Stop leaves the unanswered exchange visible, but must not leave the
+    /// reader looking at an endless loading indicator.
     private var workingLine: some View {
-        HStack(spacing: 8) {
-            ProgressView()
-                .progressViewStyle(.circular)
-                .controlSize(.small)
-                .scaleEffect(0.62)
-                .frame(width: 13, height: 13)
+        Group {
+            if companionManager.chatResponseIsPending {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .controlSize(.small)
+                        .scaleEffect(0.62)
+                        .frame(width: 13, height: 13)
 
-            Text(OverlayEyeSuggestions.lineShownWhileIrisIsWorking(
-                whileTheAssistantIs: companionManager.assistantState
-            ))
-            .font(.system(size: 12))
-            .foregroundColor(DS.Colors.muted)
+                    Text(OverlayEyeSuggestions.lineShownWhileIrisIsWorking(
+                        whileTheAssistantIs: companionManager.assistantState
+                    ))
+                    .font(.system(size: 12))
+                    .foregroundColor(DS.Colors.muted)
+                }
+            } else {
+                Text("No response is loading. You can ask a follow-up or try again.")
+                    .font(.system(size: 12))
+                    .foregroundColor(DS.Colors.muted)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

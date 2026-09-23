@@ -289,17 +289,20 @@ struct OverlayEyeExchange: Equatable {
 
     /// Iris answered, or failed in a way that has a sentence for the reader.
     ///
-    /// Ignored unless a question is actually outstanding, so a response that
-    /// lands after the reader dismissed the bar and opened it again cannot
-    /// paste a stale answer under a question they have not asked yet.
+    /// A reader may resume drafting while an answer is pending. Keep that
+    /// keyboard state when the answer arrives; the input bar separately checks
+    /// the response identity before calling this transition.
     mutating func registerIrisAnswered(
         _ answer: String,
         theAnswerIsAFailureMessage: Bool
     ) {
-        guard phase == .waitingForIrisToAnswer else { return }
+        let readerIsAlreadyDrafting = phase == .composingAFollowUp
+        guard phase == .waitingForIrisToAnswer
+                || (readerIsAlreadyDrafting && questionTheReaderAsked != nil
+                    && whatIrisSaidBack == nil) else { return }
         whatIrisSaidBack = answer
         whatIrisSaidBackIsAFailureMessage = theAnswerIsAFailureMessage
-        phase = .showingTheAnswer
+        if !readerIsAlreadyDrafting { phase = .showingTheAnswer }
     }
 
     /// The reader clicked back into the field after an answer. Only meaningful

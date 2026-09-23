@@ -548,6 +548,7 @@ struct CodexChatScreenHelpTests {
         #expect(manager.detectedElementBubbleText == nil)
         #expect(manager.testHarnessConversationHistoryCount == 0)
         #expect(manager.chatTranscriptStore.recentExchanges(limit: 10).count == transcriptCountBeforeNewChat)
+        #expect(manager.chatTranscriptStore.mostRecentExchangeInCurrentConversation == nil)
         #expect(manager.assistantResponseGenerationCount == responseGenerationBeforeNewChat)
         #expect(manager.onDemandEditCoordinator.phase == editPhaseBeforeNewChat)
     }
@@ -640,6 +641,205 @@ struct CodexChatScreenHelpTests {
         #expect(manager.detectedElementScreenLocation == guidePoint)
         #expect(manager.detectedElementBubbleText == "guide-owned target")
         #expect(manager.guideSessionController.loadState == .guideIsOpen)
+    }
+
+    @Test func reopeningDuringPendingAskKeepsItsQuestionAndAcceptsOnlyItsAnswer() async throws {
+        let fixture = try makeIsolatedManagerFixture()
+        defer { fixture.cleanUp() }
+        let manager = fixture.manager
+        manager.testHarnessSeedConversationExchange(question: "Old question", answer: "Old answer")
+        let draft = OverlayEyeInputBarDraft(text: "unsent next thought", editKind: .feature)
+        manager.inputBarDraftStore.remember(draft)
+        let task = Task<Void, Never> { try? await Task.sleep(nanoseconds: 60_000_000_000) }
+        let responseID = manager.testHarnessInstallPendingAskResponse(
+            task: task, question: "Current question"
+        )
+
+        let seed = OverlayEyeInputBarPresentationSeed.current(for: manager)
+        var exchange = seed.exchange
+        #expect(seed.responseIdentifier == responseID)
+        #expect(exchange.phase == .composingAFollowUp)
+        #expect(exchange.questionTheReaderAsked == "Current question")
+        #expect(exchange.whatIrisSaidBack == nil)
+        #expect(manager.inputBarDraftStore.draft == draft)
+
+        #expect(manager.testHarnessPublishChatResponse("Current answer", isFailure: false,
+            for: responseID))
+        let mismatched = OverlayEyeInputBarResponsePresentation.acceptCurrentAnswer(
+            into: &exchange,
+            exchangeResponseIdentifier: seed.responseIdentifier,
+            currentResponseIdentifier: manager.currentAskResponseIdentifier,
+            publishedResponseIdentifier: UUID(),
+            answerText: manager.latestAssistantResponseText,
+            isFailure: manager.latestResponseWasAFailureMessage
+        )
+        #expect(mismatched == nil)
+        #expect(exchange.whatIrisSaidBack == nil)
+        let displayed = OverlayEyeInputBarResponsePresentation.acceptCurrentAnswer(
+            into: &exchange,
+            exchangeResponseIdentifier: seed.responseIdentifier,
+            currentResponseIdentifier: manager.currentAskResponseIdentifier,
+            publishedResponseIdentifier: manager.latestAssistantResponseIdentifier,
+            answerText: manager.latestAssistantResponseText,
+            isFailure: manager.latestResponseWasAFailureMessage
+        )
+        #expect(displayed == responseID)
+        #expect(exchange.whatIrisSaidBack == "Current answer")
+        #expect(exchange.phase == .composingAFollowUp)
+        #expect(manager.inputBarDraftStore.draft == draft)
+        task.cancel()
+        await task.value
+    }
+
+    @Test func resultThatFinishesWhileClosedReopensWithSuccessOrFailure() async throws {
+        for isFailure in [false, true] {
+            let fixture = try makeIsolatedManagerFixture()
+            defer { fixture.cleanUp() }
+            let manager = fixture.manager
+            let task = Task<Void, Never> { try? await Task.sleep(nanoseconds: 60_000_000_000) }
+            let responseID = manager.testHarnessInstallPendingAskResponse(
+                task: task, question: "Question while closed"
+            )
+            #expect(manager.testHarnessPublishChatResponse(
+                isFailure ? "Could not answer" : "Finished answer",
+                isFailure: isFailure, for: responseID
+            ))
+
+            let seed = OverlayEyeInputBarPresentationSeed.current(for: manager)
+            #expect(seed.responseIdentifier == responseID)
+            #expect(seed.displayedAnswerIdentifier == responseID)
+            #expect(seed.exchange.questionTheReaderAsked == "Question while closed")
+            #expect(seed.exchange.whatIrisSaidBack == (isFailure ? "Could not answer" : "Finished answer"))
+            #expect(seed.exchange.whatIrisSaidBackIsAFailureMessage == isFailure)
+            #expect(seed.exchange.phase == .composingAFollowUp)
+            task.cancel()
+            await task.value
+        }
+    }
+
+    @Test func failureArrivingAfterPendingReopenKeepsQuestionAndDraft() async throws {
+        let fixture = try makeIsolatedManagerFixture()
+        defer { fixture.cleanUp() }
+        let manager = fixture.manager
+        let draft = OverlayEyeInputBarDraft(text: "follow-up still unsent", editKind: .feature)
+        manager.inputBarDraftStore.remember(draft)
+        let task = Task<Void, Never> { try? await Task.sleep(nanoseconds: 60_000_000_000) }
+        let responseID = manager.testHarnessInstallPendingAskResponse(
+            task: task, question: "Question awaiting failure"
+        )
+        let seed = OverlayEyeInputBarPresentationSeed.current(for: manager)
+        var exchange = seed.exchange
+        #expect(exchange.questionTheReaderAsked == "Question awaiting failure")
+
+        #expect(manager.testHarnessPublishChatResponse("Could not answer", isFailure: true,
+            for: responseID))
+        let displayed = OverlayEyeInputBarResponsePresentation.acceptCurrentAnswer(
+            into: &exchange,
+            exchangeResponseIdentifier: seed.responseIdentifier,
+            currentResponseIdentifier: manager.currentAskResponseIdentifier,
+            publishedResponseIdentifier: manager.latestAssistantResponseIdentifier,
+            answerText: manager.latestAssistantResponseText,
+            isFailure: manager.latestResponseWasAFailureMessage
+        )
+        #expect(displayed == responseID)
+        #expect(exchange.whatIrisSaidBack == "Could not answer")
+        #expect(exchange.whatIrisSaidBackIsAFailureMessage)
+        #expect(exchange.phase == .composingAFollowUp)
+        #expect(manager.inputBarDraftStore.draft == draft)
+        task.cancel()
+        await task.value
+    }
+
+    @Test func stopThenNewChatRejectsLateOldAnswerWithoutSpendingTheDraftEarly() async throws {
+        let fixture = try makeIsolatedManagerFixture()
+        defer { fixture.cleanUp() }
+        let manager = fixture.manager
+        let draft = OverlayEyeInputBarDraft(text: "keep until New chat", editKind: .bugFix)
+        manager.inputBarDraftStore.remember(draft)
+        let task = Task<Void, Never> { try? await Task.sleep(nanoseconds: 60_000_000_000) }
+        let oldResponseID = manager.testHarnessInstallPendingAskResponse(
+            task: task, question: "Old pending question"
+        )
+
+        manager.stopCurrentAskResponse()
+        #expect(manager.inputBarDraftStore.draft == draft)
+        manager.startANewChat()
+        #expect(!manager.testHarnessPublishChatResponse("late old answer", isFailure: false,
+            for: oldResponseID))
+        let seed = OverlayEyeInputBarPresentationSeed.current(for: manager)
+        #expect(seed.responseIdentifier == nil)
+        #expect(seed.exchange.phase == .composingTheFirstQuestion)
+        #expect(manager.latestAssistantResponseText == nil)
+        #expect(manager.inputBarDraftStore.draftToRestoreIntoAFreshBar.text.isEmpty)
+        await task.value
+    }
+
+    @Test func onlyReaderDismissalOfTheDisplayedAnswerClearsTransientLatch() async throws {
+        let fixture = try makeIsolatedManagerFixture()
+        defer { fixture.cleanUp() }
+        let manager = fixture.manager
+        let task = Task<Void, Never> { try? await Task.sleep(nanoseconds: 60_000_000_000) }
+        let responseID = manager.testHarnessInstallPendingAskResponse(
+            task: task, question: "Answer worth reading"
+        )
+        #expect(manager.testHarnessPublishChatResponse("Read me", isFailure: false,
+            for: responseID))
+
+        let panel = OverlayEyeInputBarPanelManager()
+        let screenFrame = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        panel.showInputBar(forEyeAtInteractionGeometry: OverlayEyeInteractionGeometry(),
+            onScreenWithFrame: screenFrame, companionManager: manager, onTheBarClosing: {})
+        panel.hideInputBar() // Automatic screen replacement is not reader dismissal.
+        #expect(manager.answerAwaitingTheReaderInTheBar?.answerText == "Read me")
+
+        panel.showInputBar(forEyeAtInteractionGeometry: OverlayEyeInteractionGeometry(),
+            onScreenWithFrame: screenFrame, companionManager: manager, onTheBarClosing: {})
+        manager.markTheAnswerOnScreenAsDismissedByTheReader(
+            ifResponseIdentifierMatches: UUID()
+        )
+        #expect(manager.answerAwaitingTheReaderInTheBar?.answerText == "Read me")
+        panel.hideInputBar(dismissedByReader: true)
+        #expect(manager.answerAwaitingTheReaderInTheBar == nil)
+        task.cancel()
+        await task.value
+    }
+
+    @Test func newChatRejectsQueuedOldDraftWritesAndAcceptsNewTyping() throws {
+        let fixture = try makeIsolatedManagerFixture()
+        defer { fixture.cleanUp() }
+        let manager = fixture.manager
+        let draftStore = manager.inputBarDraftStore
+        let originalDraft = OverlayEyeInputBarDraft(text: "Keep this draft while I move Iris",
+            editKind: .feature)
+        draftStore.remember(originalDraft)
+        let oldRenderGeneration = draftStore.currentMirrorGeneration
+
+        // Merely closing the bar leaves the draft.
+        #expect(draftStore.draftToRestoreIntoAFreshBar == originalDraft)
+        #expect(draftStore.currentMirrorGeneration == oldRenderGeneration)
+
+        manager.startANewChat()
+        let newRenderGeneration = draftStore.currentMirrorGeneration
+        #expect(newRenderGeneration != oldRenderGeneration)
+        #expect(draftStore.draftToRestoreIntoAFreshBar.text.isEmpty)
+        #expect(draftStore.mirrorGenerationIfVisibleTextMatchesStored(originalDraft.text) == nil)
+        #expect(draftStore.mirrorGenerationIfVisibleTextMatchesStored("") == newRenderGeneration)
+
+        draftStore.rememberIfCurrentPresentation(originalDraft,
+            mirrorGeneration: oldRenderGeneration)
+        #expect(draftStore.draftToRestoreIntoAFreshBar.text.isEmpty)
+
+        let newDraft = OverlayEyeInputBarDraft(text: "Fresh chat text", editKind: .bugFix)
+        draftStore.rememberIfCurrentPresentation(newDraft,
+            mirrorGeneration: newRenderGeneration)
+        #expect(draftStore.draftToRestoreIntoAFreshBar == newDraft)
+
+        // An active app-edit draft explicitly restored after reset may mirror.
+        manager.startANewChat()
+        #expect(draftStore.mirrorGenerationIfVisibleTextMatchesStored(newDraft.text) == nil)
+        draftStore.remember(newDraft)
+        #expect(draftStore.mirrorGenerationIfVisibleTextMatchesStored(newDraft.text)
+                == draftStore.currentMirrorGeneration)
     }
 
     private struct IsolatedManagerFixture {

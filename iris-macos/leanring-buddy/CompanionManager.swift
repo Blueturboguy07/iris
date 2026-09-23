@@ -34,6 +34,9 @@ final class CompanionManager: ObservableObject {
     /// The most recent assistant response (point tag stripped), shown in the
     /// input bar under the eye.
     @Published private(set) var latestAssistantResponseText: String?
+    /// The exact Ask that produced the latest response. A reopened bar must
+    /// not attach an old answer to a newer question after Stop or New chat.
+    private(set) var latestAssistantResponseIdentifier: UUID?
 
     /// Bumped once every time a response is published — an answer or the
     /// sentence explaining a failure.
@@ -84,19 +87,38 @@ final class CompanionManager: ObservableObject {
     /// clears the exchange" true, so an answer that outlives a teardown can
     /// only come back from here.
     struct AnswerAwaitingTheReader {
+        let responseIdentifier: UUID
         let questionTheReaderAsked: String
         let answerText: String
         let answerIsAFailureMessage: Bool
     }
 
+    struct PendingAskForInputBar {
+        let responseIdentifier: UUID
+        let questionTheReaderAsked: String
+    }
+
+    var currentAskResponseIdentifier: UUID { currentChatResponseIdentifier }
+
+    var pendingAskForInputBar: PendingAskForInputBar? {
+        guard chatResponseIsPending,
+              let questionTheReaderAsked = latestUserMessageText else { return nil }
+        return PendingAskForInputBar(
+            responseIdentifier: currentChatResponseIdentifier,
+            questionTheReaderAsked: questionTheReaderAsked
+        )
+    }
+
     var answerAwaitingTheReaderInTheBar: AnswerAwaitingTheReader? {
         guard theLatestAnswerIsStillWaitingForTheReader,
+              latestAssistantResponseIdentifier == currentChatResponseIdentifier,
               let questionTheReaderAsked = latestUserMessageText,
               let answerText = latestAssistantResponseText
         else {
             return nil
         }
         return AnswerAwaitingTheReader(
+            responseIdentifier: currentChatResponseIdentifier,
             questionTheReaderAsked: questionTheReaderAsked,
             answerText: answerText,
             answerIsAFailureMessage: latestResponseWasAFailureMessage
@@ -107,8 +129,12 @@ final class CompanionManager: ObservableObject {
     /// the bar with the ×, with Escape, or by clicking somewhere else. Clearing
     /// the latch is what lets the eye fade again in transient-cursor mode, so
     /// this also re-arms the hide that was held off while they were reading.
-    func markTheAnswerOnScreenAsDismissedByTheReader() {
-        guard theLatestAnswerIsStillWaitingForTheReader else { return }
+    func markTheAnswerOnScreenAsDismissedByTheReader(
+        ifResponseIdentifierMatches displayedResponseIdentifier: UUID
+    ) {
+        guard theLatestAnswerIsStillWaitingForTheReader,
+              latestAssistantResponseIdentifier == displayedResponseIdentifier,
+              currentChatResponseIdentifier == displayedResponseIdentifier else { return }
         theLatestAnswerIsStillWaitingForTheReader = false
         scheduleTransientHideIfNeeded()
     }
@@ -996,7 +1022,7 @@ final class CompanionManager: ObservableObject {
     /// same size it has always been, so warming it costs the same as an
     /// ordinary conversation that has been going for a while.
     private func restoreConversationHistoryFromTheSavedChatTranscript() {
-        let savedExchanges = chatTranscriptStore.recentExchanges(
+        let savedExchanges = chatTranscriptStore.recentExchangesInCurrentConversation(
             limit: Self.maximumConversationHistoryExchanges
         )
         guard !savedExchanges.isEmpty else { return }
@@ -1032,6 +1058,8 @@ final class CompanionManager: ObservableObject {
     /// model is being told about, it does not destroy the reader's record of
     /// what they asked. That is what the history view reads.
     func startANewChat() {
+        transientHideTask?.cancel()
+        transientHideTask = nil
         if chatResponseIsPending {
             // New chat is another way to cancel an Ask. Reuse Stop's cleanup
             // so the eye cannot keep spinning after the old task is invalidated.
@@ -1041,7 +1069,22 @@ final class CompanionManager: ObservableObject {
             currentResponseTask = nil
             currentChatResponseIdentifier = UUID()
         }
+        // Keep saved History, but mark the new conversation before the panel
+        // can be torn down. A reopened panel or a relaunched Iris must not
+        // seed the just-ended exchange as this chat's current answer.
+        chatTranscriptStore.startANewConversation()
         conversationHistory = []
+        inputBarDraftStore.clear()
+        latestUserMessageText = nil
+        latestAssistantResponseText = nil
+        latestAssistantResponseIdentifier = nil
+        latestResponseWasAFailureMessage = false
+        latestFailureAddCreditURLString = nil
+        theLatestAnswerIsStillWaitingForTheReader = false
+        if guideSessionController.guideBeingFollowed == nil {
+            clearDetectedElementLocation()
+            assistantState = .idle
+        }
         irisTrace("chat: reader started a new conversation")
     }
 
@@ -1089,6 +1132,7 @@ final class CompanionManager: ObservableObject {
     @discardableResult
     func testHarnessInstallPendingAskResponse(
         task: Task<Void, Never>,
+        question: String = "Test question",
         withPointingTarget: Bool = false,
         state: CompanionAssistantState = .thinking
     ) -> UUID {
@@ -1096,6 +1140,8 @@ final class CompanionManager: ObservableObject {
         currentChatResponseIdentifier = identifier
         currentResponseTask = task
         chatResponseIsPending = true
+        latestUserMessageText = question
+        theLatestAnswerIsStillWaitingForTheReader = false
         assistantState = state
         if withPointingTarget {
             detectedElementScreenLocation = CGPoint(x: 120, y: 240)
@@ -1103,6 +1149,18 @@ final class CompanionManager: ObservableObject {
             detectedElementBubbleText = "fixture target"
         }
         return identifier
+    }
+
+    @discardableResult
+    func testHarnessPublishChatResponse(
+        _ text: String,
+        isFailure: Bool,
+        for responseIdentifier: UUID
+    ) -> Bool {
+        guard isCurrentChatResponse(responseIdentifier) else { return false }
+        clearChatResponsePending(for: responseIdentifier)
+        publishAssistantResponse(text, isAFailureMessage: isFailure)
+        return true
     }
 #endif
 
@@ -2943,6 +3001,7 @@ final class CompanionManager: ObservableObject {
         addCreditURLString: String? = nil
     ) {
         latestAssistantResponseText = responseText
+        latestAssistantResponseIdentifier = currentChatResponseIdentifier
         latestResponseWasAFailureMessage = isAFailureMessage
         latestFailureAddCreditURLString = isAFailureMessage ? addCreditURLString : nil
         assistantResponseGenerationCount += 1

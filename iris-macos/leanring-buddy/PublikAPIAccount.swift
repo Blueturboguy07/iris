@@ -79,6 +79,10 @@ struct PublikAPIWalletSnapshot: Sendable, Equatable {
     var claimURLString: String?
     /// Where it goes once claimed.
     var addCreditURLString: String?
+    /// The one link the gateway itself picked for this install (`top_up_url`:
+    /// the claim page while anonymous, the add-credit page once claimed). Only
+    /// `GET /balance` sends it; see `PublikAPIAddCredit`.
+    var topUpURLString: String? = nil
 
     /// "$0.25". Always two decimal places, always a dollar sign, rounded DOWN
     /// so Iris never advertises money that is not there.
@@ -131,6 +135,22 @@ final class PublikAPIAccount: ObservableObject {
 
     /// True once a key is stored, whichever route it arrived by.
     @Published private(set) var hasKey: Bool
+
+    /// What the last chat reply cost on publik API, in micros, or nil before
+    /// the first one. Published so the "Last reply" line re-renders on its own.
+    @Published private(set) var lastReplyChargeMicros: Int?
+
+    /// Adds the calls of one reply together; see `PublikAPIReplyCostTally`.
+    private var replyCostTally = PublikAPIReplyCostTally()
+
+    /// The one pending "read the balance again" after a reply. Replaced, not
+    /// stacked, so a burst of calls costs one `GET /balance`.
+    private var pendingBalanceRefresh: Task<Void, Never>?
+
+    /// How long to wait after a reply before reading the balance back. A
+    /// streamed reply is settled by the gateway AFTER its last byte, so asking
+    /// at once would read the balance with the call's hold still taken out.
+    static let balanceRefreshDelayAfterAReply: Duration = .milliseconds(1_500)
 
     init(userDefaults: UserDefaults = .standard, urlSession: URLSession = .shared) {
         self.userDefaults = userDefaults
@@ -197,6 +217,10 @@ final class PublikAPIAccount: ObservableObject {
         try? KeychainStore.deleteSecret(ofKind: .publikAPIKey)
         hasKey = false
         walletSnapshot = nil
+        pendingBalanceRefresh?.cancel()
+        pendingBalanceRefresh = nil
+        replyCostTally.forgetEverything()
+        lastReplyChargeMicros = nil
     }
 
     // MARK: The first-run card
@@ -427,6 +451,101 @@ final class PublikAPIAccount: ObservableObject {
             snapshot.claimState = PublikAPIClaimState(wireValue: claimStateHeader)
         }
         walletSnapshot = snapshot
+    }
+
+    // MARK: The balance, read back
+
+    /// Reads `GET {gateway}/balance` and keeps what it says. Called at launch,
+    /// when the settings panel opens, and (debounced) after every reply.
+    ///
+    /// Returns false and leaves the last good snapshot on screen when anything
+    /// goes wrong — no key, offline, a non-2xx, a body without a balance. A
+    /// balance line that blanks or drops to $0.00 because one read failed would
+    /// tell the reader something false about their money.
+    @discardableResult
+    func refreshTheBalance() async -> Bool {
+        guard let publikAPIKey = storedKey.flatMap({ PublikAPIKey($0) }) else { return false }
+
+        var balanceRequest = URLRequest(url: gatewayBaseURL.appendingPathComponent("balance"))
+        balanceRequest.httpMethod = "GET"
+        balanceRequest.timeoutInterval = 15
+        // `x-api-key` rather than a bearer header, which the gateway accepts
+        // equally: it is the header `AssistantTransport.validatedRequest`
+        // inspects, so this read passes the same "a pk_ key only ever reaches a
+        // publik host" gate as every chat request.
+        balanceRequest.setValue(publikAPIKey.value, forHTTPHeaderField: "x-api-key")
+        guard let validatedBalanceRequest = try? AssistantTransport.validatedRequest(balanceRequest) else {
+            return false
+        }
+
+        do {
+            let (responseData, response) = try await urlSession.data(for: validatedBalanceRequest)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  (200..<300).contains(httpResponse.statusCode),
+                  let freshSnapshot = PublikAPIWalletSnapshot.parse(balanceResponseBody: responseData) else {
+                return false
+            }
+            walletSnapshot = freshSnapshot
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Reads the balance back once the gateway has had time to settle the call
+    /// that just finished. A second call inside the delay replaces the first.
+    func refreshTheBalanceSoon() {
+        pendingBalanceRefresh?.cancel()
+        pendingBalanceRefresh = Task { [weak self] in
+            try? await Task.sleep(for: Self.balanceRefreshDelayAfterAReply)
+            guard !Task.isCancelled else { return }
+            await self?.refreshTheBalance()
+        }
+    }
+
+    // MARK: What each reply cost
+
+    /// Starts adding up a chat reply. The returned identifier is handed back to
+    /// `finishCountingTheReply` so a cancelled reply cannot close its successor.
+    func beginCountingAReply() -> UUID {
+        replyCostTally.beginAReply()
+    }
+
+    func finishCountingTheReply(_ replyIdentifier: UUID) {
+        replyCostTally.finishTheReply(replyIdentifier)
+    }
+
+    /// One finished publik API call. Its cost joins the reply in progress, if
+    /// there is one; the balance is taken from the receipt when the gateway had
+    /// already settled the call, and read back from `/balance` otherwise.
+    func noteACompletedCall(_ receipt: PublikAPICallReceipt) {
+        if let chargeMicros = receipt.chargeMicros {
+            replyCostTally.addACall(chargeMicros: chargeMicros)
+            lastReplyChargeMicros = replyCostTally.lastReplyChargeMicros
+        }
+        if let settledBalanceMicros = receipt.settledBalanceMicros, var snapshot = walletSnapshot {
+            snapshot.balanceMicros = settledBalanceMicros
+            walletSnapshot = snapshot
+        } else {
+            refreshTheBalanceSoon()
+        }
+    }
+
+    // MARK: Add credit
+
+    /// Where the balance row's "Add credit" button goes right now: the
+    /// `top_up_url` from the latest `/balance` answer, else the page the claim
+    /// state implies, else the add-credit page. The 402's button goes through
+    /// the same `PublikAPIAddCredit` rules, so the two cannot disagree.
+    var urlStringForTheAddCreditButton: String {
+        PublikAPIAddCredit.urlString(for: walletSnapshot)
+    }
+
+    /// Opens an "Add credit" page in the reader's own browser, through the same
+    /// allowlist every other link Iris opens goes through.
+    @discardableResult
+    static func openTheAddCreditPage(_ addCreditURLString: String) -> Bool {
+        ExternalLinkPolicy.openExternalURLIfAllowed(addCreditURLString)
     }
 
     private static var machineArchitecture: String {

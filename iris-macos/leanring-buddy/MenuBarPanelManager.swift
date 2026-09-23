@@ -286,6 +286,11 @@ final class MenuBarPanelManager: NSObject {
         panel?.makeKeyAndOrderFront(nil)
         panel?.orderFrontRegardless()
         installClickOutsideMonitor()
+
+        // The panel is built once and only ordered in and out after that, so
+        // SwiftUI's onAppear does not fire again on a reopen. Opening it is the
+        // moment the reader looks at their balance, so it is read fresh here.
+        companionManager.refreshThePublikAPIBalanceIfPublikAPIAnswers()
     }
 
     private func hidePanel() {

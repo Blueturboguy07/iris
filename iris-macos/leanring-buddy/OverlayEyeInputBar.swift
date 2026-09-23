@@ -1852,6 +1852,7 @@ struct OverlayEyeInputBarView: View {
             if let whatIrisSaidBack = exchange.whatIrisSaidBack {
                 answerArea(showing: whatIrisSaidBack)
                 whatThatQueryCost
+                addCreditUnderTheOutOfCreditSentence
             } else {
                 workingLine
             }
@@ -1903,6 +1904,22 @@ struct OverlayEyeInputBarView: View {
                 .monospacedDigit()
                 .frame(maxWidth: .infinity, alignment: .trailing)
                 .padding(.top, 2)
+        }
+    }
+
+    /// The one link that goes with publik API's "not enough credit" sentence
+    /// (CONTRACT section 12 item 3): the same page the settings panel's
+    /// "Add credit" opens, resolved by the same `PublikAPIAddCredit` rules.
+    /// Absent under every answer and every other kind of failure.
+    @ViewBuilder
+    private var addCreditUnderTheOutOfCreditSentence: some View {
+        if exchange.whatIrisSaidBackIsAFailureMessage,
+           let addCreditURLString = companionManager.latestFailureAddCreditURLString {
+            Button(action: { PublikAPIAccount.openTheAddCreditPage(addCreditURLString) }) {
+                Text("Add credit")
+            }
+            .irisTinyButton()
+            .padding(.top, 2)
         }
     }
 

@@ -25,7 +25,19 @@ import { afterEach, describe, expect, it } from "vitest";
 
 const SETTINGS_DIR = join(__dirname, "..", "src", "renderer", "settings");
 
+/** The balance view the main process hands the panel (services/publik-balance.ts). */
+interface FakePublikBalance {
+  balanceLine: string | null;
+  isLow: boolean;
+  costLine: string;
+  addCreditUrl: string;
+}
+
 interface FakeSettings {
+  hasPublikApiKey?: boolean;
+  buildCanProvisionAutomatically?: boolean;
+  publikCard?: { balanceLine: string; whyItCosts: string; buttonLabel: string; buttonUrl: string | null };
+  publikBalance?: FakePublikBalance | null;
   claudeModel?: string;
   alwaysOnTop?: boolean;
   cursorBuddyEnabled?: boolean;
@@ -45,7 +57,10 @@ afterEach(() => {
 });
 
 /** Boots the shipped settings panel against a fake preload bridge and waits for its first `load()` to settle. */
-async function openPanel(settings: FakeSettings) {
+async function openPanel(
+  settings: FakeSettings,
+  options: { publikBalanceAfterRefresh?: FakePublikBalance | null } = {}
+) {
   const html = readFileSync(join(SETTINGS_DIR, "index.html"), "utf-8");
   const inlineScript = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
   if (!inlineScript) throw new Error("settings/index.html has no inline <script> to run");
@@ -53,6 +68,8 @@ async function openPanel(settings: FakeSettings) {
 
   const signInCalls: string[] = [];
   let signOutCalls = 0;
+  const openedLinks: string[] = [];
+  let pushBalanceChange: ((balance: FakePublikBalance | null) => void) | null = null;
 
   const dom = new JSDOM(htmlWithoutScript, {
     url: "https://localhost/settings.html",
@@ -76,6 +93,16 @@ async function openPanel(settings: FakeSettings) {
         signOutCalls += 1;
       },
       onAccountChanged: () => {},
+      openExternal: async (url: string) => {
+        openedLinks.push(url);
+      },
+      // What publik API has left: the panel reads it fresh on open, and is
+      // pushed a new one whenever the main process learns something.
+      refreshPublikBalance: async () =>
+        "publikBalanceAfterRefresh" in options ? options.publikBalanceAfterRefresh : settings.publikBalance ?? null,
+      onPublikBalanceChanged: (callback: (balance: FakePublikBalance | null) => void) => {
+        pushBalanceChange = callback;
+      },
     },
   });
   window.eval(inlineScript);
@@ -90,7 +117,15 @@ async function openPanel(settings: FakeSettings) {
     document: window.document,
     signInCalls,
     signOutCallCount: () => signOutCalls,
+    openedLinks,
+    pushBalanceChange: (balance: FakePublikBalance | null) => pushBalanceChange?.(balance),
   };
+}
+
+async function settle(): Promise<void> {
+  for (let tick = 0; tick < 20; tick += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
 }
 
 describe("the settings panel's account section", () => {
@@ -165,5 +200,87 @@ describe("the settings panel's account section", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     expect(panel.signOutCallCount()).toBe(1);
+  });
+});
+
+describe("the settings panel's publik API balance", () => {
+  const card = {
+    balanceLine: "$1.84 left",
+    whyItCosts: "The AI model behind Iris is run by a provider that charges per use.",
+    buttonLabel: "Add a plan or pack",
+    buttonUrl: "https://publikhq.com/dashboard/api/add",
+  };
+  const healthyBalance: FakePublikBalance = {
+    balanceLine: "$1.84 left",
+    isLow: false,
+    costLine: "Last reply: $0.004",
+    addCreditUrl: "https://publikhq.com/dashboard/api/add",
+  };
+  const lowBalance: FakePublikBalance = {
+    balanceLine: "$0.18 left",
+    isLow: true,
+    costLine: "About $0.010 per message on publik-balanced",
+    addCreditUrl: "https://publikhq.com/claim/HK7F-2QWD",
+  };
+
+  it("shows the balance, the cost line and Add credit — and only one link — while publik API answers", async () => {
+    const panel = await openPanel({ hasPublikApiKey: true, publikCard: card, publikBalance: healthyBalance });
+
+    const status = panel.document.querySelector("#publik-status")!;
+    const addCredit = panel.document.querySelector("#publik-add-credit")!;
+    expect(status.textContent).toBe("$1.84 left");
+    expect(status.className).toBe("status ok");
+    expect(panel.document.querySelector("#publik-cost")!.textContent).toBe("Last reply: $0.004");
+    expect(addCredit.style.display).toBe("");
+    expect(addCredit.className).toBe("");
+    // The older plan button would be a second link to the same page.
+    expect(panel.document.querySelector("#publik-cta")!.style.display).toBe("none");
+    expect(panel.document.querySelector("#publik-low")!.style.display).toBe("none");
+
+    addCredit.click();
+    expect(panel.openedLinks).toEqual(["https://publikhq.com/dashboard/api/add"]);
+  });
+
+  it("turns into a warning with a loud Add credit under $0.25, and still blocks nothing", async () => {
+    const panel = await openPanel({ hasPublikApiKey: true, publikCard: card, publikBalance: lowBalance });
+
+    const status = panel.document.querySelector("#publik-status")!;
+    const addCredit = panel.document.querySelector("#publik-add-credit")!;
+    expect(status.textContent).toBe("$0.18 left");
+    expect(status.className).toBe("status low");
+    expect(panel.document.querySelector("#publik-low")!.style.display).toBe("");
+    expect(addCredit.className).toBe("accent");
+    expect(addCredit.disabled).toBe(false);
+
+    addCredit.click();
+    expect(panel.openedLinks).toEqual(["https://publikhq.com/claim/HK7F-2QWD"]);
+  });
+
+  it("shows nothing new when publik API is not the provider answering", async () => {
+    // A stored publik key, but the reader answers with their own key or codex:
+    // the main process sends no balance view, and the section is as it was.
+    const panel = await openPanel({ hasPublikApiKey: true, publikCard: card, publikBalance: null });
+
+    expect(panel.document.querySelector("#publik-add-credit")!.style.display).toBe("none");
+    expect(panel.document.querySelector("#publik-cost")!.style.display).toBe("none");
+    const cta = panel.document.querySelector("#publik-cta")!;
+    expect(cta.style.display).toBe("");
+    expect(cta.textContent).toBe("Add a plan or pack");
+  });
+
+  it("re-reads the balance when the panel opens and draws the fresh one", async () => {
+    const panel = await openPanel(
+      { hasPublikApiKey: true, publikCard: card, publikBalance: healthyBalance },
+      { publikBalanceAfterRefresh: lowBalance }
+    );
+    expect(panel.document.querySelector("#publik-status")!.textContent).toBe("$0.18 left");
+  });
+
+  it("redraws when the main process pushes a new balance after a reply", async () => {
+    const panel = await openPanel({ hasPublikApiKey: true, publikCard: card, publikBalance: healthyBalance });
+    panel.pushBalanceChange({ ...healthyBalance, balanceLine: "$1.83 left", costLine: "Last reply: $0.011" });
+    await settle();
+    expect(panel.document.querySelector("#publik-status")!.textContent).toBe("$1.83 left");
+    expect(panel.document.querySelector("#publik-cost")!.textContent).toBe("Last reply: $0.011");
   });
 });

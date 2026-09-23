@@ -97,7 +97,8 @@ export function credentialMayReachHost(credentialKind: CredentialKind, host: str
 /** A request that has not been sent yet: everything but the body. */
 export interface PreparedRequest {
   url: string;
-  method: "POST";
+  /** POST for chat; GET for the one read, `GET /balance`. */
+  method: "GET" | "POST";
   headers: Record<string, string>;
   /**
    * Which credential this request carries, so `validatedRequest` can check the
@@ -185,6 +186,25 @@ export function tierDescription(transport: AssistantTransport): string {
  * even by supplying a hostile base URL.
  */
 function publikApiChatRequest(publikApiKey: string, apiBaseUrl: string): PreparedRequest {
+  const base = publikGatewayBaseAllowedForAPublikKey(apiBaseUrl);
+  return {
+    url: `${base}/messages`,
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": publikApiKey,
+      "anthropic-version": ANTHROPIC_API_VERSION,
+    },
+    credentialKind: "publikApiKey",
+  };
+}
+
+/**
+ * The gateway base with its trailing slash dropped — but only after checking,
+ * BEFORE any header is written, that a publik key is allowed to reach its host.
+ * Shared by the two requests that carry a publik key, so neither can drift.
+ */
+function publikGatewayBaseAllowedForAPublikKey(apiBaseUrl: string): string {
   let destinationHost: string;
   try {
     destinationHost = new URL(apiBaseUrl).hostname;
@@ -203,17 +223,31 @@ function publikApiChatRequest(publikApiKey: string, apiBaseUrl: string): Prepare
     });
   }
 
-  const base = apiBaseUrl.replace(/\/+$/, "");
-  return {
-    url: `${base}/messages`,
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": publikApiKey,
-      "anthropic-version": ANTHROPIC_API_VERSION,
-    },
+  return apiBaseUrl.replace(/\/+$/, "");
+}
+
+/**
+ * `GET {base}/balance` for the publik key: the balance, the claim state, and
+ * the one "Add credit" link (`services/publik-balance.ts`). The key rides as
+ * `x-api-key`, which the gateway accepts as well as a bearer header, and the
+ * request leaves through `validatedRequest` like every chat request does.
+ * Only the publik route has a balance; asking on another is a programming
+ * error rather than a user-facing state.
+ */
+export function makeBalanceRequest(transport: AssistantTransport): PreparedRequest {
+  if (transport.tier !== "publik") {
+    throw new AssistantTransportFailure({
+      kind: "transportFailure",
+      reason: "only the publik API route has a balance",
+    });
+  }
+  const base = publikGatewayBaseAllowedForAPublikKey(transport.apiBaseUrl);
+  return validatedRequest({
+    url: `${base}/balance`,
+    method: "GET",
+    headers: { "x-api-key": transport.publikApiKey },
     credentialKind: "publikApiKey",
-  };
+  });
 }
 
 /**

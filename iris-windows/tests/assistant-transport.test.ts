@@ -9,6 +9,7 @@ import {
   defaultModelForTransport,
   failureForStatusCode,
   isPublikHost,
+  makeBalanceRequest,
   makeChatRequest,
   preferenceDescription,
   requiresSetup,
@@ -180,6 +181,32 @@ describe("credential isolation — direction 2: the publik key only ever goes to
         expect(failure.detail.attemptedHost).toBe("evil.example.com");
       }
     }
+  });
+});
+
+describe("credential isolation — the balance read carries the publik key to publik only", () => {
+  it("GETs the gateway's /balance with the publik key and nothing else", () => {
+    const request = makeBalanceRequest(publikTransport("https://publikhq.com/api/v1/"));
+    expect(request.url).toBe("https://publikhq.com/api/v1/balance");
+    expect(request.method).toBe("GET");
+    expect(request.headers).toEqual({ "x-api-key": THE_PUBLIK_KEY });
+    expect(request.credentialKind).toBe("publikApiKey");
+  });
+
+  it("refuses a gateway address that is not a publik host before writing the key", () => {
+    try {
+      makeBalanceRequest(publikTransport("https://evil.example.com/api/v1"));
+      throw new Error("expected the balance read to be refused");
+    } catch (error) {
+      const failure = error as AssistantTransportFailure;
+      expect(failure.detail.kind).toBe("credentialWouldLeaveItsHost");
+    }
+  });
+
+  it("has no balance to read on the user's own Anthropic key", () => {
+    // Only publik has a wallet. Asking on the BYO route must fail rather than
+    // build anything that carries the user's key.
+    expect(() => makeBalanceRequest(byoTransport())).toThrow(AssistantTransportFailure);
   });
 });
 

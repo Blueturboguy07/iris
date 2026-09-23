@@ -3,6 +3,7 @@ import path from "node:path";
 
 import type { AutopilotEvent } from "../services/autopilot/runner";
 import { YourTurnTracker } from "../services/autopilot/your-turn";
+import { publikBalanceMenuLabel, type PublikBalanceView } from "../services/publik-balance";
 
 interface TrayCallbacks {
   onChat: () => void;
@@ -15,6 +16,9 @@ interface TrayCallbacks {
   /// The red 'Stop' escape hatch, reachable from the tray as well as the
   /// autopilot window: abort the running install and fold its window away.
   onStopInstall: () => void;
+  /// "Add credit": opens the one page the balance view named, through the
+  /// external-link allowlist like every other link Iris opens.
+  onAddCredit: (addCreditUrl: string) => void;
 }
 
 const RESTING_TOOLTIP = "Iris — publik's desktop companion";
@@ -30,6 +34,8 @@ const tracker = new YourTurnTracker();
 let waitingInstruction: string | undefined;
 let installActive = false;
 let updateAvailable: { version: string; downloadUrl: string } | null = null;
+/// What publik API has left, or null when it is not the provider answering.
+let publikBalance: PublikBalanceView | null = null;
 
 export function createTray(cb: TrayCallbacks): Tray {
   callbacks = cb;
@@ -59,6 +65,16 @@ function rebuildMenu(): void {
   const cb = callbacks;
 
   const template: Electron.MenuItemConstructorOptions[] = [{ label: "Iris", enabled: false }];
+
+  if (publikBalance) {
+    const balance = publikBalance;
+    template.push(
+      { type: "separator" },
+      { label: publikBalanceMenuLabel(balance), enabled: false },
+      { label: balance.costLine, enabled: false },
+      { label: "Add credit", click: () => cb.onAddCredit(balance.addCreditUrl) },
+    );
+  }
 
   if (tracker.isWaiting) {
     template.push(
@@ -92,6 +108,15 @@ function rebuildMenu(): void {
   template.push({ type: "separator" }, { label: "Quit", click: cb.onQuit });
 
   tray.setContextMenu(Menu.buildFromTemplate(template));
+}
+
+/// Tells the tray what publik API has left — set whenever the balance, the
+/// last reply's cost, or the answering provider changes. `null` removes the
+/// lines, which is what a user on their own key or on codex sees.
+export function setTrayPublikBalance(balance: PublikBalanceView | null): void {
+  if (JSON.stringify(balance) === JSON.stringify(publikBalance)) return;
+  publikBalance = balance;
+  rebuildMenu();
 }
 
 /// A menu label wants one short line; a multi-line instruction is squeezed to

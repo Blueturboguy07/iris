@@ -11,7 +11,9 @@ import {
   userFacingMessage,
 } from "../services/assistant-transport";
 import { PublikUsageSnapshot } from "../services/publik-api";
+import { addCreditUrlForRefusal } from "../services/publik-balance";
 import { CodexChatBackend, codexIsAvailable } from "./codex-session";
+import { PublikSetup } from "./publik-setup";
 import {
   PointTag,
   parsePointTags,
@@ -39,19 +41,39 @@ const MAX_CONVERSATION_TURNS = 10;
  */
 const REFINEMENT_CROP_SIZE_IN_IMAGE_SPACE = 300;
 
+/**
+ * Why the last chat message failed, for the chat window to read back after
+ * `sendQuery` rejects. `ipcRenderer.invoke` carries only an error's message
+ * (prefixed by Electron) across, so the one link a 402 comes with would
+ * otherwise be lost on the way to the window.
+ */
+export interface ChatFailure {
+  message: string;
+  /** Set only when publik API refused for lack of money (a 402). */
+  addCreditUrl: string | null;
+}
+
 export class CompanionManager {
   private readonly settings: SettingsStore;
   private readonly account: AccountSession;
+  private readonly publikSetup: PublikSetup;
   private readonly screenCapture = new ScreenCapture();
   private conversationHistory: ConversationEntry[] = [];
   private overlayWindows: BrowserWindow[];
   /** Probed rather than assumed; see `refreshCodexAvailability`. */
   private codexAvailable = false;
+  private latestChatFailure: ChatFailure | null = null;
 
-  constructor(settings: SettingsStore, account: AccountSession, overlayWindows: BrowserWindow[]) {
+  constructor(
+    settings: SettingsStore,
+    account: AccountSession,
+    overlayWindows: BrowserWindow[],
+    publikSetup: PublikSetup
+  ) {
     this.settings = settings;
     this.account = account;
     this.overlayWindows = overlayWindows;
+    this.publikSetup = publikSetup;
   }
 
   setOverlayWindows(overlayWindows: BrowserWindow[]): void {
@@ -72,14 +94,7 @@ export class CompanionManager {
    * or paste a key between one message and the next.
    */
   private createClaudeService(): ClaudeService {
-    const storedPreference = this.settings.get("providerPreference");
-    const transport = selectTransport({
-      preference: isProviderPreference(storedPreference) ? storedPreference : null,
-      storedPublikApiKey: this.settings.getPublikApiKey(),
-      publikApiBaseUrl: this.settings.getPublikApiBaseUrl(),
-      storedAnthropicApiKey: this.settings.getAnthropicApiKey(),
-      codexIsAvailable: this.codexIsAvailable(),
-    });
+    const transport = this.currentTransport();
     return new ClaudeService({
       transport,
       model: defaultModelForTransport(transport, this.settings.get("claudeModel")),
@@ -90,19 +105,45 @@ export class CompanionManager {
     });
   }
 
+  /** The route the next message will take. Throws, like `selectTransport`,
+   *  when no provider can answer. */
+  private currentTransport() {
+    const storedPreference = this.settings.get("providerPreference");
+    return selectTransport({
+      preference: isProviderPreference(storedPreference) ? storedPreference : null,
+      storedPublikApiKey: this.settings.getPublikApiKey(),
+      publikApiBaseUrl: this.settings.getPublikApiBaseUrl(),
+      storedAnthropicApiKey: this.settings.getAnthropicApiKey(),
+      codexIsAvailable: this.codexIsAvailable(),
+    });
+  }
+
+  /**
+   * Whether publik API is the provider that answers right now. Everything the
+   * balance feature adds — tray lines, the settings rows, the chat title —
+   * shows only then.
+   */
+  answersWithPublikApi(): boolean {
+    try {
+      return this.currentTransport().tier === "publik";
+    } catch {
+      return false;
+    }
+  }
+
+  lastChatFailure(): ChatFailure | null {
+    return this.latestChatFailure;
+  }
+
   /**
    * Keeps settings in step with what the gateway just said. The balance the
    * card shows has to be the live one — a stale number next to a "pick a plan"
    * button is the kind of thing that reads as a dark pattern even when it is
-   * only a caching bug.
+   * only a caching bug. `PublikSetup` also adds the charge to the reply being
+   * counted and reads the balance back when the headers carried no charge.
    */
   private recordPublikUsage(usage: PublikUsageSnapshot): void {
-    if (usage.balanceMicros !== null) {
-      this.settings.set("publikBalanceMicros", usage.balanceMicros);
-    }
-    if (usage.claimState !== null) {
-      this.settings.set("publikClaimState", usage.claimState);
-    }
+    this.publikSetup.recordUsage(usage);
   }
 
   /**
@@ -125,6 +166,10 @@ export class CompanionManager {
    * tags already stripped.
    */
   async processQuery(userMessage: string): Promise<string> {
+    // The query and any point-refinement calls it triggers are one reply, and
+    // "Last reply" in settings is what all of them cost together.
+    const replyBeingCounted = this.publikSetup.beginCountingAReply();
+    this.latestChatFailure = null;
     try {
       this.broadcastStage("capturing", "Reading screen...");
       const screenshots = await this.screenCapture.captureAllScreens();
@@ -162,10 +207,23 @@ export class CompanionManager {
       if (error instanceof AssistantTransportFailure) {
         // A transport failure is a sentence the user can act on, never a status
         // code and never the server's own body.
-        throw new Error(userFacingMessage(error.detail));
+        const message = userFacingMessage(error.detail);
+        this.latestChatFailure = {
+          message,
+          // The 402's one link, through the same rules as the balance row's
+          // "Add credit", so the two buttons cannot open different pages.
+          addCreditUrl:
+            error.detail.kind === "publikCreditExhausted"
+              ? addCreditUrlForRefusal(error.detail.topUpUrl)
+              : null,
+        };
+        throw new Error(message);
       }
-      throw error instanceof Error ? error : new Error(String(error));
+      const unexpected = error instanceof Error ? error : new Error(String(error));
+      this.latestChatFailure = { message: unexpected.message, addCreditUrl: null };
+      throw unexpected;
     } finally {
+      this.publikSetup.finishCountingTheReply(replyBeingCounted);
       this.broadcastStage("done", "");
     }
   }

@@ -1,0 +1,18 @@
+{
+  "install_id": "7d3c2a4e-58b1-4f6e-9a0c-2b8f1e6d9c41",
+  "app_slug": "iris",
+  "claim_state": "claimed",
+  "balance_micros": 1843210,
+  "starter": null,
+  "week": { "used_micros": 412000, "budget_micros": 5000000, "resets_at": "2026-09-25T17:04:11.000Z" },
+  "daily_cap_micros": 2000000,
+  "spent_today_micros": 96400,
+  "claim_code": null,
+  "claim_url": null,
+  "claim_expires_at": null,
+  "add_credit_url": "https://publikhq.com/dashboard/api/add",
+  "plans_url": "https://publikhq.com/developers#plans",
+  "top_up_url": "https://publikhq.com/dashboard/api/add",
+  "base_url": "https://publikhq.com/api/v1",
+  "available_micros": 1843210
+}

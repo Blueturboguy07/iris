@@ -47,6 +47,18 @@ class ClaudeAPI {
     /// no-op so every existing construction — and every test — is unaffected.
     var reportSpend: @Sendable (String, AssistantTokenUsage, AssistantSpendRoute) -> Void = { _, _, _ in }
 
+    /// Told about every finished call on the publik API route: what the
+    /// gateway's headers said and what the stream reported consuming, so the
+    /// settings panel's balance and "Last reply" line stay current. The spend
+    /// ledger above deliberately drops this route, so it gets a channel of its
+    /// own. A no-op by default, like `reportSpend`.
+    ///
+    /// Main-actor and called in line, NOT hopped through a `Task` the way
+    /// `reportSpend` is: the reply that made the call closes its cost tally the
+    /// moment it finishes, and a receipt still waiting in a queued task would
+    /// land after that and drop the reply's last call from "Last reply".
+    var reportPublikAPICall: @MainActor @Sendable (PublikAPICallReceipt) -> Void = { _ in }
+
     init(
         resolveTransport: @escaping @Sendable () async -> Result<AssistantTransport, AssistantTransportError>,
         model: String = "claude-sonnet-4-6"
@@ -364,7 +376,24 @@ class ClaudeAPI {
 
         let duration = Date().timeIntervalSince(startTime)
         reportSpend(model, usageThisTurn, transport.spendRoute)
+        reportPublikAPICallIfThatIsTheRoute(transport: transport, httpResponse: httpResponse, usage: usageThisTurn)
         return (text: accumulatedResponseText, duration: duration)
+    }
+
+    /// Hands one finished call's receipt to `reportPublikAPICall`, and only for
+    /// the publik route — the reader's own key is priced by the spend ledger.
+    private func reportPublikAPICallIfThatIsTheRoute(
+        transport: AssistantTransport,
+        httpResponse: HTTPURLResponse,
+        usage: AssistantTokenUsage
+    ) {
+        guard case .publikAPI = transport else { return }
+        let receipt = PublikAPICallReceipt(
+            headerValue: { headerName in httpResponse.value(forHTTPHeaderField: headerName) },
+            modelAlias: PublikAPIModelAlias.alias(forIrisModelName: model),
+            usage: usage
+        )
+        reportPublikAPICall(receipt)
     }
 
     /// Folds one SSE event's usage numbers into the turn's running total.
@@ -645,6 +674,7 @@ class ClaudeAPI {
             }
         }
         reportSpend(model, accumulator.usage, transport.spendRoute)
+        reportPublikAPICallIfThatIsTheRoute(transport: transport, httpResponse: httpResponse, usage: accumulator.usage)
         return accumulator.finalize()
     }
 

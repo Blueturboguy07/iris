@@ -122,6 +122,15 @@ as `allowed_external_host` in `main.rs`. A step whose host is not on it renders 
 That dead-button case is the bug `iris-desktop 0.1.4` fixed, and it is the one
 change made to the transplanted `app.js`.
 
+**publik API balance + Add credit** (`src/services/publik-balance.ts`). While
+publik API is the provider answering, the tray, the settings panel and the chat
+title show what is left ("$1.84 left"), what the last reply cost (from the
+gateway's `x-publik-charge-micros`, or the typical 2,000-in / 500-out message
+before the first reply), and an "Add credit" button that opens the `top_up_url`
+from `GET /api/v1/balance`. Under $0.25 it turns into a warning; it never blocks,
+the 402 still does that — and the 402 in chat now carries the same "Add credit"
+link. A user on their own key or on codex sees none of it.
+
 **Secrets at rest** (`src/main/secrets.ts`). Electron `safeStorage`, which is
 DPAPI on Windows, so ciphertext is bound to the Windows account. Upstream kept
 API keys in `%APPDATA%/clicky-windows/settings.json` in plain text; a pre-fork
@@ -170,6 +179,7 @@ src/
 │   ├── deep-link-parser.ts     every iris:// link, and every refusal
 │   ├── external-links.ts       the 22-host allowlist
 │   ├── guide-service.ts        guide fetch + the four distinct failures
+│   ├── publik-balance.ts       the balance, the cost of a message, and Add credit
 │   ├── account-service.ts      Supabase PKCE with no SDK
 │   └── tool-versions.ts        the programs a guide may cause Iris to run
 ├── preload/         The complete list of what a renderer can do
@@ -216,6 +226,9 @@ Being explicit, because the suite's green tick does not cover these:
   side of the round trip is still unverified on real hardware.)
 - **Screen capture, the overlay, and pointing accuracy.** These need a real
   desktop with real windows on it.
+- **The publik API balance in the tray.** The settings panel and chat window are
+  driven in jsdom, and every rule behind them is unit-tested, but the tray menu
+  items and a real `GET /balance` round trip have only been built, not seen.
 - **The transplanted guide panel rendering.** `app.js` is proven only by having
   worked in `iris-desktop`; the Electron bridge under it is not covered by the
   suite. In particular, whether `localStorage` works on this window's `file://`

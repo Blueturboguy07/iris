@@ -2,7 +2,13 @@ import { app, BrowserWindow, dialog, ipcMain, screen, shell } from "electron";
 import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import { createTray, observeAutopilotEventForTray, setTrayInstallActive, clearTrayYourTurn } from "./tray";
+import {
+  createTray,
+  observeAutopilotEventForTray,
+  setTrayInstallActive,
+  clearTrayYourTurn,
+  setTrayPublikBalance,
+} from "./tray";
 import { startSelfUpdateWatch } from "./self-update";
 import { SettingsStore } from "./settings";
 import { CompanionManager } from "./companion";
@@ -18,6 +24,7 @@ import { secretStorageIsAvailable } from "./secrets";
 import { PublikSetup } from "./publik-setup";
 import { openCodexLogin } from "./codex-session";
 import { buildCanProvisionAutomatically } from "./publik-app-token";
+import type { PublikBalanceView } from "../services/publik-balance";
 import { AutopilotController, type FinishedInstall } from "./autopilot-controller";
 import { guideBackedRecipeResolver } from "../services/autopilot/guide-recipe-resolver";
 import type { InstallRecipe } from "../services/autopilot/recipe";
@@ -131,6 +138,29 @@ function broadcast(channel: string, payload: unknown): void {
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed()) window.webContents.send(channel, payload);
   }
+}
+
+// MARK: - publik API balance
+
+/** What the balance lines show right now, or null when publik API is not the
+ *  provider answering (own Anthropic key, codex): nothing new then. */
+function currentPublikBalanceView(): PublikBalanceView | null {
+  return publikSetup.balanceView(companion.answersWithPublikApi());
+}
+
+/** Pushes the balance view to the tray and to every open window. */
+function publishPublikBalance(): void {
+  const view = currentPublikBalanceView();
+  setTrayPublikBalance(view);
+  broadcast("publik:balanceChanged", view);
+}
+
+/** Reads the balance again — at launch and when a window opens — but only
+ *  while publik API answers, then publishes whatever is now true. */
+async function refreshPublikBalanceIfAnswering(): Promise<PublikBalanceView | null> {
+  if (companion.answersWithPublikApi()) await publikSetup.refreshBalance();
+  publishPublikBalance();
+  return currentPublikBalanceView();
 }
 
 function focusExistingWindow(): void {
@@ -1004,6 +1034,12 @@ function handleGuideCommand(command: string, args: Record<string, unknown>): unk
 function setupIPC(): void {
   ipcMain.handle("chat:query", async (_event, text: string) => companion.processQuery(text));
 
+  // Read by the chat window right after `chat:query` rejects: the clean
+  // sentence, and the one "Add credit" link when the failure was a 402. An
+  // invoke rejection carries only a (prefixed) message, so the link has to
+  // come back this way.
+  ipcMain.handle("chat:lastFailure", () => companion.lastChatFailure());
+
   ipcMain.handle("settings:getAll", () => ({
     ...settings.getAll(),
     // Never the key itself — only whether one is stored.
@@ -1013,6 +1049,7 @@ function setupIPC(): void {
     // that a desktop app's key must not enter a renderer.
     hasPublikApiKey: publikSetup.hasKey(),
     publikCard: publikSetup.cardState(false),
+    publikBalance: currentPublikBalanceView(),
     buildCanProvisionAutomatically: buildCanProvisionAutomatically(),
     codexAvailable: codexAvailableCached,
     // Maintain mode's Tier C BYO fixer key — optional, and separate from the
@@ -1032,9 +1069,15 @@ function setupIPC(): void {
       return settings.setOpenAiApiKey(String(value ?? ""));
     }
     if (key === "publikApiKey") {
-      return publikSetup.acceptPastedKey(String(value ?? ""));
+      const accepted = publikSetup.acceptPastedKey(String(value ?? ""));
+      publishPublikBalance();
+      return accepted;
     }
     settings.set(key as never, value as never);
+    if (key === "providerPreference") {
+      // Choosing (or leaving) publik API is what shows or hides the balance.
+      void refreshPublikBalanceIfAnswering();
+    }
     if (key === "alwaysOnTop" && chatWindow && !chatWindow.isDestroyed()) {
       chatWindow.setAlwaysOnTop(Boolean(value), "screen-saver");
     }
@@ -1054,6 +1097,8 @@ function setupIPC(): void {
     const outcome = await publikSetup.provision();
     if (outcome.kind === "provisioned") {
       settings.set("providerPreference", "publikApi");
+      // Provisioning named the starter; /balance adds the one Add credit link.
+      void refreshPublikBalanceIfAnswering();
       return { ok: true as const, card: publikSetup.cardState(true) };
     }
     return {
@@ -1078,6 +1123,12 @@ function setupIPC(): void {
     publikSetup.cardState(Boolean(isFirstRun))
   );
 
+  // The balance lines. `publik:balance` answers from what is already known;
+  // `publik:refreshBalance` reads `GET /balance` first, and is what a window
+  // calls when it opens. Both are null while publik API is not answering.
+  ipcMain.handle("publik:balance", () => currentPublikBalanceView());
+  ipcMain.handle("publik:refreshBalance", () => refreshPublikBalanceIfAnswering());
+
   // Opens a console running `codex login`. Iris never sees the credential —
   // the CLI owns it, which is the point of this route.
   ipcMain.handle("codex:login", () => {
@@ -1089,6 +1140,7 @@ function setupIPC(): void {
   // restart.
   ipcMain.handle("codex:refresh", async () => {
     codexAvailableCached = await companion.refreshCodexAvailability();
+    publishPublikBalance();
     return codexAvailableCached;
   });
 
@@ -1154,7 +1206,10 @@ if (gotSingleInstanceLock) {
     registerIrisScheme();
 
     overlayWindows = createOverlayWindows();
-    companion = new CompanionManager(settings, account, overlayWindows);
+    companion = new CompanionManager(settings, account, overlayWindows, publikSetup);
+    // Every change the balance lines could show — a reply's charge, a read of
+    // /balance, a new key — reaches the tray and the open windows from here.
+    publikSetup.onBalanceChanged(() => publishPublikBalance());
     maintain = new MaintainController(maintainHost());
 
     setupIPC();
@@ -1193,8 +1248,14 @@ if (gotSingleInstanceLock) {
         // 'Stop'. `onAborted` folds the window away.
         autopilotController().abort();
       },
+      onAddCredit: (addCreditUrl) => openExternalSafely(addCreditUrl),
       onQuit: () => app.quit(),
     });
+
+    // The balance is read from the gateway at launch rather than trusted from
+    // settings.json: a top-up on the website, or another app on the same
+    // account, may have moved it since Iris last looked.
+    void refreshPublikBalanceIfAnswering();
 
     chatWindow = createChatWindow();
     chatWindow.on("closed", () => {
@@ -1212,6 +1273,9 @@ if (gotSingleInstanceLock) {
     // option in settings.
     void companion.refreshCodexAvailability().then((available) => {
       codexAvailableCached = available;
+      // Codex being usable can change which provider answers when none is
+      // chosen, and with it whether the balance lines show.
+      publishPublikBalance();
     });
 
     // Ask for credentials once, on the first launch that has none. Deliberately

@@ -52,6 +52,13 @@ final class CompanionManager: ObservableObject {
     /// uses this only to tint it.
     @Published private(set) var latestResponseWasAFailureMessage: Bool = false
 
+    /// Where the "Add credit" button under a failure goes, when the failure was
+    /// the gateway's 402 — and nil for every other response. The server's own
+    /// sentence is the failure text; this is the one link CONTRACT section 12
+    /// item 3 says goes with it, resolved by `PublikAPIAddCredit` exactly as
+    /// the settings panel's button is.
+    @Published private(set) var latestFailureAddCreditURLString: String?
+
     /// True from the moment a response is published until the reader has done
     /// something that means they are finished with it — dismissed the bar it is
     /// showing in, or asked the next question.
@@ -721,6 +728,11 @@ final class CompanionManager: ObservableObject {
         api.reportSpend = { model, usage, route in
             Task { @MainActor in ledger.record(model: model, usage: usage, route: route) }
         }
+        // The publik route's money goes to the account instead: the balance and
+        // the "Last reply" line in settings are read from what each call said.
+        api.reportPublikAPICall = { receipt in
+            publikAPIAccount.noteACompletedCall(receipt)
+        }
         return api
     }()
 
@@ -1218,6 +1230,11 @@ final class CompanionManager: ObservableObject {
             await accountService.restorePreviousSessionIfPossible()
             await claudeAPI.warmUpTLSConnectionIfNeeded()
         }
+
+        // The publik API balance is read from the gateway at launch rather than
+        // remembered: a top-up on the website, or another app on the same
+        // account, may have moved it since Iris last looked.
+        refreshThePublikAPIBalanceIfPublikAPIAnswers()
 
         startMaintainMode()
 
@@ -2652,6 +2669,10 @@ final class CompanionManager: ObservableObject {
         currentResponseTask = Task {
             defer { self.clearChatResponsePending(for: responseIdentifier) }
             guard isCurrentChatResponse(responseIdentifier) else { return }
+            // Every publik API call this message makes — a tool round, a
+            // resumed turn — adds up to the one "Last reply" figure in settings.
+            let replyBeingCounted = publikAPIAccount.beginCountingAReply()
+            defer { publikAPIAccount.finishCountingTheReply(replyBeingCounted) }
             assistantState = .capturing
             var dispatchedRoute: ChatResponseRoute?
 
@@ -2895,7 +2916,11 @@ final class CompanionManager: ObservableObject {
                 // failure to one of a fixed set of sentences, and takes care of
                 // signing the user out when the funded tier says the session
                 // is gone.
-                publishAssistantResponse(failureMessage, isAFailureMessage: true)
+                publishAssistantResponse(
+                    failureMessage,
+                    isAFailureMessage: true,
+                    addCreditURLString: addCreditURLStringIfPublikAPIRanOut(assistantError: error)
+                )
             }
 
             if isCurrentChatResponse(responseIdentifier) {
@@ -2912,9 +2937,14 @@ final class CompanionManager: ObservableObject {
     /// The single place a response reaches the UI, so the text, the "is this a
     /// failure" flag and the generation counter can never disagree about which
     /// exchange the reader is looking at.
-    private func publishAssistantResponse(_ responseText: String, isAFailureMessage: Bool) {
+    private func publishAssistantResponse(
+        _ responseText: String,
+        isAFailureMessage: Bool,
+        addCreditURLString: String? = nil
+    ) {
         latestAssistantResponseText = responseText
         latestResponseWasAFailureMessage = isAFailureMessage
+        latestFailureAddCreditURLString = isAFailureMessage ? addCreditURLString : nil
         assistantResponseGenerationCount += 1
         // The reader has not read this yet — not even if the bar is on screen
         // and rendering it this instant. Only the reader saying they are done
@@ -2922,6 +2952,27 @@ final class CompanionManager: ObservableObject {
         // Until then nothing may fade the overlay out from under it, and a bar
         // that reopens after a teardown can still find it.
         theLatestAnswerIsStillWaitingForTheReader = true
+    }
+
+    /// Reads the publik API balance again — at launch, and each time the
+    /// settings panel opens — but only while publik API is the provider that
+    /// answers. A reader on their own key or on Codex sees nothing new in the
+    /// panel, so nothing new is fetched for them either.
+    func refreshThePublikAPIBalanceIfPublikAPIAnswers() {
+        guard accountService.resolvedChatProvider == .publikAPI, publikAPIAccount.hasKey else { return }
+        let publikAPIAccount = self.publikAPIAccount
+        Task { await publikAPIAccount.refreshTheBalance() }
+    }
+
+    /// The "Add credit" link for a failure that was publik API running out, or
+    /// nil for any other failure. Also asks for the balance again, so the
+    /// settings panel shows the low balance the 402 just reported.
+    private func addCreditURLStringIfPublikAPIRanOut(assistantError: Error) -> String? {
+        guard case .publikAPIOutOfCredit(let insufficientCredit)? = assistantError as? AssistantTransportError else {
+            return nil
+        }
+        publikAPIAccount.refreshTheBalanceSoon()
+        return PublikAPIAddCredit.urlString(for: insufficientCredit)
     }
 
     /// If the cursor is in transient mode (user toggled the cursor off),

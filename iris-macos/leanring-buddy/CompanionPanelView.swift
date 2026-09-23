@@ -433,6 +433,18 @@ struct CompanionPanelView: View {
 
             Spacer()
 
+            // The publik API balance, pinned here because the card that
+            // carries it sits at the bottom of a scrolling panel. Only while
+            // publik API is the provider answering.
+            if let balanceSnapshotForTheHeader = publikAPIWalletSnapshotWhilePublikAPIAnswers {
+                Text(PublikAPIMoney.balanceLine(balanceMicros: balanceSnapshotForTheHeader.balanceMicros))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(publikAPIBalanceIsLow ? DS.Colors.warningText : DS.Colors.quiet)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .nativeTooltip("What's left on publik API")
+            }
+
             Button(action: {
                 NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
             }) {
@@ -1357,21 +1369,44 @@ struct CompanionPanelView: View {
     private var publikAPIBalanceRows: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                Image(systemName: "creditcard.fill")
+                Image(systemName: publikAPIBalanceIsLow ? "exclamationmark.triangle.fill" : "creditcard.fill")
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(DS.Colors.textTertiary)
+                    .foregroundColor(publikAPIBalanceIsLow ? DS.Colors.warning : DS.Colors.textTertiary)
 
                 // (a) The balance line. Dollars, never tokens or credits.
                 Text(publikAPIBalanceLine)
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
+                    .foregroundColor(publikAPIBalanceIsLow ? DS.Colors.warningText : DS.Colors.textSecondary)
+                    .monospacedDigit()
 
                 Spacer()
+
+                if publikAPIIsTheProviderAnswering {
+                    publikAPIAddCreditButton
+                }
 
                 Button(action: { forgetPublikAPIKey() }) {
                     Text("Remove")
                 }
                 .irisTextButton(fontSize: 10, isDanger: true)
+            }
+
+            if publikAPIIsTheProviderAnswering {
+                // Never a block: this only says so. A request the balance
+                // cannot cover is still refused by the gateway's own 402.
+                if publikAPIBalanceIsLow {
+                    Text("Running low. Add credit so Iris can keep answering.")
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.warningText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if let costPerMessageLine = publikAPICostPerMessageLine {
+                    Text(costPerMessageLine)
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .monospacedDigit()
+                }
             }
 
             // (b) The one-sentence justification.
@@ -1380,8 +1415,12 @@ struct CompanionPanelView: View {
                 .foregroundColor(DS.Colors.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            // (c) The primary button, and only ever one link.
-            if let (buttonTitle, linkURLString) = publikAPIPrimaryAction {
+            // (c) The primary button, and only ever one link. While publik API
+            // is the provider answering, "Add credit" in the balance row IS
+            // that link — it opens the same page this button would (the claim
+            // page while anonymous, the add-credit page once claimed) — so this
+            // one steps aside rather than make two.
+            if !publikAPIIsTheProviderAnswering, let (buttonTitle, linkURLString) = publikAPIPrimaryAction {
                 Button(action: { _ = ExternalLinkPolicy.openExternalURLIfAllowed(linkURLString) }) {
                     Text(buttonTitle)
                 }
@@ -1400,7 +1439,55 @@ struct CompanionPanelView: View {
         guard let walletSnapshot = publikAPIAccount.walletSnapshot else {
             return "publik API is set up"
         }
+        if publikAPIIsTheProviderAnswering {
+            return PublikAPIMoney.balanceLine(balanceMicros: walletSnapshot.balanceMicros)
+        }
         return "\(walletSnapshot.dollarsDescription) left on publik API"
+    }
+
+    /// Whether publik API is the provider that will answer the next question.
+    /// Everything new about the balance — the Add credit button, the cost line,
+    /// the warning, the header label — shows only then.
+    private var publikAPIIsTheProviderAnswering: Bool {
+        accountService.resolvedChatProvider == .publikAPI && accountService.hasPublikAPIKey
+    }
+
+    private var publikAPIWalletSnapshotWhilePublikAPIAnswers: PublikAPIWalletSnapshot? {
+        guard publikAPIIsTheProviderAnswering else { return nil }
+        return publikAPIAccount.walletSnapshot
+    }
+
+    /// Under $0.25, while publik API answers. Nothing is known to be low before
+    /// the first balance has been read.
+    private var publikAPIBalanceIsLow: Bool {
+        guard let walletSnapshot = publikAPIWalletSnapshotWhilePublikAPIAnswers else { return false }
+        return PublikAPIMoney.balanceIsLow(balanceMicros: walletSnapshot.balanceMicros)
+    }
+
+    /// "Last reply: $0.004", or before the first reply the typical cost of a
+    /// message on the tier the model picker maps to.
+    private var publikAPICostPerMessageLine: String? {
+        PublikAPIMoney.costPerMessageLine(
+            lastReplyChargeMicros: publikAPIAccount.lastReplyChargeMicros,
+            modelAlias: PublikAPIModelAlias.alias(forIrisModelName: companionManager.selectedModel)
+        )
+    }
+
+    /// Opens the page the latest `/balance` answer named. The ordinary chip
+    /// normally; the filled pill once the balance is low, so the way to fix it
+    /// is the loudest thing in the row.
+    @ViewBuilder
+    private var publikAPIAddCreditButton: some View {
+        let addCreditButton = Button(action: {
+            PublikAPIAccount.openTheAddCreditPage(publikAPIAccount.urlStringForTheAddCreditButton)
+        }) {
+            Text("Add credit")
+        }
+        if publikAPIBalanceIsLow {
+            addCreditButton.irisPrimaryPill(isFullWidth: false, isCompact: true)
+        } else {
+            addCreditButton.irisTinyButton()
+        }
     }
 
     /// The primary button's title and its single destination. Anonymous installs

@@ -22,6 +22,10 @@ import { contextBridge, ipcRenderer } from "electron";
 contextBridge.exposeInMainWorld("iris", {
   // Chat
   sendQuery: (text: string): Promise<string> => ipcRenderer.invoke("chat:query", text),
+  /** Why the last `sendQuery` rejected: the clean sentence, and the one "Add
+   *  credit" link when publik API refused for lack of money. */
+  lastChatFailure: (): Promise<{ message: string; addCreditUrl: string | null } | null> =>
+    ipcRenderer.invoke("chat:lastFailure"),
   onStage: (callback: (data: { stage: string; label: string }) => void) => {
     ipcRenderer.on("companion:stage", (_event, data) => callback(data));
   },
@@ -50,6 +54,13 @@ contextBridge.exposeInMainWorld("iris", {
   provisionPublikApi: () => ipcRenderer.invoke("publik:provision"),
   publikCard: (isFirstRun: boolean) => ipcRenderer.invoke("publik:card", isFirstRun),
   markPublikCardShown: () => ipcRenderer.invoke("publik:cardShown"),
+  // The balance lines: what is left, what a message costs, and where "Add
+  // credit" goes. Null while publik API is not the provider answering.
+  publikBalance: () => ipcRenderer.invoke("publik:balance"),
+  refreshPublikBalance: () => ipcRenderer.invoke("publik:refreshBalance"),
+  onPublikBalanceChanged: (callback: (balance: unknown) => void) => {
+    ipcRenderer.on("publik:balanceChanged", (_event, balance) => callback(balance));
+  },
   completeFirstRun: () => ipcRenderer.invoke("firstRun:complete"),
 
   // Codex. Iris opens the login in a console and never sees the credential.

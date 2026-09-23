@@ -249,27 +249,43 @@ export interface PublikUsageSnapshot {
   claimState: PublikClaimState | null;
   starterRemainingMicros: number | null;
   servedModel: string | null;
+  /**
+   * What this call cost, from `x-publik-charge-micros`. The gateway writes it
+   * only once the call is settled — on every non-streaming answer, which is
+   * what this client asks for — and `x-publik-balance` beside it is then the
+   * balance AFTER the charge. Null when absent (a failure, or a stream), and
+   * then the balance is read back from `GET /balance` instead.
+   */
+  chargeMicros: number | null;
 }
 
 export interface HeaderReader {
   get(name: string): string | null;
 }
 
-export function readPublikUsageHeaders(headers: HeaderReader): PublikUsageSnapshot {
-  const numeric = (name: string): number | null => {
-    const raw = headers.get(name);
-    if (raw === null) return null;
-    const parsed = Number.parseInt(raw.trim(), 10);
-    return Number.isFinite(parsed) ? parsed : null;
-  };
+/**
+ * One `x-publik-*` micros header. Only a plain, non-negative whole number is
+ * read; anything else ("12abc", "-5", "1.5") is ignored rather than guessed
+ * at, because a garbled charge must not become a price on screen and a
+ * garbled balance must not become one either.
+ */
+export function readMicrosHeader(raw: string | null): number | null {
+  if (raw === null) return null;
+  const trimmed = raw.trim();
+  if (!/^[0-9]+$/.test(trimmed)) return null;
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
 
+export function readPublikUsageHeaders(headers: HeaderReader): PublikUsageSnapshot {
   const claimStateRaw = headers.get("x-publik-claim-state");
   return {
-    balanceMicros: numeric("x-publik-balance"),
+    balanceMicros: readMicrosHeader(headers.get("x-publik-balance")),
     claimState:
       claimStateRaw === "claimed" ? "claimed" : claimStateRaw === "anonymous" ? "anonymous" : null,
-    starterRemainingMicros: numeric("x-publik-starter-remaining"),
+    starterRemainingMicros: readMicrosHeader(headers.get("x-publik-starter-remaining")),
     servedModel: headers.get("x-publik-model"),
+    chargeMicros: readMicrosHeader(headers.get("x-publik-charge-micros")),
   };
 }
 

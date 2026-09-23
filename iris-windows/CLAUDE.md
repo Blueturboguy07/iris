@@ -141,6 +141,24 @@ memory-only, per protocol §4.
 into bug reports. If `safeStorage.isEncryptionAvailable()` is false, refuse to
 store the key and say so. Never fall back to plaintext.
 
+### publik API balance and Add credit
+
+`services/publik-balance.ts` is the Windows half of "Balance + Add credit in
+Iris" (founder decision, 2026-09-22; the Mac half is `PublikAPIBalance.swift`).
+The rules — the $0.25 low line, the tier prices behind the typical-message
+figure, which page "Add credit" opens, reading `GET /balance` — are all there
+and tested in `tests/publik-balance.test.ts`, against the same
+`tests/fixtures/publik-balance/*.json` the Swift suite reads. `main/publik-setup.ts`
+owns the timing (launch, a window opening, after each reply) and the per-reply
+tally; `makeBalanceRequest` in `assistant-transport.ts` builds the one GET that
+carries the publik key, through `validatedRequest` like chat. This client asks
+for non-streaming answers, so `x-publik-charge-micros` and `x-publik-balance`
+on a reply are already settled; a response without a charge (a 402) triggers a
+debounced `/balance` read instead. Everything shows only while publik API is the
+provider answering (`CompanionManager.answersWithPublikApi`). A 402's link
+reaches the chat window through `chat:lastFailure`, because an invoke rejection
+carries only a message.
+
 ### Deep links
 
 `services/deep-link-parser.ts` is a port of `parse_guide_deep_link` in

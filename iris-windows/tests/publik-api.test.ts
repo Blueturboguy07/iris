@@ -203,6 +203,21 @@ describe("reading a metered response", () => {
     const usage = readPublikUsageHeaders(headersFrom({ "x-publik-balance": "lots" }));
     expect(usage.balanceMicros).toBeNull();
   });
+
+  it("reads what a settled call cost from x-publik-charge-micros", () => {
+    const usage = readPublikUsageHeaders(headersFrom({ "x-publik-charge-micros": " 4321 " }));
+    expect(usage.chargeMicros).toBe(4_321);
+    expect(readPublikUsageHeaders(headersFrom({ "x-publik-charge-micros": "0" })).chargeMicros).toBe(0);
+  });
+
+  it("ignores a charge that is not a plain whole number rather than guessing at it", () => {
+    // parseInt would read "12abc" as 12 and "1.5" as 1: a garbled charge must
+    // not become a price on screen.
+    for (const malformed of ["12abc", "-5", "1.5", "lots", "", "1e3"]) {
+      expect(readPublikUsageHeaders(headersFrom({ "x-publik-charge-micros": malformed })).chargeMicros).toBeNull();
+    }
+    expect(readPublikUsageHeaders(headersFrom({})).chargeMicros).toBeNull();
+  });
 });
 
 describe("the 402", () => {

@@ -47,6 +47,15 @@ export interface SettingsSchema {
    *  truthful before the next metered call updates it. */
   publikBalanceMicros: number;
 
+  /** Whether `publikBalanceMicros` came from the gateway for the key held now.
+   *  False until one does, so an unread balance is never shown as "$0.00 left"
+   *  and never lights the low-balance warning. */
+  publikBalanceSeen: boolean;
+
+  /** The one "Add credit" link the last `GET /balance` named (`top_up_url`):
+   *  the claim page while anonymous, the add-credit page once claimed. */
+  publikTopUpUrl: string;
+
   /** The starter the install was granted, for the first-run balance line. */
   publikStarterMicros: number;
 
@@ -90,6 +99,8 @@ const defaults: SettingsSchema = {
   publikAddCreditUrl: "",
   publikClaimState: "anonymous",
   publikBalanceMicros: 0,
+  publikBalanceSeen: false,
+  publikTopUpUrl: "",
   publikStarterMicros: 0,
   publikCardHasBeenShown: false,
   alwaysOnTop: false,

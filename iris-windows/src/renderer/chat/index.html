@@ -21,6 +21,7 @@
       --accent: #638cff;
       --accent-hover: #7da0ff;
       --error: #f87171;
+      --warn: #fbbf24;
       --msg-user: linear-gradient(135deg, #638cff 0%, #5a7af5 100%);
       --radius-sm: 8px;
       --radius-md: 12px;
@@ -59,6 +60,8 @@
       margin-left: auto;
       padding-right: 6px;
     }
+    /* A publik API balance under $0.25: a warning, never a block. */
+    #titlebar .tier.low { color: var(--warn); }
     .win-btn {
       -webkit-app-region: no-drag;
       width: 30px; height: 28px;
@@ -74,6 +77,11 @@
     .msg.assistant { align-self: flex-start; background: var(--bg-secondary); border: 1px solid var(--border); }
     .msg.system { align-self: center; color: var(--text-tertiary); font-size: 11px; text-align: center; max-width: 100%; }
     .msg.error { align-self: flex-start; background: rgba(248, 113, 113, 0.1); border: 1px solid rgba(248, 113, 113, 0.3); color: var(--error); }
+    .msg .add-credit {
+      display: block; margin-top: 8px; padding: 6px 12px; border: 0; border-radius: var(--radius-sm);
+      background: var(--accent); color: #fff; font-weight: 600; cursor: pointer; font-size: 12px; font-family: inherit;
+    }
+    .msg .add-credit:hover { background: var(--accent-hover); }
 
     #welcome { margin: auto; text-align: center; color: var(--text-secondary); padding: 24px; line-height: 1.6; }
     #welcome h2 { font-size: 15px; color: var(--text-primary); margin-bottom: 6px; }
@@ -176,6 +184,9 @@
       tierEl.textContent = settings.hasPublikApiKey
         ? 'publik API'
         : settings.hasAnthropicApiKey ? 'your Anthropic key' : '';
+      tierEl.title = '';
+      tierEl.classList.remove('low');
+      renderPublikBalance(settings.publikBalance);
 
       if (!settings.buildCanProvisionAutomatically) {
         document.getElementById('publik-setup').disabled = true;
@@ -187,6 +198,22 @@
         document.getElementById('publik-setup').disabled = true;
       }
       return settings;
+    }
+
+    /**
+     * The balance beside the provider name — "publik API · $1.84 left" —
+     * with what a message costs on hover. Null (a reader on their own key or
+     * on codex) leaves the title exactly as it was.
+     */
+    function renderPublikBalance(balance) {
+      if (!balance) return;
+      tierEl.textContent = balance.balanceLine ? 'publik API · ' + balance.balanceLine : 'publik API';
+      tierEl.title = balance.costLine;
+      tierEl.classList.toggle('low', Boolean(balance.isLow));
+    }
+
+    async function refreshPublikBalance() {
+      renderPublikBalance(await window.iris.refreshPublikBalance());
     }
 
     async function send() {
@@ -201,8 +228,23 @@
         addMessage(response || '(no answer)', 'assistant');
       } catch (error) {
         // The main process already turned this into a sentence meant for a
-        // person; a raw status code never reaches here.
-        addMessage(String(error && error.message ? error.message : error), 'error');
+        // person; a raw status code never reaches here. It is read back from
+        // the main process because an invoke rejection carries only a
+        // prefixed message — and not the one link a 402 comes with.
+        const failure = await window.iris.lastChatFailure();
+        const errorEl = addMessage(
+          failure && failure.message
+            ? failure.message
+            : String(error && error.message ? error.message : error),
+          'error'
+        );
+        if (failure && failure.addCreditUrl) {
+          const addCreditButton = document.createElement('button');
+          addCreditButton.className = 'add-credit';
+          addCreditButton.textContent = 'Add credit';
+          addCreditButton.addEventListener('click', () => window.iris.openExternal(failure.addCreditUrl));
+          errorEl.appendChild(addCreditButton);
+        }
         await refreshAccountState();
       } finally {
         sendBtn.disabled = false;
@@ -259,8 +301,11 @@
 
     window.iris.onStage(({ label }) => showStatus(label));
     window.iris.onAccountChanged(() => refreshAccountState());
+    window.iris.onPublikBalanceChanged((balance) => renderPublikBalance(balance));
+    // Coming back to the window is when the reader looks at the balance.
+    window.addEventListener('focus', () => { refreshPublikBalance(); });
 
-    refreshAccountState();
+    refreshAccountState().then(() => refreshPublikBalance());
   </script>
 </body>
 </html>

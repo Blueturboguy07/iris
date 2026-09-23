@@ -16,6 +16,7 @@
       --accent: #638cff;
       --error: #f87171;
       --ok: #34d399;
+      --warn: #fbbf24;
       --radius: 8px;
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -48,6 +49,8 @@
     .status { font-size: 12px; }
     .status.ok { color: var(--ok); }
     .status.warn { color: var(--error); }
+    /* A publik API balance under $0.25: a warning, never a block. */
+    .status.low, .note.low { color: var(--warn); }
   </style>
 </head>
 <body>
@@ -76,7 +79,13 @@
     <div class="field">
       <div class="row">
         <span class="status" id="publik-status">Checking…</span>
+        <span style="flex:1"></span>
+        <button id="publik-add-credit" style="display:none">Add credit</button>
       </div>
+      <div class="note low" id="publik-low" style="display:none">
+        Running low. Add credit so Iris can keep answering.
+      </div>
+      <div class="note" id="publik-cost" style="display:none"></div>
       <div class="note" id="publik-why"></div>
       <div class="row" style="margin-top:10px">
         <button class="accent" id="publik-cta" style="display:none"></button>
@@ -202,9 +211,13 @@
 
   <script>
     const el = (id) => document.getElementById(id);
+    /** The last settings read, so a balance update can re-render the publik
+     *  section without reading everything again. */
+    let latestSettings = null;
 
     async function load() {
       const settings = await window.iris.getSettings();
+      latestSettings = settings;
 
       el('claudeModel').value = settings.claudeModel || 'claude-sonnet-4-5-20250929';
       el('alwaysOnTop').checked = Boolean(settings.alwaysOnTop);
@@ -271,11 +284,19 @@
       const status = el('publik-status');
       const cta = el('publik-cta');
       const setup = el('publik-setup');
+      const addCredit = el('publik-add-credit');
       const card = settings.publikCard;
+      // Null unless publik API is the provider answering: a reader on their
+      // own key or on codex sees the section exactly as before.
+      const balance = settings.publikBalance;
 
       el('publikApiKey').placeholder = settings.hasPublikApiKey
         ? 'A key is stored (hidden)'
         : 'pk_live_…';
+
+      addCredit.style.display = 'none';
+      el('publik-low').style.display = 'none';
+      el('publik-cost').style.display = 'none';
 
       if (!settings.hasPublikApiKey) {
         status.textContent = 'Not set up on this computer';
@@ -283,6 +304,24 @@
         el('publik-why').textContent = '';
         cta.style.display = 'none';
         setup.style.display = settings.buildCanProvisionAutomatically ? '' : 'none';
+        return;
+      }
+
+      if (balance) {
+        status.textContent = balance.balanceLine || 'publik API is set up';
+        status.className = balance.isLow ? 'status low' : 'status ok';
+        el('publik-low').style.display = balance.isLow ? '' : 'none';
+        el('publik-cost').textContent = balance.costLine;
+        el('publik-cost').style.display = '';
+        el('publik-why').textContent = card.whyItCosts;
+        setup.style.display = 'none';
+        // "Add credit" IS the one link while publik API answers — the claim
+        // page while anonymous, the add-credit page once claimed — so the
+        // older button steps aside rather than make two. Loud when low.
+        addCredit.style.display = '';
+        addCredit.className = balance.isLow ? 'accent' : '';
+        addCredit.onclick = () => window.iris.openExternal(balance.addCreditUrl);
+        cta.style.display = 'none';
         return;
       }
 
@@ -387,7 +426,19 @@
     el('signout').addEventListener('click', async () => { await window.iris.signOut(); load(); });
 
     window.iris.onAccountChanged(() => load());
-    load();
+    window.iris.onPublikBalanceChanged((balance) => {
+      if (!latestSettings) return;
+      latestSettings.publikBalance = balance;
+      renderPublikSection(latestSettings);
+    });
+    // Opening settings is when the reader looks at their balance, so it is
+    // read fresh from publik rather than shown from the last time.
+    load().then(async () => {
+      const balance = await window.iris.refreshPublikBalance();
+      if (!latestSettings) return;
+      latestSettings.publikBalance = balance;
+      renderPublikSection(latestSettings);
+    });
   </script>
 </body>
 </html>

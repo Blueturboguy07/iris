@@ -117,6 +117,23 @@ describe("what actually goes on the wire", () => {
     expect(seen[0].balanceMicros).toBe(182_400);
   });
 
+  it("reports what a settled answer cost, so the settings panel can say what the last reply cost", async () => {
+    // A non-streaming answer is settled before its headers are written, so the
+    // charge and the balance beside it are final (CONTRACT section 11.6).
+    const { fetchImplementation } = recordingFetch({
+      publikHeaders: { "x-publik-charge-micros": "4321", "x-publik-balance": "1838889" },
+    });
+    const seen: Array<{ chargeMicros: number | null; balanceMicros: number | null }> = [];
+    await new ClaudeService({
+      transport: { tier: "publik", publikApiKey: THE_PUBLIK_KEY, apiBaseUrl: "https://publikhq.com/api/v1" },
+      model: "publik-balanced",
+      fetchImplementation,
+      reportPublikUsage: (usage) => seen.push(usage),
+    }).query(A_QUERY);
+
+    expect(seen).toEqual([expect.objectContaining({ chargeMicros: 4_321, balanceMicros: 1_838_889 })]);
+  });
+
   it("caps max_tokens at the documented limit", async () => {
     const { fetchImplementation, sent } = recordingFetch({});
     const transport: AssistantTransport = {

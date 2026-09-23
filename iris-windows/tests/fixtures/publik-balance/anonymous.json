@@ -1,0 +1,18 @@
+{
+  "install_id": "7d3c2a4e-58b1-4f6e-9a0c-2b8f1e6d9c41",
+  "app_slug": "iris",
+  "claim_state": "anonymous",
+  "balance_micros": 181240,
+  "starter": { "remaining_micros": 181240, "expires_at": "2026-10-18T17:04:11.000Z" },
+  "week": { "used_micros": 68760, "budget_micros": null, "resets_at": "2026-09-25T17:04:11.000Z" },
+  "daily_cap_micros": 2000000,
+  "spent_today_micros": 68760,
+  "claim_code": "HK7F-2QWD",
+  "claim_url": "https://publikhq.com/claim/HK7F-2QWD",
+  "claim_expires_at": "2026-10-18T17:04:11.000Z",
+  "add_credit_url": "https://publikhq.com/dashboard/api/add",
+  "plans_url": "https://publikhq.com/developers#plans",
+  "top_up_url": "https://publikhq.com/claim/HK7F-2QWD",
+  "base_url": "https://publikhq.com/api/v1",
+  "available_micros": 181240
+}

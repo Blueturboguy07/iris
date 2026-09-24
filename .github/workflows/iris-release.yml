@@ -300,6 +300,25 @@ jobs:
       - name: Install
         run: npm ci
 
+      # The Windows app reports package.json's version (app.getVersion()), and
+      # the tray's "Update to Iris x.y.z" notice compares it with the newest
+      # release. Until 0.9.15 it stayed at 0.1.0 while the tags moved on, so
+      # every Windows install was told it was out of date. A tag must name the
+      # version its exe reports; tests/app-version.test.ts separately keeps it
+      # equal to the macOS MARKETING_VERSION.
+      - name: Check the Windows version matches the tag
+        if: startsWith(github.ref, 'refs/tags/iris-v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#iris-v}"
+          package_version="$(node -p "require('./package.json').version")"
+          if [ "$tag_version" != "$package_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME, but iris-windows/package.json says $package_version. Run 'npm version $tag_version --no-git-tag-version' in iris-windows as part of the 'Iris $tag_version' commit, then tag that commit."
+            exit 1
+          fi
+          echo "iris-windows/package.json is $package_version, matching $GITHUB_REF_NAME."
+
       # A tag must not outrun a red branch: iris-windows.yml runs these on every
       # push, and running them here means a release cannot skip them.
       - name: Typecheck

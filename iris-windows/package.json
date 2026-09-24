@@ -1,6 +1,6 @@
 {
   "name": "iris-windows",
-  "version": "0.1.0",
+  "version": "0.9.14",
   "description": "Iris — publik's desktop companion for Windows. A text-first fork of tekram/clicky-windows.",
   "main": "dist/main/index.js",
   "scripts": {

@@ -36,7 +36,10 @@ running on `windows-latest`. That workflow:
 6. **starts the packaged `iris.exe` and requires it to survive ten seconds** —
    a build that cannot start is worse than no build, because it packages
    cleanly and fails on a user's machine instead of here,
-7. uploads the installer as an artifact, including on failure.
+7. **installs the real `Iris-Setup.exe`** and requires the Desktop and Start
+   Menu shortcuts to exist and start Iris, then uninstalls and requires both to
+   be gone (see "Install, shortcuts and opening Iris" below),
+8. uploads the installer as an artifact, including on failure.
 
 The unit suite is deliberately free of network, display, and Windows-only APIs,
 so it runs identically on macOS during development and on Windows in CI. That is
@@ -131,6 +134,26 @@ from `GET /api/v1/balance`. Under $0.25 it turns into a warning; it never blocks
 the 402 still does that — and the 402 in chat now carries the same "Add credit"
 link. A user on their own key or on codex sees none of it.
 
+**Install, shortcuts and opening Iris** (`src/services/launch-arguments.ts`).
+Squirrel.Windows creates no shortcut for an Electron app on its own — Electron's
+exe declares itself "Squirrel-aware", so Squirrel runs it with
+`--squirrel-install` / `--squirrel-updated` / `--squirrel-uninstall` /
+`--squirrel-obsolete` and expects it to manage its own shortcuts. The top of
+`main/index.ts` answers those hooks before anything else starts (Desktop + Start
+Menu shortcuts via Squirrel's `Update.exe`, removed again on uninstall) and
+quits. `--squirrel-firstrun`, the first real launch, starts Iris normally and
+adds a one-time notice saying where Iris lives. A second launch while Iris runs
+(the shortcut again) brings the chat window up — creating it if it was closed —
+while an `iris://` link keeps its deep-link path. Every release before 0.9.15
+shipped without any of this: no icon, and a relaunch that showed nothing.
+
+**Version.** `app.getVersion()` is `package.json`'s `version`, and the tray's
+"Update to Iris x.y.z" notice compares it with the newest `iris-v*` release. It
+must equal the release: `tests/app-version.test.ts` holds it to the macOS app's
+`MARKETING_VERSION`, and `iris-release.yml` refuses to build a tag that
+disagrees with it. (Until 0.9.15 it said 0.1.0, so every Windows install was
+told it was out of date.)
+
 **Secrets at rest** (`src/main/secrets.ts`). Electron `safeStorage`, which is
 DPAPI on Windows, so ciphertext is bound to the Windows account. Upstream kept
 API keys in `%APPDATA%/clicky-windows/settings.json` in plain text; a pre-fork
@@ -179,7 +202,9 @@ src/
 │   ├── deep-link-parser.ts     every iris:// link, and every refusal
 │   ├── external-links.ts       the 22-host allowlist
 │   ├── guide-service.ts        guide fetch + the four distinct failures
+│   ├── launch-arguments.ts     Squirrel install hooks + what a second launch opens
 │   ├── publik-balance.ts       the balance, the cost of a message, and Add credit
+│   ├── window-geometry.ts      Settings/first-run sizes: resizable, with minimums
 │   ├── account-service.ts      Supabase PKCE with no SDK
 │   └── tool-versions.ts        the programs a guide may cause Iris to run
 ├── preload/         The complete list of what a renderer can do
@@ -226,6 +251,11 @@ Being explicit, because the suite's green tick does not cover these:
   side of the round trip is still unverified on real hardware.)
 - **Screen capture, the overlay, and pointing accuracy.** These need a real
   desktop with real windows on it.
+- **The first-run notice and a real person's click.** CI installs, opens Iris
+  from the Desktop shortcut and uninstalls on `windows-latest`, and the GUI e2e
+  suite relaunches a running Iris and sees the chat come back, but the
+  `--squirrel-firstrun` toast and a double-click on a real desktop have only
+  been built, not seen.
 - **The publik API balance in the tray.** The settings panel and chat window are
   driven in jsdom, and every rule behind them is unit-tested, but the tray menu
   items and a real `GET /balance` round trip have only been built, not seen.

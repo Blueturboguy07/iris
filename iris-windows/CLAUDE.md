@@ -167,6 +167,34 @@ behavioural spec. The governing rule is that an **unknown query parameter is
 rejected, not ignored**. If you add a parameter, add it to the parser, the
 allowlist of names, and the test table — in that order.
 
+### Install hooks, shortcuts, relaunch, version
+
+- **Squirrel hooks come first.** Electron's exe is "Squirrel-aware", so
+  Squirrel.Windows makes no shortcut by itself and runs `iris.exe
+  --squirrel-install|updated|uninstall|obsolete` and waits for it. The top of
+  `main/index.ts` — before the single-instance lock, settings, or any window —
+  answers those from `services/launch-arguments.ts` (Desktop + Start Menu
+  shortcuts via `Update.exe`, removed on uninstall) and quits. Do not move
+  app start-up above that block, and do not add a runtime dependency for it
+  (`electron-squirrel-startup`): the app has none. `--squirrel-firstrun` starts
+  normally plus a one-time "where Iris lives" notice. The real installer is
+  checked by the "Installer shortcuts" step in `iris-windows.yml`.
+- **A second launch with no `iris://` link opens the chat** (`showChatWindow`:
+  create if closed, restore, focus). Never fall back to "any window": the
+  overlays are always there and are transparent, so focusing one looks like
+  nothing happened. Links keep the deep-link path.
+- **Settings and first-run windows are resizable** (`services/window-geometry.ts`)
+  and their pages never scroll sideways: rows wrap, `overflow-wrap: anywhere`,
+  `overflow-x: hidden` as the backstop, and a thin `::-webkit-scrollbar`. Never
+  set `scrollbar-width`/`scrollbar-color` on those pages — Chromium then ignores
+  the `::-webkit-scrollbar` rules and Windows' wide grey default comes back.
+  `tests/window-geometry.test.ts` pins this; the GUI e2e measures it on Windows.
+- **Version.** `package.json`'s `version` is `app.getVersion()` and feeds the
+  self-update check, so it is bumped in every `Iris X.Y.Z` commit together with
+  the macOS `MARKETING_VERSION` (`npm version X.Y.Z --no-git-tag-version`).
+  `tests/app-version.test.ts` fails when the two differ; `iris-release.yml`
+  refuses a tag that differs from it.
+
 ### Autopilot (guided-install)
 
 `src/services/autopilot/` runs an install recipe end to end — the Windows port of

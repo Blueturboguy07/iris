@@ -35,6 +35,7 @@ import { firstAvailableMaintainProvider } from "../services/maintain/model-provi
 import { RegistryRefreshingToolProbe, RealDetourClock } from "./setup-detour-host";
 import { MaintainController, type MaintainHost } from "./maintain/controller";
 import type { MaintainAskAnswer, MaintainIncidentSnapshot } from "../services/maintain/incident-coordinator";
+import { FIRST_RUN_WINDOW_GEOMETRY, SETTINGS_WINDOW_GEOMETRY } from "../services/window-geometry";
 
 /**
  * index.ts
@@ -338,9 +339,9 @@ function openGuideWindow(): BrowserWindow {
 
 function createSettingsWindow(): BrowserWindow {
   const window = new BrowserWindow({
-    width: 500,
-    height: 600,
-    resizable: false,
+    // Resizable, with a minimum the page's layout is checked at — see
+    // services/window-geometry.ts for the report that changed this.
+    ...SETTINGS_WINDOW_GEOMETRY,
     show: false,
     webPreferences: {
       preload: preloadPath(),
@@ -348,6 +349,10 @@ function createSettingsWindow(): BrowserWindow {
       nodeIntegration: false,
     },
   });
+  // No File/Edit/View menu bar: Electron's default one has nothing for a
+  // settings form, and its View > Zoom is one way the page ends up wider than
+  // the window. Typing, copy and paste in the fields do not need it.
+  window.removeMenu();
   void window.loadFile(rendererPath("settings", "index.html"));
   window.once("ready-to-show", () => window.show());
   return window;
@@ -363,9 +368,7 @@ function createSettingsWindow(): BrowserWindow {
  */
 function createFirstRunWindow(): BrowserWindow {
   const window = new BrowserWindow({
-    width: 560,
-    height: 620,
-    resizable: false,
+    ...FIRST_RUN_WINDOW_GEOMETRY,
     show: false,
     title: "Welcome to Iris",
     webPreferences: {
@@ -374,6 +377,7 @@ function createFirstRunWindow(): BrowserWindow {
       nodeIntegration: false,
     },
   });
+  window.removeMenu();
   void window.loadFile(rendererPath("first-run", "index.html"));
   window.once("ready-to-show", () => window.show());
   return window;

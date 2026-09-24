@@ -1,5 +1,5 @@
-import { app, BrowserWindow, dialog, ipcMain, screen, shell } from "electron";
-import { execFile } from "node:child_process";
+import { app, BrowserWindow, dialog, ipcMain, Notification, screen, shell } from "electron";
+import { execFile, spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -35,6 +35,14 @@ import { firstAvailableMaintainProvider } from "../services/maintain/model-provi
 import { RegistryRefreshingToolProbe, RealDetourClock } from "./setup-detour-host";
 import { MaintainController, type MaintainHost } from "./maintain/controller";
 import type { MaintainAskAnswer, MaintainIncidentSnapshot } from "../services/maintain/incident-coordinator";
+import {
+  SQUIRREL_HOOK_TIMEOUT_MS,
+  relaunchIntentFromArgv,
+  squirrelEventFromArgv,
+  squirrelStartupPlan,
+  squirrelUpdateExePath,
+  type SquirrelStartupPlan,
+} from "../services/launch-arguments";
 import { FIRST_RUN_WINDOW_GEOMETRY, SETTINGS_WINDOW_GEOMETRY } from "../services/window-geometry";
 
 /**
@@ -47,6 +55,71 @@ import { FIRST_RUN_WINDOW_GEOMETRY, SETTINGS_WINDOW_GEOMETRY } from "../services
  * invokes — that file is the Tauri panel transplanted verbatim, so this process
  * answers the same vocabulary its Rust counterpart does.
  */
+
+// MARK: - Squirrel.Windows install hooks
+//
+// This runs before anything else in the app: before the single-instance lock,
+// before settings, before any window. Squirrel runs `iris.exe` with one of its
+// `--squirrel-*` flags during install, update and uninstall and waits up to 15
+// seconds for it; a hook run must do its one job and quit, never boot Iris.
+// Until 0.9.15 nothing here handled them, so the installer made no Desktop or
+// Start Menu shortcut and the install hook started the whole app. See
+// `services/launch-arguments.ts` for the full story and the tested decisions.
+//
+// Handled inline rather than with the `electron-squirrel-startup` package:
+// this app ships with zero runtime dependencies (package.json "dependencies"
+// is empty and the asar carries none), the package is the same thirty lines,
+// and doing it here lets the decisions be unit-tested, the shortcut locations
+// be stated explicitly, and `--squirrel-firstrun` get its notice.
+
+const squirrelPlan: SquirrelStartupPlan | null = (() => {
+  if (process.platform !== "win32") return null;
+  const event = squirrelEventFromArgv(process.argv);
+  return event ? squirrelStartupPlan(event, path.basename(process.execPath)) : null;
+})();
+
+/** True for a launch that exists only to run a Squirrel hook and quit. */
+const isSquirrelHookRun =
+  squirrelPlan !== null &&
+  (squirrelPlan.kind === "runUpdateExeThenQuit" || squirrelPlan.kind === "quitImmediately");
+
+/** True on the first launch Squirrel makes right after installing. */
+const isSquirrelFirstRun = squirrelPlan?.kind === "startAsFirstRun";
+
+function runSquirrelHookThenQuit(plan: SquirrelStartupPlan): void {
+  if (plan.kind !== "runUpdateExeThenQuit") {
+    app.quit();
+    return;
+  }
+  let finished = false;
+  const quitOnce = () => {
+    if (finished) return;
+    finished = true;
+    app.quit();
+  };
+  // Squirrel moves on after 15 seconds whether or not the hook exited; a hung
+  // or missing Update.exe must not keep this process alive past that.
+  setTimeout(quitOnce, SQUIRREL_HOOK_TIMEOUT_MS);
+  try {
+    const updateExe = spawn(squirrelUpdateExePath(process.execPath), plan.updateExeArguments, {
+      detached: true,
+      windowsHide: true,
+      stdio: "ignore",
+    });
+    // Waiting for it to finish (rather than quitting straight away) means the
+    // shortcuts exist before Squirrel goes on to launch the installed app.
+    updateExe.once("close", quitOnce);
+    updateExe.once("error", (error) => {
+      console.error(`Squirrel hook could not run Update.exe: ${error.message}`);
+      quitOnce();
+    });
+  } catch (error) {
+    console.error(`Squirrel hook could not run Update.exe: ${error instanceof Error ? error.message : String(error)}`);
+    quitOnce();
+  }
+}
+
+if (squirrelPlan && isSquirrelHookRun) runSquirrelHookThenQuit(squirrelPlan);
 
 let chatWindow: BrowserWindow | null = null;
 let settingsWindow: BrowserWindow | null = null;
@@ -72,13 +145,23 @@ let pendingGuideDeepLink: GuideDeepLink | null = null;
  * in argv, so a single-instance lock is what turns that second launch into a
  * message to the running app rather than a second Iris.
  */
-const gotSingleInstanceLock = app.requestSingleInstanceLock();
-if (!gotSingleInstanceLock) {
+const gotSingleInstanceLock = isSquirrelHookRun ? false : app.requestSingleInstanceLock();
+if (isSquirrelHookRun) {
+  // Quits on its own once Update.exe is done (see runSquirrelHookThenQuit).
+} else if (!gotSingleInstanceLock) {
   app.quit();
 } else {
   app.on("second-instance", (_event, argv) => {
-    receiveDeepLinksFromArgv(argv);
-    focusExistingWindow();
+    const intent = relaunchIntentFromArgv(argv);
+    if (intent.kind === "deepLinks") {
+      // Unchanged: a link is delivered, then the existing window is raised.
+      for (const url of intent.urls) receiveDeepLink(url);
+      focusExistingWindow();
+      return;
+    }
+    // Anything else is a person opening Iris again — the Desktop or Start
+    // Menu shortcut — while it already runs in the tray. Show them the chat.
+    showChatWindow();
   });
   // macOS/Linux dev convenience; on Windows the argv path above is the real one.
   app.on("open-url", (event, url) => {
@@ -170,6 +253,57 @@ function focusExistingWindow(): void {
   if (window.isMinimized()) window.restore();
   window.show();
   window.focus();
+}
+
+/**
+ * The one way Iris's chat is brought up — from the tray, from a second launch
+ * (the Desktop or Start Menu shortcut), and from the first-run notice. Creates
+ * it when it was closed, restores it when it was minimized, and brings it to
+ * the front either way. The old second-launch path fell back to "any window",
+ * which after the chat was closed meant a transparent click-through overlay:
+ * the launch appeared to do nothing.
+ */
+function showChatWindow(): void {
+  if (chatWindow && !chatWindow.isDestroyed()) {
+    if (chatWindow.isMinimized()) chatWindow.restore();
+    chatWindow.show();
+    chatWindow.focus();
+    return;
+  }
+  chatWindow = createChatWindow();
+  chatWindow.on("closed", () => {
+    chatWindow = null;
+  });
+}
+
+/** Opens Settings, or brings the open one to the front. */
+function showSettingsWindow(): void {
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    if (settingsWindow.isMinimized()) settingsWindow.restore();
+    settingsWindow.show();
+    settingsWindow.focus();
+    return;
+  }
+  settingsWindow = createSettingsWindow();
+  settingsWindow.on("closed", () => {
+    settingsWindow = null;
+  });
+}
+
+/**
+ * Shown once, on the launch Squirrel makes right after installing: where Iris
+ * lives from now on. Iris is a tray app, and on Windows 11 a new tray icon is
+ * tucked behind the ^ arrow, so without this the reader's only clue after
+ * closing the chat was an icon they could not see.
+ */
+function showInstalledNotice(): void {
+  if (!Notification.isSupported()) return;
+  const notice = new Notification({
+    title: "Iris is installed",
+    body: "Open Iris any time from its icon on your desktop or in the Start menu. While it runs, it also sits in the system tray, near the clock.",
+  });
+  notice.on("click", () => showChatWindow());
+  notice.show();
 }
 
 // MARK: - Cursor buddy
@@ -1017,14 +1151,7 @@ function handleGuideCommand(command: string, args: Record<string, unknown>): unk
       if (process.env.IRIS_E2E !== "1") {
         throw new Error(`unknown Iris command '${command}'`);
       }
-      if (settingsWindow && !settingsWindow.isDestroyed()) {
-        settingsWindow.focus();
-      } else {
-        settingsWindow = createSettingsWindow();
-        settingsWindow.on("closed", () => {
-          settingsWindow = null;
-        });
-      }
+      showSettingsWindow();
       return null;
     }
 
@@ -1166,6 +1293,12 @@ function setupIPC(): void {
     openGuideWindow();
   });
 
+  // The chat window's gear button: Settings in one click, instead of only
+  // through the tray icon's right-click menu.
+  ipcMain.handle("settings:open", () => {
+    showSettingsWindow();
+  });
+
   // The single entry point the transplanted guide panel uses.
   ipcMain.handle("iris:invoke", (_event, command: string, args: Record<string, unknown>) =>
     handleGuideCommand(command, args ?? {})
@@ -1219,27 +1352,9 @@ if (gotSingleInstanceLock) {
     setupIPC();
 
     createTray({
-      onChat: () => {
-        if (chatWindow && !chatWindow.isDestroyed()) {
-          chatWindow.focus();
-        } else {
-          chatWindow = createChatWindow();
-          chatWindow.on("closed", () => {
-            chatWindow = null;
-          });
-        }
-      },
+      onChat: () => showChatWindow(),
       onGuide: () => openGuideWindow(),
-      onSettings: () => {
-        if (settingsWindow && !settingsWindow.isDestroyed()) {
-          settingsWindow.focus();
-        } else {
-          settingsWindow = createSettingsWindow();
-          settingsWindow.on("closed", () => {
-            settingsWindow = null;
-          });
-        }
-      },
+      onSettings: () => showSettingsWindow(),
       onYourTurn: () => {
         // Land the reader on the install that is waiting for them.
         if (autopilotWindow && !autopilotWindow.isDestroyed()) {
@@ -1261,10 +1376,10 @@ if (gotSingleInstanceLock) {
     // account, may have moved it since Iris last looked.
     void refreshPublikBalanceIfAnswering();
 
-    chatWindow = createChatWindow();
-    chatWindow.on("closed", () => {
-      chatWindow = null;
-    });
+    showChatWindow();
+
+    // The first launch after installing: say where Iris lives from now on.
+    if (isSquirrelFirstRun) showInstalledNotice();
 
     if (settings.get("cursorBuddyEnabled")) startCursorBuddy();
 

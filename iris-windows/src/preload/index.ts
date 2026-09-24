@@ -76,6 +76,8 @@ contextBridge.exposeInMainWorld("iris", {
 
   // Guides
   openGuide: () => ipcRenderer.invoke("guide:open"),
+  // Settings, from the chat window's gear button (the tray menu has its own).
+  openSettings: () => ipcRenderer.invoke("settings:open"),
 
   // Shell + window controls
   openExternal: (url: string) => ipcRenderer.invoke("shell:openExternal", url),

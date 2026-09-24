@@ -144,6 +144,23 @@ export function deliverDeepLink({ exePath, userDataDir, url }) {
   return proc;
 }
 
+/**
+ * Fires a plain second launch — no link, just the exe — the way a reader's
+ * Desktop or Start Menu shortcut does once Iris is already running. The
+ * single-instance lock routes it into the running app's `second-instance`
+ * handler, which must bring the chat window up. Same userData dir as the
+ * running app, for the same reason as `deliverDeepLink`.
+ */
+export function relaunchApp({ exePath, userDataDir }) {
+  const proc = spawn(exePath, [`--user-data-dir=${userDataDir}`], {
+    env: process.env,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  proc.unref?.();
+  return proc;
+}
+
 // ---------------------------------------------------------------------------
 // The WER crash artifact.
 // ---------------------------------------------------------------------------

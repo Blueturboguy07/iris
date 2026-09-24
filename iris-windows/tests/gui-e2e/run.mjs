@@ -25,12 +25,13 @@ import { homedir } from "node:os";
 import { mkdirSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 
-import { waitForDebuggerEndpoint, attach, hasTarget, waitForTarget, CdpSession } from "./cdp.mjs";
+import { waitForDebuggerEndpoint, attach, hasTarget, listTargets, waitForTarget, CdpSession } from "./cdp.mjs";
 import {
   scratchRoot,
   findPackagedExe,
   launchApp,
   deliverDeepLink,
+  relaunchApp,
   werReportArchiveDir,
   writeCrashArtifact,
   publikclipCrashFields,
@@ -82,34 +83,34 @@ const baseEnv = {
 // window lifecycle, and real iris:// deep-link delivery.
 // ===========================================================================
 async function scenarioCoreUi(exePath) {
-  results.scenario("A · Core UI: onboarding, keys, settings, signed-out query, windows, deep links");
+  results.scenario("A · Core UI: onboarding, keys, settings, signed-out query, windows, deep links, relaunch");
   const userDataDir = join(scratchRoot(), "userdata-core");
   rmrf(userDataDir);
 
   await withApp({ exePath, userDataDir, env: baseEnv, name: "core" }, async (app) => {
     const chat = await attach(app.port, "chat/index.html");
 
-    // 1. Boot & onboarding: signed-out setup panel with the BYO-key input and
-    //    both sign-in buttons.
+    // 1. Boot & onboarding: with no credential yet, the chat's setup panel
+    //    offers publik API and a BYO-key field. (The sign-in buttons this used
+    //    to look for moved to Settings when the funded tier was removed on
+    //    2026-09-21; the stale lookup threw here and hid every later check in
+    //    this scenario until 0.9.15.)
     await chat.waitForEval("!!document.getElementById('byo-key')", (v) => v === true, 15_000);
-    const onboarding = await chat.eval(
+    const onboarding = await chat.waitForEval(
       "({" +
         "setupVisible: document.getElementById('setup').classList.contains('visible')," +
         "hasByoKey: !!document.getElementById('byo-key')," +
-        "hasGoogle: !!document.getElementById('signin-google')," +
-        "hasGithub: !!document.getElementById('signin-github')," +
-        "googleDisabled: document.getElementById('signin-google').disabled," +
+        "hasPublikSetup: !!document.getElementById('publik-setup')," +
+        "hasSettingsButton: !!document.getElementById('settings-btn')," +
         "setupText: (document.getElementById('setup-text').textContent||'')" +
       "})",
-    );
-    results.check("onboarding setup panel is visible when signed-out", onboarding.setupVisible);
-    results.check("BYO Anthropic key input (#byo-key) is present", onboarding.hasByoKey);
-    results.check("both sign-in buttons render", onboarding.hasGoogle && onboarding.hasGithub);
-    results.check(
-      "sign-in disabled + explained when no publik account configured",
-      onboarding.googleDisabled && /no publik account/i.test(onboarding.setupText),
-      onboarding.setupText,
-    );
+      (v) => v && v.setupVisible === true,
+      10_000,
+    ).catch((error) => ({ error: String(error) }));
+    results.check("onboarding setup panel is visible with no credential", onboarding.setupVisible === true, JSON.stringify(onboarding));
+    results.check("BYO Anthropic key input (#byo-key) is present", onboarding.hasByoKey === true);
+    results.check("publik API setup button renders", onboarding.hasPublikSetup === true);
+    results.check("chat title bar has the Settings gear (#settings-btn)", onboarding.hasSettingsButton === true);
     await chat.screenshot(shot("01-onboarding.png"));
 
     // 2. Key storage via the bridge (real safeStorage / DPAPI on Windows).
@@ -147,11 +148,11 @@ async function scenarioCoreUi(exePath) {
     const cleared = await chat.eval("window.iris.getSettings()");
     results.check("both keys clear to false", cleared.hasAnthropicApiKey === false && cleared.hasOpenAiApiKey === false);
 
-    // 3. Settings window (opened via the IRIS_E2E-gated main-process hook, since
-    //    a native tray click is not reachable from CDP). Verify the OpenAI field
-    //    renders.
-    await chat.eval("window.irisNative.invoke('e2e_open_settings', {})");
-    const settings = await attach(app.port, "settings/index.html");
+    // 3. Settings window, opened the way a person now can: the chat title
+    //    bar's gear (a native tray click is not reachable from CDP). Verify
+    //    the OpenAI field renders.
+    await chat.eval("document.getElementById('settings-btn').click(); 'clicked'");
+    const settings = await attach(app.port, "settings/index.html", 15_000);
     await settings.waitForEval("!!document.getElementById('openaiApiKey')", (v) => v === true, 10_000);
     const settingsDom = await settings.eval(
       "({" +
@@ -165,6 +166,45 @@ async function scenarioCoreUi(exePath) {
     results.check("settings window renders the OpenAI (Tier C) key field", settingsDom.hasOpenAi);
     results.check("settings window renders the model select + account row", settingsDom.hasModel && settingsDom.hasAccount);
     await settings.screenshot(shot("03-settings.png"));
+
+    // 3b. "I can't resize the menu settings and it show up the 2 big default
+    //     scroller vertical and horizontal" (a paying subscriber, 2026-09-24).
+    //     The window is resizable now, down to 400 px wide including the
+    //     frame — about 384 px of page. At that width, with the real Segoe UI
+    //     this runner renders, nothing may need horizontal scrolling. The
+    //     viewport is emulated because the window's own size is not reachable
+    //     over CDP; the page lays out exactly as it would in a window that
+    //     narrow.
+    await settings.send("Emulation.setDeviceMetricsOverride", {
+      width: 384,
+      height: 380,
+      deviceScaleFactor: 0,
+      mobile: false,
+    });
+    await sleep(400);
+    const narrowest = await settings.eval(
+      "({" +
+        "rootScrollWidth: document.documentElement.scrollWidth," +
+        "rootClientWidth: document.documentElement.clientWidth," +
+        "bodyScrollWidth: document.body.scrollWidth," +
+        "bodyClientWidth: document.body.clientWidth," +
+        "rootScrollHeight: document.documentElement.scrollHeight," +
+        "rootClientHeight: document.documentElement.clientHeight," +
+        "overflowX: getComputedStyle(document.body).overflowX," +
+        "font: getComputedStyle(document.body).fontFamily" +
+      "})",
+    );
+    results.check(
+      "settings page needs no horizontal scrolling at the window's narrowest width",
+      narrowest.rootScrollWidth <= narrowest.rootClientWidth && narrowest.bodyScrollWidth <= narrowest.bodyClientWidth,
+      JSON.stringify(narrowest),
+    );
+    results.check("settings page never shows a horizontal scrollbar (overflow-x: hidden)", narrowest.overflowX === "hidden", narrowest.overflowX);
+    await settings.screenshot(shot("03b-settings-narrowest.png"));
+    await settings.eval("window.scrollTo(0, document.documentElement.scrollHeight / 2); 'scrolled'");
+    await sleep(200);
+    await settings.screenshot(shot("03c-settings-narrowest-scrolled.png"));
+    await settings.send("Emulation.clearDeviceMetricsOverride").catch(() => {});
     settings.close();
 
     // 4. Signed-out sendQuery must PROMPT for a key, never make a paid model
@@ -227,7 +267,40 @@ async function scenarioCoreUi(exePath) {
       JSON.stringify(accepted),
     );
 
+    // 7. Opening Iris again while it runs. A reader who closes the chat still
+    //    has Iris in the tray; launching it again (the Desktop or Start Menu
+    //    shortcut — a second instance with no link) must bring the chat back.
+    //    Before 0.9.15 the second launch "focused" a transparent overlay and
+    //    nothing appeared.
+    await chat.eval("window.iris.closeWindow(); 'closing'").catch(() => {});
     chat.close();
+    let chatClosed = false;
+    for (let attempt = 0; attempt < 30 && !chatClosed; attempt += 1) {
+      chatClosed = !(await hasTarget(app.port, "chat/index.html"));
+      if (!chatClosed) await sleep(300);
+    }
+    results.check("closing the chat leaves Iris running with no chat window", chatClosed);
+
+    relaunchApp({ exePath, userDataDir });
+    const reopenedTarget = await waitForTarget(app.port, "chat/index.html", 20_000).catch(() => null);
+    results.check("launching Iris again with the chat closed opens the chat", !!reopenedTarget);
+    if (reopenedTarget) {
+      const reopened = await new CdpSession(reopenedTarget).open();
+      const visibility = await reopened
+        .waitForEval("document.visibilityState", (v) => v === "visible", 10_000)
+        .catch(() => "not visible");
+      results.check("…and the reopened chat is visible, not hidden", visibility === "visible", String(visibility));
+      await reopened.screenshot(shot("05b-chat-after-relaunch.png")).catch(() => {});
+
+      // A second plain launch with the chat already open keeps ONE chat.
+      relaunchApp({ exePath, userDataDir });
+      await sleep(3000);
+      const chatTargets = (await listTargets(app.port).catch(() => [])).filter(
+        (target) => target.type === "page" && (target.url || "").includes("chat/index.html"),
+      );
+      results.check("launching again with the chat open does not open a second chat", chatTargets.length === 1, String(chatTargets.length));
+      reopened.close();
+    }
   });
 }
 

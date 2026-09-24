@@ -54,6 +54,7 @@ async function openChat(options: {
   openWindows.push(dom);
   const { window } = dom;
   const openedLinks: string[] = [];
+  const bridgeCalls: string[] = [];
 
   Object.defineProperty(window, "iris", {
     configurable: true,
@@ -80,9 +81,10 @@ async function openChat(options: {
       openExternal: async (url: string) => {
         openedLinks.push(url);
       },
-      openGuide: () => {},
-      minimizeWindow: () => {},
-      closeWindow: () => {},
+      openGuide: () => bridgeCalls.push("openGuide"),
+      openSettings: () => bridgeCalls.push("openSettings"),
+      minimizeWindow: () => bridgeCalls.push("minimizeWindow"),
+      closeWindow: () => bridgeCalls.push("closeWindow"),
     },
   });
   window.eval(inlineScript);
@@ -95,7 +97,7 @@ async function openChat(options: {
     await settle();
   }
 
-  return { document: window.document, openedLinks, ask };
+  return { document: window.document, openedLinks, bridgeCalls, ask };
 }
 
 describe("the chat window's publik API balance", () => {
@@ -165,5 +167,26 @@ describe("the chat window's out-of-money refusal", () => {
     const errorMessage = chat.document.querySelector(".msg.error")!;
     expect(errorMessage.textContent).toBe("publik api is unavailable right now.");
     expect(errorMessage.querySelector("button")).toBeNull();
+  });
+});
+
+describe("the chat window's title bar", () => {
+  // Settings used to be reachable only from the tray icon's right-click menu,
+  // which Windows 11 hides behind the ^ arrow by the clock. The gear puts it
+  // one click from the window people actually have open.
+  it("opens Settings from the gear button", async () => {
+    const chat = await openChat({ publikBalance: null });
+    const gear = chat.document.querySelector("#settings-btn")!;
+    expect(gear.title).toBe("Settings");
+    gear.click();
+    expect(chat.bridgeCalls).toEqual(["openSettings"]);
+  });
+
+  it("keeps each title-bar button on its own action", async () => {
+    const chat = await openChat({ publikBalance: null });
+    for (const id of ["guide-btn", "settings-btn", "min-btn", "close-btn"]) {
+      chat.document.querySelector(`#${id}`)!.click();
+    }
+    expect(chat.bridgeCalls).toEqual(["openGuide", "openSettings", "minimizeWindow", "closeWindow"]);
   });
 });

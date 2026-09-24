@@ -124,6 +124,101 @@ jobs:
           Stop-Process -Id $process.Id -Force
           Write-Host "Launch smoke test passed."
 
+      # ── Installer shortcuts ──────────────────────────────────────────
+      # Squirrel.Windows makes NO shortcut for an Electron app by itself: the
+      # app has to answer `--squirrel-install` by asking Update.exe for one
+      # (src/services/launch-arguments.ts). Every release before 0.9.15 left
+      # readers with no Desktop or Start Menu icon. So this runs the real
+      # Iris-Setup.exe the way a reader does (silently, minus the splash),
+      # checks both shortcuts exist and point at Iris, opens Iris from the
+      # Desktop shortcut and checks it stays up, then uninstalls and checks
+      # both shortcuts are gone again.
+      - name: Installer shortcuts (install, open from shortcut, uninstall)
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem -Path out/make -Recurse -Filter Iris-Setup.exe | Select-Object -First 1
+          if (-not $setup) { Write-Error "npm run make produced no Iris-Setup.exe"; exit 1 }
+
+          $desktop = [Environment]::GetFolderPath('DesktopDirectory')
+          $startMenuPrograms = Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs'
+          $root = Join-Path $env:LOCALAPPDATA 'Iris'
+          $desktopLink = Join-Path $desktop 'Iris.lnk'
+          function Get-StartMenuLink {
+            Get-ChildItem -Path $startMenuPrograms -Recurse -Filter 'Iris.lnk' -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+          function Show-SquirrelLogs {
+            foreach ($log in @((Join-Path $root 'SquirrelSetup.log'), (Join-Path $env:LOCALAPPDATA 'SquirrelTemp\SquirrelSetup.log'))) {
+              if (Test-Path $log) { Write-Host "--- $log (last 60 lines) ---"; Get-Content $log -Tail 60 }
+            }
+          }
+
+          if ((Test-Path $desktopLink) -or (Get-StartMenuLink)) {
+            Write-Error "An Iris shortcut exists before installing; the runner is not clean."
+            exit 1
+          }
+
+          # ── Install ──
+          $timer = [Diagnostics.Stopwatch]::StartNew()
+          $install = Start-Process -FilePath $setup.FullName -ArgumentList '--silent' -PassThru -Wait
+          Write-Host "Iris-Setup.exe --silent exited with $($install.ExitCode) after $([int]$timer.Elapsed.TotalSeconds)s"
+          # The install hook can finish a moment after Setup.exe returns.
+          $deadline = (Get-Date).AddSeconds(60)
+          while (-not ((Test-Path $desktopLink) -and (Get-StartMenuLink)) -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 2
+          }
+          $startMenuLink = Get-StartMenuLink
+          Write-Host "After $([int]$timer.Elapsed.TotalSeconds)s:"
+          Write-Host "  Desktop shortcut:    $(if (Test-Path $desktopLink) { $desktopLink } else { 'MISSING' })"
+          Write-Host "  Start Menu shortcut: $(if ($startMenuLink) { $startMenuLink.FullName } else { 'MISSING' })"
+          Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  installed: $($_.Name)" }
+          if (-not (Test-Path $desktopLink) -or -not $startMenuLink) {
+            Show-SquirrelLogs
+            Write-Error "Installing Iris did not create both the Desktop and the Start Menu shortcut."
+            exit 1
+          }
+
+          # Squirrel's shortcuts start Iris through its own Update.exe
+          # (--processStart iris.exe), so either the target or the arguments
+          # name iris.exe, and the target lives in the Iris install folder.
+          $shell = New-Object -ComObject WScript.Shell
+          foreach ($link in @($desktopLink, $startMenuLink.FullName)) {
+            $shortcut = $shell.CreateShortcut($link)
+            Write-Host "  $link -> $($shortcut.TargetPath) $($shortcut.Arguments)"
+            $namesIris = ($shortcut.TargetPath -like '*iris.exe') -or ($shortcut.Arguments -like '*iris.exe*')
+            if (-not ($shortcut.TargetPath -like "$root\*") -or -not $namesIris) {
+              Write-Error "$link does not start the installed Iris."
+              exit 1
+            }
+          }
+
+          # ── Open Iris from the Desktop shortcut ──
+          Get-Process iris -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Process -FilePath $desktopLink
+          Start-Sleep -Seconds 12
+          $running = @(Get-Process iris -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$root\*" })
+          if ($running.Count -eq 0) {
+            Show-SquirrelLogs
+            Write-Error "Opening the Desktop shortcut did not leave Iris running."
+            exit 1
+          }
+          Write-Host "The Desktop shortcut opened Iris ($($running.Count) iris.exe processes from $root)."
+          $running | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+
+          # ── Uninstall ──
+          $uninstall = Start-Process -FilePath (Join-Path $root 'Update.exe') -ArgumentList '--uninstall', '-s' -PassThru -Wait
+          Write-Host "Update.exe --uninstall exited with $($uninstall.ExitCode)"
+          $deadline = (Get-Date).AddSeconds(60)
+          while (((Test-Path $desktopLink) -or (Get-StartMenuLink)) -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 2
+          }
+          if ((Test-Path $desktopLink) -or (Get-StartMenuLink)) {
+            Show-SquirrelLogs
+            Write-Error "Uninstalling Iris left a shortcut behind."
+            exit 1
+          }
+          Write-Host "Installer shortcuts test passed: created on install, open Iris, removed on uninstall."
+
       # ── Artifacts ────────────────────────────────────────────────────
       # The installer is the thing a human on Windows would actually try, so it
       # is uploaded whether or not the smoke test passed — a broken build is

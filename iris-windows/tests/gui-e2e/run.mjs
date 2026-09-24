@@ -576,8 +576,13 @@ async function scenarioAutopilot(exePath) {
     },
     async (app) => {
       const term = await attach(app.port, "autopilot/index.html", 30_000);
-      // Capture the runner's event stream + finished signal from the renderer.
-      await term.eval(
+      // Capture the runner's event stream + finished signal in the CHAT window,
+      // not the terminal: both receive every broadcast, but the terminal folds
+      // itself away ~2.8 s after "finished" (autopilot/app.js), and a 3 s poll
+      // of a window that has just closed used to hang the suite until its
+      // watchdog (2 of 6 runs on 2026-09-24). The chat window stays open.
+      const listener = await attach(app.port, "chat/index.html", 30_000);
+      await listener.eval(
         "window.__ap = { events: [], finished: null, gates: [] };" +
           "window.irisNative.listen('autopilot:event', function(e){ window.__ap.events.push(e); });" +
           "window.irisNative.listen('autopilot:finished', function(o){ window.__ap.finished = o; });" +
@@ -593,10 +598,11 @@ async function scenarioAutopilot(exePath) {
       );
       log(`  autopilot: waiting up to ${Math.round(AUTOPILOT_TIMEOUT_MS / 1000)}s for a real clone+install+dev-server…`);
 
-      const finished = await term
+      const finished = await listener
         .waitForEval("window.__ap.finished", (v) => v && typeof v === "object", AUTOPILOT_TIMEOUT_MS, 3000)
         .catch(() => null);
 
+      // Best effort: the terminal may already have folded itself away.
       await term.screenshot(shot("09-autopilot-terminal.png")).catch(() => {});
 
       const cloneDir = join(homedir(), "OpenASCII");
@@ -608,11 +614,12 @@ async function scenarioAutopilot(exePath) {
         finished && finished.type === "local_web",
         JSON.stringify(finished),
       );
-      log(`  autopilot: ${(await term.eval("window.__ap.gates.length").catch(() => "?"))} reader gate(s) acknowledged on the way`);
+      log(`  autopilot: ${(await listener.eval("window.__ap.gates.length").catch(() => "?"))} reader gate(s) acknowledged on the way`);
       // Provenance fires on finish (a local_web install records "none" — the
       // decision still runs; the observable here is the finished output type,
       // asserted above; controller.recordInstallProvenance is unit-tested).
       term.close();
+      listener.close();
     },
   );
 }

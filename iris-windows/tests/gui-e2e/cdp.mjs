@@ -76,6 +76,7 @@ export class CdpSession {
     this.socket = null;
     this.nextId = 0;
     this.pending = new Map();
+    this.closedReason = null;
   }
 
   async open() {
@@ -84,6 +85,19 @@ export class CdpSession {
       this.socket.addEventListener("open", () => resolve());
       this.socket.addEventListener("error", () => reject(new Error("websocket failed to open")));
     });
+    // A target that goes away (a window closing) closes its socket, and a
+    // DevTools request in flight then never gets an answer. Reject every
+    // pending call and refuse new ones, so a closed window fails the check
+    // that was talking to it instead of hanging the whole suite until the
+    // watchdog — which hid scenario D's cause on 2026-09-24.
+    const failEverything = (reason) => {
+      if (this.closedReason) return;
+      this.closedReason = reason;
+      for (const { reject } of this.pending.values()) reject(new Error(reason));
+      this.pending.clear();
+    };
+    this.socket.addEventListener("close", () => failEverything(`CDP target ${this.target.url} closed`));
+    this.socket.addEventListener("error", () => failEverything(`CDP socket error on ${this.target.url}`));
     this.socket.addEventListener("message", (event) => {
       const message = JSON.parse(event.data);
       if (message.id && this.pending.has(message.id)) {
@@ -103,6 +117,10 @@ export class CdpSession {
 
   send(method, params = {}) {
     return new Promise((resolve, reject) => {
+      if (this.closedReason) {
+        reject(new Error(this.closedReason));
+        return;
+      }
       const id = ++this.nextId;
       this.pending.set(id, { resolve, reject });
       this.socket.send(JSON.stringify({ id, method, params }));

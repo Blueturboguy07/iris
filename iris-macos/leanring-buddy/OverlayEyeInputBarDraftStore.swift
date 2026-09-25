@@ -67,6 +67,9 @@ final class OverlayEyeInputBarDraftStore {
 
     /// The current draft, or the empty draft when there is nothing to restore.
     private(set) var draft = OverlayEyeInputBarDraft()
+    /// An explicit New chat invalidates queued callbacks from the old SwiftUI
+    /// render, which can otherwise repopulate text after the store was cleared.
+    private(set) var currentMirrorGeneration = UUID()
 
     init(draft: OverlayEyeInputBarDraft = OverlayEyeInputBarDraft()) {
         self.draft = draft
@@ -77,6 +80,21 @@ final class OverlayEyeInputBarDraftStore {
     /// (`text` → "") also clear the store, with no second code path.
     func remember(_ draft: OverlayEyeInputBarDraft) {
         self.draft = draft
+    }
+
+    func rememberIfCurrentPresentation(
+        _ draft: OverlayEyeInputBarDraft,
+        mirrorGeneration: UUID
+    ) {
+        guard mirrorGeneration == currentMirrorGeneration else { return }
+        self.draft = draft
+    }
+
+    /// The old editor may still display discarded text between clearing the
+    /// store and SwiftUI rendering the blank field. Do not hand it the new
+    /// generation until its visible text matches the post-reset draft.
+    func mirrorGenerationIfVisibleTextMatchesStored(_ visibleText: String) -> UUID? {
+        visibleText == draft.text ? currentMirrorGeneration : nil
     }
 
     /// The draft a freshly-opened bar should start its composer from. Empty when
@@ -91,5 +109,6 @@ final class OverlayEyeInputBarDraftStore {
     /// without routing through the field — has one obvious way to do it.
     func clear() {
         draft = OverlayEyeInputBarDraft()
+        currentMirrorGeneration = UUID()
     }
 }

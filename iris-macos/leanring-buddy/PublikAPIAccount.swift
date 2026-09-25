@@ -158,6 +158,14 @@ final class PublikAPIAccount: ObservableObject {
         self.hasKey = KeychainStore.hasSecret(ofKind: .publikAPIKey)
     }
 
+    /// Uses isolated preferences and never reads the Mac's Keychain.
+    /// Only used by isolated manager tests.
+    init(inertForTesting userDefaults: UserDefaults) {
+        self.userDefaults = userDefaults
+        self.urlSession = URLSession(configuration: .ephemeral)
+        self.hasKey = false
+    }
+
     // MARK: Where requests go
 
     /// The gateway origin for this install: what provisioning returned, else the

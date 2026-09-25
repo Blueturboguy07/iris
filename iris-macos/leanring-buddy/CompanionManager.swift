@@ -27,12 +27,175 @@ enum CompanionAssistantState {
 
 @MainActor
 final class CompanionManager: ObservableObject {
+    struct AskCaptureForegroundSnapshot: Equatable, Sendable {
+        let bundleIdentifier: String?
+        let processIdentifier: pid_t?
+        let applicationName: String?
+        let windowTitle: String?
+        let focusedWindowIdentity: UUID?
+        let focusedWindowFrame: CGRect?
+
+        var hasFocusedWindowIdentityAndFrame: Bool {
+            focusedWindowIdentity != nil && focusedWindowFrame != nil
+        }
+
+        func representsSameApplicationProcess(as other: Self) -> Bool {
+            guard let bundleIdentifier, let processIdentifier else { return false }
+            return bundleIdentifier == other.bundleIdentifier
+                && processIdentifier == other.processIdentifier
+        }
+
+        func representsSameVerifiedWindow(as other: Self) -> Bool {
+            guard let bundleIdentifier, let processIdentifier,
+                  let focusedWindowIdentity, let focusedWindowFrame,
+                  bundleIdentifier == other.bundleIdentifier,
+                  processIdentifier == other.processIdentifier,
+                  focusedWindowIdentity == other.focusedWindowIdentity,
+                  let otherFrame = other.focusedWindowFrame else {
+                return false
+            }
+            return Self.framesMatch(focusedWindowFrame, otherFrame)
+        }
+
+        private static func framesMatch(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+            abs(lhs.origin.x - rhs.origin.x) <= 1
+                && abs(lhs.origin.y - rhs.origin.y) <= 1
+                && abs(lhs.size.width - rhs.size.width) <= 1
+                && abs(lhs.size.height - rhs.size.height) <= 1
+        }
+
+        func promptNote(irisBundleIdentifier: String?) -> String? {
+            guard focusedWindowIdentity != nil, focusedWindowFrame != nil,
+                  let applicationName, !applicationName.isEmpty,
+                  bundleIdentifier != irisBundleIdentifier else {
+                return nil
+            }
+            var note = "[The app the reader is working in right now is \(applicationName)."
+            if let windowTitle, !windowTitle.isEmpty {
+                note += " Its front window is titled \"\(windowTitle)\"."
+            }
+            note += " The screenshot shows every window on the display at once, so when the"
+            note += " question is about \"my screen\" or \"this\", answer about \(applicationName)"
+            note += " unless they clearly mean something else.]"
+            return note
+        }
+    }
+
+    enum AskCaptureWindowContext: Equatable {
+        case verified
+        case unavailable
+        case changed
+    }
+
+    private static let foregroundSettlementMaximumPolls = 24
+    private static let foregroundSettlementPollNanoseconds: UInt64 = 12_000_000
+
+    static func isIrisForegroundSnapshot(
+        _ snapshot: AskCaptureForegroundSnapshot,
+        irisBundleIdentifier: String?,
+        currentProcessIdentifier: pid_t
+    ) -> Bool {
+        if snapshot.processIdentifier == currentProcessIdentifier {
+            return true
+        }
+        guard let bundleIdentifier = snapshot.bundleIdentifier else { return false }
+        return bundleIdentifier == irisBundleIdentifier
+            || bundleIdentifier == "com.publikhq.iris"
+            || bundleIdentifier == "com.publikhq.iris.test"
+    }
+
+    /// Keeps any foreground note and spatial answer tied to the same verified
+    /// window across asynchronous work. If window identity is unavailable or
+    /// changes, ordinary screen help still proceeds without a note or pointing.
+    static func captureScreenHelpWhileForegroundContextStaysCurrent<CapturedValue>(
+        readForeground: () -> AskCaptureForegroundSnapshot,
+        isIrisForeground: (AskCaptureForegroundSnapshot) -> Bool = { _ in false },
+        waitForForegroundUpdate: (() async throws -> Void)? = nil,
+        capture: () async throws -> CapturedValue
+    ) async throws -> (
+        capturedValue: CapturedValue,
+        foreground: AskCaptureForegroundSnapshot,
+        windowContext: AskCaptureWindowContext
+    ) {
+        var previousExternalForeground: AskCaptureForegroundSnapshot?
+        var foregroundBeforeCapture: AskCaptureForegroundSnapshot?
+        for poll in 0..<foregroundSettlementMaximumPolls {
+            try Task.checkCancellation()
+            let currentForeground = readForeground()
+            if !isIrisForeground(currentForeground),
+               currentForeground.bundleIdentifier != nil,
+               currentForeground.processIdentifier != nil {
+                if let previousExternalForeground,
+                   previousExternalForeground.representsSameApplicationProcess(as: currentForeground) {
+                    foregroundBeforeCapture = currentForeground
+                    break
+                }
+                previousExternalForeground = currentForeground
+            } else {
+                previousExternalForeground = nil
+            }
+            if poll + 1 < foregroundSettlementMaximumPolls {
+                if let waitForForegroundUpdate {
+                    try await waitForForegroundUpdate()
+                } else {
+                    try await Task.sleep(nanoseconds: foregroundSettlementPollNanoseconds)
+                }
+            }
+        }
+        guard let foregroundBeforeCapture else {
+            throw ScreenHelpCaptureError.irisIsFrontmost
+        }
+        let capturedValue = try await capture()
+        let foregroundAfterCapture = readForeground()
+        let windowContext: AskCaptureWindowContext
+        if foregroundBeforeCapture.representsSameVerifiedWindow(as: foregroundAfterCapture) {
+            windowContext = .verified
+        } else if foregroundBeforeCapture.representsSameApplicationProcess(as: foregroundAfterCapture),
+                  !foregroundBeforeCapture.hasFocusedWindowIdentityAndFrame,
+                  !foregroundAfterCapture.hasFocusedWindowIdentityAndFrame {
+            windowContext = .unavailable
+        } else {
+            windowContext = .changed
+        }
+        return (
+            capturedValue,
+            foregroundBeforeCapture,
+            windowContext
+        )
+    }
+
+    private enum ScreenHelpCaptureError: Error {
+        case foregroundChanged
+        case irisIsFrontmost
+
+        var userFacingMessage: String {
+            switch self {
+            case .foregroundChanged:
+                return "the app or window changed while i was looking. bring it forward and ask again."
+            case .irisIsFrontmost:
+                return "switch to the app you want me to look at, then ask again."
+            }
+        }
+    }
+
+    private struct FocusedWindowIdentityEntry {
+        let processIdentifier: pid_t
+        let element: AXUIElement
+        let identifier: UUID
+    }
+
+    private static var focusedWindowIdentityEntries: [FocusedWindowIdentityEntry] = []
+
     @Published private(set) var assistantState: CompanionAssistantState = .idle
+    @Published private(set) var chatResponseIsPending = false
     /// The most recent message the user submitted from the panel text field.
     @Published private(set) var latestUserMessageText: String?
     /// The most recent assistant response (point tag stripped), shown in the
     /// input bar under the eye.
     @Published private(set) var latestAssistantResponseText: String?
+    /// The exact Ask that produced the latest response. A reopened bar must
+    /// not attach an old answer to a newer question after Stop or New chat.
+    private(set) var latestAssistantResponseIdentifier: UUID?
 
     /// Bumped once every time a response is published — an answer or the
     /// sentence explaining a failure.
@@ -83,19 +246,38 @@ final class CompanionManager: ObservableObject {
     /// clears the exchange" true, so an answer that outlives a teardown can
     /// only come back from here.
     struct AnswerAwaitingTheReader {
+        let responseIdentifier: UUID
         let questionTheReaderAsked: String
         let answerText: String
         let answerIsAFailureMessage: Bool
     }
 
+    struct PendingAskForInputBar {
+        let responseIdentifier: UUID
+        let questionTheReaderAsked: String
+    }
+
+    var currentAskResponseIdentifier: UUID { currentChatResponseIdentifier }
+
+    var pendingAskForInputBar: PendingAskForInputBar? {
+        guard chatResponseIsPending,
+              let questionTheReaderAsked = latestUserMessageText else { return nil }
+        return PendingAskForInputBar(
+            responseIdentifier: currentChatResponseIdentifier,
+            questionTheReaderAsked: questionTheReaderAsked
+        )
+    }
+
     var answerAwaitingTheReaderInTheBar: AnswerAwaitingTheReader? {
         guard theLatestAnswerIsStillWaitingForTheReader,
+              latestAssistantResponseIdentifier == currentChatResponseIdentifier,
               let questionTheReaderAsked = latestUserMessageText,
               let answerText = latestAssistantResponseText
         else {
             return nil
         }
         return AnswerAwaitingTheReader(
+            responseIdentifier: currentChatResponseIdentifier,
             questionTheReaderAsked: questionTheReaderAsked,
             answerText: answerText,
             answerIsAFailureMessage: latestResponseWasAFailureMessage
@@ -106,8 +288,12 @@ final class CompanionManager: ObservableObject {
     /// the bar with the ×, with Escape, or by clicking somewhere else. Clearing
     /// the latch is what lets the eye fade again in transient-cursor mode, so
     /// this also re-arms the hide that was held off while they were reading.
-    func markTheAnswerOnScreenAsDismissedByTheReader() {
-        guard theLatestAnswerIsStillWaitingForTheReader else { return }
+    func markTheAnswerOnScreenAsDismissedByTheReader(
+        ifResponseIdentifierMatches displayedResponseIdentifier: UUID
+    ) {
+        guard theLatestAnswerIsStillWaitingForTheReader,
+              latestAssistantResponseIdentifier == displayedResponseIdentifier,
+              currentChatResponseIdentifier == displayedResponseIdentifier else { return }
         theLatestAnswerIsStillWaitingForTheReader = false
         scheduleTransientHideIfNeeded()
     }
@@ -150,21 +336,74 @@ final class CompanionManager: ObservableObject {
     /// start/stop/completion hooks below.
     private let autopilotTakeoverController = GuideAutopilotTakeoverController()
 
+    /// Dependencies are injectable so tests can exercise this real manager
+    /// without touching the user's credentials, preferences, or transcript.
+    private let preferences: UserDefaults
+    private let guideServiceForTesting: GuideService?
+    private let guideWatchLoopForTesting: WatchLoop?
+    private let editPatchQueueForTesting: PatchQueue?
+    private let observeGuideAppActivations: Bool
+
     /// Owns sign-in and the user's own Anthropic key. The panel observes it
     /// directly, and the request pipeline below asks it which route to take.
-    let accountService = AccountService()
+    let accountService: AccountService
 
     /// The publik API credential and what the gateway last said about it. Owned
     /// here rather than inside `AccountService` because it is not an identity:
     /// a publik API key is a way to pay for a model, and since the funded tier
     /// was removed it has nothing to do with being signed in at all.
-    let publikAPIAccount = PublikAPIAccount()
+    let publikAPIAccount: PublikAPIAccount
 
     /// What the reader's own API key has spent. Only ever told about calls; it
     /// can neither refuse one nor slow one down — the founder's ruling was that
     /// a reader paying their own bill does not need Iris inventing a ceiling on
     /// top of the one their provider already enforces. They need the number.
-    let spendLedger = AssistantSpendLedger()
+    let spendLedger: AssistantSpendLedger
+
+    convenience init() {
+        self.init(
+            accountService: AccountService(),
+            publikAPIAccount: PublikAPIAccount(),
+            chatTranscriptStore: ChatTranscriptStore(),
+            spendLedger: AssistantSpendLedger(),
+            gitHubForkService: GitHubForkService(),
+            preferences: .standard,
+            guideServiceForTesting: nil,
+            guideWatchLoopForTesting: nil,
+            editPatchQueueForTesting: nil,
+            observeGuideAppActivations: true
+        )
+    }
+
+    init(
+        accountService: AccountService,
+        publikAPIAccount: PublikAPIAccount,
+        chatTranscriptStore: ChatTranscriptStore,
+        spendLedger: AssistantSpendLedger,
+        gitHubForkService: GitHubForkService,
+        preferences: UserDefaults,
+        guideServiceForTesting: GuideService?,
+        guideWatchLoopForTesting: WatchLoop?,
+        editPatchQueueForTesting: PatchQueue?,
+        observeGuideAppActivations: Bool
+    ) {
+        self.accountService = accountService
+        self.publikAPIAccount = publikAPIAccount
+        self.chatTranscriptStore = chatTranscriptStore
+        self.spendLedger = spendLedger
+        self.gitHubForkService = gitHubForkService
+        self.preferences = preferences
+        self.guideServiceForTesting = guideServiceForTesting
+        self.guideWatchLoopForTesting = guideWatchLoopForTesting
+        self.editPatchQueueForTesting = editPatchQueueForTesting
+        self.observeGuideAppActivations = observeGuideAppActivations
+        self.catalogAppUpdateSeenTagsStore = CatalogAppUpdateSeenTagsStore(userDefaults: preferences)
+        self.installProvenanceStore = InstallProvenanceStore(userDefaults: preferences)
+        self.selectedModel = preferences.string(forKey: "selectedClaudeModel") ?? "claude-sonnet-4-6"
+        self.isClickyCursorEnabled = preferences.object(forKey: "isClickyCursorEnabled") == nil
+            ? true
+            : preferences.bool(forKey: "isClickyCursorEnabled")
+    }
 
     /// Owns the install guide the reader is currently following, if any. It
     /// lives here rather than in the panel view because an `iris://guide/…`
@@ -175,6 +414,12 @@ final class CompanionManager: ObservableObject {
     /// factory is called only when the reader taps "Let Iris run it", never at
     /// init, so building the runner from the app's live ClaudeAPI here is safe.
     lazy var guideSessionController = GuideSessionController(
+        guideService: guideServiceForTesting ?? GuideService(
+            apiBase: AssistantTransport.configuredPublikBaseURL().absoluteString
+        ),
+        watchLoop: guideWatchLoopForTesting,
+        lastFollowedGuideMemory: LastFollowedGuideMemory(userDefaults: preferences),
+        observeAppActivations: observeGuideAppActivations,
         makeAutopilotRunner: { [weak self] context in
             let claudeAPI = self?.claudeAPI ?? ClaudeAPI(resolveTransport: {
                 .failure(.transportFailure(reason: "assistant unavailable"))
@@ -225,7 +470,7 @@ final class CompanionManager: ObservableObject {
     /// background check below (`checkForCatalogAppUpdatesAndNotifyIfNeeded`)
     /// notifies once per newly available version rather than every time it
     /// runs.
-    let catalogAppUpdateSeenTagsStore = CatalogAppUpdateSeenTagsStore.shared
+    let catalogAppUpdateSeenTagsStore: CatalogAppUpdateSeenTagsStore
 
     /// Ticks the background catalog-app update check on
     /// `catalogAppUpdateCheckInterval` while Iris is running. `AppInventoryService`
@@ -249,7 +494,7 @@ final class CompanionManager: ObservableObject {
     // MARK: - Maintain mode
 
     /// Where an app came from decides whether Iris may ever patch it.
-    let installProvenanceStore = InstallProvenanceStore()
+    let installProvenanceStore: InstallProvenanceStore
     /// The pool transport and this install's pseudonymous identity, shared
     /// by the coordinator and the replay engine below.
     private let maintainPoolClient = MaintainPoolClient()
@@ -272,7 +517,7 @@ final class CompanionManager: ObservableObject {
     lazy var maintainFeatureRequests = MaintainFeatureRequests(installIdentity: maintainInstallIdentity)
     /// Fork backup for local fixes. Dormant until the GitHub App's client id
     /// ships in Info.plist (IrisGitHubAppClientID).
-    let gitHubForkService = GitHubForkService()
+    let gitHubForkService: GitHubForkService
     /// Rebuild → relaunch for a kept on-demand edit (design §4, Option A only):
     /// packages a fresh, launchable artifact FROM the clone and launches it as a
     /// distinct instance — never overwriting an installed/signed bundle.
@@ -289,7 +534,7 @@ final class CompanionManager: ObservableObject {
     lazy var onDemandEditCoordinator: OnDemandEditCoordinator = {
         let coordinator = OnDemandEditCoordinator(
             installProvenanceStore: installProvenanceStore,
-            patchQueue: PatchQueue(),
+            patchQueue: editPatchQueueForTesting ?? PatchQueue(),
             topRequestsForApp: { [weak self] appSlug in
                 guard let self else { return [] }
                 return await self.maintainFeatureRequests
@@ -845,7 +1090,7 @@ final class CompanionManager: ObservableObject {
     }
 
     /// Turns a failed request into what the panel says.
-    private func describeAndHandle(assistantError: Error) async -> String {
+    private func describeAndHandle(assistantError: Error, logFailureDetails: Bool = true) async -> String {
         // The Codex chat route throws the Tier C provider's error type rather
         // than a transport one — it is a subprocess, not a request. Those cases
         // already carry the sentence a reader can act on ("run `codex login`",
@@ -855,12 +1100,16 @@ final class CompanionManager: ObservableObject {
         // 8.)" incident was, so it is handled before the fallback rather than
         // after it.
         if let providerError = assistantError as? MaintainModelProviderError {
-            print("⚠️ Companion response error (provider): \(providerError)")
+            if logFailureDetails {
+                print("⚠️ Companion response error (provider): \(providerError)")
+            }
             return providerError.userFacingMessage
         }
 
         guard let transportError = assistantError as? AssistantTransportError else {
-            print("⚠️ Companion response error: \(assistantError)")
+            if logFailureDetails {
+                print("⚠️ Companion response error: \(assistantError)")
+            }
             return AssistantTransportError.transportFailure(
                 reason: assistantError.localizedDescription
             ).userFacingMessage
@@ -914,7 +1163,7 @@ final class CompanionManager: ObservableObject {
     ///
     /// It holds only what the reader typed and what Iris said back — see the
     /// privacy note at the top of `ChatTranscriptStore.swift`.
-    let chatTranscriptStore = ChatTranscriptStore()
+    let chatTranscriptStore: ChatTranscriptStore
 
     /// The reader's UNSENT draft in the bar's composer, kept across a dismissal
     /// so clicking off no longer throws away a half-typed request (Publik Test
@@ -937,7 +1186,7 @@ final class CompanionManager: ObservableObject {
     /// same size it has always been, so warming it costs the same as an
     /// ordinary conversation that has been going for a while.
     private func restoreConversationHistoryFromTheSavedChatTranscript() {
-        let savedExchanges = chatTranscriptStore.recentExchanges(
+        let savedExchanges = chatTranscriptStore.recentExchangesInCurrentConversation(
             limit: Self.maximumConversationHistoryExchanges
         )
         guard !savedExchanges.isEmpty else { return }
@@ -973,15 +1222,129 @@ final class CompanionManager: ObservableObject {
     /// model is being told about, it does not destroy the reader's record of
     /// what they asked. That is what the history view reads.
     func startANewChat() {
-        currentResponseTask?.cancel()
-        currentResponseTask = nil
+        transientHideTask?.cancel()
+        transientHideTask = nil
+        if chatResponseIsPending {
+            // New chat is another way to cancel an Ask. Reuse Stop's cleanup
+            // so the eye cannot keep spinning after the old task is invalidated.
+            stopCurrentAskResponse()
+        } else {
+            currentResponseTask?.cancel()
+            currentResponseTask = nil
+            currentChatResponseIdentifier = UUID()
+        }
+        // Keep saved History, but mark the new conversation before the panel
+        // can be torn down. A reopened panel or a relaunched Iris must not
+        // seed the just-ended exchange as this chat's current answer.
+        chatTranscriptStore.startANewConversation()
         conversationHistory = []
+        inputBarDraftStore.clear()
+        latestUserMessageText = nil
+        latestAssistantResponseText = nil
+        latestAssistantResponseIdentifier = nil
+        latestResponseWasAFailureMessage = false
+        latestFailureAddCreditURLString = nil
+        theLatestAnswerIsStillWaitingForTheReader = false
+        if guideSessionController.guideBeingFollowed == nil {
+            clearDetectedElementLocation()
+            assistantState = .idle
+        }
         irisTrace("chat: reader started a new conversation")
     }
 
     /// The currently running AI response task, if any. Cancelled when the user
     /// submits a new message so a new response can begin immediately.
     private var currentResponseTask: Task<Void, Never>?
+    private var currentChatResponseIdentifier = UUID()
+
+    /// Frozen when the model request is dispatched, then used for both the
+    /// transport and its diagnostics. The settings picker may change while a
+    /// response is in flight, but that cannot change which route was launched.
+    enum ChatResponseRoute: Equatable {
+        case codex
+        case http
+
+        init(resolvedProvider: AssistantProviderPreference?) {
+            self = resolvedProvider == .codex ? .codex : .http
+        }
+
+        var logsFailureDetails: Bool { self != .codex }
+    }
+
+    private func isCurrentChatResponse(_ responseIdentifier: UUID) -> Bool {
+        currentChatResponseIdentifier == responseIdentifier && !Task.isCancelled
+    }
+
+    private func clearChatResponsePending(for responseIdentifier: UUID) {
+        guard currentChatResponseIdentifier == responseIdentifier else { return }
+        chatResponseIsPending = false
+    }
+
+#if DEBUG
+    var testHarnessChatResponseIdentifier: UUID { currentChatResponseIdentifier }
+    var testHarnessConversationHistoryCount: Int { conversationHistory.count }
+
+    func testHarnessAcceptsChatResponse(_ identifier: UUID) -> Bool {
+        isCurrentChatResponse(identifier)
+    }
+
+    func testHarnessSeedConversationExchange(question: String, answer: String) {
+        conversationHistory.append((userMessage: question, assistantResponse: answer))
+        chatTranscriptStore.recordExchange(question: question, answer: answer)
+    }
+
+    @discardableResult
+    func testHarnessInstallPendingAskResponse(
+        task: Task<Void, Never>,
+        question: String = "Test question",
+        withPointingTarget: Bool = false,
+        state: CompanionAssistantState = .thinking
+    ) -> UUID {
+        let identifier = UUID()
+        currentChatResponseIdentifier = identifier
+        currentResponseTask = task
+        chatResponseIsPending = true
+        latestUserMessageText = question
+        theLatestAnswerIsStillWaitingForTheReader = false
+        assistantState = state
+        if withPointingTarget {
+            detectedElementScreenLocation = CGPoint(x: 120, y: 240)
+            detectedElementDisplayFrame = CGRect(x: 0, y: 0, width: 800, height: 600)
+            detectedElementBubbleText = "fixture target"
+        }
+        return identifier
+    }
+
+    @discardableResult
+    func testHarnessPublishChatResponse(
+        _ text: String,
+        isFailure: Bool,
+        for responseIdentifier: UUID
+    ) -> Bool {
+        guard isCurrentChatResponse(responseIdentifier) else { return false }
+        clearChatResponsePending(for: responseIdentifier)
+        publishAssistantResponse(text, isAFailureMessage: isFailure)
+        return true
+    }
+#endif
+
+    /// Stop only the Ask task owned by the compact composer. The identifier is
+    /// invalidated before cancellation so a racing completion cannot publish.
+    func stopCurrentAskResponse() {
+        guard chatResponseIsPending else { return }
+        currentChatResponseIdentifier = UUID()
+        currentResponseTask?.cancel()
+        currentResponseTask = nil
+        chatResponseIsPending = false
+        if guideSessionController.guideBeingFollowed == nil {
+            clearDetectedElementLocation()
+            assistantState = .idle
+        } else if assistantState == .capturing || assistantState == .thinking {
+            // Capture/thinking belongs to this Ask request, not to the guide.
+            // A guide-owned pointing state and its target remain untouched.
+            assistantState = .idle
+        }
+    }
 
     private var summonHotkeyTransitionCancellable: AnyCancellable?
     private var accountStateChangeCancellable: AnyCancellable?
@@ -1002,24 +1365,22 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var isOverlayVisible: Bool = false
 
     /// The Claude model used for responses. Persisted to UserDefaults.
-    @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "claude-sonnet-4-6"
+    @Published var selectedModel: String
 
     func setSelectedModel(_ model: String) {
         selectedModel = model
-        UserDefaults.standard.set(model, forKey: "selectedClaudeModel")
+        preferences.set(model, forKey: "selectedClaudeModel")
         claudeAPI.model = model
     }
 
     /// User preference for whether the Iris cursor should be shown.
     /// When toggled off, the overlay only appears transiently during a response.
     /// Persisted to UserDefaults so the choice survives app restarts.
-    @Published var isClickyCursorEnabled: Bool = UserDefaults.standard.object(forKey: "isClickyCursorEnabled") == nil
-        ? true
-        : UserDefaults.standard.bool(forKey: "isClickyCursorEnabled")
+    @Published var isClickyCursorEnabled: Bool
 
     func setClickyCursorEnabled(_ enabled: Bool) {
         isClickyCursorEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "isClickyCursorEnabled")
+        preferences.set(enabled, forKey: "isClickyCursorEnabled")
         transientHideTask?.cancel()
         transientHideTask = nil
 
@@ -1042,8 +1403,8 @@ final class CompanionManager: ObservableObject {
     /// Whether the user has completed onboarding at least once. Persisted
     /// to UserDefaults so the Start button only appears on first launch.
     var hasCompletedOnboarding: Bool {
-        get { UserDefaults.standard.bool(forKey: "hasCompletedOnboarding") }
-        set { UserDefaults.standard.set(newValue, forKey: "hasCompletedOnboarding") }
+        get { preferences.bool(forKey: "hasCompletedOnboarding") }
+        set { preferences.set(newValue, forKey: "hasCompletedOnboarding") }
     }
 
     func start() {
@@ -1944,7 +2305,7 @@ final class CompanionManager: ObservableObject {
         // Screen content permission is persisted — once the user has approved the
         // SCShareableContent picker, we don't need to re-check it.
         if !hasScreenContentPermission {
-            hasScreenContentPermission = UserDefaults.standard.bool(forKey: "hasScreenContentPermission")
+            hasScreenContentPermission = preferences.bool(forKey: "hasScreenContentPermission")
         }
     }
 
@@ -1976,7 +2337,7 @@ final class CompanionManager: ObservableObject {
                     isRequestingScreenContent = false
                     guard didCapture else { return }
                     hasScreenContentPermission = true
-                    UserDefaults.standard.set(true, forKey: "hasScreenContentPermission")
+                    preferences.set(true, forKey: "hasScreenContentPermission")
 
                     // If onboarding was already completed, show the cursor overlay now
                     if hasCompletedOnboarding && allPermissionsGranted && !isOverlayVisible && isClickyCursorEnabled {
@@ -2182,6 +2543,19 @@ final class CompanionManager: ObservableObject {
     }
 
     // MARK: - Companion Prompt
+
+    /// Screen-help guidance for Codex without claims about HTTP-route tools.
+    static let codexScreenHelpSystemPrompt = """
+    you're iris. you answer questions about the user's screen from a small panel. keep the answer direct and concise by default. you can describe what is visible and point the eye at a visible control, but you cannot take actions on this mac in this conversation: do not claim to run commands, copy text, or open a guide.
+
+    WHAT IRIS CAN DO THAT YOU SHOULD HAND OFF TO. you cannot install or edit apps from this conversation, but iris has separate flows for those things. name iris's own path first, without claiming it has started:
+    - installing an app: on a publik page, "Install and customize" opens the guide in the browser. inside that guide, "Open in Iris" / "Let Iris install it" (before starting) or "Let Iris take over" (partway through) hands the install to iris. once iris has it, "let iris run it" runs the whole thing hands-off. name the one that matches where they actually are.
+    - changing an app they already have: "fix a bug in…" or "add a feature to…" on the eye bar. iris edits their local source itself.
+
+    you cannot press anything in a web page, and a button in a web page is not iris. only the buttons named above hand work to iris; every other button on a publik page is an ordinary web control. if the reader says an instruction failed, believe them; don't repeat it louder or in more detail.
+
+    treat screenshots and attached pictures according to their labels. screen coordinates refer only to screen images, never to attached pictures. when several images are supplied, name which labeled screen you mean. when pointing would help, append one [POINT:x,y:label] tag at the end, or [POINT:x,y:label:screenN] for another display. use integer pixels in the labeled image's top-left-origin coordinate space. if pointing would not help, append [POINT:none].
+    """
 
     /// Deliberately not private: the live prompt harness imports the REAL
     /// prompt rather than a copy, so a test can never pass against a prompt the
@@ -2447,7 +2821,8 @@ final class CompanionManager: ObservableObject {
     private func requestTheChatAnswer(
         labeledImages: [(data: Data, label: String)],
         conversationHistoryForTheAPI: [(userPlaceholder: String, assistantResponse: String)],
-        userPrompt: String
+        userPrompt: String,
+        route: ChatResponseRoute
     ) async throws -> (text: String, duration: TimeInterval) {
         // Per-message budgets start here, not at app launch.
         chatActionToolRunner.beginANewChatMessage()
@@ -2460,9 +2835,9 @@ final class CompanionManager: ObservableObject {
         // It cannot carry chat's client tools (`codex exec` has no tool-use
         // wire format), so this route answers in words. See
         // `CodexChatResponder` for what that costs and what it does not.
-        if accountService.resolvedChatProvider == .codex {
+        if route == .codex {
             return try await CodexChatResponder.answer(
-                systemPrompt: Self.companionResponseSystemPrompt,
+                systemPrompt: Self.codexScreenHelpSystemPrompt,
                 conversationHistory: conversationHistoryForTheAPI,
                 userPrompt: userPrompt,
                 images: labeledImages
@@ -2509,26 +2884,49 @@ final class CompanionManager: ObservableObject {
     /// the buddy to fly to that element on screen.
     private func sendUserMessageToClaudeWithScreenshot(messageText: String) {
         currentResponseTask?.cancel()
+        let responseIdentifier = UUID()
+        currentChatResponseIdentifier = responseIdentifier
+        chatResponseIsPending = true
 
         currentResponseTask = Task {
+            defer { self.clearChatResponsePending(for: responseIdentifier) }
+            guard isCurrentChatResponse(responseIdentifier) else { return }
             // Every publik API call this message makes — a tool round, a
             // resumed turn — adds up to the one "Last reply" figure in settings.
             let replyBeingCounted = publikAPIAccount.beginCountingAReply()
             defer { publikAPIAccount.finishCountingTheReply(replyBeingCounted) }
-
             assistantState = .capturing
+            var dispatchedRoute: ChatResponseRoute?
 
             do {
-                // What this message looks at: every connected screen, exactly
-                // as before, plus whatever the reader attached to the bar
-                // (pasted, dropped, or picked). `takeTheImagesForThisMessage`
-                // spends the attachments, so they ride one message and one only.
-                let (labeledImages, screenCaptures) = try await CompanionScreenCaptureUtility
-                    .imageryForOneChatMessage(
-                        theReaderAttached: OverlayEyePastedImageAttachment.shared.takeTheImagesForThisMessage()
-                    )
-
-                guard !Task.isCancelled else { return }
+                // Keep explicit ownership of this message's attachments. They
+                // are consumed only after capture and foreground checks pass.
+                let attachmentBatch = OverlayEyePastedImageAttachment.shared.snapshotForMessage()
+                let capturedScreenHelp = try await Self.captureScreenHelpWhileForegroundContextStaysCurrent(
+                    readForeground: {
+                        Self.askCaptureForegroundSnapshot(for: NSWorkspace.shared.frontmostApplication)
+                    },
+                    isIrisForeground: { snapshot in
+                        Self.isIrisForegroundSnapshot(
+                            snapshot,
+                            irisBundleIdentifier: Bundle.main.bundleIdentifier,
+                            currentProcessIdentifier: ProcessInfo.processInfo.processIdentifier
+                        )
+                    },
+                    capture: {
+                        try await CompanionScreenCaptureUtility.imageryForOneChatMessage(
+                            theReaderAttached: attachmentBatch.images
+                        )
+                    }
+                )
+                guard isCurrentChatResponse(responseIdentifier) else { return }
+                guard capturedScreenHelp.windowContext != .changed else {
+                    throw ScreenHelpCaptureError.foregroundChanged
+                }
+                OverlayEyePastedImageAttachment.shared.consume(attachmentBatch)
+                let labeledImages = capturedScreenHelp.capturedValue.labeledImages
+                let screenCaptures = capturedScreenHelp.capturedValue.screenCaptures
+                let foregroundWhenCaptured = capturedScreenHelp.foreground
 
                 assistantState = .thinking
 
@@ -2609,29 +3007,37 @@ final class CompanionManager: ObservableObject {
                 // The watch loop learned this months ago and passes exactly this
                 // pair. Chat never did.
                 let promptWithFrontmostApp: String = {
-                    guard let frontmostApplication = NSWorkspace.shared.frontmostApplication,
-                          let applicationName = frontmostApplication.localizedName,
-                          frontmostApplication.bundleIdentifier != Bundle.main.bundleIdentifier
-                    else {
+                    guard capturedScreenHelp.windowContext == .verified,
+                          foregroundWhenCaptured.representsSameVerifiedWindow(
+                            as: Self.askCaptureForegroundSnapshot(for: NSWorkspace.shared.frontmostApplication)
+                          ) else {
                         return promptWithMachineFacts
                     }
-                    var note = "[The app the reader is working in right now is \(applicationName)."
-                    if let windowTitle = Self.titleOfTheFrontmostWindow(), !windowTitle.isEmpty {
-                        note += " Its front window is titled \"\(windowTitle)\"."
+                    guard let note = foregroundWhenCaptured.promptNote(
+                        irisBundleIdentifier: Bundle.main.bundleIdentifier
+                    ) else {
+                        return promptWithMachineFacts
                     }
-                    note += " The screenshot shows every window on the display at once, so when the"
-                    note += " question is about \"my screen\" or \"this\", answer about \(applicationName)"
-                    note += " unless they clearly mean something else.]"
                     return promptWithMachineFacts + "\n\n" + note
                 }()
 
+                let route = ChatResponseRoute(resolvedProvider: accountService.resolvedChatProvider)
+                dispatchedRoute = route
                 let (fullResponseText, _) = try await requestTheChatAnswer(
                     labeledImages: labeledImages,
                     conversationHistoryForTheAPI: historyForAPI,
-                    userPrompt: promptWithFrontmostApp
+                    userPrompt: promptWithFrontmostApp,
+                    route: route
                 )
 
-                guard !Task.isCancelled else { return }
+                guard isCurrentChatResponse(responseIdentifier) else { return }
+
+                // The provider call can outlast a window switch or resize.
+                // Never fly to coordinates derived from an older window image.
+                let focusedWindowIsStillCurrent = capturedScreenHelp.windowContext == .verified
+                    && foregroundWhenCaptured.representsSameVerifiedWindow(
+                        as: Self.askCaptureForegroundSnapshot(for: NSWorkspace.shared.frontmostApplication)
+                    )
 
                 // Parse the [POINT:...] tag from Claude's response
                 let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
@@ -2653,7 +3059,7 @@ final class CompanionManager: ObservableObject {
                 // Switch to pointing BEFORE setting the location so the triangle
                 // becomes visible and can fly to the target. Without this, the
                 // spinner hides the triangle and the flight animation is invisible.
-                let hasPointCoordinate = parseResult.coordinate != nil
+                let hasPointCoordinate = parseResult.coordinate != nil && focusedWindowIsStillCurrent
                 if hasPointCoordinate {
                     assistantState = .pointing
                 }
@@ -2669,7 +3075,9 @@ final class CompanionManager: ObservableObject {
                 }()
 
                 if let pointCoordinate = parseResult.coordinate,
+                   focusedWindowIsStillCurrent,
                    let targetScreenCapture {
+                    guard isCurrentChatResponse(responseIdentifier) else { return }
                     // Claude's coordinates are in the screenshot's pixel space
                     // (top-left origin, e.g. 1280x831). Scale to the display's
                     // point space (e.g. 1512x982), then convert to AppKit global coords.
@@ -2706,6 +3114,8 @@ final class CompanionManager: ObservableObject {
                     print("🎯 Element pointing: none — \(parseResult.outcome.rawValue)")
                 }
 
+                guard isCurrentChatResponse(responseIdentifier) else { return }
+
                 // Save this exchange to conversation history (with the point tag
                 // stripped so it doesn't confuse future context)
                 conversationHistory.append((
@@ -2735,18 +3145,36 @@ final class CompanionManager: ObservableObject {
             } catch is CancellationError {
                 // User asked something else — response was interrupted
             } catch {
+                guard isCurrentChatResponse(responseIdentifier) else { return }
+                let codexRouteWasUsed = dispatchedRoute == .codex
+                if codexRouteWasUsed {
+                    irisTrace(
+                        "assistant/screen-help: failed route=codex class="
+                            + CodexChatResponder.failureDiagnosticClass(for: error)
+                    )
+                }
+                let failureMessage: String
+                if let captureError = error as? ScreenHelpCaptureError {
+                    failureMessage = captureError.userFacingMessage
+                } else {
+                    failureMessage = await describeAndHandle(
+                        assistantError: error,
+                        logFailureDetails: dispatchedRoute?.logsFailureDetails ?? true
+                    )
+                }
+                guard isCurrentChatResponse(responseIdentifier) else { return }
                 // Never the raw server body: `describeAndHandle` maps the
                 // failure to one of a fixed set of sentences, and takes care of
                 // signing the user out when the funded tier says the session
                 // is gone.
                 publishAssistantResponse(
-                    await describeAndHandle(assistantError: error),
+                    failureMessage,
                     isAFailureMessage: true,
                     addCreditURLString: addCreditURLStringIfPublikAPIRanOut(assistantError: error)
                 )
             }
 
-            if !Task.isCancelled {
+            if isCurrentChatResponse(responseIdentifier) {
                 // Pointing keeps its state until the buddy flies back and
                 // clearDetectedElementLocation() resets it to idle.
                 if assistantState != .pointing {
@@ -2766,6 +3194,7 @@ final class CompanionManager: ObservableObject {
         addCreditURLString: String? = nil
     ) {
         latestAssistantResponseText = responseText
+        latestAssistantResponseIdentifier = currentChatResponseIdentifier
         latestResponseWasAFailureMessage = isAFailureMessage
         latestFailureAddCreditURLString = isAFailureMessage ? addCreditURLString : nil
         assistantResponseGenerationCount += 1
@@ -2904,25 +3333,93 @@ final class CompanionManager: ObservableObject {
 
     /// Parses a [POINT:x,y:label:screenN] or [POINT:none] tag from the end of Claude's response.
     /// Returns the display text (tag removed) and the optional coordinate + label + screen number.
-    /// The title of the frontmost window, read through accessibility.
-    ///
-    /// Best-effort by design: without the Accessibility grant, or for an app
-    /// that exposes no title, this is nil and the caller simply names the app
-    /// without it. A missing title must never cost the reader the app name,
-    /// which is the more useful half.
-    static func titleOfTheFrontmostWindow() -> String? {
+    static func askCaptureForegroundSnapshot(
+        for application: NSRunningApplication?
+    ) -> AskCaptureForegroundSnapshot {
+        let focusedWindow = application.flatMap {
+            focusedWindowSnapshot(processIdentifier: $0.processIdentifier)
+        }
+        return AskCaptureForegroundSnapshot(
+            bundleIdentifier: application?.bundleIdentifier,
+            processIdentifier: application?.processIdentifier,
+            applicationName: application?.localizedName,
+            windowTitle: focusedWindow?.title,
+            focusedWindowIdentity: focusedWindow?.identity,
+            focusedWindowFrame: focusedWindow?.frame
+        )
+    }
+
+    private static func focusedWindowSnapshot(
+        processIdentifier: pid_t
+    ) -> (title: String?, identity: UUID, frame: CGRect)? {
         guard AXIsProcessTrusted() else { return nil }
-        guard let frontmostApplication = NSWorkspace.shared.frontmostApplication else { return nil }
-        let applicationElement = AXUIElementCreateApplication(frontmostApplication.processIdentifier)
+        let applicationElement = AXUIElementCreateApplication(processIdentifier)
         var focusedWindow: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             applicationElement, kAXFocusedWindowAttribute as CFString, &focusedWindow
-        ) == .success, let window = focusedWindow else { return nil }
+        ) == .success, let focusedWindow,
+              CFGetTypeID(focusedWindow) == AXUIElementGetTypeID() else { return nil }
+        let window = focusedWindow as! AXUIElement
+
         var title: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &title)
+
+        var positionValue: CFTypeRef?
+        var sizeValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
-            window as! AXUIElement, kAXTitleAttribute as CFString, &title
-        ) == .success else { return nil }
-        return title as? String
+            window, kAXPositionAttribute as CFString, &positionValue
+        ) == .success,
+        AXUIElementCopyAttributeValue(
+            window, kAXSizeAttribute as CFString, &sizeValue
+        ) == .success,
+        let positionValue, let sizeValue,
+        CFGetTypeID(positionValue) == AXValueGetTypeID(),
+        CFGetTypeID(sizeValue) == AXValueGetTypeID() else {
+            return nil
+        }
+
+        var origin = CGPoint.zero
+        var dimensions = CGSize.zero
+        guard AXValueGetValue(positionValue as! AXValue, .cgPoint, &origin),
+              AXValueGetValue(sizeValue as! AXValue, .cgSize, &dimensions),
+              origin.x.isFinite, origin.y.isFinite,
+              dimensions.width.isFinite, dimensions.height.isFinite,
+              dimensions.width > 0, dimensions.height > 0 else {
+            return nil
+        }
+
+        return (
+            title as? String,
+            focusedWindowIdentifier(for: window, processIdentifier: processIdentifier),
+            CGRect(origin: origin, size: dimensions)
+        )
+    }
+
+    /// AXUIElement values can be re-created between reads; CFEqual, not title
+    /// or frame, establishes whether the focused accessibility object is the
+    /// same window. The bounded cache only retains the most recent 32 windows.
+    private static func focusedWindowIdentifier(
+        for window: AXUIElement,
+        processIdentifier: pid_t
+    ) -> UUID {
+        if let entry = focusedWindowIdentityEntries.first(where: {
+            $0.processIdentifier == processIdentifier && CFEqual($0.element, window)
+        }) {
+            return entry.identifier
+        }
+
+        let entry = FocusedWindowIdentityEntry(
+            processIdentifier: processIdentifier,
+            element: window,
+            identifier: UUID()
+        )
+        focusedWindowIdentityEntries.append(entry)
+        if focusedWindowIdentityEntries.count > 32 {
+            focusedWindowIdentityEntries.removeFirst(
+                focusedWindowIdentityEntries.count - 32
+            )
+        }
+        return entry.identifier
     }
 
     static func parsePointingCoordinates(from fullResponseText: String) -> PointingParseResult {

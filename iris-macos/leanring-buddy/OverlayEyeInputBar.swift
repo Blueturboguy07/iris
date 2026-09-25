@@ -68,6 +68,60 @@ final class OverlayEyeInputBarPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+/// A pending Ask or unread answer belongs to the current request, not to the
+/// last archived exchange. Reopening the bar seeds that request first.
+struct OverlayEyeInputBarPresentationSeed {
+    let exchange: OverlayEyeExchange
+    let responseIdentifier: UUID?
+    let displayedAnswerIdentifier: UUID?
+
+    @MainActor
+    static func current(for companionManager: CompanionManager) -> Self {
+        var exchange = OverlayEyeExchange()
+        if let pending = companionManager.pendingAskForInputBar {
+            exchange.registerTheReaderAsked(pending.questionTheReaderAsked)
+            exchange.registerTheReaderWentBackToTheField()
+            return Self(exchange: exchange, responseIdentifier: pending.responseIdentifier,
+                displayedAnswerIdentifier: nil)
+        }
+        if let unread = companionManager.answerAwaitingTheReaderInTheBar {
+            exchange.registerTheReaderAsked(unread.questionTheReaderAsked)
+            exchange.registerIrisAnswered(unread.answerText,
+                theAnswerIsAFailureMessage: unread.answerIsAFailureMessage)
+            exchange.registerTheReaderWentBackToTheField()
+            return Self(exchange: exchange, responseIdentifier: unread.responseIdentifier,
+                displayedAnswerIdentifier: unread.responseIdentifier)
+        }
+        exchange = OverlayEyeInputBarPanelManager.exchangeShowingTheLastThingThatWasSaid(
+            fromTranscriptStore: companionManager.chatTranscriptStore
+        )
+        return Self(exchange: exchange, responseIdentifier: nil, displayedAnswerIdentifier: nil)
+    }
+}
+
+enum OverlayEyeInputBarResponsePresentation {
+    /// A generation change alone cannot identify the Ask that just finished.
+    /// Stop, New chat, and a second Ask all invalidate an earlier completion.
+    static func acceptCurrentAnswer(
+        into exchange: inout OverlayEyeExchange,
+        exchangeResponseIdentifier: UUID?,
+        currentResponseIdentifier: UUID,
+        publishedResponseIdentifier: UUID?,
+        answerText: String?,
+        isFailure: Bool
+    ) -> UUID? {
+        guard let exchangeResponseIdentifier,
+              exchangeResponseIdentifier == currentResponseIdentifier,
+              publishedResponseIdentifier == exchangeResponseIdentifier,
+              let answerText,
+              exchange.whatIrisSaidBack == nil,
+              (exchange.phase == .waitingForIrisToAnswer
+                || exchange.phase == .composingAFollowUp) else { return nil }
+        exchange.registerIrisAnswered(answerText, theAnswerIsAFailureMessage: isFailure)
+        return exchange.whatIrisSaidBack == nil ? nil : exchangeResponseIdentifier
+    }
+}
+
 /// Owns the input bar's window: shows it under the eye, grows and shrinks it as
 /// the exchange inside it changes, moves keyboard focus in and out of it, and
 /// dismisses it on a click anywhere else, telling the overlay when it has gone
@@ -81,6 +135,9 @@ final class OverlayEyeInputBarPanelManager {
     /// Readable (not settable) from the suite, so a frame AppKit chose on its
     /// own can be simulated before `resizeTheBarToFit` is asked to correct it.
     private(set) var inputBarPanel: OverlayEyeInputBarPanel?
+    private var inputBarPresentationIdentity: UUID?
+    private weak var presentedCompanionManager: CompanionManager?
+    private var displayedAnswerResponseIdentifier: UUID?
     private var barResizeObservation: NSObjectProtocol?
     private var clickOutsideMonitor: Any?
 
@@ -145,6 +202,8 @@ final class OverlayEyeInputBarPanelManager {
         companionManager: CompanionManager,
         onTheBarClosing: @escaping () -> Void
     ) {
+        let presentationIdentity = UUID()
+        inputBarPresentationIdentity = presentationIdentity
         notifyTheOverlayThatTheBarClosed = onTheBarClosing
         interactionGeometryTheBarHangsFrom = interactionGeometry
         frameOfTheScreenTheBarIsOn = screenFrame
@@ -166,15 +225,16 @@ final class OverlayEyeInputBarPanelManager {
         // It is still ONE exchange. This is a bar hanging off a 64pt eye, not a
         // second chat window: the most recent exchange comes back and nothing
         // else does.
-        let exchangeToReopenWith = Self.exchangeShowingTheLastThingThatWasSaid(
-            fromTranscriptStore: companionManager.chatTranscriptStore
-        )
+        let presentationSeed = OverlayEyeInputBarPresentationSeed.current(for: companionManager)
+        presentedCompanionManager = companionManager
+        displayedAnswerResponseIdentifier = presentationSeed.displayedAnswerIdentifier
 
         let inputBarView = OverlayEyeInputBarView(
             companionManager: companionManager,
             guideSessionController: companionManager.guideSessionController,
             onDismissRequested: { [weak self] in
-                self?.hideInputBar()
+                guard self?.inputBarPresentationIdentity == presentationIdentity else { return }
+                self?.hideInputBar(dismissedByReader: true)
             },
             onTheBarShouldReleaseTheKeyboard: { [weak self] in
                 self?.releaseTheKeyboardSoTheReadersOwnAppGetsItBack()
@@ -188,7 +248,12 @@ final class OverlayEyeInputBarPanelManager {
             onTheReaderWantsToAttachImages: { [weak self] in
                 self?.pickImagesToAttachFromTheReadersFiles()
             },
-            showingTheExchange: exchangeToReopenWith
+            onCurrentAnswerDisplayed: { [weak self] responseIdentifier in
+                guard self?.inputBarPresentationIdentity == presentationIdentity else { return }
+                self?.displayedAnswerResponseIdentifier = responseIdentifier
+            },
+            showingTheExchange: presentationSeed.exchange,
+            showingResponseIdentifier: presentationSeed.responseIdentifier
         )
         .frame(width: OverlayEyeInteractionGeometry.inputBarWidth)
 
@@ -308,7 +373,7 @@ final class OverlayEyeInputBarPanelManager {
         fromTranscriptStore chatTranscriptStore: ChatTranscriptStore
     ) -> OverlayEyeExchange {
         var exchange = OverlayEyeExchange()
-        guard let lastSavedExchange = chatTranscriptStore.mostRecentExchange else {
+        guard let lastSavedExchange = chatTranscriptStore.mostRecentExchangeInCurrentConversation else {
             return exchange
         }
 
@@ -331,7 +396,15 @@ final class OverlayEyeInputBarPanelManager {
     }
 
     /// Takes the bar down and hands keyboard focus back to whatever had it.
-    func hideInputBar() {
+    func hideInputBar(dismissedByReader: Bool = false) {
+        if dismissedByReader, let displayedAnswerResponseIdentifier {
+            presentedCompanionManager?.markTheAnswerOnScreenAsDismissedByTheReader(
+                ifResponseIdentifierMatches: displayedAnswerResponseIdentifier
+            )
+        }
+        presentedCompanionManager = nil
+        displayedAnswerResponseIdentifier = nil
+        inputBarPresentationIdentity = nil
         if let barResizeObservation {
             NotificationCenter.default.removeObserver(barResizeObservation)
             self.barResizeObservation = nil
@@ -499,7 +572,7 @@ final class OverlayEyeInputBarPanelManager {
                 if event.type == .rightMouseDown {
                     // Never the start of a drag: dismiss at once, as every
                     // press used to.
-                    self.hideInputBar()
+                    self.hideInputBar(dismissedByReader: true)
                     return
                 }
 
@@ -512,7 +585,7 @@ final class OverlayEyeInputBarPanelManager {
                     dragPasteboardChangeCount: NSPasteboard(name: .drag).changeCount
                 )
                 if decision == .dismissTheBar {
-                    self.hideInputBar()
+                    self.hideInputBar(dismissedByReader: true)
                 }
 
             default:
@@ -651,6 +724,9 @@ struct OverlayEyeInputBarView: View {
     /// Called whenever the bar's content changes height, so the window it lives
     /// in can grow and shrink with it.
     let onTheBarsMeasuredHeightChanged: (CGFloat) -> Void
+    /// The owning panel uses this exact request ID to distinguish a reader's
+    /// dismissal of the displayed answer from automatic panel replacement.
+    let onCurrentAnswerDisplayed: (UUID) -> Void
 
     /// Called by the attach button. The panel manager owns the picker, because
     /// the picker needs the click-outside monitor paused and the keyboard
@@ -668,6 +744,7 @@ struct OverlayEyeInputBarView: View {
     /// Editing is the default because opening an app is a deliberate act and
     /// editing it is the reason to have done it. Asking is one tap away.
     @State private var composerMode: ComposerMode = .edit
+    @State private var stopButtonIsHovered = false
 
     /// The fix/feature choice, which decides the honesty label and the commit
     /// trailer, so it is a real choice and not a convenience.
@@ -679,11 +756,13 @@ struct OverlayEyeInputBarView: View {
     @State private var historyIsShowing: Bool = false
 
     @State private var typedMessage: String = ""
+    @State private var draftMirrorGeneration = UUID()
 
     /// The one question-and-answer the bar is showing. All the rules about what
     /// follows what live in `OverlayEyeExchange`, which is a plain value and is
     /// tested without a window.
     @State private var exchange = OverlayEyeExchange()
+    @State private var responseIdentifierForExchange: UUID?
 
     /// How tall the answer's text would like to be. Used to size the scrolling
     /// area to the answer when the answer is short, and to cap it when it is
@@ -707,7 +786,9 @@ struct OverlayEyeInputBarView: View {
         onTheBarShouldTakeTheKeyboardBack: @escaping () -> Void,
         onTheBarsMeasuredHeightChanged: @escaping (CGFloat) -> Void,
         onTheReaderWantsToAttachImages: @escaping () -> Void = {},
-        showingTheExchange exchange: OverlayEyeExchange = OverlayEyeExchange()
+        onCurrentAnswerDisplayed: @escaping (UUID) -> Void = { _ in },
+        showingTheExchange exchange: OverlayEyeExchange = OverlayEyeExchange(),
+        showingResponseIdentifier responseIdentifier: UUID? = nil
     ) {
         self.companionManager = companionManager
         self.guideSessionController = guideSessionController
@@ -723,7 +804,9 @@ struct OverlayEyeInputBarView: View {
         self.onTheBarShouldTakeTheKeyboardBack = onTheBarShouldTakeTheKeyboardBack
         self.onTheBarsMeasuredHeightChanged = onTheBarsMeasuredHeightChanged
         self.onTheReaderWantsToAttachImages = onTheReaderWantsToAttachImages
+        self.onCurrentAnswerDisplayed = onCurrentAnswerDisplayed
         _exchange = State(initialValue: exchange)
+        _responseIdentifierForExchange = State(initialValue: responseIdentifier)
 
         // Seed the composer from any UNSENT draft the reader left when they last
         // dismissed the bar mid-typing. The bar view is destroyed on every
@@ -734,6 +817,9 @@ struct OverlayEyeInputBarView: View {
         let draftToRestore = companionManager.inputBarDraftStore.draftToRestoreIntoAFreshBar
         _typedMessage = State(initialValue: draftToRestore.text)
         _editKind = State(initialValue: draftToRestore.editKind)
+        _draftMirrorGeneration = State(
+            initialValue: companionManager.inputBarDraftStore.currentMirrorGeneration
+        )
     }
 
     private var suggestionsToOffer: [String] {
@@ -792,7 +878,10 @@ struct OverlayEyeInputBarView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        // Each render's callbacks retain this generation. An explicit New
+        // chat rotates the store before an old onChange can replay stale text.
+        let mirrorGenerationForThisRender = draftMirrorGeneration
+        return VStack(alignment: .leading, spacing: 8) {
             // Shown above everything else, whichever mode the bar is in right
             // now — a rejected `iris://` link has nothing else on screen to
             // attach an explanation to. See `CompanionManager.
@@ -980,13 +1069,17 @@ struct OverlayEyeInputBarView: View {
         // off while mid-prompting keeps my prompt" true without the destroyed
         // view having to remember anything (Publik Test 2, 2026-09-03).
         .onChange(of: typedMessage) { _, newText in
-            companionManager.inputBarDraftStore.remember(
-                OverlayEyeInputBarDraft(text: newText, editKind: editKind)
+            guard newText == typedMessage else { return }
+            companionManager.inputBarDraftStore.rememberIfCurrentPresentation(
+                OverlayEyeInputBarDraft(text: newText, editKind: editKind),
+                mirrorGeneration: mirrorGenerationForThisRender
             )
         }
         .onChange(of: editKind) { _, newKind in
-            companionManager.inputBarDraftStore.remember(
-                OverlayEyeInputBarDraft(text: typedMessage, editKind: newKind)
+            guard newKind == editKind else { return }
+            companionManager.inputBarDraftStore.rememberIfCurrentPresentation(
+                OverlayEyeInputBarDraft(text: typedMessage, editKind: newKind),
+                mirrorGeneration: mirrorGenerationForThisRender
             )
         }
         .animation(DS.Motion.contentIn, value: exchange.phase)
@@ -1142,7 +1235,14 @@ struct OverlayEyeInputBarView: View {
                     editKindRow
                 }
             } else {
-                modelSelectorRow
+                if accountService.resolvedChatProvider == .codex {
+                    Text("Codex CLI default for screen-help requests")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                } else {
+                    modelSelectorRow
+                }
             }
             // With nothing attached this is EmptyView, so the bar is byte for
             // byte the bar it has always been until the reader pastes a picture.
@@ -1543,16 +1643,37 @@ struct OverlayEyeInputBarView: View {
 
             closeButton
 
-            Button {
-                sendWhatIsTyped()
-            } label: {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundColor(theSendButtonIsLive ? DS.Colors.accent : DS.Colors.quiet)
+            if companionManager.chatResponseIsPending {
+                Button {
+                    companionManager.stopCurrentAskResponse()
+                } label: {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(DS.Colors.accent)
+                        .frame(width: 28, height: 28)
+                        .background {
+                            Circle().fill(stopButtonIsHovered ? DS.Colors.accent.opacity(0.16) : .clear)
+                        }
+                }
+                .buttonStyle(.plain)
+                .pointerCursor()
+                .onHover { stopButtonIsHovered = $0 }
+                .contentShape(Circle())
+                .accessibilityIdentifier("askStopResponse")
+                .accessibilityLabel("Stop response")
+                .help("Stop the current response")
+            } else {
+                Button {
+                    sendWhatIsTyped()
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundColor(theSendButtonIsLive ? DS.Colors.accent : DS.Colors.quiet)
+                }
+                .buttonStyle(.plain)
+                .pointerCursor(isEnabled: theSendButtonIsLive)
+                .disabled(!theSendButtonIsLive)
             }
-            .buttonStyle(.plain)
-            .pointerCursor(isEnabled: theSendButtonIsLive)
-            .disabled(!theSendButtonIsLive)
         }
     }
 
@@ -1636,11 +1757,7 @@ struct OverlayEyeInputBarView: View {
                 Spacer(minLength: 0)
 
                 Button {
-                    historyIsShowing = false
-                    companionManager.startANewChat()
-                    exchange.clearTheWholeExchange()
-                    typedMessage = ""
-                    theTextFieldHasKeyboardFocus = true
+                    startFreshChat()
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "square.and.pencil")
@@ -1654,6 +1771,31 @@ struct OverlayEyeInputBarView: View {
                 .help("Clear this conversation and start fresh")
             }
         }
+    }
+
+    private func startFreshChat() {
+        let preserveEditDraft = anAppIsOpenForEditing && effectiveComposerMode == .edit
+        historyIsShowing = false
+        companionManager.startANewChat()
+        exchange.clearTheWholeExchange()
+        responseIdentifierForExchange = nil
+        if preserveEditDraft {
+            companionManager.inputBarDraftStore.remember(
+                OverlayEyeInputBarDraft(text: typedMessage, editKind: editKind)
+            )
+        } else {
+            typedMessage = ""
+            attachments.removeAllAttachments()
+        }
+        measuredAnswerTextHeight = 0
+        onTheBarShouldTakeTheKeyboardBack()
+        // Adopt the new generation LAST. The old field may still render its
+        // pre-reset text for one turn, and must not mirror it back into store.
+        if let freshGeneration = companionManager.inputBarDraftStore
+            .mirrorGenerationIfVisibleTextMatchesStored(typedMessage) {
+            draftMirrorGeneration = freshGeneration
+        }
+        DispatchQueue.main.async { theTextFieldHasKeyboardFocus = true }
     }
 
     /// Past exchanges, newest first. Capped in height so a long history
@@ -1863,22 +2005,30 @@ struct OverlayEyeInputBarView: View {
         .background(IrisShellBackground(cornerRadius: DS.CornerRadius.large))
     }
 
-    /// The spinner and the sentence saying which part of the work is happening.
-    /// Both are driven by the same `assistantState` that spins the eye's own
-    /// track, so a spinning eye and an idle-looking bar cannot happen.
+    /// The spinner is shown only while a chat response is actually pending.
+    /// Stop leaves the unanswered exchange visible, but must not leave the
+    /// reader looking at an endless loading indicator.
     private var workingLine: some View {
-        HStack(spacing: 8) {
-            ProgressView()
-                .progressViewStyle(.circular)
-                .controlSize(.small)
-                .scaleEffect(0.62)
-                .frame(width: 13, height: 13)
+        Group {
+            if companionManager.chatResponseIsPending {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .controlSize(.small)
+                        .scaleEffect(0.62)
+                        .frame(width: 13, height: 13)
 
-            Text(OverlayEyeSuggestions.lineShownWhileIrisIsWorking(
-                whileTheAssistantIs: companionManager.assistantState
-            ))
-            .font(.system(size: 12))
-            .foregroundColor(DS.Colors.muted)
+                    Text(OverlayEyeSuggestions.lineShownWhileIrisIsWorking(
+                        whileTheAssistantIs: companionManager.assistantState
+                    ))
+                    .font(.system(size: 12))
+                    .foregroundColor(DS.Colors.muted)
+                }
+            } else {
+                Text("No response is loading. You can ask a follow-up or try again.")
+                    .font(.system(size: 12))
+                    .foregroundColor(DS.Colors.muted)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -2043,7 +2193,9 @@ struct OverlayEyeInputBarView: View {
         }
 
         companionManager.sendUserMessage(messageText)
+        responseIdentifierForExchange = companionManager.currentAskResponseIdentifier
         exchange.registerTheReaderAsked(messageText)
+        showWhateverIrisJustSaid()
         typedMessage = ""
         measuredAnswerTextHeight = 0
 
@@ -2054,13 +2206,15 @@ struct OverlayEyeInputBarView: View {
     }
 
     private func showWhateverIrisJustSaid() {
-        guard let latestAssistantResponseText = companionManager.latestAssistantResponseText else {
-            return
-        }
-        exchange.registerIrisAnswered(
-            latestAssistantResponseText,
-            theAnswerIsAFailureMessage: companionManager.latestResponseWasAFailureMessage
-        )
+        guard let displayedResponseIdentifier = OverlayEyeInputBarResponsePresentation.acceptCurrentAnswer(
+            into: &exchange,
+            exchangeResponseIdentifier: responseIdentifierForExchange,
+            currentResponseIdentifier: companionManager.currentAskResponseIdentifier,
+            publishedResponseIdentifier: companionManager.latestAssistantResponseIdentifier,
+            answerText: companionManager.latestAssistantResponseText,
+            isFailure: companionManager.latestResponseWasAFailureMessage
+        ) else { return }
+        onCurrentAnswerDisplayed(displayedResponseIdentifier)
     }
 
     /// The reader clicked back into the field after an answer. The answer stays

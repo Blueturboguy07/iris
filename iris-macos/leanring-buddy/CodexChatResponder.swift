@@ -74,22 +74,54 @@ enum CodexChatResponder {
             imageLabels: images.map(\.label)
         )
 
-        let answerText = try await CodexMaintainProvider.runCodexExec(
-            codexBinaryPath: codexBinaryPath,
-            promptText: promptText,
-            attachedImagePNGDataList: images.map(\.data),
-            model: nil,
-            // A question about what is on screen is exactly the kind that
-            // benefits from the model being able to look something up, and the
-            // search runs on the provider's side so nothing local gains network.
-            webSearchEnabled: true,
-            timeoutSeconds: answerTimeoutSeconds
-        )
+        let answerText = try await withRequestCancellation { cancellation in
+            try await CodexMaintainProvider.runCodexExec(
+                codexBinaryPath: codexBinaryPath,
+                promptText: promptText,
+                attachedImagePNGDataList: images.map(\.data),
+                model: nil,
+                webSearchEnabled: true,
+                timeoutSeconds: answerTimeoutSeconds,
+                cancellation: cancellation,
+                requireAllImages: true
+            )
+        }
 
         // Nothing is reported to the spend ledger on purpose. A ChatGPT plan is
         // flat-rate, so the marginal cost of one more question is zero and a
         // dollar figure against it would be a bill Iris invented.
         return (text: answerText, duration: Date().timeIntervalSince(startedAt))
+    }
+
+    /// Bridges cancellation of the Ask task to only the Codex child it owns.
+    static func withRequestCancellation<Value>(
+        operation: @escaping (CodexExecCancellation) async throws -> Value
+    ) async throws -> Value {
+        let cancellation = CodexExecCancellation()
+        return try await withTaskCancellationHandler {
+            let value = try await operation(cancellation)
+            try cancellation.throwIfCancelled()
+            return value
+        } onCancel: {
+            cancellation.cancel()
+        }
+    }
+
+    /// A safe diagnostic category. Never returns localized text, subprocess
+    /// output, paths, prompts, images, or an arbitrary error type name.
+    static func failureDiagnosticClass(for error: Error) -> String {
+        if error is MaintainModelProviderError { return "codex_provider" }
+        if error is AssistantTransportError { return "assistant_transport" }
+        if error is CodexExecInvocation.ValidationError { return "invocation_validation" }
+        if error is CancellationError { return "cancelled" }
+
+        let nsError = error as NSError
+        switch nsError.domain {
+        case NSCocoaErrorDomain: return "foundation_\(nsError.code)"
+        case NSPOSIXErrorDomain: return "posix_\(nsError.code)"
+        case NSURLErrorDomain: return "url_\(nsError.code)"
+        default: return "other"
+        }
     }
 
     // MARK: - The prompt
@@ -104,15 +136,18 @@ enum CodexChatResponder {
     /// through command blocks, which is the opposite of what chat wants.
     static let chatFramingPreamble = """
         You are being used as the assistant inside another program, answering a \
-        question about what is on the user's screen. Do not use YOUR OWN shell, \
+        question about what is on the user's screen. You may describe what is \
+        visible and point the eye at a visible control. Do not use YOUR OWN shell, \
         file or repository tools: the directory you are running in is an empty \
         scratch directory and has nothing to do with the question. Your entire \
         reply is the answer the user reads, so write it directly to them.
 
-        You cannot take actions on their machine on this route — you cannot \
-        copy to their clipboard, run commands for them, or open anything. When \
-        the answer involves doing something, tell them what to do in words \
-        rather than offering to do it, and never claim you have done it.
+        You cannot take actions on their machine on this route: do not claim to \
+        copy text, run commands, or open a guide. When Iris has a separate app \
+        edit or install-guide path, explain that handoff in words without \
+        claiming it has started. Tell the reader what to do in words, and never \
+        claim you have done it. Follow the system prompt's screen-label and \
+        pointing instructions.
         """
 
     /// The whole prompt for one question. Pure, so the exact bytes are testable.

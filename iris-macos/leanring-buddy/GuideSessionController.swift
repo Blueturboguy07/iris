@@ -313,7 +313,7 @@ final class GuideSessionController: ObservableObject {
     /// `UserDefaults` suite and never touches the reader's real preference.
     /// Assigning it re-reads, because what was published at init came from
     /// whichever store was in place then.
-    var lastFollowedGuideMemory = LastFollowedGuideMemory.shared {
+    var lastFollowedGuideMemory: LastFollowedGuideMemory {
         didSet {
             lastGuideTheReaderWasFollowing = lastFollowedGuideMemory.rememberedGuide()
         }
@@ -884,12 +884,15 @@ final class GuideSessionController: ObservableObject {
         checkToolVersion: @escaping GuideToolVersionChecker = { toolName in
             try await ToolVersionService.checkToolVersion(tool: toolName)
         },
+        lastFollowedGuideMemory: LastFollowedGuideMemory = .shared,
+        observeAppActivations: Bool = true,
         makeAutopilotRunner: (@MainActor (GuideAutopilotGuideContext) -> GuideAutopilotRunner)? = nil
     ) {
         self.guideService = guideService
         self.platformThisAppRunsOn = platformThisAppRunsOn
         self.watchLoop = watchLoop ?? WatchLoop()
         self.checkToolVersion = checkToolVersion
+        self.lastFollowedGuideMemory = lastFollowedGuideMemory
         self.makeAutopilotRunner = makeAutopilotRunner
 
         // The whole feature in four lines: when the loop decides the step is
@@ -918,7 +921,9 @@ final class GuideSessionController: ObservableObject {
         // made, and startup is not hijacked.
         self.lastGuideTheReaderWasFollowing = lastFollowedGuideMemory.rememberedGuide()
 
-        startRefreshingPointingOnAppActivation()
+        if observeAppActivations {
+            startRefreshingPointingOnAppActivation()
+        }
     }
 
     // MARK: - Opening a guide
@@ -3069,9 +3074,8 @@ final class GuideSessionController: ObservableObject {
     ) -> Bool {
         for (index, step) in branch.steps.enumerated() where index < resumeIndex {
             if let repositoryPath = WatchLoop.repositoryPathAGitCloneWouldCreate(inCommand: step.command) {
-                var isDirectory: ObjCBool = false
                 let gitPath = (repositoryPath as NSString).appendingPathComponent(".git")
-                if !FileManager.default.fileExists(atPath: gitPath, isDirectory: &isDirectory) {
+                if !repositoryExistsAtPath(gitPath) {
                     return false
                 }
             }
@@ -3087,6 +3091,13 @@ final class GuideSessionController: ObservableObject {
             return false
         }
         return true
+    }
+
+    /// The production check reads the clone on disk. Tests can answer for a
+    /// fixture clone without creating a repository in the reader's home.
+    var repositoryExistsAtPath: (String) -> Bool = { gitPath in
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: gitPath, isDirectory: &isDirectory)
     }
 
     /// The step whose completion puts the app on disk: the last terminal

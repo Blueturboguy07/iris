@@ -17,8 +17,8 @@
 //      staples onto the prompt. The store keeps the reader's OWN sentence, not
 //      the assembled prompt.
 //    - anything about who the reader is, and any network destination.
-//  Two strings and a date. If a future change wants a third thing in here, that
-//  is a privacy decision and not a storage one.
+//  Two strings and a date for each exchange. A non-text reset marker separates
+//  the current conversation from the archive without deleting either one.
 //
 //  Nothing here ever leaves the machine. The transcript is read back by exactly
 //  two callers: `CompanionManager`, to warm the model's conversation window at
@@ -106,7 +106,8 @@ struct ChatTranscriptExchange: Codable, Equatable, Sendable {
 /// WHY IT IS STILL NOT A CHAT HISTORY BROWSER. The bar hangs off a 64pt eye and
 /// floats over whatever the reader is really doing. This store keeps a few
 /// hundred exchanges so the model's window can be warmed and so the file is
-/// worth having, but the bar only ever reopens on `mostRecentExchange`. There
+/// worth having, but the bar only reopens on the current conversation's last
+/// exchange. There
 /// is deliberately no scrollback, no search, and no way to page backwards.
 @MainActor
 final class ChatTranscriptStore {
@@ -148,6 +149,10 @@ final class ChatTranscriptStore {
     /// for the rest of this session.
     private var exchangesOldestFirst: [ChatTranscriptExchange] = []
 
+    /// The archive remains intact when New chat starts. A marker in the same
+    /// atomic file records where the currently resumable conversation begins.
+    private var currentConversationStartIndex: Int?
+
     /// False once a write has failed. The store keeps working — it just stops
     /// claiming the conversation will survive a quit. Nothing surfaces it to the
     /// reader yet; it exists so the degraded state is a value that can be asked
@@ -161,7 +166,9 @@ final class ChatTranscriptStore {
         try? FileManager.default.createDirectory(
             at: directoryURL, withIntermediateDirectories: true
         )
-        exchangesOldestFirst = Self.readExchanges(fromFileAtURL: fileURL)
+        let savedTranscript = Self.readTranscript(fromFileAtURL: fileURL)
+        exchangesOldestFirst = savedTranscript.exchanges
+        currentConversationStartIndex = savedTranscript.currentConversationStartIndex
     }
 
     // MARK: - Reading
@@ -172,6 +179,19 @@ final class ChatTranscriptStore {
         exchangesOldestFirst.last
     }
 
+    /// The bar and model resume only exchanges after the last New chat marker.
+    /// `recentExchanges` still includes all archived conversations for History.
+    var mostRecentExchangeInCurrentConversation: ChatTranscriptExchange? {
+        recentExchangesInCurrentConversation(limit: 1).last
+    }
+
+    func recentExchangesInCurrentConversation(limit: Int) -> [ChatTranscriptExchange] {
+        guard limit > 0 else { return [] }
+        return Array(exchangesOldestFirst
+            .dropFirst(currentConversationStartIndex ?? 0)
+            .suffix(limit))
+    }
+
     /// The newest `limit` exchanges, oldest first — the order the model's
     /// conversation history wants them in.
     func recentExchanges(limit: Int) -> [ChatTranscriptExchange] {
@@ -180,6 +200,13 @@ final class ChatTranscriptStore {
     }
 
     // MARK: - Writing
+
+    /// Starts a blank conversation without deleting the reader's archive.
+    /// The marker persists even if Iris quits before another question is sent.
+    func startANewConversation() {
+        currentConversationStartIndex = exchangesOldestFirst.count
+        writeWholeTranscriptToDisk()
+    }
 
     /// Records one completed exchange and prunes the oldest away.
     ///
@@ -202,6 +229,12 @@ final class ChatTranscriptStore {
 
         exchangesOldestFirst.append(exchange)
         if exchangesOldestFirst.count > Self.maximumKeptExchanges {
+            let numberOfPrunedExchanges = exchangesOldestFirst.count - Self.maximumKeptExchanges
+            if let currentConversationStartIndex {
+                self.currentConversationStartIndex = max(
+                    0, currentConversationStartIndex - numberOfPrunedExchanges
+                )
+            }
             exchangesOldestFirst = Array(exchangesOldestFirst.suffix(Self.maximumKeptExchanges))
         }
         writeWholeTranscriptToDisk()
@@ -215,7 +248,13 @@ final class ChatTranscriptStore {
     /// a valid state — never a half-written line the next launch has to guess
     /// about.
     private func writeWholeTranscriptToDisk() {
-        let encodedLines = exchangesOldestFirst.compactMap(Self.encodedLine(for:))
+        var encodedLines = exchangesOldestFirst.compactMap(Self.encodedLine(for:))
+        if let currentConversationStartIndex {
+            encodedLines.insert(
+                Self.conversationBoundaryLine,
+                at: min(currentConversationStartIndex, encodedLines.count)
+            )
+        }
         let fileBody = encodedLines.isEmpty ? "" : encodedLines.joined(separator: "\n") + "\n"
         do {
             try fileBody.write(to: fileURL, atomically: true, encoding: .utf8)
@@ -250,7 +289,21 @@ final class ChatTranscriptStore {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         guard let lineData = line.data(using: .utf8) else { return nil }
+        guard !lineBeginsANewConversation(line) else { return nil }
         return try? decoder.decode(ChatTranscriptExchange.self, from: lineData)
+    }
+
+    nonisolated private static let conversationBoundaryLine = #"{"beginsNewConversation":true}"#
+
+    nonisolated private struct ConversationBoundary: Decodable {
+        let beginsNewConversation: Bool
+    }
+
+    nonisolated private static func lineBeginsANewConversation(_ line: String) -> Bool {
+        guard let lineData = line.data(using: .utf8),
+              let boundary = try? JSONDecoder().decode(ConversationBoundary.self, from: lineData)
+        else { return false }
+        return boundary.beginsNewConversation
     }
 
     /// Every exchange currently in the file, oldest first, capped at
@@ -258,13 +311,28 @@ final class ChatTranscriptStore {
     /// transcript, never an error. An undecodable line is skipped rather than
     /// fatal — one corrupt line must not blind Iris to the rest of the chat.
     nonisolated static func readExchanges(fromFileAtURL fileURL: URL) -> [ChatTranscriptExchange] {
+        readTranscript(fromFileAtURL: fileURL).exchanges
+    }
+
+    nonisolated private static func readTranscript(
+        fromFileAtURL fileURL: URL
+    ) -> (exchanges: [ChatTranscriptExchange], currentConversationStartIndex: Int?) {
         guard let fileContents = try? String(contentsOf: fileURL, encoding: .utf8) else {
-            return []
+            return ([], nil)
         }
-        let exchanges = fileContents
-            .components(separatedBy: "\n")
-            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-            .compactMap(decodedExchange(fromLine:))
-        return Array(exchanges.suffix(maximumKeptExchanges))
+        var exchanges: [ChatTranscriptExchange] = []
+        var currentConversationStartIndex: Int?
+        for line in fileContents.components(separatedBy: "\n") {
+            if lineBeginsANewConversation(line) {
+                currentConversationStartIndex = exchanges.count
+            } else if let exchange = decodedExchange(fromLine: line) {
+                exchanges.append(exchange)
+            }
+        }
+        let numberOfPrunedExchanges = max(0, exchanges.count - maximumKeptExchanges)
+        return (
+            Array(exchanges.suffix(maximumKeptExchanges)),
+            currentConversationStartIndex.map { max(0, $0 - numberOfPrunedExchanges) }
+        )
     }
 }

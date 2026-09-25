@@ -405,6 +405,11 @@ final class OnDemandEditCoordinator: ObservableObject {
         _ scrubbedRequest: String,
         _ clonePath: String?
     ) async -> FeatureEditRequestProbeVerdict
+    private let modelProviderIsAvailable: () -> Bool
+    private let editSandboxIsAvailable: () -> Bool
+    private let runLogDirectoryPath: String
+    private let memoryIndexDirectoryPath: String
+    private let interruptedRunRecordPath: String
 
     /// Runs the actual on-demand edit — the jailed loop + verify + commit — and
     /// returns the engine's result. Injected so the whole machine is testable
@@ -652,6 +657,11 @@ final class OnDemandEditCoordinator: ObservableObject {
                 _ clonePath: String?
             ) async -> FeatureEditRequestProbeVerdict
         )? = nil,
+        modelProviderIsAvailable: (() -> Bool)? = nil,
+        editSandboxIsAvailable: (() -> Bool)? = nil,
+        runLogDirectoryPath: String = OnDemandEditRunLog.runsDirectoryPath,
+        memoryIndexDirectoryPath: String = OnDemandEditRunLog.memoryIndexDirectoryPath,
+        interruptedRunRecordPath: String = OnDemandEditInterruptedRunRecovery.defaultRecordPath,
         performOnDemandEdit: (
             (
                 _ resolvedClonePath: String,
@@ -673,6 +683,13 @@ final class OnDemandEditCoordinator: ObservableObject {
         self.clonePathLock = clonePathLock ?? .shared
         self.topRequestsForApp = topRequestsForApp
         self.probeRequestTriggers = probeRequestTriggers ?? Self.defaultProbeRequestTriggers
+        self.modelProviderIsAvailable = modelProviderIsAvailable ?? {
+            MaintainModelProviderResolver.firstAvailable() != nil
+        }
+        self.editSandboxIsAvailable = editSandboxIsAvailable ?? { MaintainSandbox.isAvailable }
+        self.runLogDirectoryPath = runLogDirectoryPath
+        self.memoryIndexDirectoryPath = memoryIndexDirectoryPath
+        self.interruptedRunRecordPath = interruptedRunRecordPath
         self.performOnDemandEdit = performOnDemandEdit ?? Self.defaultPerformOnDemandEdit
     }
 
@@ -1153,7 +1170,8 @@ final class OnDemandEditCoordinator: ObservableObject {
         runLog = OnDemandEditRunLog(
             appSlug: slug,
             kindLabel: kind == .feature ? "feature" : "bug fix",
-            scrubbedRequest: scrubbed
+            scrubbedRequest: scrubbed,
+            directoryPath: runLogDirectoryPath
         )
 
         Task { [weak self] in
@@ -1208,7 +1226,9 @@ final class OnDemandEditCoordinator: ObservableObject {
         // because it is the piece that knows which paths are a package
         // manager's own bookkeeping rather than the reader's work — see
         // `isDependencyManagerBookkeeping`.
-        let interruptedRun = OnDemandEditInterruptedRunRecovery.recordOnDisk()
+        let interruptedRun = OnDemandEditInterruptedRunRecovery.recordOnDisk(
+            recordPath: interruptedRunRecordPath
+        )
         let dirtyTree = OnDemandEditDirtyTreeReport.read(
             porcelainOutput: status?.outputTail ?? "", repoRootPath: resolvedClonePath,
             leftByAnInterruptedIrisEdit: interruptedRun?.clonePath == resolvedClonePath ? interruptedRun : nil
@@ -1268,7 +1288,10 @@ final class OnDemandEditCoordinator: ObservableObject {
         // re-guessing what run N already learned. (2) The reader's
         // clarification answers, which were collected and never read before.
         var additionalPromptSections: [String] = []
-        let priorRuns = OnDemandEditRunLog.recentMemoryRecords(forAppSlug: slug)
+        let priorRuns = OnDemandEditRunLog.recentMemoryRecords(
+            forAppSlug: slug,
+            directoryPath: memoryIndexDirectoryPath
+        )
         if let memorySection = OnDemandEditRunLog.memoryPromptSection(fromRecords: priorRuns) {
             additionalPromptSections.append(memorySection)
             editRunner.note("Iris remembers \(priorRuns.count) earlier attempt\(priorRuns.count == 1 ? "" : "s") on \(appName) and is using what it learned.")
@@ -1363,7 +1386,7 @@ final class OnDemandEditCoordinator: ObservableObject {
             editRunner.finishStopped()
             runLog?.finish(outcome: "stopped by the reader — everything reverted")
             recordMemory(outcome: "stopped by the reader — everything reverted", kind: kind)
-            OnDemandEditInterruptedRunRecovery.forget()
+            OnDemandEditInterruptedRunRecovery.forget(recordPath: interruptedRunRecordPath)
             runLog = nil
             readerAskedToStopTheRun = false
             clonePathLock.release(clonePath: resolvedClonePath)
@@ -1376,7 +1399,7 @@ final class OnDemandEditCoordinator: ObservableObject {
         switch result {
         case .appliedAndRebuilt(let branchName, _, _, let suitePassed, let symptomVerifiedByRepro):
             committedBranchName = branchName
-            OnDemandEditInterruptedRunRecovery.forget()
+            OnDemandEditInterruptedRunRecovery.forget(recordPath: interruptedRunRecordPath)
             editRunner.recordVerificationResult(passed: true, over: elapsed)
             editRunner.note(verificationNote(
                 suitePassed: suitePassed, kind: kind, symptomVerifiedByRepro: symptomVerifiedByRepro
@@ -1526,9 +1549,15 @@ final class OnDemandEditCoordinator: ObservableObject {
             // The block this answers is "the binary on disk is stale", so the
             // fix is to replace the INSTALLED copy — not launch a parallel one
             // and leave the stale binary in place (founder override, Sep 2 2026).
-            let launchPath = await deliverOverInstalledAppThenResolveLaunchPath(
+            guard let launchPath = await deliverOverInstalledAppThenResolveLaunchPath(
                 slug: slug, appName: appName, artifactPath: artifactPath
-            )
+            ) else {
+                editRunner.finishStopped()
+                releaseLockIfHeld()
+                statusLine = "Built \(appName), but delivery was refused: \(deliveryRejectionReason ?? "the delivery could not be validated"). Nothing was launched."
+                phase = .done
+                return
+            }
             let launch = await relaunch(slug, launchPath, false)
             editRunner.finishApplied()
             phase = .done
@@ -1815,9 +1844,15 @@ final class OnDemandEditCoordinator: ObservableObject {
         //     Sep 2 2026). Resolves the path to launch — the installed copy on a
         //     successful swap, else the build-dir artifact — and records the
         //     installed path + pre-delivery backup for a later undo.
-        let launchArtifactPath = await deliverOverInstalledAppThenResolveLaunchPath(
+        guard let launchArtifactPath = await deliverOverInstalledAppThenResolveLaunchPath(
             slug: slug, appName: appName, artifactPath: artifactPath
-        )
+        ) else {
+            editRunner.finishApplied()
+            releaseLockIfHeld()
+            statusLine = "Applied the change on branch \(branchName), but delivery was refused: \(deliveryRejectionReason ?? "the delivery could not be validated"). Nothing was launched."
+            phase = .done
+            return
+        }
         // 2) Quit the running app (gracefully — a save dialog still routes to
         //    the force-quit consent, the one destructive act that can corrupt
         //    data) and launch the delivered build.
@@ -1829,17 +1864,22 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// Deliver the fresh build OVER the reader's installed copy (founder
     /// override, Sep 2 2026) and return the path that should now be launched —
     /// the installed copy when the swap succeeds, else the build-dir artifact.
+    /// A rejected artifact returns nil and is never launched.
     /// Records the installed path and the pre-delivery backup for a later undo,
     /// and updates `packagedArtifactPath` so a force-quit RETRY (which reuses it)
     /// relaunches the same delivered copy.
-    private func deliverOverInstalledAppThenResolveLaunchPath(
+    private var deliveryRejectionReason: String?
+
+    func deliverOverInstalledAppThenResolveLaunchPath(
         slug: String, appName: String, artifactPath: String
-    ) async -> String {
+    ) async -> String? {
+        deliveryRejectionReason = nil
         deliveredInstalledAppPath = nil
         deliveredInstalledBackupPath = nil
         guard let deliver = deliverEditedAppOverInstalledApp else {
-            packagedArtifactPath = artifactPath
-            return artifactPath
+            packagedArtifactPath = nil
+            editRunner.note("Iris couldn't validate delivery of the rebuilt \(appName); no app was launched.")
+            return nil
         }
         statusLine = "Installing the rebuilt \(appName) over your copy…"
         let launchPath: String
@@ -1857,6 +1897,12 @@ final class OnDemandEditCoordinator: ObservableObject {
             launchPath = artifactPath
             editRunner.note("No separately installed \(appName) to replace — running the rebuilt copy from the clone.")
             runLog?.record("delivered: no installed copy — running from build dir")
+        case .deliveryRejected(let reason):
+            deliveryRejectionReason = reason
+            packagedArtifactPath = nil
+            editRunner.note("Iris rejected the rebuilt \(appName) before delivery (\(reason)); no app was launched.")
+            runLog?.record("delivered: rejected artifact (\(reason)) — no launch")
+            return nil
         case .deliveryFailed(let reason):
             launchPath = artifactPath
             editRunner.note("Couldn't replace your installed \(appName) (\(reason)) — running the rebuilt copy from the clone instead.")
@@ -2151,14 +2197,17 @@ final class OnDemandEditCoordinator: ObservableObject {
     /// the next run sees failures and stops, not just successes).
     private func recordMemory(outcome: String, kind: OnDemandEditKind) {
         guard let slug = activeAppSlug else { return }
-        OnDemandEditRunLog.appendMemoryRecord(OnDemandEditMemoryRecord(
-            appSlug: slug,
-            kind: kind == .feature ? OnDemandEditMemoryRecord.kindFeature : OnDemandEditMemoryRecord.kindBugFix,
-            scrubbedRequest: scrubbedRequest ?? "",
-            filesTouched: filesTouchedThisRun,
-            agentFinalNarration: lastAgentNarrationThisRun,
-            outcome: outcome
-        ))
+        OnDemandEditRunLog.appendMemoryRecord(
+            OnDemandEditMemoryRecord(
+                appSlug: slug,
+                kind: kind == .feature ? OnDemandEditMemoryRecord.kindFeature : OnDemandEditMemoryRecord.kindBugFix,
+                scrubbedRequest: scrubbedRequest ?? "",
+                filesTouched: filesTouchedThisRun,
+                agentFinalNarration: lastAgentNarrationThisRun,
+                outcome: outcome
+            ),
+            directoryPath: memoryIndexDirectoryPath
+        )
     }
 
     /// Prompt sections every on-demand run carries regardless of app or
@@ -2596,9 +2645,15 @@ final class OnDemandEditCoordinator: ObservableObject {
             self.freshBuildSigningSummary = signingSummary
             // 1b) Deliver over the installed copy (founder override, Sep 2 2026),
             //     then launch whichever copy that resolved to.
-            let launchPath = await self.deliverOverInstalledAppThenResolveLaunchPath(
+            guard let launchPath = await self.deliverOverInstalledAppThenResolveLaunchPath(
                 slug: slug, appName: self.activeAppName ?? slug, artifactPath: artifactPath
-            )
+            ) else {
+                self.editRunner.finishApplied()
+                self.releaseLockIfHeld()
+                self.statusLine = "Your change is safe on branch \(self.committedBranchName ?? "the branch"), but delivery was refused: \(self.deliveryRejectionReason ?? "the delivery could not be validated"). Nothing was launched."
+                self.phase = .done
+                return
+            }
             // 2) Terminate the running app (graceful only) and launch the
             //    delivered build. A refusal to quit surfaces the force-quit consent.
             self.statusLine = "Quitting \(self.activeAppName ?? slug) and opening your edited build…"
@@ -3158,14 +3213,14 @@ final class OnDemandEditCoordinator: ObservableObject {
         // explains WHY editing needs a key (chat is funded, editing real code is
         // not) rather than reading as an accusation — and the card offers a
         // button straight into settings, driven by `refusalOffersModelKeySetup`.
-        guard MaintainModelProviderResolver.firstAvailable() != nil else {
+        guard modelProviderIsAvailable() else {
             return .refused(
                 reason: "Editing an app changes its real code, which runs on your own model key — not the funded tier that covers chat. Connect a model in settings to turn this on.",
                 offersModelKeySetup: true
             )
         }
         // The Seatbelt jail every model-authored command runs inside.
-        guard MaintainSandbox.isAvailable else {
+        guard editSandboxIsAvailable() else {
             return .refused(reason: "the sandbox Iris edits inside isn't available on this machine.")
         }
         // A real rebuild recipe for this stack. `.other` / swiftMacOS have no
@@ -3344,7 +3399,7 @@ final class OnDemandEditCoordinator: ObservableObject {
     }
 
     private func failRun(reason: String, resolvedClonePath: String) {
-        OnDemandEditInterruptedRunRecovery.forget()
+        OnDemandEditInterruptedRunRecovery.forget(recordPath: interruptedRunRecordPath)
         clonePathLock.release(clonePath: resolvedClonePath)
         self.resolvedClonePath = nil
         phase = .failed(reason: reason)
@@ -3362,7 +3417,9 @@ final class OnDemandEditCoordinator: ObservableObject {
         guard let resolved = resolvedClonePath,
               let baseCommit = originalHeadCommit,
               let slug = activeAppSlug else { return }
-        var record = OnDemandEditInterruptedRunRecovery.recordOnDisk()
+        var record = OnDemandEditInterruptedRunRecovery.recordOnDisk(
+            recordPath: interruptedRunRecordPath
+        )
         if record == nil || record?.clonePath != resolved || record?.baseCommit != baseCommit {
             record = OnDemandEditInFlightRecord(
                 appSlug: slug,
@@ -3379,7 +3436,9 @@ final class OnDemandEditCoordinator: ObservableObject {
         if let waitingOn {
             recordToWrite.whatIrisWasWaitingFor = waitingOn
         }
-        OnDemandEditInterruptedRunRecovery.remember(recordToWrite)
+        OnDemandEditInterruptedRunRecovery.remember(
+            recordToWrite, recordPath: interruptedRunRecordPath
+        )
     }
 
     private func releaseLockIfHeld() {
@@ -3399,7 +3458,7 @@ final class OnDemandEditCoordinator: ObservableObject {
     }
 
     private func resetInFlightState() {
-        OnDemandEditInterruptedRunRecovery.forget()
+        OnDemandEditInterruptedRunRecovery.forget(recordPath: interruptedRunRecordPath)
         pullRequestState = .notAttempted
         changelogState = .notAttempted
         committedBranchName = nil

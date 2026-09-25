@@ -453,12 +453,17 @@ final class CompanionManager: ObservableObject {
         // can undo it. Falls back to launching the build-dir artifact when there
         // is no separate installed copy or the swap fails.
         coordinator.deliverEditedAppOverInstalledApp = { [weak self] appSlug, freshBuildArtifactPath in
-            guard let self,
-                  let macBundleId = self.appInventoryService.installedEntriesForDisplay
-                      .first(where: { $0.slug == appSlug })?.macBundleId,
-                  !macBundleId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  let clonePath = self.installProvenanceStore.provenance(forAppSlug: appSlug)?.clonePath else {
-                return .deliveryFailed(reason: "Iris doesn't have a bundle id or a source clone for this app")
+            guard let self else {
+                return .deliveryRejected(reason: "Iris's delivery service is no longer available")
+            }
+            guard let macBundleId = self.appInventoryService.installedEntriesForDisplay
+                .first(where: { $0.slug == appSlug })?.macBundleId,
+                  !macBundleId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return .deliveryRejected(reason: "Iris has no bundle identifier for this app")
+            }
+            guard let clonePath = self.installProvenanceStore.provenance(forAppSlug: appSlug)?.clonePath,
+                  !clonePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return .deliveryRejected(reason: "Iris has no verified source clone for this app")
             }
             return await self.appRelaunchService.installFreshBuildOverInstalledApp(
                 macBundleId: macBundleId,

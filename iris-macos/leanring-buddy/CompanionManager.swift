@@ -1407,7 +1407,7 @@ final class CompanionManager: ObservableObject {
         UsageMonitor.shared.record(UsageEvent(
             kind: .modelSelected,
             provider: provider,
-            modelTier: UsageModelTier.forIrisModelName(selectedModel)
+            modelTier: usageModelTierForCounting(provider: provider)
         ))
         publikAPINudgeCoordinator.providerChanged(to: provider)
         publikAPINudgeCoordinator.readerPickedAProviderOrModel()
@@ -3081,11 +3081,12 @@ final class CompanionManager: ObservableObject {
                 // question up: `record` hops to the monitor's queue and the
                 // nudge only sets a published value the bar renders inline.
                 let frontmostCatalogAppSlugForThisQuestion = appInventoryService.frontmostCatalogAppSlug
+                let providerForThisQuestion = accountService.resolvedChatProvider?.usageProvider
                 UsageMonitor.shared.record(UsageEvent(
                     kind: .aiCall,
                     appSlug: frontmostCatalogAppSlugForThisQuestion,
-                    provider: accountService.resolvedChatProvider?.usageProvider,
-                    modelTier: UsageModelTier.forIrisModelName(selectedModel)
+                    provider: providerForThisQuestion,
+                    modelTier: usageModelTierForCounting(provider: providerForThisQuestion)
                 ))
                 publikAPINudgeCoordinator.anAICallIsGoingOut(
                     frontmostCatalogAppSlug: frontmostCatalogAppSlugForThisQuestion
@@ -3278,6 +3279,14 @@ final class CompanionManager: ObservableObject {
     /// answers. A reader on their own key or on Codex sees nothing new in the
     /// panel, so nothing new is fetched for them either.
     // MARK: - Usage monitoring
+
+    /// The tier a count claims. The picker's model decides it on publik API
+    /// and on the reader's own key; Codex runs whatever model its CLI is set
+    /// to, which Iris does not know, so no tier is claimed for it.
+    private func usageModelTierForCounting(provider: UsageProvider?) -> UsageModelTier? {
+        guard provider != .codex else { return nil }
+        return UsageModelTier.forIrisModelName(selectedModel)
+    }
 
     /// Points the shared monitor at consent.json and publik, starts its
     /// once-a-minute send, and starts counting catalog app launches.

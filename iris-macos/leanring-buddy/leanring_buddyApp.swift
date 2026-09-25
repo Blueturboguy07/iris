@@ -89,8 +89,13 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotific
             openCanonicalSettings()
         }
         // Auto-open the panel if the user still needs to do something:
-        // either they haven't onboarded yet, or permissions were revoked.
-        if !companionManager.hasCompletedOnboarding || !companionManager.allPermissionsGranted {
+        // either they haven't onboarded yet, or permissions were revoked, or
+        // the anonymous usage disclosure has never been on screen (it sits at
+        // the top of the panel, so this is how it is seen at first open —
+        // once; after that it waits in settings until it is answered).
+        if !companionManager.hasCompletedOnboarding
+            || !companionManager.allPermissionsGranted
+            || companionManager.usageSharingController.disclosureHasNeverBeenShown {
             menuBarPanelManager?.showPanelOnLaunch()
         }
         registerAsLoginItemIfNeeded()

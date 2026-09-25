@@ -42,6 +42,13 @@ struct CompanionPanelView: View {
     /// else on this panel notices. Without observing it the card would show
     /// whatever the balance was when the panel last happened to redraw.
     @ObservedObject var publikAPIAccount: PublikAPIAccount
+    /// The anonymous usage switch: the first-open card and the settings row.
+    @ObservedObject var usageSharingController: UsageSharingController
+    /// publik API vs the reader's own key vs a ChatGPT plan, priced by publik.
+    @ObservedObject var modelPriceComparisonStore: ModelPriceComparisonStore
+    /// The session's one publik API suggestion; this panel shows the
+    /// provider/model-pick one (decision point a).
+    @ObservedObject var publikAPINudgeCoordinator: PublikAPINudgeCoordinator
 
     /// Where the pointer is inside the panel, so the eye can glance toward it.
     /// Zero (looking straight ahead) whenever the pointer is elsewhere.
@@ -105,6 +112,9 @@ struct CompanionPanelView: View {
         _appInventoryService = ObservedObject(wrappedValue: companionManager.appInventoryService)
         _spendLedger = ObservedObject(wrappedValue: companionManager.spendLedger)
         _publikAPIAccount = ObservedObject(wrappedValue: companionManager.publikAPIAccount)
+        _usageSharingController = ObservedObject(wrappedValue: companionManager.usageSharingController)
+        _modelPriceComparisonStore = ObservedObject(wrappedValue: companionManager.modelPriceComparisonStore)
+        _publikAPINudgeCoordinator = ObservedObject(wrappedValue: companionManager.publikAPINudgeCoordinator)
     }
 
     var body: some View {
@@ -221,6 +231,16 @@ struct CompanionPanelView: View {
     @ViewBuilder
     private var settingsAndAccountContent: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // The anonymous usage disclosure, first thing at first open and
+            // until the reader answers it. Ordinary content in the scroll, like
+            // the setup helper below — never a modal, never blocking.
+            if usageSharingController.shouldShowTheDisclosureCard {
+                UsageSharingDisclosureCard(controller: usageSharingController)
+                    .padding(.top, 16)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 2)
+            }
+
             // The first thing a new reader sees, when it is showing: the brief
             // how-to, above everything else. It is ordinary content in the
             // scroll, never a modal, so it can never block or steal focus.
@@ -272,6 +292,8 @@ struct CompanionPanelView: View {
                             Divider()
                             autopilotAutonomyRow
                             editTerminalMinimizeRow
+                            Divider()
+                            UsageSharingSettingsRow(controller: usageSharingController)
                         }
                     case .connections:
                         accountSection
@@ -1218,6 +1240,12 @@ struct CompanionPanelView: View {
     private var bringYourOwnCredentialSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             providerPickerRows
+            providerOrModelPickNudge
+            ModelPriceComparisonView(
+                store: modelPriceComparisonStore,
+                irisModelName: companionManager.selectedModel,
+                selectedProvider: accountService.resolvedChatProvider?.usageProvider
+            )
             publikAPICard
             bringYourOwnKeyRows
             codexLoginRows
@@ -1269,12 +1297,32 @@ struct CompanionPanelView: View {
         }
     }
 
+    /// Decision point (a): shown under the picker right after a pick of a
+    /// provider or model that is not publik API, at most once a session.
+    @ViewBuilder
+    private var providerOrModelPickNudge: some View {
+        if let nudge = publikAPINudgeCoordinator.visibleNudge, nudge.decisionPoint == .modelSelection {
+            PublikAPINudgeCard(
+                nudge: nudge,
+                primaryActionTitle: "Use publik API",
+                onPrimaryAction: {
+                    publikAPINudgeCoordinator.readerActedOnTheNudge()
+                    chooseProvider(.publikAPI)
+                },
+                onDismiss: { publikAPINudgeCoordinator.dismiss() }
+            )
+        }
+    }
+
     private func providerIsSelected(_ provider: AssistantProviderPreference) -> Bool {
         accountService.resolvedChatProvider == provider
     }
 
     private func chooseProvider(_ provider: AssistantProviderPreference) {
         AssistantProviderChoice.current = provider
+        // A count of the pick and decision point (a). Neither can hold this
+        // tap up: the monitor returns at once and the nudge is an inline card.
+        companionManager.readerPickedAProviderOrModel()
         // The picker is also how somebody starts publik API from nothing: if
         // they choose it and there is no key yet, put the disclosure in front
         // of them rather than leaving a chosen-but-broken provider selected.
@@ -1526,11 +1574,17 @@ struct CompanionPanelView: View {
         }
     }
 
-    /// The justification, verbatim from `CONTRACT.md` section 12 item 1(b).
+    /// The justification `CONTRACT.md` section 12 item 1(b) requires.
     /// Says why it costs money, in dollars, and never names the provider.
+    ///
+    /// It used to say publik "passes that on at half the provider's list
+    /// price". That stopped being true on 2026-09-20, when every tier went to
+    /// list ("at cost"), and publik now sets its own tier prices — the
+    /// comparison above this card shows them next to the alternatives, served
+    /// by publik. The sentence now claims only what the code does.
     static let publikAPIWhyItCostsSentence =
         "The AI model behind Iris is run by a provider that charges per use. "
-        + "publik passes that on at half the provider's list price, nothing is "
+        + "publik API bills you per use at the prices shown above, nothing is "
         + "charged behind your back, and every call is visible on your dashboard."
 
     private func acceptDisclosureAndProvision() {

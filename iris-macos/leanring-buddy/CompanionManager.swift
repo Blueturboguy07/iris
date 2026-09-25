@@ -491,6 +491,31 @@ final class CompanionManager: ObservableObject {
     /// origin when a developer's Info.plist says so.
     private let publikBaseURL = AssistantTransport.configuredPublikBaseURL()
 
+    // MARK: - Usage counts, prices, and the one nudge
+
+    /// consent.json — where the anonymous usage switch lives beside crash
+    /// telemetry's (see `PublikConsentStore`). Lazy so a test that builds a
+    /// manager and never starts it never reads the real file.
+    lazy var publikConsentStore = PublikConsentStore()
+
+    /// The first-open card and the settings switch.
+    lazy var usageSharingController = UsageSharingController(
+        consentStore: publikConsentStore,
+        usageMonitor: UsageMonitor.shared
+    )
+
+    /// publik API vs the reader's own key vs a ChatGPT plan, priced by publik.
+    lazy var modelPriceComparisonStore = ModelPriceComparisonStore(publikBaseURL: publikBaseURL)
+
+    /// The session's one suggestion of publik API, at the three decision points.
+    lazy var publikAPINudgeCoordinator = PublikAPINudgeCoordinator(
+        currentProvider: { [weak self] in self?.accountService.resolvedChatProvider?.usageProvider },
+        currentIrisModelName: { [weak self] in self?.selectedModel ?? "claude-sonnet-4-6" },
+        currentComparison: { [weak self] in self?.modelPriceComparisonStore.comparison }
+    )
+
+    private var catalogAppLaunchObserver: NSObjectProtocol?
+
     // MARK: - Maintain mode
 
     /// Where an app came from decides whether Iris may ever patch it.
@@ -1371,6 +1396,21 @@ final class CompanionManager: ObservableObject {
         selectedModel = model
         preferences.set(model, forKey: "selectedClaudeModel")
         claudeAPI.model = model
+        readerPickedAProviderOrModel()
+    }
+
+    /// Decision point (a) and the `model_selected` count, for both a model pick
+    /// here and a provider pick in the settings panel. Fire-and-forget: the
+    /// monitor returns at once and the nudge only ever sets a published value.
+    func readerPickedAProviderOrModel() {
+        let provider = accountService.resolvedChatProvider?.usageProvider
+        UsageMonitor.shared.record(UsageEvent(
+            kind: .modelSelected,
+            provider: provider,
+            modelTier: UsageModelTier.forIrisModelName(selectedModel)
+        ))
+        publikAPINudgeCoordinator.providerChanged(to: provider)
+        publikAPINudgeCoordinator.readerPickedAProviderOrModel()
     }
 
     /// User preference for whether the Iris cursor should be shown.
@@ -1457,6 +1497,13 @@ final class CompanionManager: ObservableObject {
         // remembered: a top-up on the website, or another app on the same
         // account, may have moved it since Iris last looked.
         refreshThePublikAPIBalanceIfPublikAPIAnswers()
+
+        // Anonymous usage counts, the price comparison, and the nudge's cost
+        // watch. None of it is awaited: each either returns at once or runs on
+        // its own queue/task, and every failure is dropped.
+        startUsageMonitoring()
+        modelPriceComparisonStore.loadIfNeeded()
+        publikAPINudgeCoordinator.watchMeasuredSpend(on: spendLedger)
 
         startMaintainMode()
 
@@ -1676,6 +1723,7 @@ final class CompanionManager: ObservableObject {
 
         guideSessionController.onGuideCompleted = { [weak self] guide, branch in
             guard let self else { return }
+            UsageMonitor.shared.record(UsageEvent(kind: .guideCompleted, appSlug: guide.appSlug))
             // The one moment provenance is knowable for certain: a guide
             // that cloned a repo produced a source build Iris may later
             // patch; a guide that only downloaded a signed app did not.
@@ -1809,6 +1857,11 @@ final class CompanionManager: ObservableObject {
     func stop() {
         globalSummonHotkeyMonitor.stop()
         appLinkService.stopWatchingForRunningApps()
+        UsageMonitor.shared.stop()
+        if let catalogAppLaunchObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(catalogAppLaunchObserver)
+            self.catalogAppLaunchObserver = nil
+        }
         crashArtifactWatcher?.stop()
         crashArtifactWatcher = nil
         hangProbeTimer?.invalidate()
@@ -3023,6 +3076,20 @@ final class CompanionManager: ObservableObject {
 
                 let route = ChatResponseRoute(resolvedProvider: accountService.resolvedChatProvider)
                 dispatchedRoute = route
+
+                // One count, and decision point (b). Neither can hold the
+                // question up: `record` hops to the monitor's queue and the
+                // nudge only sets a published value the bar renders inline.
+                let frontmostCatalogAppSlugForThisQuestion = appInventoryService.frontmostCatalogAppSlug
+                UsageMonitor.shared.record(UsageEvent(
+                    kind: .aiCall,
+                    appSlug: frontmostCatalogAppSlugForThisQuestion,
+                    provider: accountService.resolvedChatProvider?.usageProvider,
+                    modelTier: UsageModelTier.forIrisModelName(selectedModel)
+                ))
+                publikAPINudgeCoordinator.anAICallIsGoingOut(
+                    frontmostCatalogAppSlug: frontmostCatalogAppSlugForThisQuestion
+                )
                 let (fullResponseText, _) = try await requestTheChatAnswer(
                     labeledImages: labeledImages,
                     conversationHistoryForTheAPI: historyForAPI,
@@ -3210,6 +3277,57 @@ final class CompanionManager: ObservableObject {
     /// settings panel opens — but only while publik API is the provider that
     /// answers. A reader on their own key or on Codex sees nothing new in the
     /// panel, so nothing new is fetched for them either.
+    // MARK: - Usage monitoring
+
+    /// Points the shared monitor at consent.json and publik, starts its
+    /// once-a-minute send, and starts counting catalog app launches.
+    private func startUsageMonitoring() {
+        // A test host is not a reader: it must never count as usage, and must
+        // never read or write the real consent file.
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+        let consentStore = publikConsentStore
+        UsageMonitor.shared.configure(UsageMonitor.Configuration(
+            isSharingEnabled: { consentStore.isUsageSharingOn },
+            installIdentifier: { consentStore.installIdentifier() },
+            irisVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "",
+            operatingSystem: "macos",
+            sender: URLSessionUsageEventSender(publikBaseURL: publikBaseURL),
+            currentDate: { Date() },
+            flushInterval: 60,
+            maximumDistinctCountsHeld: 200
+        ))
+        UsageMonitor.shared.start()
+        watchForCatalogAppLaunches()
+    }
+
+    /// `app_opened`: a launch of an app publik's catalog lists, matched by
+    /// bundle identifier. Only the catalog slug is counted — never the app's
+    /// name, its window, or anything it shows.
+    private func watchForCatalogAppLaunches() {
+        guard catalogAppLaunchObserver == nil else { return }
+        catalogAppLaunchObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            MainActor.assumeIsolated {
+                guard let self,
+                      let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                      let bundleIdentifier = application.bundleIdentifier else { return }
+                self.recordACatalogAppLaunch(bundleIdentifier: bundleIdentifier)
+            }
+        }
+    }
+
+    private func recordACatalogAppLaunch(bundleIdentifier: String) {
+        let matchingEntry = appInventoryService.inventoryEntries.first { entry in
+            guard let macBundleId = entry.macBundleId else { return false }
+            return macBundleId.caseInsensitiveCompare(bundleIdentifier) == .orderedSame
+        }
+        guard let catalogSlug = matchingEntry?.slug else { return }
+        UsageMonitor.shared.record(UsageEvent(kind: .appOpened, appSlug: catalogSlug))
+    }
+
     func refreshThePublikAPIBalanceIfPublikAPIAnswers() {
         guard accountService.resolvedChatProvider == .publikAPI, publikAPIAccount.hasKey else { return }
         let publikAPIAccount = self.publikAPIAccount

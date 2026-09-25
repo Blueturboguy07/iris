@@ -92,10 +92,13 @@ own message and exactly one link from the response (`top_up_url`, `claim_url` or
 `CONTRACT.md` §12 is binding and applies to Iris. In short:
 
 - A first-run card **after** provisioning succeeds, showing the balance line, the
-  one-sentence justification (the model provider charges per use; publik passes
-  it on at half the provider's list price; nothing is charged behind your back;
-  every call is on the dashboard), and a primary **"Link this computer & pick a
-  plan"** button to `claim_url`.
+  one-sentence justification (the model provider charges per use; publik API
+  bills per use at the prices Iris shows beside the other options; nothing is
+  charged behind your back; every call is on the dashboard), and a primary
+  **"Link this computer & pick a plan"** button to `claim_url`. (It used to
+  say "at half the provider's list price"; that stopped being true when the
+  tiers went to list on 2026-09-20. `CONTRACT.md` §12 item 1(b) still carries
+  the old wording and needs the same correction.)
 - The same button in settings while the install is unclaimed; it becomes "Add a
   plan or pack" once claimed.
 - **Never a silent starter.** The app must not spend starter credit before that

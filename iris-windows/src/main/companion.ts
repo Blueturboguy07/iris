@@ -14,6 +14,7 @@ import { PublikUsageSnapshot } from "../services/publik-api";
 import { addCreditUrlForRefusal } from "../services/publik-balance";
 import { CodexChatBackend, codexIsAvailable } from "./codex-session";
 import { PublikSetup } from "./publik-setup";
+import { type UsageProvider, usageProviderForTransportTier } from "../services/usage-monitor";
 import {
   PointTag,
   parsePointTags,
@@ -128,6 +129,16 @@ export class CompanionManager {
       return this.currentTransport().tier === "publik";
     } catch {
       return false;
+    }
+  }
+
+  /** Which route the next message would take, as the usage count's enum.
+   *  Null when nothing can answer. */
+  currentUsageProvider(): UsageProvider | null {
+    try {
+      return usageProviderForTransportTier(this.currentTransport().tier);
+    } catch {
+      return null;
     }
   }
 

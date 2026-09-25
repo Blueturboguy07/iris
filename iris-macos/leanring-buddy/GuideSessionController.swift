@@ -1064,6 +1064,9 @@ final class GuideSessionController: ObservableObject {
 
         guideBeingFollowed = fetchedGuide
         selectedBranch = resolvedHandoff.branch
+        // An anonymous count of which catalog app's guide was opened — the
+        // slug only, fire-and-forget (`UsageMonitor`).
+        UsageMonitor.shared.record(UsageEvent(kind: .guideStarted, appSlug: fetchedGuide.appSlug))
 
         // A link that names a branch and a step BEYOND THE START is carrying the
         // reader's own place across from the website, so it wins over whatever

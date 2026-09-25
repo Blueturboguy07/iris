@@ -1012,6 +1012,11 @@ struct OverlayEyeInputBarView: View {
                 historyAndNewChatRow
                 chatHistoryList
                 whateverTheExchangeIsUpTo
+
+                // publik API, suggested at most once a session: the first
+                // question in an app, or a measured cost on the reader's own
+                // key. Inline, under the exchange — the question already went.
+                EyeBarPublikAPINudgeSlot(companionManager: companionManager)
             }
         }
         // The bar is dismissed the way every transient input on macOS is. This

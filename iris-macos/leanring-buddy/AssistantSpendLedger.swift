@@ -92,10 +92,33 @@ nonisolated enum AssistantModelPrices {
     /// needing a new row every time a snapshot ships.
     ///
     /// Longest prefix wins, so a more specific row can override a family.
+    ///
+    /// Opus 4.5 and later list at a third of Opus 4 / 4.1 (Anthropic's pricing
+    /// page, read 2026-09-25): the bare "claude-opus-4" row alone priced the
+    /// picker's claude-opus-4-6 at $15 / $75 when it costs $5 / $25, tripling
+    /// every Opus figure this ledger showed. The specific rows below win by
+    /// longest prefix. The prices publik serves (`AssistantServerPublishedPrices`)
+    /// take precedence over this whole table once they have loaded.
     static let table: [(modelPrefix: String, pricing: AssistantModelPricing)] = [
         ("claude-opus-4", AssistantModelPricing(
             inputPerMillion: 15, cacheWritePerMillion: 18.75,
             cacheReadPerMillion: 1.50, outputPerMillion: 75
+        )),
+        ("claude-opus-4-5", AssistantModelPricing(
+            inputPerMillion: 5, cacheWritePerMillion: 6.25,
+            cacheReadPerMillion: 0.50, outputPerMillion: 25
+        )),
+        ("claude-opus-4-6", AssistantModelPricing(
+            inputPerMillion: 5, cacheWritePerMillion: 6.25,
+            cacheReadPerMillion: 0.50, outputPerMillion: 25
+        )),
+        ("claude-opus-4-7", AssistantModelPricing(
+            inputPerMillion: 5, cacheWritePerMillion: 6.25,
+            cacheReadPerMillion: 0.50, outputPerMillion: 25
+        )),
+        ("claude-opus-4-8", AssistantModelPricing(
+            inputPerMillion: 5, cacheWritePerMillion: 6.25,
+            cacheReadPerMillion: 0.50, outputPerMillion: 25
         )),
         ("claude-sonnet-4", AssistantModelPricing(
             inputPerMillion: 3, cacheWritePerMillion: 3.75,
@@ -122,6 +145,29 @@ nonisolated enum AssistantModelPrices {
             .filter { model.hasPrefix($0.modelPrefix) }
             .max { $0.modelPrefix.count < $1.modelPrefix.count }?
             .pricing
+    }
+}
+
+/// Anthropic's list prices as publik serves them (`GET /api/iris/model-prices`,
+/// the same rows the provider comparison shows), installed once they load.
+/// Preferred over the table above, so the ledger and the comparison can never
+/// disagree about what a model costs. Empty until the fetch succeeds, and the
+/// table is the fallback until then.
+@MainActor
+enum AssistantServerPublishedPrices {
+    private static var pricingByModel: [String: AssistantModelPricing] = [:]
+
+    static func install(_ published: [String: AssistantModelPricing]) {
+        pricingByModel = published
+    }
+
+    /// Exact id, or a dated snapshot of it (`claude-sonnet-4-6-20260115`).
+    static func pricing(forModel model: String) -> AssistantModelPricing? {
+        if let exact = pricingByModel[model] { return exact }
+        return pricingByModel
+            .filter { model.hasPrefix($0.key + "-") }
+            .max { $0.key.count < $1.key.count }?
+            .value
     }
 }
 
@@ -218,7 +264,8 @@ final class AssistantSpendLedger: ObservableObject {
     func record(model: String, usage: AssistantTokenUsage, route: AssistantSpendRoute) {
         guard route.isMetered, !usage.isEmpty else { return }
 
-        let pricing = AssistantModelPrices.pricing(forModel: model)
+        let pricing = AssistantServerPublishedPrices.pricing(forModel: model)
+            ?? AssistantModelPrices.pricing(forModel: model)
         let cost = pricing?.cost(of: usage)
         let entry = AssistantSpendEntry(model: model, usage: usage, cost: cost, at: Date())
 

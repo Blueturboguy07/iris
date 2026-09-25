@@ -7,7 +7,8 @@
 // `src/main/` would typecheck instead of failing. The renderer is plain
 // JavaScript and is not typechecked at all, so nothing else needs those types.
 // The surface below is exactly what tests/guide-renderer.test.ts,
-// tests/settings-renderer.test.ts, tests/chat-renderer.test.ts, and
+// tests/settings-renderer.test.ts, tests/chat-renderer.test.ts,
+// tests/usage-and-prices-renderer.test.ts, and
 // tests/guide-autopilot-entry.test.ts touch.
 //
 declare module "jsdom" {
@@ -18,10 +19,12 @@ declare module "jsdom" {
     hidden: boolean;
     /** Inputs only; the chat test types a question into `#input`. */
     value: string;
+    /** Checkboxes only; the usage switch. */
+    checked: boolean;
     title: string;
     readonly classList: { contains(token: string): boolean };
     readonly firstChild: { readonly textContent: string | null } | null;
-    readonly style: { display: string };
+    readonly style: { display: string; width: string };
     querySelector(selectors: string): JSDOMElement | null;
     click(): void;
   }
@@ -29,6 +32,7 @@ declare module "jsdom" {
   export interface JSDOMWindow {
     readonly document: {
       querySelector(selectors: string): JSDOMElement | null;
+      querySelectorAll(selectors: string): ArrayLike<JSDOMElement> & Iterable<JSDOMElement>;
     };
     readonly navigator: object;
     readonly location: object;

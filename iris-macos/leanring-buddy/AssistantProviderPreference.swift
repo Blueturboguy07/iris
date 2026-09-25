@@ -48,7 +48,10 @@ enum AssistantProviderPreference: String, CaseIterable, Sendable, Equatable {
     var explanation: String {
         switch self {
         case .publikAPI:
-            return "Works right away. You pay for what you use, at half what the model would cost you directly."
+            // Was "at half what the model would cost you directly" — untrue
+            // since the tiers went to list price on 2026-09-20. The price
+            // comparison under the picker carries the real numbers instead.
+            return "Works right away. You pay for what you use, from a prepaid balance."
         case .anthropicKey:
             return "Your key, your bill, straight to Anthropic. publik never sees it."
         case .codex:

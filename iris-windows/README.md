@@ -161,6 +161,21 @@ install is migrated on first run and the plaintext keys are removed. If Windows
 will not provide encryption, Iris says so and refuses to store a key rather than
 falling back to plaintext.
 
+**Anonymous usage counts, the price comparison, and one nudge a session**
+(`src/main/usage.ts`, founder request 2026-09-25; the Mac half is
+`UsageMonitor.swift` and friends). Counts of which catalog apps are opened,
+which provider and tier answer, and which installs start and finish — enums, a
+catalog slug and the hour, nothing else — go to publik's
+`/api/telemetry/usage` at most once a minute, and any failure drops the batch.
+The switch lives in the shared `%LOCALAPPDATA%\publik\consent.json` next to
+crash telemetry's (which stays opt-in); the disclosure shows in the chat and
+settings windows until it is answered, with the switch on. Settings shows
+publik API vs your own Anthropic key vs a ChatGPT plan, priced by publik's
+`/api/iris/model-prices` and nothing compiled in. publik API is suggested at
+most once a launch, at a provider/model pick or the first question on another
+provider, and "Not now" quiets it for 7 days. Not done here: a cost-threshold
+suggestion — this client does not measure what a reader's own key spends.
+
 ## What is deliberately absent
 
 Removed in the fork, and not coming back:
@@ -259,6 +274,10 @@ Being explicit, because the suite's green tick does not cover these:
 - **The publik API balance in the tray.** The settings panel and chat window are
   driven in jsdom, and every rule behind them is unit-tested, but the tray menu
   items and a real `GET /balance` round trip have only been built, not seen.
+- **Usage counts and the price fetch on a real network.** Batching, dropping,
+  the consent file and the comparison are unit-tested and the windows are
+  driven in jsdom, but a real send to publik and a real `app_opened` from the
+  2 s frontmost poll have only been built, not seen.
 - **The transplanted guide panel rendering.** `app.js` is proven only by having
   worked in `iris-desktop`; the Electron bridge under it is not covered by the
   suite. In particular, whether `localStorage` works on this window's `file://`

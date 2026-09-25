@@ -44,6 +44,7 @@ import {
   type SquirrelStartupPlan,
 } from "../services/launch-arguments";
 import { FIRST_RUN_WINDOW_GEOMETRY, SETTINGS_WINDOW_GEOMETRY } from "../services/window-geometry";
+import { UsageAndPricing } from "./usage";
 
 /**
  * index.ts
@@ -133,6 +134,9 @@ let codexAvailableCached = false;
 const account = new AccountSession(settings);
 let companion: CompanionManager;
 let maintain: MaintainController;
+/** Anonymous usage counts, the price comparison, and the one publik API
+ *  nudge. Nothing in it is ever awaited by a window or a query. */
+let usageAndPricing: UsageAndPricing;
 let cursorBuddyInterval: ReturnType<typeof setInterval> | null = null;
 
 /** A guide link that arrived before the panel was ready to receive it. */
@@ -676,6 +680,9 @@ function openAutopilotWindow(slug: string): BrowserWindow {
     webPreferences: { preload: preloadPath(), contextIsolation: true, nodeIntegration: false },
   });
   const win = autopilotWindow;
+  // An anonymous count of which catalog app's install started — the slug
+  // only, and it returns at once (`main/usage.ts`).
+  usageAndPricing?.record({ kind: "guide_started", appSlug: slug });
   // A run is now active, so the tray offers 'Stop the install' for its duration.
   setTrayInstallActive(true);
   void win.loadFile(rendererPath("autopilot", "index.html"), { query: { slug } });
@@ -932,6 +939,7 @@ function autopilotController(): AutopilotController {
       setTimeout(() => void companion.pointAtGate(pointingTarget), settleDelayMs);
     },
     onFinished: (finishedInstall: FinishedInstall) => {
+      usageAndPricing?.record({ kind: "guide_completed", appSlug: finishedInstall.slug });
       // The one moment provenance is knowable for certain — a guide-source
       // clone maintain mode may later patch, versus a signed download it never
       // may. Recorded before anything opens, mirroring macOS's
@@ -1163,13 +1171,31 @@ function handleGuideCommand(command: string, args: Record<string, unknown>): unk
 // MARK: - IPC
 
 function setupIPC(): void {
-  ipcMain.handle("chat:query", async (_event, text: string) => companion.processQuery(text));
+  ipcMain.handle("chat:query", async (_event, text: string) => {
+    // One anonymous count and nudge decision point (b). Both return at once;
+    // the question is not held up by either.
+    usageAndPricing.anAICallIsGoingOut();
+    return companion.processQuery(text);
+  });
 
   // Read by the chat window right after `chat:query` rejects: the clean
   // sentence, and the one "Add credit" link when the failure was a 402. An
   // invoke rejection carries only a (prefixed) message, so the link has to
   // come back this way.
   ipcMain.handle("chat:lastFailure", () => companion.lastChatFailure());
+
+  // MARK: Usage counts, prices, and the one nudge
+  //
+  // The switch lives in the shared consent.json; the disclosure is shown by
+  // the renderers (chat and settings) until it is answered, and counting
+  // starts once it has been on screen. See `main/usage.ts`.
+  ipcMain.handle("usage:state", () => usageAndPricing.usageSharingView());
+  ipcMain.handle("usage:disclosureShown", () => usageAndPricing.disclosureWasShown());
+  ipcMain.handle("usage:setSharing", (_event, sharingOn: boolean) => usageAndPricing.setSharing(Boolean(sharingOn)));
+  ipcMain.handle("prices:comparison", () => usageAndPricing.loadComparisonIfNeeded());
+  ipcMain.handle("nudge:current", () => usageAndPricing.visibleNudge());
+  ipcMain.handle("nudge:dismiss", () => usageAndPricing.dismissNudge());
+  ipcMain.handle("nudge:acted", () => usageAndPricing.nudgeActedOn());
 
   ipcMain.handle("settings:getAll", () => ({
     ...settings.getAll(),
@@ -1208,6 +1234,10 @@ function setupIPC(): void {
     if (key === "providerPreference") {
       // Choosing (or leaving) publik API is what shows or hides the balance.
       void refreshPublikBalanceIfAnswering();
+    }
+    if (key === "providerPreference" || key === "claudeModel") {
+      // One anonymous count and nudge decision point (a).
+      usageAndPricing.readerPickedAProviderOrModel();
     }
     if (key === "alwaysOnTop" && chatWindow && !chatWindow.isDestroyed()) {
       chatWindow.setAlwaysOnTop(Boolean(value), "screen-saver");
@@ -1348,8 +1378,19 @@ if (gotSingleInstanceLock) {
     // /balance, a new key — reaches the tray and the open windows from here.
     publikSetup.onBalanceChanged(() => publishPublikBalance());
     maintain = new MaintainController(maintainHost());
+    usageAndPricing = new UsageAndPricing({
+      settings,
+      broadcast,
+      irisVersion: app.getVersion(),
+      currentProvider: () => companion.currentUsageProvider(),
+    });
+    maintain.onFrontmostCatalogApp = (slug, processId) => usageAndPricing.catalogAppIsFrontmost(slug, processId);
 
     setupIPC();
+
+    // The once-a-minute usage send and the one price fetch. Neither blocks
+    // anything below; every failure is dropped.
+    usageAndPricing.start();
 
     createTray({
       onChat: () => showChatWindow(),

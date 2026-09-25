@@ -159,6 +159,28 @@ provider answering (`CompanionManager.answersWithPublikApi`). A 402's link
 reaches the chat window through `chat:lastFailure`, because an invoke rejection
 carries only a message.
 
+### Anonymous usage counts, prices, and the one nudge
+
+`main/usage.ts` owns the file path, the timer and the network; every decision
+is in `services/` and tested (`tests/usage-monitor.test.ts`,
+`tests/consent-and-nudge.test.ts`, `tests/usage-and-prices-renderer.test.ts`):
+
+- `services/usage-monitor.ts` — counts five enum-only events per hour, sends
+  at most once a minute, drops a batch on ANY failure. `record` is synchronous
+  and never throws; nothing awaits a send. Off means nothing is held or sent.
+- `services/consent-file.ts` — the shared `consent.json`. `telemetry` (crash
+  reports) is never written true; unknown keys survive; `usage` is absent
+  until the disclosure has been on screen, then defaults on.
+- `services/model-price-comparison.ts` — parses publik's
+  `/api/iris/model-prices` and reprices the own-key row for the model this PC
+  picked. No price is compiled in; unreachable means "unavailable", not a guess.
+- `services/publik-api-nudge.ts` — one suggestion a session, at a provider or
+  model pick or the session's first question on another provider; "Not now"
+  is 7 days (`publikNudgeLastDismissedAt` in settings). No cost-threshold
+  point: this client does not measure own-key spend, so it does not pretend to.
+
+`IRIS_E2E=1` turns counting off entirely, so a CI run never reaches publik as usage.
+
 ### Deep links
 
 `services/deep-link-parser.ts` is a port of `parse_guide_deep_link` in

@@ -146,6 +146,9 @@ export class MaintainController {
    *  to attribute a confirmed hang to a slug/pid (mirrors macOS reading
    *  `NSWorkspace.frontmostApplication` inside its verdict closure). */
   private lastProbedFrontmostApp: FrontmostCatalogApp | undefined;
+  /** Told each time the 2 s poll finds one of ours in front. Set by
+   *  `main/index.ts` for the anonymous usage count; never awaited. */
+  onFrontmostCatalogApp: ((slug: string, processId: number) => void) | undefined;
   /** The hang the probe is currently tracking per pid, so the ask fires ONCE
    *  on recovery/exit rather than every tick — the Windows analog of macOS's
    *  `confirmedHangByPid`. Mutable `seconds` so a still-hanging app updates its
@@ -256,6 +259,9 @@ export class MaintainController {
       const frontmost = await this.appInventory.frontmostCatalogApp();
       this.lastProbedFrontmostApp = frontmost;
       if (frontmost === undefined) return;
+      // The anonymous usage count's "app opened" rides this same poll rather
+      // than adding a second one (`main/usage.ts` counts a new pid once).
+      this.onFrontmostCatalogApp?.(frontmost.slug, frontmost.pid);
       await this.hangProbe.probe(frontmost.pid);
     } finally {
       this.hangTickInFlight = false;

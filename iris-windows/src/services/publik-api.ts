@@ -72,15 +72,20 @@ export function formatMicrosAsDollars(micros: number): string {
 }
 
 /**
- * The one-sentence justification, verbatim from CONTRACT.md section 12 (b).
+ * The one-sentence justification CONTRACT.md section 12 (b) requires.
  *
  * It is a fixed string rather than something assembled at the call site because
  * section 12 requires it to appear wherever money is mentioned, and because
- * every clause in it is a promise: half the provider's list price, nothing
- * charged silently, every call visible on the dashboard.
+ * every clause in it is a promise: billed per use at the prices Iris shows,
+ * nothing charged silently, every call visible on the dashboard.
+ *
+ * It used to promise "half the provider's list price". That stopped being true
+ * on 2026-09-20, when every tier went to list, and publik now sets its own tier
+ * prices; the settings window shows them beside the alternatives, served by
+ * publik (`services/model-price-comparison.ts`).
  */
 export const WHY_IT_COSTS_SENTENCE =
-  "The AI model behind Iris is run by a provider that charges per use; publik passes that on at half the provider's list price, nothing is charged behind your back, and every call is visible on your dashboard.";
+  "The AI model behind Iris is run by a provider that charges per use; publik API bills you per use at the prices Iris shows in Settings, nothing is charged behind your back, and every call is visible on your dashboard.";
 
 /** The disclosure shown BEFORE provisioning. Consent precedes the mint (section 3.2 [S4]). */
 export const PROVISIONING_DISCLOSURE =

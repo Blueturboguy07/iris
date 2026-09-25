@@ -103,6 +103,18 @@ async function openPanel(
       onPublikBalanceChanged: (callback: (balance: FakePublikBalance | null) => void) => {
         pushBalanceChange = callback;
       },
+      // Usage counts, prices and the nudge have their own suite
+      // (usage-and-prices-renderer.test.ts); here they are simply quiet.
+      usageState: async () => ({ state: "sharing", showDisclosure: false }),
+      usageDisclosureShown: async () => ({ state: "sharing", showDisclosure: false }),
+      setUsageSharing: async () => ({ state: "sharing", showDisclosure: false }),
+      onUsageChanged: () => {},
+      priceComparison: async () => ({ state: "unavailable" }),
+      onPriceComparisonChanged: () => {},
+      currentNudge: async () => null,
+      dismissNudge: async () => {},
+      nudgeActedOn: async () => {},
+      onNudgeChanged: () => {},
     },
   });
   window.eval(inlineScript);

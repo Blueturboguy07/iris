@@ -63,6 +63,28 @@ contextBridge.exposeInMainWorld("iris", {
   },
   completeFirstRun: () => ipcRenderer.invoke("firstRun:complete"),
 
+  // Anonymous usage counts. The switch lives in the shared consent.json; the
+  // renderers show the disclosure until it is answered.
+  usageState: () => ipcRenderer.invoke("usage:state"),
+  usageDisclosureShown: () => ipcRenderer.invoke("usage:disclosureShown"),
+  setUsageSharing: (sharingOn: boolean) => ipcRenderer.invoke("usage:setSharing", sharingOn),
+  onUsageChanged: (callback: (state: unknown) => void) => {
+    ipcRenderer.on("usage:changed", (_event, state) => callback(state));
+  },
+  // The price comparison, served by publik. Null-free: `state` says whether
+  // there is anything to show.
+  priceComparison: () => ipcRenderer.invoke("prices:comparison"),
+  onPriceComparisonChanged: (callback: (view: unknown) => void) => {
+    ipcRenderer.on("prices:changed", (_event, view) => callback(view));
+  },
+  // The session's one publik API suggestion.
+  currentNudge: () => ipcRenderer.invoke("nudge:current"),
+  dismissNudge: () => ipcRenderer.invoke("nudge:dismiss"),
+  nudgeActedOn: () => ipcRenderer.invoke("nudge:acted"),
+  onNudgeChanged: (callback: (nudge: unknown) => void) => {
+    ipcRenderer.on("nudge:changed", (_event, nudge) => callback(nudge));
+  },
+
   // Codex. Iris opens the login in a console and never sees the credential.
   codexLogin: () => ipcRenderer.invoke("codex:login"),
   refreshCodexAvailability: () => ipcRenderer.invoke("codex:refresh"),

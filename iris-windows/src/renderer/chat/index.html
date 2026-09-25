@@ -127,6 +127,19 @@
     }
     #send:hover { background: var(--accent-hover); }
     #send:disabled { opacity: 0.4; cursor: default; }
+
+    /* Inline cards — the usage disclosure and the one publik API suggestion.
+       In the flow of the window, never a modal, never over the input. */
+    .inline-card {
+      margin: 10px 16px 0; padding: 10px 12px; border: 1px solid var(--border);
+      border-radius: var(--radius-md); background: var(--bg-secondary); display: none; flex-shrink: 0;
+    }
+    .inline-card.visible { display: block; }
+    .inline-card h3 { font-size: 12px; margin-bottom: 4px; }
+    .inline-card p { color: var(--text-secondary); font-size: 12px; line-height: 1.5; margin-bottom: 8px; }
+    .inline-card .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .inline-card label { color: var(--text-primary); font-size: 12px; display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+    .inline-card button.primary, .inline-card button.secondary { flex: 0 0 auto; padding: 6px 12px; }
   </style>
 </head>
 <body>
@@ -150,6 +163,18 @@
     <button class="win-btn" id="close-btn" title="Close">&#10005;</button>
   </div>
 
+  <!-- The anonymous usage disclosure, until it is answered. Its switch starts
+       on; counting starts once it has been on screen (`main/usage.ts`). -->
+  <div class="inline-card" id="usage-disclosure">
+    <h3>Anonymous usage counts</h3>
+    <p id="usage-disclosure-text"></p>
+    <label><input type="checkbox" id="usage-disclosure-switch" checked> Share anonymous usage counts</label>
+    <div class="row">
+      <button class="primary" id="usage-continue">Continue</button>
+      <button class="secondary" id="usage-turn-off">Turn off</button>
+    </div>
+  </div>
+
   <div id="messages">
     <div id="welcome">
       <h2>Ask about your screen</h2>
@@ -165,6 +190,16 @@
     <div class="row">
       <input type="password" id="byo-key" placeholder="…or paste an Anthropic API key">
       <button class="secondary" id="save-key" style="flex:0 0 auto">Save</button>
+    </div>
+  </div>
+
+  <!-- The session's one publik API suggestion. The question already went. -->
+  <div class="inline-card" id="nudge-card">
+    <h3 id="nudge-headline"></h3>
+    <p id="nudge-detail"></p>
+    <div class="row">
+      <button class="primary" id="nudge-compare">Compare in Settings</button>
+      <button class="secondary" id="nudge-not-now" title="Hides suggestions like this for 7 days.">Not now</button>
     </div>
   </div>
 
@@ -324,6 +359,49 @@
     document.getElementById('min-btn').addEventListener('click', () => window.iris.minimizeWindow());
     document.getElementById('close-btn').addEventListener('click', () => window.iris.closeWindow());
 
+    // MARK: Anonymous usage counts
+
+    document.getElementById('usage-disclosure-text').textContent =
+      'Iris shares anonymous usage counts (which catalog apps you open and which AI tier you pick) ' +
+      'to improve recommendations. No content, no identity.';
+
+    function renderUsage(view) {
+      document.getElementById('usage-disclosure').classList.toggle('visible', Boolean(view && view.showDisclosure));
+    }
+    async function loadUsage() {
+      let view = await window.iris.usageState();
+      if (view.showDisclosure) view = await window.iris.usageDisclosureShown();
+      renderUsage(view);
+    }
+    document.getElementById('usage-continue').addEventListener('click', async () =>
+      renderUsage(await window.iris.setUsageSharing(document.getElementById('usage-disclosure-switch').checked)));
+    document.getElementById('usage-turn-off').addEventListener('click', async () =>
+      renderUsage(await window.iris.setUsageSharing(false)));
+    window.iris.onUsageChanged((view) => renderUsage(view));
+
+    // MARK: The one publik API suggestion
+
+    function renderNudge(nudge) {
+      const card = document.getElementById('nudge-card');
+      if (!nudge) {
+        card.classList.remove('visible');
+        return;
+      }
+      document.getElementById('nudge-headline').textContent = nudge.headline;
+      document.getElementById('nudge-detail').textContent = nudge.detail;
+      card.classList.add('visible');
+    }
+    document.getElementById('nudge-compare').addEventListener('click', async () => {
+      await window.iris.nudgeActedOn();
+      renderNudge(null);
+      window.iris.openSettings();
+    });
+    document.getElementById('nudge-not-now').addEventListener('click', async () => {
+      await window.iris.dismissNudge();
+      renderNudge(null);
+    });
+    window.iris.onNudgeChanged((nudge) => renderNudge(nudge));
+
     window.iris.onStage(({ label }) => showStatus(label));
     window.iris.onAccountChanged(() => refreshAccountState());
     window.iris.onPublikBalanceChanged((balance) => renderPublikBalance(balance));
@@ -331,6 +409,8 @@
     window.addEventListener('focus', () => { refreshPublikBalance(); });
 
     refreshAccountState().then(() => refreshPublikBalance());
+    loadUsage();
+    window.iris.currentNudge().then((nudge) => renderNudge(nudge));
   </script>
 </body>
 </html>

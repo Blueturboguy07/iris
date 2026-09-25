@@ -75,11 +75,50 @@
     .status.warn { color: var(--error); }
     /* A publik API balance under $0.25: a warning, never a block. */
     .status.low, .note.low { color: var(--warn); }
+
+    /* Inline cards: the usage disclosure and the one publik API suggestion.
+       Content in the page, never a modal. */
+    .card {
+      border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel);
+      padding: 12px; margin-bottom: 14px;
+    }
+    .card h3 { font-size: 13px; margin-bottom: 6px; }
+    .card p { color: var(--text-dim); line-height: 1.5; margin-bottom: 8px; }
+
+    /* The price comparison: one row per route, bars scaled to the largest
+       value of the same kind on screen. */
+    .price-option { border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; margin-top: 8px; }
+    .price-option.highlighted { border-color: rgba(99, 140, 255, 0.45); background: rgba(99, 140, 255, 0.08); }
+    .price-option .title { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; margin-bottom: 4px; }
+    .price-option .model { color: var(--text-faint); font-size: 11px; }
+    .bar-row { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+    .bar-row .caption { width: 44px; color: var(--text-faint); font-size: 11px; flex: 0 0 auto; }
+    .bar-row .track { flex: 1 1 auto; height: 5px; border-radius: 3px; background: var(--border); overflow: hidden; }
+    .bar-row .fill { height: 5px; border-radius: 3px; background: var(--text-faint); }
+    .price-option.highlighted .bar-row .fill { background: var(--accent); }
+    .bar-row .value { width: 96px; text-align: right; font-size: 11px; color: var(--text-dim); flex: 0 0 auto; font-variant-numeric: tabular-nums; }
   </style>
 </head>
 <body>
   <h1>Iris</h1>
   <div class="lede">publik's desktop companion. Text-first.</div>
+
+  <!-- The anonymous usage disclosure, until it is answered. Its switch starts
+       on; counting starts once it has been on screen. -->
+  <div class="card" id="usage-disclosure" style="display:none">
+    <h3>Anonymous usage counts</h3>
+    <p id="usage-disclosure-text"></p>
+    <div class="checkbox">
+      <input type="checkbox" id="usage-disclosure-switch" checked>
+      <label for="usage-disclosure-switch">Share anonymous usage counts</label>
+    </div>
+    <div class="row">
+      <button class="accent" id="usage-continue">Continue</button>
+      <button id="usage-turn-off">Turn off</button>
+      <span style="flex:1"></span>
+      <button id="usage-what-is-sent">What is sent</button>
+    </div>
+  </div>
 
   <section>
     <h2>How Iris answers</h2>
@@ -95,6 +134,19 @@
         Chosen here, and never switched for you: if the one you pick stops working,
         Iris says so instead of quietly spending on a different account.
       </div>
+    </div>
+    <!-- Decision point (a) of the nudge policy: at most once a session. -->
+    <div class="card" id="nudge-card" style="display:none">
+      <h3 id="nudge-headline"></h3>
+      <p id="nudge-detail"></p>
+      <div class="row">
+        <button class="accent" id="nudge-use-publik">Use publik API</button>
+        <button id="nudge-not-now" title="Hides suggestions like this for 7 days.">Not now</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>What each option costs</label>
+      <div id="price-comparison"><div class="note">Loading prices…</div></div>
     </div>
   </section>
 
@@ -227,6 +279,11 @@
 
   <section>
     <h2>Privacy</h2>
+    <div class="checkbox">
+      <input type="checkbox" id="usageSharing">
+      <label for="usageSharing">Share anonymous usage counts</label>
+    </div>
+    <div class="note" id="usage-sharing-note" style="margin-bottom:10px"></div>
     <div class="note">
       Screenshots are held in memory, sent only to the model transport you are using,
       and never written to disk. Iris does not record audio: voice was removed in this fork.
@@ -362,6 +419,153 @@
       }
     }
 
+    // MARK: Anonymous usage counts
+
+    const USAGE_DISCLOSURE =
+      'Iris shares anonymous usage counts (which catalog apps you open and which AI tier you pick) ' +
+      'to improve recommendations. No content, no identity.';
+    el('usage-disclosure-text').textContent = USAGE_DISCLOSURE;
+
+    function renderUsage(view) {
+      if (!view) return;
+      el('usage-disclosure').style.display = view.showDisclosure ? '' : 'none';
+      el('usageSharing').checked = view.state === 'sharing';
+      el('usage-sharing-note').textContent = view.state === 'sharing'
+        ? 'On. Which catalog apps you open and which AI tier you pick, counted by the hour. No content, no identity. Turning it off also deletes what was sent.'
+        : 'Off. Iris counts nothing.';
+    }
+
+    async function loadUsage() {
+      let view = await window.iris.usageState();
+      // The card is on screen: from now the default (on) is in force.
+      if (view.showDisclosure) view = await window.iris.usageDisclosureShown();
+      renderUsage(view);
+    }
+
+    el('usage-continue').addEventListener('click', async () =>
+      renderUsage(await window.iris.setUsageSharing(el('usage-disclosure-switch').checked)));
+    el('usage-turn-off').addEventListener('click', async () => {
+      el('usage-disclosure-switch').checked = false;
+      renderUsage(await window.iris.setUsageSharing(false));
+    });
+    el('usage-what-is-sent').addEventListener('click', () =>
+      window.iris.openExternal('https://publikhq.com/privacy#iris'));
+    el('usageSharing').addEventListener('change', async (event) =>
+      renderUsage(await window.iris.setUsageSharing(event.target.checked)));
+    window.iris.onUsageChanged((view) => renderUsage(view));
+
+    // MARK: The price comparison (every number from publik)
+
+    function money(value) {
+      return value > 0 && value < 0.1 ? '$' + value.toFixed(3) : '$' + value.toFixed(2);
+    }
+
+    function barRow(caption, valueText, fraction) {
+      const row = document.createElement('div');
+      row.className = 'bar-row';
+      const captionEl = document.createElement('span');
+      captionEl.className = 'caption';
+      captionEl.textContent = caption;
+      const track = document.createElement('span');
+      track.className = 'track';
+      const fill = document.createElement('div');
+      fill.className = 'fill';
+      fill.style.width = Math.max(2, Math.round(Math.min(1, Math.max(0, fraction)) * 100)) + '%';
+      track.appendChild(fill);
+      const value = document.createElement('span');
+      value.className = 'value';
+      value.textContent = valueText;
+      row.append(captionEl, track, value);
+      return row;
+    }
+
+    function renderPrices(view) {
+      const container = el('price-comparison');
+      container.textContent = '';
+      if (!view || view.state === 'loading') {
+        const note = document.createElement('div');
+        note.className = 'note';
+        note.textContent = 'Loading prices…';
+        container.appendChild(note);
+        return;
+      }
+      if (view.state !== 'loaded' || !view.options) {
+        const note = document.createElement('div');
+        note.className = 'note';
+        note.textContent = 'Prices are unavailable right now. They come from publik and are never guessed.';
+        container.appendChild(note);
+        return;
+      }
+      const perMillion = view.options.flatMap((option) => [option.inputUsdPerMillion || 0, option.outputUsdPerMillion || 0]);
+      const largestPerMillion = Math.max(0, ...perMillion);
+      const largestMonthly = Math.max(0, ...view.options.map((option) => option.estimatedMonthlyUsd));
+      const preference = latestSettings && latestSettings.providerPreference;
+      const highlighted = preference === 'anthropicKey' ? 'anthropic-key' : preference === 'codex' ? 'codex' : 'publik-api';
+      for (const option of view.options) {
+        const card = document.createElement('div');
+        card.className = 'price-option' + (option.provider === highlighted ? ' highlighted' : '');
+        const title = document.createElement('div');
+        title.className = 'title';
+        const label = document.createElement('strong');
+        label.textContent = option.label;
+        const model = document.createElement('span');
+        model.className = 'model';
+        model.textContent = option.servedBy && option.servedBy !== option.model
+          ? option.model + ' · ' + option.servedBy + ' answers'
+          : option.model;
+        title.append(label, model);
+        card.appendChild(title);
+        if (option.billing === 'per_token' && option.inputUsdPerMillion !== null && option.outputUsdPerMillion !== null) {
+          card.appendChild(barRow('In', money(option.inputUsdPerMillion) + ' / 1M', largestPerMillion ? option.inputUsdPerMillion / largestPerMillion : 0));
+          card.appendChild(barRow('Out', money(option.outputUsdPerMillion) + ' / 1M', largestPerMillion ? option.outputUsdPerMillion / largestPerMillion : 0));
+          card.appendChild(barRow('Month', '≈ ' + money(option.estimatedMonthlyUsd), largestMonthly ? option.estimatedMonthlyUsd / largestMonthly : 0));
+        } else {
+          card.appendChild(barRow('Month', money(option.estimatedMonthlyUsd) + ' flat', largestMonthly ? option.estimatedMonthlyUsd / largestMonthly : 0));
+        }
+        const note = document.createElement('div');
+        note.className = 'note';
+        note.textContent = option.note;
+        card.appendChild(note);
+        const source = document.createElement('div');
+        source.className = 'note';
+        source.textContent = 'Source: ' + option.source;
+        card.appendChild(source);
+        container.appendChild(card);
+      }
+      for (const text of [view.assumption, view.caveat]) {
+        const note = document.createElement('div');
+        note.className = 'note';
+        note.textContent = text;
+        container.appendChild(note);
+      }
+    }
+
+    window.iris.onPriceComparisonChanged((view) => renderPrices(view));
+
+    // MARK: The one publik API suggestion (decision point a)
+
+    function renderNudge(nudge) {
+      const card = el('nudge-card');
+      if (!nudge) {
+        card.style.display = 'none';
+        return;
+      }
+      el('nudge-headline').textContent = nudge.headline;
+      el('nudge-detail').textContent = nudge.detail;
+      card.style.display = '';
+    }
+    el('nudge-not-now').addEventListener('click', async () => {
+      await window.iris.dismissNudge();
+      renderNudge(null);
+    });
+    el('nudge-use-publik').addEventListener('click', async () => {
+      await window.iris.nudgeActedOn();
+      el('providerPreference').value = 'publikApi';
+      await window.iris.setSetting('providerPreference', 'publikApi');
+      load();
+    });
+    window.iris.onNudgeChanged((nudge) => renderNudge(nudge));
+
     el('codex-login').addEventListener('click', () => {
       window.iris.codexLogin();
       el('codex-status').textContent = 'Finish signing in in the console window, then Re-check.';
@@ -374,7 +578,8 @@
 
     el('providerPreference').addEventListener('change', async () => {
       await window.iris.setSetting('providerPreference', el('providerPreference').value);
-      load();
+      await load();
+      renderPrices(await window.iris.priceComparison());
     });
 
     el('publik-setup').addEventListener('click', async () => {
@@ -436,8 +641,11 @@
       load();
     });
 
-    el('claudeModel').addEventListener('change', (event) =>
-      window.iris.setSetting('claudeModel', event.target.value));
+    el('claudeModel').addEventListener('change', async (event) => {
+      await window.iris.setSetting('claudeModel', event.target.value);
+      // The own-key row follows the model picked here.
+      renderPrices(await window.iris.priceComparison());
+    });
     el('alwaysOnTop').addEventListener('change', (event) =>
       window.iris.setSetting('alwaysOnTop', event.target.checked));
     el('cursorBuddyEnabled').addEventListener('change', (event) =>
@@ -457,7 +665,10 @@
     });
     // Opening settings is when the reader looks at their balance, so it is
     // read fresh from publik rather than shown from the last time.
+    loadUsage();
     load().then(async () => {
+      renderPrices(await window.iris.priceComparison());
+      renderNudge(await window.iris.currentNudge());
       const balance = await window.iris.refreshPublikBalance();
       if (!latestSettings) return;
       latestSettings.publikBalance = balance;

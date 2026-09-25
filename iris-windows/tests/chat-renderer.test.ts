@@ -85,6 +85,16 @@ async function openChat(options: {
       openSettings: () => bridgeCalls.push("openSettings"),
       minimizeWindow: () => bridgeCalls.push("minimizeWindow"),
       closeWindow: () => bridgeCalls.push("closeWindow"),
+      // Usage counts and the nudge have their own suite
+      // (usage-and-prices-renderer.test.ts); here they are simply quiet.
+      usageState: async () => ({ state: "sharing", showDisclosure: false }),
+      usageDisclosureShown: async () => ({ state: "sharing", showDisclosure: false }),
+      setUsageSharing: async () => ({ state: "sharing", showDisclosure: false }),
+      onUsageChanged: () => {},
+      currentNudge: async () => null,
+      dismissNudge: async () => {},
+      nudgeActedOn: async () => {},
+      onNudgeChanged: () => {},
     },
   });
   window.eval(inlineScript);

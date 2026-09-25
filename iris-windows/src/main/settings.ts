@@ -83,6 +83,11 @@ export interface SettingsSchema {
   /** False until the first-run flow has been completed once. */
   hasCompletedFirstRun: boolean;
 
+  /** When the reader last pressed "Not now" on a publik API suggestion, in ms
+   *  since the epoch; 0 = never. Every suggestion stays away for 7 days after
+   *  it (`services/publik-api-nudge.ts`). */
+  publikNudgeLastDismissedAt: number;
+
   /** The release tag (e.g. "iris-v0.9.11") the self-update check last
    *  notified about, so a reader who dismisses the notice is not shown it
    *  again every few hours for the same release — only when a newer one
@@ -109,6 +114,7 @@ const defaults: SettingsSchema = {
   lastGuideSlug: "",
   hasCompletedFirstRun: false,
   lastAnnouncedUpdateTag: "",
+  publikNudgeLastDismissedAt: 0,
 };
 
 /**

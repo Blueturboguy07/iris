@@ -80,7 +80,7 @@ export function composeNudge(options: {
       decisionPoint: options.decisionPoint,
       headline: `publik API at this tier: ${publikPrice}`,
       detail:
-        `${publik.model}${answeredBy}: ${publikPrice}. Your key's ${key.model}: ` +
+        `${publik.model}${answeredBy}. Your key's ${key.model}: ` +
         `${dollars(key.inputUsdPerMillion)} / ${dollars(key.outputUsdPerMillion)}. A different model answers on publik API.`,
     };
   }

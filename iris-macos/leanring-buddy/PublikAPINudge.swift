@@ -279,10 +279,12 @@ final class PublikAPINudgeCoordinator: ObservableObject {
                     detail: "Measured from Anthropic's own token counts at list price. " + comparisonSentence
                 )
             }
+            // The headline already carries publik's price, so the detail
+            // names the model behind it and the key's price once each.
             return PublikAPINudge(
                 decisionPoint: decisionPoint,
                 headline: "publik API at this tier: \(publikPriceText)",
-                detail: comparisonSentence
+                detail: "\(publik.model)\(answeredBy). Your key's \(key.model): \(keyPriceText). A different model answers on publik API."
             )
         case .codex:
             // Flat-rate: no cost is measured and no price is compared against a

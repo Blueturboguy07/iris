@@ -22,9 +22,10 @@
 //      Anthropic key) is gone. It was free to anyone signed in and capped only
 //      per-user, so exposure scaled with the number of accounts — which is
 //      what kept Iris from being publicly installable at all. publik API
-//      replaces it: the same "it just works" first run, paid by the person
-//      using it. The server route stays up for older installed builds; this
-//      build never calls it.
+//      replaces it, paid by the person using it: a new computer starts at
+//      $0.00, and linking it to a publik account gives $0.05 of free use,
+//      once per account. The server route stays up for older installed
+//      builds; this build never calls it.
 //    - The Claude Code OAuth token route (`sk-ant-oat…`, `claude setup-token`,
 //      importing an existing `claude login`) is gone for good. Anthropic's own
 //      terms forbid a third-party app collecting, storing or intermediating
@@ -409,8 +410,8 @@ enum AssistantTransportError: Error, Equatable, Sendable {
     case noCredentialsAvailable
     /// publik API is the chosen provider but no key is stored yet.
     case publikAPINotSetUp
-    /// A key exists but the first-run card has not been shown, so spending the
-    /// starter would be the "silent starter" CONTRACT section 12 forbids.
+    /// A key exists but the first-run card has not been shown, so spending its
+    /// balance would be the "silent starter" CONTRACT section 12 forbids.
     case publikAPIStarterNotYetDisclosed
     /// The chosen provider is Codex, which is a subprocess and not a URL route.
     case codexIsNotAnHTTPTransport

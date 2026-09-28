@@ -49,9 +49,10 @@ struct PublikAPIAccountTests {
     }
 
     @Test func aPastedKeyNeedsNoStarterDisclosure() throws {
-        // The card is about the starter THIS install was granted. A key the
-        // reader brought from their own dashboard has no starter attached, so
-        // gating it behind the card would be a step with nothing to say.
+        // The card is about the balance of the install Iris minted. A key the
+        // reader brought from their own dashboard belongs to an account they
+        // already have, so gating it behind the card would be a step with
+        // nothing to say.
         let defaults = try isolatedDefaults()
         let account = PublikAPIAccount(userDefaults: defaults)
         _ = account.saveKeyPastedByTheReader("pk_live_abc123456789_0123456789abcdef0123456789abcdef")

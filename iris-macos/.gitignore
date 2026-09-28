@@ -38,7 +38,7 @@ tools/edit-battery/fixtures/*/oracle/secret/*.pem
 #
 # The token is public by construction — it ships inside every binary and the
 # gateway is built for that (per-release, revocable by timestamp, IP rate
-# limited, small starter). But "readable by anyone who unpacks a dmg" and
+# limited, and every mint starts at $0.00). But "readable by anyone who unpacks a dmg" and
 # "in a public git history forever, for every release at once" are different
 # risks. iris is a public repo. This never goes near it.
 .publik-app-token

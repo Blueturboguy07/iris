@@ -13,7 +13,7 @@ function seams(overrides: Partial<ProvisioningSeams> = {}): ProvisioningSeams {
   let storedInstallId: string | null = null;
   let counter = 0;
   return {
-    fetchImplementation: vi.fn(async () => response(201, { key: MINTED_KEY, starter_micros: 250_000 })),
+    fetchImplementation: vi.fn(async () => response(201, { key: MINTED_KEY, starter_micros: 0, balance_micros: 0 })),
     // Distinct bytes per call, so a "minted a fresh id" assertion is real.
     randomBytes: () => {
       counter += 1;
@@ -93,7 +93,7 @@ describe("provisioning a publik install", () => {
           sentBodies.push(init.body);
           return sentBodies.length === 1
             ? response(200, { key: null, starter_micros: 0 })
-            : response(201, { key: MINTED_KEY, starter_micros: 250_000 });
+            : response(201, { key: MINTED_KEY, starter_micros: 0, balance_micros: 0 });
         },
       }),
     });

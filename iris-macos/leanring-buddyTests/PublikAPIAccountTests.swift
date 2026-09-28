@@ -6,10 +6,12 @@
 //  answers, and the CTA rule that is easiest to break by accident.
 //
 //  The one worth stating up front is CONTRACT.md section 12 item 4 — "never a
-//  silent starter". An app that provisions a key and quietly starts spending
-//  the free balance before telling anybody what it costs is the exact failure
-//  that rule exists to prevent, and it is invisible in manual testing because
-//  everything appears to work.
+//  silent starter". An app that provisions a key and quietly starts spending a
+//  balance before telling anybody what it costs is the exact failure that rule
+//  exists to prevent, and it is invisible in manual testing because everything
+//  appears to work. Since publik's migration 0059 a new install is minted at
+//  $0.00; the one free thing is $0.05 of use, once per publik account, when a
+//  computer is linked.
 //
 
 import Foundation
@@ -80,8 +82,8 @@ struct PublikAPIAccountTests {
         let account = PublikAPIAccount(userDefaults: defaults)
         let first = account.installIdentifier()
         let second = account.installIdentifier()
-        // Re-minting on every launch would ask the gateway for a fresh starter
-        // each time, which is what its per-IP starter caps exist to stop.
+        // Re-minting on every launch would ask the gateway for a fresh install
+        // each time, which is what its per-IP mint caps exist to stop.
         #expect(first == second)
         #expect(!first.isEmpty)
 
@@ -121,16 +123,38 @@ struct PublikAPIAccountTests {
     @Test func aProvisioningResponseIsReadWhicheverFieldNameCarriesTheBalance() {
         // CONTRACT 3.2 ships `balance_micros` and `starting_credit_micros` with
         // the same value for one release; either must work, so a rename on the
-        // server does not blank the balance line.
-        let withBalance = PublikAPIAccount.InstallsResponse(payload: [
-            "key": "pk_live_x", "balance_micros": 250_000, "claim_state": "anonymous",
+        // server does not blank the balance line. Since publik's migration 0059
+        // an anonymous mint is $0.00; an install minted already bound to a
+        // publik account carries that account's one-time $0.05.
+        let anonymousMint = PublikAPIAccount.InstallsResponse(payload: [
+            "key": "pk_live_x", "balance_micros": 0, "starter_micros": 0, "claim_state": "anonymous",
         ])
-        #expect(withBalance.balanceMicros == 250_000)
+        #expect(anonymousMint.balanceMicros == 0)
+        #expect(anonymousMint.claimState == .anonymous)
 
         let withStartingCredit = PublikAPIAccount.InstallsResponse(payload: [
-            "key": "pk_live_x", "starting_credit_micros": 250_000,
+            "key": "pk_live_x", "starting_credit_micros": 50_000, "claim_state": "claimed",
         ])
-        #expect(withStartingCredit.balanceMicros == 250_000)
+        #expect(withStartingCredit.balanceMicros == 50_000)
+    }
+
+    @Test func anUnlinkedInstallAtZeroIsToldHowToGetItsFreeUse() {
+        // The line every new install starts on. "$0.00 left" alone would read
+        // as broken; this says the one step that gives $0.05 of free use.
+        #expect(PublikAPIMoney.balanceLine(balanceMicros: 0, claimState: .anonymous)
+            == "$0.00 · link this computer for $0.05 of free use")
+        #expect(PublikAPIMoney.balanceLine(balanceMicros: 0, claimState: .anonymous)
+            == PublikAPIMoney.unlinkedZeroBalanceLine)
+        #expect(PublikAPIMoney.balanceLine(balanceMicros: 0, claimState: .claimed) == "$0.00 left")
+        #expect(PublikAPIMoney.balanceLine(balanceMicros: 50_000, claimState: .claimed) == "$0.05 left")
+        #expect(PublikAPIMoney.balanceLine(balanceMicros: 182_400, claimState: .anonymous) == "$0.18 left")
+    }
+
+    @Test func theDisclosureVersionMovedWithTheZeroStartWording() {
+        // Version 1 promised a free start; version 2 is "$0.00, and $0.05 of
+        // free use once you link". The gateway records it and never rejects it.
+        #expect(PublikAPIAccount.currentDisclosureVersion == 2)
+        #expect(PublikAPIDisclosureAcceptance.readerAcceptedTheDisclosure().disclosureVersion == 2)
     }
 
     @Test func aReplayedInstallIdComesBackWithNoKey() {

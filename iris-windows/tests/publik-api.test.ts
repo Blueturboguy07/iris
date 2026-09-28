@@ -1,16 +1,23 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_PUBLIK_MODEL,
+  DISCLOSURE_VERSION,
+  PROVISIONING_DISCLOSURE,
   PUBLIK_MODEL_ALIASES,
+  UNLINKED_ZERO_BALANCE_LINE,
   WHY_IT_COSTS_SENTENCE,
   buildInstallProvisioningRequest,
   formatMicrosAsDollars,
+  insufficientCreditFallbackMessage,
   isPublikModelAlias,
   looksLikeAPublikApiKey,
   looksLikeAnAppToken,
   newInstallId,
   parseInsufficientCredit,
   parseProvisionedInstall,
+  publikBalanceLine,
   publikCardState,
   readPublikUsageHeaders,
   revokedKeyWantsReprovisioning,
@@ -49,18 +56,45 @@ describe("the money vocabulary", () => {
     // as a unit, never the provider's name.
     const renderedCopy = [
       WHY_IT_COSTS_SENTENCE,
+      PROVISIONING_DISCLOSURE,
+      UNLINKED_ZERO_BALANCE_LINE,
+      insufficientCreditFallbackMessage("anonymous"),
+      insufficientCreditFallbackMessage("claimed"),
       publikCardState({
-        balanceMicros: 250_000,
-        starterMicros: 250_000,
+        balanceMicros: 0,
         claimState: "anonymous",
         claimUrl: "https://publikhq.com/claim/ABCD-1234",
         addCreditUrl: null,
-        isFirstRun: true,
       }).balanceLine,
     ].join(" ");
     expect(renderedCopy).not.toMatch(/\btokens?\b/i);
     expect(renderedCopy).not.toMatch(/\bcredits\b/i);
     expect(renderedCopy).not.toMatch(/openai|anthropic|chatgpt|claude/i);
+  });
+
+  it("never promises free usage a new install does not get", () => {
+    // publik migration 0059 (2026-09-28): an install is minted at $0.00, and
+    // the only free thing is $0.05 of use, once per publik account, when a
+    // computer is linked. Nothing may say an install starts with free usage.
+    const renderedCopy = [
+      PROVISIONING_DISCLOSURE,
+      UNLINKED_ZERO_BALANCE_LINE,
+      insufficientCreditFallbackMessage("anonymous"),
+    ].join(" ");
+    expect(renderedCopy).not.toMatch(/starts with free|free starter|free usage|small free|\$0\.25/i);
+    expect(PROVISIONING_DISCLOSURE).toContain("$0.00");
+    expect(PROVISIONING_DISCLOSURE).toContain("$0.05 of free use, once");
+  });
+
+  it("keeps the first-run window's disclosure word for word the same as the service's", () => {
+    // The first-run page cannot import the service, so it carries its own copy
+    // of the sentence. This is what stops the two from drifting apart.
+    const firstRunPage = readFileSync(
+      join(__dirname, "..", "src", "renderer", "first-run", "index.html"),
+      "utf-8"
+    );
+    expect(firstRunPage).toContain(JSON.stringify(PROVISIONING_DISCLOSURE));
+    expect(firstRunPage).not.toMatch(/starts with free usage/i);
   });
 });
 
@@ -125,12 +159,14 @@ describe("the provisioning request", () => {
     expect(body.app_slug).toBe("iris");
     expect(body.app_token).toBe("pat_iris_0123456789abcdef0123456789abcdef");
     expect(body.install_id).toBe("11111111-2222-4333-8444-555555555555");
-    expect(body.disclosure_version).toBe(1);
+    expect(body.disclosure_version).toBe(DISCLOSURE_VERSION);
+    expect(DISCLOSURE_VERSION).toBe(2);
   });
 });
 
 describe("reading a provisioning response", () => {
-  it("reads a 201 with a key, a starter and a claim link", () => {
+  it("reads a 201 with a key, a $0.00 balance and a claim link", () => {
+    // publik migration 0059: a new install is minted at $0.00, with no starter.
     const install = parseProvisionedInstall(
       JSON.stringify({
         key: "pk_live_abcdef123456_0123456789abcdef0123456789abcdef",
@@ -138,22 +174,25 @@ describe("reading a provisioning response", () => {
         claim_url: "https://publikhq.com/claim/HK7F-2QWD",
         add_credit_url: "https://publikhq.com/dashboard/api/add",
         claim_state: "anonymous",
-        starter_micros: 250_000,
-        balance_micros: 250_000,
+        starter_micros: 0,
+        balance_micros: 0,
         base_url: "https://publikhq.com/api/v1",
       })
     );
     expect(install?.apiKey).toBe("pk_live_abcdef123456_0123456789abcdef0123456789abcdef");
-    expect(install?.starterMicros).toBe(250_000);
+    expect(install?.starterMicros).toBe(0);
+    expect(install?.balanceMicros).toBe(0);
     expect(install?.claimState).toBe("anonymous");
     expect(install?.baseUrl).toBe("https://publikhq.com/api/v1");
   });
 
   it("accepts starting_credit_micros as the documented alias of the balance", () => {
+    // An install minted already bound to a publik account carries that
+    // account's one-time $0.05 of free use.
     const install = parseProvisionedInstall(
-      JSON.stringify({ key: null, claim_state: "claimed", starting_credit_micros: 250_000 })
+      JSON.stringify({ key: null, claim_state: "claimed", starting_credit_micros: 50_000 })
     );
-    expect(install?.balanceMicros).toBe(250_000);
+    expect(install?.balanceMicros).toBe(50_000);
     expect(install?.claimState).toBe("claimed");
   });
 
@@ -225,7 +264,7 @@ describe("the 402", () => {
     error: {
       type: "insufficient_credit",
       message: "Not enough publik credit for this request.",
-      available_micros: 1240,
+      available_micros: 0,
       required_micros: 41000,
       claim_state: "anonymous",
       top_up_url: "https://publikhq.com/claim/HK7F-2QWD",
@@ -251,6 +290,23 @@ describe("the 402", () => {
     expect(exhausted?.topUpUrl).toBe("u");
   });
 
+  it("falls back to a sentence of its own only when the server sent none", () => {
+    const anonymous = parseInsufficientCredit(
+      JSON.stringify({ error: { type: "insufficient_credit", claim_state: "anonymous", top_up_url: "u" } })
+    );
+    expect(anonymous?.message).toBe(
+      "Your publik API balance is too low for this request. Link this computer to your publik account for $0.05 of free use, once, or pick a plan."
+    );
+    const claimed = parseInsufficientCredit(
+      JSON.stringify({ error: { type: "insufficient_credit", claim_state: "claimed", top_up_url: "u" } })
+    );
+    expect(claimed?.message).toBe(
+      "Your publik API balance is too low for this request. Add a plan or a pack to keep going."
+    );
+    const needsClaim = parseInsufficientCredit(JSON.stringify({ error: { type: "model_requires_claim" } }));
+    expect(needsClaim?.message).toBe("Link this computer to your publik account to use this model.");
+  });
+
   it("ignores an error of a different type", () => {
     expect(parseInsufficientCredit(JSON.stringify({ error: { type: "rate_limit_exceeded" } }))).toBeNull();
   });
@@ -263,41 +319,56 @@ describe("the 402", () => {
 });
 
 describe("the publik card", () => {
-  it("leads with the free starter on first run", () => {
+  it("asks a new, unlinked install at $0.00 to link the computer for its free use", () => {
+    // publik migration 0059: the mint gives $0.00 and no starter. The first
+    // card says so, and says what linking gives, instead of "$0.00 left".
     const card = publikCardState({
-      balanceMicros: 250_000,
-      starterMicros: 250_000,
+      balanceMicros: 0,
       claimState: "anonymous",
       claimUrl: "https://publikhq.com/claim/HK7F-2QWD",
       addCreditUrl: null,
-      isFirstRun: true,
     });
-    expect(card.balanceLine).toBe("$0.25 of free starter usage");
+    expect(card.balanceLine).toBe("$0.00 · link this computer for $0.05 of free use");
+    expect(card.balanceLine).toBe(UNLINKED_ZERO_BALANCE_LINE);
     expect(card.whyItCosts).toBe(WHY_IT_COSTS_SENTENCE);
     expect(card.buttonLabel).toBe("Link this computer & pick a plan");
     expect(card.buttonUrl).toBe("https://publikhq.com/claim/HK7F-2QWD");
   });
 
-  it("shows what is left afterwards", () => {
+  it("shows a linked account's one-time $0.05 as an ordinary balance", () => {
+    const card = publikCardState({
+      balanceMicros: 50_000,
+      claimState: "claimed",
+      claimUrl: null,
+      addCreditUrl: "https://publikhq.com/dashboard/api/add",
+    });
+    expect(card.balanceLine).toBe("$0.05 left");
+    expect(card.buttonLabel).toBe("Add a plan or pack");
+  });
+
+  it("shows what is left on an unlinked install that still has a balance", () => {
+    // Only an install minted before migration 0059 can be here.
     const card = publikCardState({
       balanceMicros: 182_400,
-      starterMicros: 250_000,
       claimState: "anonymous",
       claimUrl: "https://publikhq.com/claim/HK7F-2QWD",
       addCreditUrl: null,
-      isFirstRun: false,
     });
     expect(card.balanceLine).toBe("$0.18 left");
+  });
+
+  it("says $0.00 left, not the link line, once the install is linked", () => {
+    expect(publikBalanceLine(0, "claimed")).toBe("$0.00 left");
+    expect(publikBalanceLine(0)).toBe("$0.00 left");
+    expect(publikBalanceLine(0, "anonymous")).toBe(UNLINKED_ZERO_BALANCE_LINE);
   });
 
   it("switches the button once the install is claimed", () => {
     const card = publikCardState({
       balanceMicros: 800_000,
-      starterMicros: 250_000,
       claimState: "claimed",
       claimUrl: "https://publikhq.com/claim/HK7F-2QWD",
       addCreditUrl: "https://publikhq.com/dashboard/api/add",
-      isFirstRun: false,
     });
     expect(card.buttonLabel).toBe("Add a plan or pack");
     expect(card.buttonUrl).toBe("https://publikhq.com/dashboard/api/add");

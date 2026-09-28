@@ -29,7 +29,8 @@ import {
 import {
   PublikClaimState,
   PublikModelAlias,
-  formatMicrosAsDollars,
+  UNLINKED_ZERO_BALANCE_LINE,
+  publikBalanceLine,
 } from "./publik-api";
 
 // MARK: - Tier prices
@@ -75,9 +76,14 @@ export function balanceIsLow(balanceMicros: number): boolean {
   return balanceMicros < LOW_BALANCE_THRESHOLD_MICROS;
 }
 
-/** "$1.84 left". */
-export function balanceLine(balanceMicros: number): string {
-  return `${formatMicrosAsDollars(balanceMicros)} left`;
+/**
+ * "$1.84 left". Given a claim state, an unlinked install at $0.00 reads
+ * "$0.00 · link this computer for $0.05 of free use" instead: since publik's
+ * migration 0059 every new install starts there, and linking is the one way
+ * to the free $0.05.
+ */
+export function balanceLine(balanceMicros: number, claimState?: PublikClaimState): string {
+  return publikBalanceLine(balanceMicros, claimState);
 }
 
 /**
@@ -247,7 +253,8 @@ export async function readPublikBalance(
  * answers: a user on their own key or on codex sees nothing new.
  */
 export interface PublikBalanceView {
-  /** "$1.84 left", or null before any balance has been read. */
+  /** "$1.84 left" (or the link-for-free-use line for an unlinked install at
+   *  $0.00), or null before any balance has been read. */
   balanceLine: string | null;
   isLow: boolean;
   costLine: string;
@@ -267,7 +274,8 @@ export function publikBalanceView(options: {
 }): PublikBalanceView | null {
   if (!options.answeringWithPublik) return null;
   return {
-    balanceLine: options.balanceMicros === null ? null : balanceLine(options.balanceMicros),
+    balanceLine:
+      options.balanceMicros === null ? null : balanceLine(options.balanceMicros, options.claimState),
     // Nothing is known to be low before the first balance has been read.
     isLow: options.balanceMicros !== null && balanceIsLow(options.balanceMicros),
     costLine: costPerMessageLine(options.lastReplyChargeMicros, options.modelAlias),
@@ -277,11 +285,12 @@ export function publikBalanceView(options: {
 
 /**
  * The tray's balance item: "publik API: $1.84 left". A menu item cannot be
- * coloured, so a low balance says so in words instead.
+ * coloured, so a low balance says so in words instead — except the unlinked
+ * $0.00 line, which already says what to do.
  */
 export function publikBalanceMenuLabel(view: PublikBalanceView): string {
   if (!view.balanceLine) return "publik API";
-  return view.isLow
+  return view.isLow && view.balanceLine !== UNLINKED_ZERO_BALANCE_LINE
     ? `publik API: ${view.balanceLine} — running low`
     : `publik API: ${view.balanceLine}`;
 }

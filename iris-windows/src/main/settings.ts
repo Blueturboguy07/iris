@@ -56,14 +56,18 @@ export interface SettingsSchema {
    *  the claim page while anonymous, the add-credit page once claimed. */
   publikTopUpUrl: string;
 
-  /** The starter the install was granted, for the first-run balance line. */
+  /**
+   * The starter the mint reported. Always 0 since publik's migration 0059: a
+   * new install starts at $0.00, and the one free $0.05 goes to the publik
+   * account when the computer is linked. Kept so older settings files load;
+   * nothing renders it.
+   */
   publikStarterMicros: number;
 
   /**
    * Whether the §12 card has been shown. CONTRACT.md section 12 (4) forbids
-   * spending the starter before the user has seen the balance, the reason it
-   * costs money, and the link — so this gates the first request, not just the
-   * UI.
+   * spending the balance before the user has seen it, the reason it costs
+   * money, and the link — so this gates the first request, not just the UI.
    */
   publikCardHasBeenShown: boolean;
 

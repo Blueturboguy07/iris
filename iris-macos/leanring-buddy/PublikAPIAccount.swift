@@ -11,8 +11,11 @@
 //
 //    - A packaged build ships a public app token (`pat_iris_<32>`). On first
 //      run, AFTER the reader accepts the disclosure, Iris calls
-//      `POST /api/v1/installs` and is handed a `pk_live_…` key, a claim code
-//      and a small starter balance. No account, no sign-in, no card.
+//      `POST /api/v1/installs` and is handed a `pk_live_…` key and a claim
+//      code, at a $0.00 balance — no account, no sign-in, no card needed to
+//      get the key itself. Linking an account afterward (the claim_url CTA) is
+//      what grants that account its one-time $0.05 of free use (publik
+//      migration 0059, 2026-09-28). Until then every metered call is a 402.
 //    - A build with no app token is NOT broken. It falls back to the reader
 //      pasting a key from publikhq.com/dashboard/api, which is also the route
 //      for somebody who already has one.
@@ -51,9 +54,12 @@ struct PublikAPIDisclosureAcceptance: Sendable {
 
 /// Whether this install has been linked to a publik account yet.
 ///
-/// An anonymous install is a real, working install — it just has only the
-/// starter balance and cannot reach the largest model tier. Claiming it is what
-/// the CTA's primary button is for.
+/// An anonymous install has a real key but, since publik's migration 0059, a
+/// $0.00 balance: every metered call is refused with a 402 until it is linked
+/// to a publik account (which gives that account $0.05 of free use, once), a
+/// plan or a pack is added, or the reader pastes their own key. It also cannot
+/// reach the largest model tier. Claiming it is what the CTA's primary button
+/// is for.
 enum PublikAPIClaimState: String, Sendable, Equatable {
     case anonymous
     case claimed
@@ -104,8 +110,10 @@ struct PublikAPIWalletSnapshot: Sendable, Equatable {
 final class PublikAPIAccount: ObservableObject {
 
     /// The disclosure wording Iris currently ships. Bump when the wording
-    /// changes materially; the gateway records it.
-    static let currentDisclosureVersion = 1
+    /// changes materially; the gateway records it. Version 2 is the
+    /// "$0.00 to start, $0.05 of free use once you link" wording (publik
+    /// migration 0059); version 1 promised a free start.
+    static let currentDisclosureVersion = 2
 
     /// The Info.plist key holding the build's public app token. A build without
     /// one falls back to the paste route — see the file header.
@@ -113,7 +121,7 @@ final class PublikAPIAccount: ObservableObject {
 
     /// Where the client-minted install id is remembered. It must survive
     /// relaunches: re-minting one on every launch would ask the gateway for a
-    /// fresh starter every time, which is exactly what its per-IP starter caps
+    /// fresh install every time, which is exactly what its per-IP mint caps
     /// exist to stop.
     private static let installIdentifierDefaultsKey = "irisPublikAPIInstallIdentifier"
 
@@ -215,8 +223,8 @@ final class PublikAPIAccount: ObservableObject {
         try? KeychainStore.saveSecret(trimmedKey, ofKind: .publikAPIKey)
         hasKey = KeychainStore.hasSecret(ofKind: .publikAPIKey)
         // A pasted key belongs to an account the reader already has, so there is
-        // no starter to disclose and nothing to gate: the card requirement in
-        // CONTRACT section 12 is about the starter this install was granted.
+        // nothing to disclose and nothing to gate: the card requirement in
+        // CONTRACT section 12 is about the balance of the install Iris minted.
         userDefaults.set(true, forKey: Self.firstRunCardShownDefaultsKey)
         return true
     }
@@ -242,7 +250,7 @@ final class PublikAPIAccount: ObservableObject {
     }
 
     /// CONTRACT section 12 item 4. A provisioned install may not spend its
-    /// starter until the card has been in front of the reader once.
+    /// balance until the card has been in front of the reader once.
     var maySpendOnThisKey: Bool {
         hasKey && firstRunCardHasBeenShown
     }

@@ -125,6 +125,23 @@ enum PublikAPIMoney {
         "\(PublikAPIWalletSnapshot.dollarsDescription(forMicros: balanceMicros)) left"
     }
 
+    /// What an install that is not linked to a publik account shows at $0.00,
+    /// in place of "$0.00 left". Since publik's migration 0059 (2026-09-28) a
+    /// new install is minted at $0.00 and the one free thing is $0.05 of use,
+    /// once per publik account, when a computer is linked — so this is the
+    /// line every fresh install starts on, and "$0.00 left" alone would read
+    /// as broken rather than as one step to take.
+    static let unlinkedZeroBalanceLine = "$0.00 · link this computer for $0.05 of free use"
+
+    /// `balanceLine(balanceMicros:)`, except that an unlinked install with
+    /// nothing left gets `unlinkedZeroBalanceLine`.
+    static func balanceLine(balanceMicros: Int, claimState: PublikAPIClaimState) -> String {
+        if claimState == .anonymous && balanceMicros <= 0 {
+            return unlinkedZeroBalanceLine
+        }
+        return balanceLine(balanceMicros: balanceMicros)
+    }
+
     /// A per-message price, to a tenth of a cent: "$0.004", "$0.010".
     ///
     /// Rounded to the nearest tenth of a cent rather than down: this is what a

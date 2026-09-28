@@ -82,15 +82,41 @@ export function formatMicrosAsDollars(micros: number): string {
 export const WHY_IT_COSTS_SENTENCE =
   "The AI model behind Iris is run by a provider that charges per use; publik passes that on at half the provider's list price, nothing is charged behind your back, and every call is visible on your dashboard.";
 
-/** The disclosure shown BEFORE provisioning. Consent precedes the mint (section 3.2 [S4]). */
+/**
+ * The disclosure shown BEFORE provisioning. Consent precedes the mint (section 3.2 [S4]).
+ *
+ * Since publik's migration 0059 (founder, 2026-09-28) a new install is minted
+ * at $0.00. The one free thing is $0.05 of use, paid once per publik account
+ * when a computer is first linked to it. So this sentence must not promise free
+ * usage on its own: a reader who accepts a bargain that is not on offer meets a
+ * 402 on their first question instead. The first-run window shows this exact
+ * string (`tests/publik-api.test.ts` holds the two copies together).
+ */
 export const PROVISIONING_DISCLOSURE =
-  "Iris will set up publik API on this computer so it can answer you. It starts with free usage, and you will see the balance before anything is spent.";
+  "Iris will set up publik API on this computer so it can answer you. Your balance starts at $0.00 and no card is asked for. Linking your publik account gives $0.05 of free use, once, and you will see the balance before anything is spent.";
 
 /**
  * Bumped when the disclosure text changes materially. The server records it and
- * never rejects on it, so this is an audit trail rather than a gate.
+ * never rejects on it, so this is an audit trail rather than a gate. Version 2
+ * is the $0.00-start wording above; version 1 promised "free usage".
  */
-export const DISCLOSURE_VERSION = 1;
+export const DISCLOSURE_VERSION = 2;
+
+/**
+ * What an install that is not linked to a publik account shows at $0.00, in
+ * place of "$0.00 left". It is the only state a fresh install is in now, and
+ * "$0.00 left" alone would read as broken rather than as one step to take.
+ */
+export const UNLINKED_ZERO_BALANCE_LINE = "$0.00 · link this computer for $0.05 of free use";
+
+/**
+ * "$1.84 left", or `UNLINKED_ZERO_BALANCE_LINE` for an unlinked install with
+ * nothing left. Without a claim state it is always the plain line.
+ */
+export function publikBalanceLine(balanceMicros: number, claimState?: PublikClaimState): string {
+  if (claimState === "anonymous" && !(balanceMicros > 0)) return UNLINKED_ZERO_BALANCE_LINE;
+  return `${formatMicrosAsDollars(balanceMicros)} left`;
+}
 
 // MARK: - Install identity
 
@@ -319,11 +345,27 @@ export function parseInsufficientCredit(rawBody: string): PublikCreditExhausted 
   if (type !== "insufficient_credit" && type !== "model_requires_claim") return null;
 
   const claimStateRaw = readString(error, "claim_state");
+  const claimState: PublikClaimState = claimStateRaw === "claimed" ? "claimed" : "anonymous";
   return {
-    message: readString(error, "message") ?? "Not enough publik credit for this request.",
+    message:
+      readString(error, "message") ??
+      (type === "model_requires_claim"
+        ? "Link this computer to your publik account to use this model."
+        : insufficientCreditFallbackMessage(claimState)),
     topUpUrl: readString(error, "top_up_url", "claim_url", "add_credit_url"),
-    claimState: claimStateRaw === "claimed" ? "claimed" : "anonymous",
+    claimState,
   };
+}
+
+/**
+ * Only for a 402 that arrives without the server's own sentence. It follows the
+ * gateway's wording: an unlinked install is told that linking gives $0.05 of
+ * free use, once; a linked one is told to add a plan or a pack.
+ */
+export function insufficientCreditFallbackMessage(claimState: PublikClaimState): string {
+  return claimState === "anonymous"
+    ? "Your publik API balance is too low for this request. Link this computer to your publik account for $0.05 of free use, once, or pick a plan."
+    : "Your publik API balance is too low for this request. Add a plan or a pack to keep going.";
 }
 
 /**
@@ -349,6 +391,12 @@ export function revokedKeyWantsReprovisioning(rawBody: string): boolean {
  * The state of the publik card, in one value. Section 12 pins both the shape
  * and the wording: while the install is anonymous the button links the computer
  * and picks a plan; once claimed it adds a plan or a pack.
+ *
+ * There is no "free starter" line any more. A new install is minted at $0.00
+ * (publik migration 0059), so the first card an unlinked install shows is
+ * `UNLINKED_ZERO_BALANCE_LINE`, and every card after that shows what is left.
+ * The $0.05 of free use belongs to the publik account and arrives when the
+ * computer is linked, as an ordinary balance.
  */
 export interface PublikCardState {
   balanceLine: string;
@@ -359,18 +407,11 @@ export interface PublikCardState {
 
 export function publikCardState(options: {
   balanceMicros: number;
-  starterMicros: number;
   claimState: PublikClaimState;
   claimUrl: string | null;
   addCreditUrl: string | null;
-  /** True only on the card shown immediately after provisioning. */
-  isFirstRun: boolean;
 }): PublikCardState {
-  const amount = formatMicrosAsDollars(options.balanceMicros);
-  const balanceLine =
-    options.isFirstRun && options.starterMicros > 0
-      ? `${formatMicrosAsDollars(options.starterMicros)} of free starter usage`
-      : `${amount} left`;
+  const balanceLine = publikBalanceLine(options.balanceMicros, options.claimState);
 
   const claimed = options.claimState === "claimed";
   return {

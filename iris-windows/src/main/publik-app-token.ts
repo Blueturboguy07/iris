@@ -7,9 +7,10 @@
  * The token is public by construction — it sits inside every copy of the
  * binary and anyone can read it out. That is expected and contained by design
  * (CONTRACT.md sections 3.2 and 7): tokens are minted per release, revocable
- * by timestamp without touching the installs they already created, rate
- * limited per IP, and each one mints only a small starter. It is not a secret,
- * so it does NOT live in `secrets.ts`.
+ * by timestamp without touching the installs they already created, and rate
+ * limited per IP. Since publik's migration 0059 an install minted with one
+ * starts at $0.00 and carries no starter of its own. It is not a secret, so it
+ * does NOT live in `secrets.ts`.
  *
  * Tokens exist as of 2026-09-21 (`scripts/mint-app-token.mts iris` on the
  * publik side mints them, and the `iris` apps row it needs now exists). A

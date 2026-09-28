@@ -9,7 +9,11 @@
  * CONTRACT.md section 12 (4) is enforced here rather than in the renderer:
  * "an app must not consume the starter without having shown (a)–(c) at least
  * once". `publikCardHasBeenShown` gates spending, not just drawing — a card the
- * user closed before it painted must not be treated as shown.
+ * user closed before it painted must not be treated as shown. Since publik's
+ * migration 0059 a new install is minted at $0.00 and the one free $0.05
+ * arrives when the computer is linked to a publik account, so the gate now
+ * guards that balance, and whatever a plan or a pack adds, rather than a
+ * starter the mint handed over.
  */
 
 import { app } from "electron";
@@ -101,7 +105,11 @@ export class PublikSetup {
     if (install.addCreditUrl) this.settings.set("publikAddCreditUrl", install.addCreditUrl);
     this.settings.set("publikClaimState", install.claimState);
     if (install.starterMicros > 0) this.settings.set("publikStarterMicros", install.starterMicros);
-    if (install.balanceMicros > 0) {
+    // A freshly minted key's balance is the one the mint reported — $0.00 for a
+    // new install since publik's migration 0059 — so it is recorded even at
+    // zero. Otherwise the card and the tray would carry over whatever an
+    // earlier key had left, instead of saying "link this computer".
+    if (install.apiKey || install.balanceMicros > 0) {
       this.settings.set("publikBalanceMicros", install.balanceMicros);
       this.settings.set("publikBalanceSeen", true);
     }
@@ -137,14 +145,12 @@ export class PublikSetup {
   }
 
   /** What the §12 card should render right now. */
-  cardState(isFirstRun: boolean): PublikCardState {
+  cardState(): PublikCardState {
     return publikCardState({
       balanceMicros: this.settings.get("publikBalanceMicros"),
-      starterMicros: this.settings.get("publikStarterMicros"),
       claimState: this.settings.get("publikClaimState") === "claimed" ? "claimed" : "anonymous",
       claimUrl: this.settings.get("publikClaimUrl") || null,
       addCreditUrl: this.settings.get("publikAddCreditUrl") || null,
-      isFirstRun,
     });
   }
 
@@ -154,7 +160,7 @@ export class PublikSetup {
 
   /**
    * CONTRACT section 12 (4). A provisioned install whose card has never been
-   * shown must not spend its starter, so this is checked before a request, not
+   * shown must not spend its balance, so this is checked before a request, not
    * only before a paint.
    */
   maySpendStarter(): boolean {

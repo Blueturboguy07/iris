@@ -12,8 +12,9 @@
  *      called before that — "consent precedes mint" [S4].
  *   2. POST /installs with the build's app token and a client-minted
  *      `install_id`.
- *   3. `201` hands back a `pk_live_…` key exactly once, plus the starter and a
- *      claim URL.
+ *   3. `201` hands back a `pk_live_…` key exactly once, plus a $0.00 balance
+ *      and a claim URL (publik migration 0059: the one free $0.05 goes to the
+ *      publik account when the computer is linked, never to the mint).
  *   4. A `200` means this `install_id` was already used, and the server will
  *      not show the key again. If we have no stored key, that pairing is
  *      unrecoverable, so we mint ONE fresh `install_id` and retry. Exactly

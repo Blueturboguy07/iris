@@ -1179,7 +1179,7 @@ function setupIPC(): void {
     // state, never the credential behind it — CONTRACT section 1 is explicit
     // that a desktop app's key must not enter a renderer.
     hasPublikApiKey: publikSetup.hasKey(),
-    publikCard: publikSetup.cardState(false),
+    publikCard: publikSetup.cardState(),
     publikBalance: currentPublikBalanceView(),
     buildCanProvisionAutomatically: buildCanProvisionAutomatically(),
     codexAvailable: codexAvailableCached,
@@ -1228,9 +1228,10 @@ function setupIPC(): void {
     const outcome = await publikSetup.provision();
     if (outcome.kind === "provisioned") {
       settings.set("providerPreference", "publikApi");
-      // Provisioning named the starter; /balance adds the one Add credit link.
+      // Provisioning named the balance ($0.00 for a new install since publik's
+      // migration 0059); /balance adds the one Add credit link.
       void refreshPublikBalanceIfAnswering();
-      return { ok: true as const, card: publikSetup.cardState(true) };
+      return { ok: true as const, card: publikSetup.cardState() };
     }
     return {
       ok: false as const,
@@ -1244,15 +1245,13 @@ function setupIPC(): void {
     };
   });
 
-  // Section 12 (4): the starter is not spendable until the card has been seen.
+  // Section 12 (4): the balance is not spendable until the card has been seen.
   ipcMain.handle("publik:cardShown", () => {
     publikSetup.markCardShown();
     return true;
   });
 
-  ipcMain.handle("publik:card", (_event, isFirstRun: boolean) =>
-    publikSetup.cardState(Boolean(isFirstRun))
-  );
+  ipcMain.handle("publik:card", () => publikSetup.cardState());
 
   // The balance lines. `publik:balance` answers from what is already known;
   // `publik:refreshBalance` reads `GET /balance` first, and is what a window

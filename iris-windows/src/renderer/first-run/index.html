@@ -85,7 +85,7 @@
     <div class="option primary" id="publik-option">
       <h2>Use publik API</h2>
       <p id="publik-pitch">
-        The simplest option — Iris sets itself up and starts with free usage.
+        The simplest option — Iris sets itself up now, at $0.00. Link your publik account afterward for $0.05 of free use, once.
       </p>
       <button class="accent" id="publik-start">Set up publik API</button>
       <div class="note" id="publik-disclosure"></div>
@@ -152,8 +152,10 @@
         document.getElementById("publik-pitch").textContent =
           "This build can't set one up on its own — paste a key from your dashboard below instead.";
       } else {
+        // The same words as PROVISIONING_DISCLOSURE in services/publik-api.ts;
+        // tests/publik-api.test.ts fails if the two drift apart.
         document.getElementById("publik-disclosure").textContent =
-          "Iris will set up publik API on this computer so it can answer you. It starts with free usage, and you will see the balance before anything is spent.";
+          "Iris will set up publik API on this computer so it can answer you. Your balance starts at $0.00 and no card is asked for. Linking your publik account gives $0.05 of free use, once, and you will see the balance before anything is spent.";
       }
     }
 
@@ -184,7 +186,7 @@
       };
       if (!card.buttonUrl) button.disabled = true;
       show("card");
-      // Only now may the starter be spent — section 12 (4).
+      // Only now may the balance be spent — section 12 (4).
       iris.markPublikCardShown();
     }
 

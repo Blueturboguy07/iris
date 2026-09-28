@@ -12,8 +12,12 @@ wins and this file is the bug.
 ## The three options a user has
 
 1. **publik API** — the default. Metered, billed to the user at half the
-   provider's list price. Auto-provisions on first run; a $0.25 starter means it
-   works before anyone has paid anything.
+   provider's list price. Auto-provisions on first run at a $0.00 balance, and
+   no card is asked for. Nothing is spent until the user links the computer to
+   their publik account, adds a plan or a pack, or pastes their own key. Linking
+   gives the publik account $0.05 of free use, once, at link time, not per
+   install (publik migration 0059, 2026-09-28). Until then every metered call is
+   answered `402 insufficient_credit`.
 2. **Your own Anthropic key** — a pasted `sk-ant-…`, stored locally, sent only to
    `api.anthropic.com`, never to publik.
 3. **Sign in with ChatGPT (Codex CLI)** — drives the user's own `codex` binary.
@@ -24,9 +28,10 @@ There is no fourth option. In particular:
 - **The funded tier is gone.** `POST /api/assistant/chat` (publik's own Anthropic
   key, free to signed-in users) is no longer a transport. It was the reason Iris
   could not be handed out publicly: per-user caps, no global cap, so exposure
-  scaled with the number of accounts. publik API replaces it — same "it just
-  works" first run, paid by the person using it. The server route stays up for
-  already-installed older builds; new builds must not call it.
+  scaled with the number of accounts. publik API replaces it, paid by the
+  person using it: a new computer starts at $0.00, and linking it to a publik
+  account gives $0.05 of free use, once per account. The server route stays up
+  for already-installed older builds; new builds must not call it.
 - **No Anthropic OAuth, ever.** Claude.ai / Claude Code subscription tokens
   (`sk-ant-oat…`, `claude setup-token`, importing an existing `claude login`) are
   prohibited for third-party apps by Anthropic's own terms: developers may not
@@ -58,17 +63,21 @@ error message.
 **Provisioning.** Two routes to a key:
 
 - *Machine* (preferred, this is the "auto setup"): show the disclosure, then
-  `POST /api/v1/installs` with the build's app token. Returns a `pk_live_…` key,
-  a claim code and the starter. Consent precedes the mint — never call this
-  before the disclosure is accepted.
+  `POST /api/v1/installs` with the build's app token. Returns a `pk_live_…` key
+  and a claim code, at a $0.00 balance (`starter_micros` and `balance_micros`
+  are both 0). Consent precedes the mint — never call this before the
+  disclosure is accepted. The disclosure must not promise free usage: it says
+  the balance starts at $0.00 and that linking the publik account gives $0.05
+  of free use, once.
 - *Human*: the user pastes a `pk_live_…` key from `publikhq.com/dashboard/api`.
   This is the fallback whenever the build carries no app token, and must keep
   working regardless.
 
 **The app token** is a build-time constant (`pat_iris_<32>`), public by
 construction since it ships inside the binary — that is expected and contained:
-tokens are per-release, revocable, IP rate-limited, and mint only a small
-starter. A build without one is not broken; it falls back to the human route.
+tokens are per-release, revocable, and IP rate-limited; minting with one
+produces a $0.00-balance install, never a starter of its own. A build without
+one is not broken; it falls back to the human route.
 Note that macOS releases are cut locally, so the token has to be available to a
 local build, not only to CI.
 
@@ -98,9 +107,15 @@ own message and exactly one link from the response (`top_up_url`, `claim_url` or
   plan"** button to `claim_url`.
 - The same button in settings while the install is unclaimed; it becomes "Add a
   plan or pack" once claimed.
-- **Never a silent starter.** The app must not spend starter credit before that
-  card has been shown at least once. The pre-provisioning disclosure is not that
-  card — the card comes after, with the real balance on it.
+- **Never a silent starter.** An anonymous install mints at $0.00 and has no
+  starter to spend. The one free grant that exists — $0.05 of use, once per
+  publik account — belongs to the account and is paid at link time, not at
+  install or mint time. The app must not imply that an anonymous install already
+  has free usage, and must not spend any balance before that card has been shown
+  at least once. The pre-provisioning disclosure is not that card — the card
+  comes after, with the real balance on it. For an unlinked install at $0.00 the
+  balance line reads "$0.00 · link this computer for $0.05 of free use", not
+  "$0.00 left".
 
 **Copy rules**, same as the site enforces in `copy-guard.test.ts`: say "publik
 API"; show **dollars**, never tokens and never "credits" as a unit; never name
@@ -114,7 +129,8 @@ credential step goes after permissions. Windows has no first-run flow at all and
 needs one.
 
 The default path should be one obvious action: accept the disclosure, get
-provisioned, see the card, start using it. The other two options are offered
+provisioned, see the card, link the computer (which gives $0.05 of free use,
+once per publik account), start using it. The other two options are offered
 alongside, not buried.
 
 ## What still works with no credential at all

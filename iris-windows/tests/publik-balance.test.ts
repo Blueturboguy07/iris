@@ -17,7 +17,7 @@ import {
   readPublikBalance,
   typicalMessageChargeMicros,
 } from "../src/services/publik-balance";
-import { parseInsufficientCredit } from "../src/services/publik-api";
+import { UNLINKED_ZERO_BALANCE_LINE, parseInsufficientCredit } from "../src/services/publik-api";
 
 /**
  * Balance + Add credit in Iris (founder decision, 2026-09-22).
@@ -35,12 +35,17 @@ function balanceFixture(fileName: string): string {
 const THE_PUBLIK_KEY = "pk_live_abcdef123456_0123456789abcdef0123456789abcdef";
 
 describe("reading GET /balance", () => {
-  it("shows an anonymous install its balance and sends Add credit to the claim page", () => {
+  it("shows a new, unlinked install its $0.00 and sends Add credit to the claim page", () => {
+    // publik migration 0059: an install is minted at $0.00. The one free thing
+    // is $0.05 of use, once per publik account, when the computer is linked.
     const balance = parseBalanceResponse(balanceFixture("anonymous.json"));
     expect(balance).not.toBeNull();
-    expect(balance!.balanceMicros).toBe(181_240);
+    expect(balance!.balanceMicros).toBe(0);
     expect(balance!.claimState).toBe("anonymous");
-    expect(balanceLine(balance!.balanceMicros)).toBe("$0.18 left");
+    expect(balanceLine(balance!.balanceMicros, balance!.claimState)).toBe(
+      "$0.00 · link this computer for $0.05 of free use"
+    );
+    expect(balanceLine(balance!.balanceMicros)).toBe("$0.00 left");
     expect(balanceIsLow(balance!.balanceMicros)).toBe(true);
     expect(addCreditUrlFor(balance!)).toBe("https://publikhq.com/claim/HK7F-2QWD");
   });
@@ -103,7 +108,7 @@ describe("reading GET /balance", () => {
         error: {
           type: "insufficient_credit",
           message: "Not enough publik credit for this request.",
-          available_micros: 1_240,
+          available_micros: 0,
           claim_state: "anonymous",
           top_up_url: "https://publikhq.com/claim/HK7F-2QWD",
           claim_url: "https://publikhq.com/claim/HK7F-2QWD",
@@ -196,7 +201,7 @@ describe("what a message costs", () => {
     const afterAReply = costPerMessageLine(4_321, "publik-balanced");
     expect(beforeAnyReply).toBe("About $0.010 per message on publik-balanced");
     expect(afterAReply).toBe("Last reply: $0.004");
-    for (const line of [beforeAnyReply, afterAReply, balanceLine(181_240)]) {
+    for (const line of [beforeAnyReply, afterAReply, balanceLine(181_240), balanceLine(0, "anonymous")]) {
       expect(line.toLowerCase()).not.toContain("token");
       expect(line.toLowerCase()).not.toContain("credit");
     }
@@ -211,11 +216,18 @@ describe("what the tray, settings and chat title are handed", () => {
     topUpUrl: "https://publikhq.com/claim/HK7F-2QWD",
   };
 
+  const claimed = {
+    claimState: "claimed" as const,
+    claimUrl: null,
+    addCreditUrl: "https://publikhq.com/dashboard/api/add",
+    topUpUrl: "https://publikhq.com/dashboard/api/add",
+  };
+
   it("is nothing at all when publik API is not the provider answering", () => {
     expect(
       publikBalanceView({
         answeringWithPublik: false,
-        balanceMicros: 181_240,
+        balanceMicros: 0,
         lastReplyChargeMicros: 4_321,
         modelAlias: "publik-balanced",
         ...anonymous,
@@ -227,16 +239,33 @@ describe("what the tray, settings and chat title are handed", () => {
     expect(
       publikBalanceView({
         answeringWithPublik: true,
-        balanceMicros: 181_240,
-        lastReplyChargeMicros: 4_321,
+        balanceMicros: 0,
+        lastReplyChargeMicros: null,
         modelAlias: "publik-balanced",
         ...anonymous,
       })
     ).toEqual({
-      balanceLine: "$0.18 left",
+      balanceLine: "$0.00 · link this computer for $0.05 of free use",
+      isLow: true,
+      costLine: "About $0.010 per message on publik-balanced",
+      addCreditUrl: "https://publikhq.com/claim/HK7F-2QWD",
+    });
+  });
+
+  it("shows a linked account's one-time $0.05 as what is left", () => {
+    expect(
+      publikBalanceView({
+        answeringWithPublik: true,
+        balanceMicros: 50_000,
+        lastReplyChargeMicros: 4_321,
+        modelAlias: "publik-balanced",
+        ...claimed,
+      })
+    ).toEqual({
+      balanceLine: "$0.05 left",
       isLow: true,
       costLine: "Last reply: $0.004",
-      addCreditUrl: "https://publikhq.com/claim/HK7F-2QWD",
+      addCreditUrl: "https://publikhq.com/dashboard/api/add",
     });
   });
 
@@ -260,6 +289,11 @@ describe("what the tray, settings and chat title are handed", () => {
       "publik API: $0.18 left — running low"
     );
     expect(publikBalanceMenuLabel({ ...base, balanceLine: null, isLow: false })).toBe("publik API");
+    // The unlinked $0.00 line already says what to do; "running low" on top
+    // of it would only repeat it less usefully.
+    expect(publikBalanceMenuLabel({ ...base, balanceLine: UNLINKED_ZERO_BALANCE_LINE, isLow: true })).toBe(
+      "publik API: $0.00 · link this computer for $0.05 of free use"
+    );
   });
 });
 

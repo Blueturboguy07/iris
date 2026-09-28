@@ -52,7 +52,7 @@ contextBridge.exposeInMainWorld("iris", {
   // card's rendered state (CONTRACT section 1: a desktop app's key must not
   // enter a renderer).
   provisionPublikApi: () => ipcRenderer.invoke("publik:provision"),
-  publikCard: (isFirstRun: boolean) => ipcRenderer.invoke("publik:card", isFirstRun),
+  publikCard: () => ipcRenderer.invoke("publik:card"),
   markPublikCardShown: () => ipcRenderer.invoke("publik:cardShown"),
   // The balance lines: what is left, what a message costs, and where "Add
   // credit" goes. Null while publik API is not the provider answering.

@@ -48,7 +48,7 @@ enum AssistantProviderPreference: String, CaseIterable, Sendable, Equatable {
     var explanation: String {
         switch self {
         case .publikAPI:
-            return "Works right away. You pay for what you use, at half what the model would cost you directly."
+            return "Starts at $0.00. Linking your publik account gives $0.05 of free use, once; after that you pay for what you use, at half what the model would cost you directly."
         case .anthropicKey:
             return "Your key, your bill, straight to Anthropic. publik never sees it."
         case .codex:

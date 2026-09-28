@@ -1290,7 +1290,7 @@ struct CompanionPanelView: View {
     /// the balance line, the justification, and the one button.
     ///
     /// `CONTRACT.md` section 12 is binding here. In particular the card must be
-    /// shown at least once BEFORE any starter credit is spent — which is why
+    /// shown at least once BEFORE any of the balance is spent — which is why
     /// `PublikAPIAccount.maySpendOnThisKey` is false until
     /// `recordThatTheFirstRunCardWasShown()` has run, and why this view calls it
     /// on appear rather than somewhere more convenient.
@@ -1319,7 +1319,7 @@ struct CompanionPanelView: View {
                 .foregroundColor(DS.Colors.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Text("Iris will register this Mac with publik to get it a key. No account and no card needed to start.")
+            Text("Iris will register this Mac with publik to get it a key. Your balance starts at $0.00 and no card is asked for. Linking your publik account gives $0.05 of free use, once.")
                 .font(.system(size: 10))
                 .foregroundColor(DS.Colors.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1450,19 +1450,25 @@ struct CompanionPanelView: View {
             }
         }
         .onAppear {
-            // CONTRACT section 12 item 4: the starter may not be spent until
+            // CONTRACT section 12 item 4: the balance may not be spent until
             // this card has been in front of the reader once.
             publikAPIAccount.recordThatTheFirstRunCardWasShown()
         }
     }
 
-    /// The balance, from the last thing the gateway said.
+    /// The balance, from the last thing the gateway said. An unlinked install
+    /// at $0.00 — where every new install starts since publik's migration
+    /// 0059 — says how to get its one free $0.05 instead of "$0.00 left".
     private var publikAPIBalanceLine: String {
         guard let walletSnapshot = publikAPIAccount.walletSnapshot else {
             return "publik API is set up"
         }
-        if publikAPIIsTheProviderAnswering {
-            return PublikAPIMoney.balanceLine(balanceMicros: walletSnapshot.balanceMicros)
+        let balanceLine = PublikAPIMoney.balanceLine(
+            balanceMicros: walletSnapshot.balanceMicros,
+            claimState: walletSnapshot.claimState
+        )
+        if publikAPIIsTheProviderAnswering || balanceLine == PublikAPIMoney.unlinkedZeroBalanceLine {
+            return balanceLine
         }
         return "\(walletSnapshot.dollarsDescription) left on publik API"
     }

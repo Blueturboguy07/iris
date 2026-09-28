@@ -17,9 +17,10 @@
  * signed in: `POST {publik}/api/assistant/chat` on publik's own Anthropic key,
  * free to the user and capped only per-user, so publik's exposure grew with the
  * number of accounts. That is what kept Iris from being handed out publicly.
- * publik API replaces it — the same "it just works" first run, paid by the
- * person using it. The server route stays up for builds already installed; this
- * one must not call it.
+ * publik API replaces it, paid by the person using it: a new computer starts at
+ * $0.00, and linking it to a publik account gives $0.05 of free use, once per
+ * account. The server route stays up for builds already installed; this one
+ * must not call it.
  *
  * THE PROPERTY THIS FILE EXISTS TO PROTECT: a credential only ever reaches the
  * host that issued it. The user's own Anthropic key must never be seen by a

@@ -37,12 +37,16 @@ struct PublikAPIBalanceTests {
     // MARK: Reading GET /balance
 
     @Test func anAnonymousInstallShowsItsBalanceAndLinksToTheClaimPage() throws {
+        // publik migration 0059: an install is minted at $0.00. The one free
+        // thing is $0.05 of use, once per publik account, when it is linked.
         let snapshot = try #require(PublikAPIWalletSnapshot.parse(
             balanceResponseBody: try balanceFixture(named: "anonymous.json")
         ))
-        #expect(snapshot.balanceMicros == 181_240)
+        #expect(snapshot.balanceMicros == 0)
         #expect(snapshot.claimState == .anonymous)
-        #expect(PublikAPIMoney.balanceLine(balanceMicros: snapshot.balanceMicros) == "$0.18 left")
+        #expect(PublikAPIMoney.balanceLine(balanceMicros: snapshot.balanceMicros) == "$0.00 left")
+        #expect(PublikAPIMoney.balanceLine(balanceMicros: snapshot.balanceMicros, claimState: snapshot.claimState)
+            == "$0.00 · link this computer for $0.05 of free use")
         #expect(PublikAPIMoney.balanceIsLow(balanceMicros: snapshot.balanceMicros))
         #expect(PublikAPIAddCredit.urlString(for: snapshot) == "https://publikhq.com/claim/HK7F-2QWD")
     }
@@ -110,7 +114,7 @@ struct PublikAPIBalanceTests {
         let refusal = try #require(PublikAPIInsufficientCredit.parse(responseBody: jsonData("""
             {"type": "error", "error": {"type": "insufficient_credit",
              "message": "Not enough publik credit for this request.",
-             "available_micros": 1240, "claim_state": "anonymous",
+             "available_micros": 0, "claim_state": "anonymous",
              "top_up_url": "https://publikhq.com/claim/HK7F-2QWD",
              "claim_url": "https://publikhq.com/claim/HK7F-2QWD",
              "add_credit_url": "https://publikhq.com/dashboard/api/add"}}
@@ -245,7 +249,10 @@ struct PublikAPIBalanceTests {
         #expect(afterAReply == "Last reply: $0.004")
 
         // The copy rule: dollars, never tokens, never "credits".
-        for line in [beforeAnyReply, afterAReply, PublikAPIMoney.balanceLine(balanceMicros: 181_240)] {
+        for line in [
+            beforeAnyReply, afterAReply, PublikAPIMoney.balanceLine(balanceMicros: 181_240),
+            PublikAPIMoney.unlinkedZeroBalanceLine,
+        ] {
             #expect(!line.lowercased().contains("token"), "\(line)")
             #expect(!line.lowercased().contains("credit"), "\(line)")
         }

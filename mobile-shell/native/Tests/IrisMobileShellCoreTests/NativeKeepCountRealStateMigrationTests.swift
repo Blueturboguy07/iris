@@ -1,0 +1,313 @@
+import CryptoKit
+import Foundation
+import XCTest
+@testable import IrisMobileShellCore
+
+final class NativeKeepCountRealStateMigrationTests: XCTestCase {
+    func testRealPhoneStateMigratesWithoutLossThenPrunesByKeepCount() async throws {
+        // MUTATION: prune during migration loses old hashes; age ordering or dropping current loses the expected set; touching state changes original hashes; skipping the warning fails when input history exceeds two; Keep all must preserve every input digest.
+        let inputPath = ProcessInfo.processInfo.environment["IRIS_PHONE_STATE_COPY"]
+            ?? "/Users/akrit/Projects-Hub/Iris/iris/orch-scratch/phone-state-copy-20261001"
+        guard FileManager.default.fileExists(atPath: inputPath) else {
+            XCTFail("The real-state input was not found at the configured copy path: \(inputPath)")
+            return
+        }
+
+        let fm = FileManager.default
+        let temp = fm.temporaryDirectory.appendingPathComponent("iris-real-state-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: temp) }
+        try fm.copyItem(at: URL(fileURLWithPath: inputPath, isDirectory: true), to: temp)
+        let firstCopy = temp.appendingPathComponent("first-run", isDirectory: true)
+        try fm.copyItem(at: URL(fileURLWithPath: inputPath, isDirectory: true), to: firstCopy)
+        let firstRoot = firstCopy.appendingPathComponent("v1", isDirectory: true)
+
+        let before = try RealStateOracle.snapshot(root: firstRoot)
+        XCTAssertEqual(Set(before.apps.keys), ["publik.kneecap", "publik.nut-ai", "publik.freeharmony"])
+        let defaultsName = "iris-real-state-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        XCTAssertNil(defaults.string(forKey: NativeShellLibraryCoordinator.versionKeepCountUserDefaultsKey))
+
+        let offers = RealStateOracle.offers(from: before)
+        let coordinator = RealStateOracle.coordinator(root: firstRoot, defaults: defaults, offers: offers)
+        _ = try await coordinator.refreshLibrary()
+        for record in before.apps.values {
+            let launch = try await coordinator.launchActive(identity: record.identity)
+            XCTAssertEqual(launch.launchedRevisionId, record.currentRevisionId, record.identity.appId)
+            try RealStateOracle.assertLaunch(launch.launch, matches: record.revisions[record.currentRevisionId]!, file: #filePath, line: #line)
+        }
+
+        let afterMigration = try RealStateOracle.snapshot(root: firstRoot, using: before)
+        XCTAssertTrue(before.allContentHashes.isSubset(of: afterMigration.allStoredContentHashes), "migration must not delete any original content hash")
+        RealStateOracle.assertActivePointersUnchanged(before, afterMigration, file: #filePath, line: #line)
+        RealStateOracle.assertOriginalStateBytesUnchanged(before, afterMigration, file: #filePath, line: #line)
+
+        let revisionStore = try XCTUnwrap(before.apps.values.first).identity
+        let warningStore = try NativeRevisionStore(rootURL: firstRoot, appId: revisionStore.appId, projectId: revisionStore.projectId,
+                                                   shellVersion: "1.0.0", capabilityPolicy: RealStateOracle.capabilityPolicy, defaults: defaults)
+        _ = try await warningStore.revisionSummaries()
+        let warning = await warningStore.storageMigrationWarning()
+        if before.apps.values.contains(where: { $0.revisions.count > 2 }) {
+            XCTAssertEqual(warning, "Older versions will be cleared the next time Iris tidies storage.")
+            let warningAgain = try NativeRevisionStore(rootURL: firstRoot, appId: revisionStore.appId, projectId: revisionStore.projectId,
+                                                       shellVersion: "1.0.0", capabilityPolicy: RealStateOracle.capabilityPolicy, defaults: defaults)
+            _ = try await warningAgain.revisionSummaries()
+            let warningAfterReconstruction = await warningAgain.storageMigrationWarning()
+            XCTAssertEqual(warningAfterReconstruction, warning, "migration warning must persist across reconstruction")
+        }
+
+        // Reconstruct immediately after migration to cover the interrupted-first-launch recovery boundary.
+        let resumedCoordinator = RealStateOracle.coordinator(root: firstRoot, defaults: defaults, offers: offers)
+        _ = try await resumedCoordinator.refreshLibrary()
+        for record in before.apps.values {
+            let launch = try await resumedCoordinator.launchActive(identity: record.identity)
+            XCTAssertEqual(launch.launchedRevisionId, record.currentRevisionId, record.identity.appId)
+        }
+        let afterReconstruction = try RealStateOracle.snapshot(root: firstRoot, using: before)
+        XCTAssertTrue(before.allContentHashes.isSubset(of: afterReconstruction.allStoredContentHashes), "reconstruction after migration must retain every original hash")
+        RealStateOracle.assertOriginalStateBytesUnchanged(before, afterReconstruction, file: #filePath, line: #line)
+
+        let bytesBeforePrune = afterReconstruction.storedContentBytes
+        // Each app gets its own ordinary prune through the app's normal coordinator entry point.
+        for record in before.apps.values {
+            _ = try await resumedCoordinator.pruneStorage(identity: record.identity)
+        }
+        let afterPrune = try RealStateOracle.snapshot(root: firstRoot, using: before)
+        for record in before.apps.values {
+            let expected = Set(record.orderedRevisionIds.suffix(2))
+                .union(record.protectedRevisionIds)
+            let actual = try RealStateOracle.usableRevisionIds(record, root: firstRoot)
+            XCTAssertEqual(actual, expected, "ordinary prune must keep the two newest plus separately protected roles for \(record.identity.appId)")
+            let launch = try await resumedCoordinator.launchActive(identity: record.identity)
+            XCTAssertEqual(launch.launchedRevisionId, record.currentRevisionId, record.identity.appId)
+            try RealStateOracle.assertLaunch(launch.launch, matches: record.revisions[record.currentRevisionId]!, file: #filePath, line: #line)
+        }
+        RealStateOracle.assertOriginalStateBytesUnchanged(before, afterPrune, file: #filePath, line: #line)
+        XCTAssertLessThanOrEqual(afterPrune.storedContentBytes, bytesBeforePrune,
+                                 "real-state stored content bytes before=\(bytesBeforePrune), after=\(afterPrune.storedContentBytes)")
+        print("REAL_STATE_KEEP_COUNT_BYTES before=\(bytesBeforePrune) after=\(afterPrune.storedContentBytes) reclaimed=\(bytesBeforePrune - afterPrune.storedContentBytes)")
+
+        // Repeating both public operations is idempotent on the real copied layout.
+        _ = try await resumedCoordinator.refreshLibrary()
+        for record in before.apps.values { _ = try await resumedCoordinator.pruneStorage(identity: record.identity) }
+        let afterSecondPass = try RealStateOracle.snapshot(root: firstRoot, using: before)
+        XCTAssertEqual(afterPrune.allStoredContentHashes, afterSecondPass.allStoredContentHashes)
+        XCTAssertEqual(afterPrune.storedContentBytes, afterSecondPass.storedContentBytes)
+        RealStateOracle.assertOriginalStateBytesUnchanged(before, afterSecondPass, file: #filePath, line: #line)
+
+        // Keep all is tested from a fresh clone of the same real input, not a synthetic or already-pruned store.
+        let allCopy = temp.appendingPathComponent("keep-all", isDirectory: true)
+        try fm.copyItem(at: URL(fileURLWithPath: inputPath, isDirectory: true), to: allCopy)
+        let allRoot = allCopy.appendingPathComponent("v1", isDirectory: true)
+        let allBefore = try RealStateOracle.snapshot(root: allRoot)
+        let allDefaultsName = "iris-real-state-all-\(UUID().uuidString)"
+        let allDefaults = try XCTUnwrap(UserDefaults(suiteName: allDefaultsName))
+        defer { allDefaults.removePersistentDomain(forName: allDefaultsName) }
+        let allOffers = RealStateOracle.offers(from: allBefore)
+        let allCoordinator = RealStateOracle.coordinator(root: allRoot, defaults: allDefaults, offers: allOffers)
+        _ = try await allCoordinator.setVersionKeepCount(.keepAll, defaults: allDefaults)
+        _ = try await allCoordinator.refreshLibrary()
+        for record in allBefore.apps.values { _ = try await allCoordinator.pruneStorage(identity: record.identity) }
+        let allAfter = try RealStateOracle.snapshot(root: allRoot, using: allBefore)
+        XCTAssertEqual(allBefore.allContentHashes, allAfter.allStoredContentHashes, "Keep all must preserve all original real-state content")
+        RealStateOracle.assertOriginalStateBytesUnchanged(allBefore, allAfter, file: #filePath, line: #line)
+    }
+}
+
+private enum RealStateOracle {
+    static let supportedCapabilities: Set<String> = ["web.media.camera", "web.media.export", "web.media.photo-picker", "web.storage"]
+    static let capabilityPolicy = CapabilityPolicy(supportedCapabilities: supportedCapabilities)
+
+    struct Revision {
+        let id: String
+        let createdAt: String
+        let entrypoint: String
+        let files: [String: String]
+        let revisionRoot: URL
+        let contentRoot: URL
+    }
+    struct App {
+        let identity: NativeShellAppIdentity
+        let currentRevisionId: String
+        let fallbackRevisionId: String?
+        let revisions: [String: Revision]
+        let orderedRevisionIds: [String]
+        let protectedRevisionIds: Set<String>
+    }
+    struct Snapshot {
+        let apps: [String: App]
+        let allContentHashes: Set<String>
+        let allStoredContentHashes: Set<String>
+        let stateFileHashes: [String: String]
+        let stateRoot: URL
+        let activePointers: [String: (String, String?) ]
+        let storedContentBytes: Int64
+    }
+
+    static func offers(from snapshot: Snapshot) -> [NativeShellAppIdentity: Set<String>] {
+        Dictionary(uniqueKeysWithValues: snapshot.apps.values.map { ($0.identity, Set($0.revisions.keys)) })
+    }
+
+    static func coordinator(root: URL, defaults: UserDefaults, offers: [NativeShellAppIdentity: Set<String>]) -> NativeShellLibraryCoordinator {
+        // Mirrors NativeWebStorageConfiguration.capabilityPolicy on iOS 18.4; the Core test target cannot import the Host target.
+        return NativeShellLibraryCoordinator(rootURL: root, capabilityPolicy: capabilityPolicy, defaults: defaults,
+                                              downloadableRevisionIds: { identity in offers[identity] ?? [] })
+    }
+
+    static func snapshot(root: URL, using baseline: Snapshot? = nil) throws -> Snapshot {
+        let fm = FileManager.default
+        let contentRoot = root.appendingPathComponent("content", isDirectory: true)
+        let stateRoot = root.appendingPathComponent("state", isDirectory: true)
+        var apps: [String: App] = [:]
+        var allHashes = Set<String>()
+        var pointers: [String: (String, String?)] = [:]
+        let appDirs = try fm.contentsOfDirectory(at: contentRoot, includingPropertiesForKeys: [.isDirectoryKey])
+        for appDir in appDirs where (try appDir.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true {
+            let projectDirs = try fm.contentsOfDirectory(at: appDir, includingPropertiesForKeys: [.isDirectoryKey])
+            for projectDir in projectDirs where (try projectDir.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true {
+                let appId = appDir.lastPathComponent
+                let projectId = projectDir.lastPathComponent
+                let identity = NativeShellAppIdentity(appId: appId, projectId: projectId)
+                let revisionsRoot = projectDir.appendingPathComponent("revisions", isDirectory: true)
+                var revisions: [String: Revision] = [:]
+                let revisionDirs = (try? fm.contentsOfDirectory(at: revisionsRoot, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+                for revisionDir in revisionDirs where (try revisionDir.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true {
+                    let metadataURL = revisionDir.appendingPathComponent("metadata.json")
+                    let metadata = try JSONSerialization.jsonObject(with: Data(contentsOf: metadataURL)) as! [String: Any]
+                    let revisionId = metadata["revisionId"] as! String
+                    let createdAt = metadata["createdAt"] as! String
+                    let manifest = metadata["manifest"] as! [String: Any]
+                    let entrypoint = manifest["entrypoint"] as! String
+                    let fileRows = metadata["files"] as! [[String: Any]]
+                    var files: [String: String] = [:]
+                    let tree = revisionDir.appendingPathComponent("content", isDirectory: true)
+                    for row in fileRows {
+                        let path = row["path"] as! String
+                        let metadataHash = row["sha256"] as! String
+                        let expectedHash = metadataHash.hasPrefix("sha256:") ? String(metadataHash.dropFirst("sha256:".count)) : metadataHash
+                        let url = tree.appendingPathComponent(path)
+                        let actualHash = sha256(try Data(contentsOf: url))
+                        XCTAssertEqual(actualHash, expectedHash, "copied input metadata hash mismatch for \(appId)/\(revisionId)/\(path)")
+                        files[path] = actualHash
+                        allHashes.insert(actualHash)
+                    }
+                    revisions[revisionId] = Revision(id: revisionId, createdAt: createdAt, entrypoint: entrypoint, files: files, revisionRoot: revisionDir, contentRoot: tree)
+                }
+                if revisions.isEmpty, let prior = baseline?.apps[appId] { revisions = prior.revisions }
+                let pointerURL = stateRoot.appendingPathComponent(appId, isDirectory: true).appendingPathComponent(projectId, isDirectory: true).appendingPathComponent("active.json")
+                let pointer = try JSONSerialization.jsonObject(with: Data(contentsOf: pointerURL)) as! [String: Any]
+                let current = pointer["currentRevisionId"] as! String
+                let fallback = pointer["fallbackRevisionId"] as? String
+                guard revisions[current] != nil else { throw NSError(domain: "RealStateOracle", code: 1, userInfo: [NSLocalizedDescriptionKey: "active revision metadata missing for \(appId)"]) }
+                if let fallback, revisions[fallback] == nil { throw NSError(domain: "RealStateOracle", code: 2, userInfo: [NSLocalizedDescriptionKey: "fallback revision metadata missing for \(appId)"]) }
+                let ordered = revisions.values.sorted { lhs, rhs in
+                    lhs.createdAt == rhs.createdAt ? lhs.id < rhs.id : lhs.createdAt < rhs.createdAt
+                }.map(\.id)
+                apps[appId] = App(identity: identity, currentRevisionId: current, fallbackRevisionId: fallback,
+                                  revisions: revisions, orderedRevisionIds: ordered,
+                                  protectedRevisionIds: Set([current, fallback].compactMap { $0 }))
+                pointers[appId] = (current, fallback)
+            }
+        }
+        let stateHashes = try hashesOfFiles(under: stateRoot, relativeTo: root)
+        let objectRoot = root.appendingPathComponent("objects", isDirectory: true)
+        let stored = try hashesOfFiles(under: objectRoot, relativeTo: objectRoot)
+        let byteTotal = try regularFiles(under: objectRoot).reduce(Int64(0)) { partial, url in
+            partial + Int64(try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
+        }
+        if let baseline {
+            for (appId, old) in baseline.apps where apps[appId] == nil {
+                let pointerURL = stateRoot.appendingPathComponent(appId, isDirectory: true).appendingPathComponent(old.identity.projectId, isDirectory: true).appendingPathComponent("active.json")
+                let pointer = try JSONSerialization.jsonObject(with: Data(contentsOf: pointerURL)) as! [String: Any]
+                let current = pointer["currentRevisionId"] as! String
+                let fallback = pointer["fallbackRevisionId"] as? String
+                apps[appId] = App(identity: old.identity, currentRevisionId: current, fallbackRevisionId: fallback,
+                                  revisions: old.revisions, orderedRevisionIds: old.orderedRevisionIds, protectedRevisionIds: Set([current, fallback].compactMap { $0 }))
+                pointers[appId] = (current, fallback)
+            }
+            allHashes = baseline.allContentHashes
+        }
+        return Snapshot(apps: apps, allContentHashes: allHashes, allStoredContentHashes: stored.values.reduce(into: Set<String>()) { $0.insert($1) },
+                        stateFileHashes: stateHashes, stateRoot: stateRoot, activePointers: pointers, storedContentBytes: byteTotal)
+    }
+
+    static func assertActivePointersUnchanged(_ before: Snapshot, _ after: Snapshot, file: StaticString, line: UInt) {
+        for (appId, pointer) in before.activePointers {
+            XCTAssertEqual(after.activePointers[appId]?.0, pointer.0, appId, file: file, line: line)
+            XCTAssertEqual(after.activePointers[appId]?.1, pointer.1, appId, file: file, line: line)
+        }
+    }
+
+    static func assertOriginalStateBytesUnchanged(_ before: Snapshot, _ after: Snapshot, file: StaticString, line: UInt) {
+        for (path, digest) in before.stateFileHashes {
+            if path.hasSuffix("/active.json") {
+                // SPEC.md section 2.1 line 111 preserves this layout, and section 2.7 preserves the active pointer content.
+                // The store may atomically re-encode active.json bytes while retaining the same JSON keys and values.
+                let pathComponents = path.split(separator: "/").map(String.init)
+                guard let appId = before.apps.keys.first(where: { pathComponents.contains($0) }),
+                      let app = before.apps[appId] else {
+                    XCTFail("could not identify app for active pointer path: \(path)", file: file, line: line)
+                    continue
+                }
+                let beforeURL = before.stateRoot.appendingPathComponent(appId, isDirectory: true)
+                    .appendingPathComponent(app.identity.projectId, isDirectory: true).appendingPathComponent("active.json")
+                let afterURL = after.stateRoot.appendingPathComponent(appId, isDirectory: true)
+                    .appendingPathComponent(app.identity.projectId, isDirectory: true).appendingPathComponent("active.json")
+                do {
+                    let beforeObject = try JSONSerialization.jsonObject(with: Data(contentsOf: beforeURL)) as? [String: Any]
+                    let afterObject = try JSONSerialization.jsonObject(with: Data(contentsOf: afterURL)) as? [String: Any]
+                    XCTAssertNotNil(beforeObject, "active pointer must be a JSON object: \(path)", file: file, line: line)
+                    XCTAssertNotNil(afterObject, "active pointer must be a JSON object: \(path)", file: file, line: line)
+                    XCTAssertEqual(afterObject?.count, beforeObject?.count, "active pointer keys changed: \(path)", file: file, line: line)
+                    XCTAssertEqual(afterObject as NSDictionary?, beforeObject as NSDictionary?, "active pointer content changed: \(path)", file: file, line: line)
+                } catch {
+                    XCTFail("could not parse active pointer JSON at \(path): \(error)", file: file, line: line)
+                }
+            } else {
+                XCTAssertEqual(after.stateFileHashes[path], digest, "person state file changed: \(path)", file: file, line: line)
+            }
+        }
+    }
+
+    static func assertLaunch(_ descriptor: VerifiedLaunchDescriptor, matches revision: Revision, file: StaticString, line: UInt) throws {
+        var launchRoot = descriptor.entrypointURL.deletingLastPathComponent()
+        for _ in 1..<max(1, revision.entrypoint.split(separator: "/").count) { launchRoot.deleteLastPathComponent() }
+        for (path, digest) in revision.files {
+            let url = launchRoot.appendingPathComponent(path)
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                XCTFail("launch content missing \(path)", file: file, line: line); continue
+            }
+            XCTAssertEqual(sha256(try Data(contentsOf: url)), digest, "launch content differs at \(path)", file: file, line: line)
+        }
+    }
+
+    static func usableRevisionIds(_ app: App, root: URL) throws -> Set<String> {
+        let objects = root.appendingPathComponent("objects", isDirectory: true)
+        let storedHashes = try hashesOfFiles(under: objects, relativeTo: objects)
+        return Set(app.revisions.values.filter { revision in
+            let digests = Set(storedHashes.values)
+            return revision.files.values.allSatisfy { digests.contains($0) }
+        }.map(\.id))
+    }
+
+    private static func hashesOfFiles(under directory: URL, relativeTo base: URL) throws -> [String: String] {
+        var result: [String: String] = [:]
+        for url in try regularFiles(under: directory) {
+            let relative = String(url.path.dropFirst(base.path.count + (base.path.hasSuffix("/") ? 0 : 1)))
+            result[relative] = sha256(try Data(contentsOf: url))
+        }
+        return result
+    }
+
+    private static func regularFiles(under directory: URL) throws -> [URL] {
+        guard FileManager.default.fileExists(atPath: directory.path),
+              let enumerator = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey]) else { return [] }
+        var files: [URL] = []
+        for case let url as URL in enumerator where (try url.resourceValues(forKeys: [.isRegularFileKey])).isRegularFile == true { files.append(url) }
+        return files
+    }
+
+    private static func sha256(_ bytes: Data) -> String {
+        SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    }
+}

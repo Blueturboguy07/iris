@@ -1,0 +1,17 @@
+{
+  "seed": "iris-catalog-v2-fixtures-2026-09-28",
+  "generator": "mobile-shell/tools/catalog-fixture-generator",
+  "installablePackages": true,
+  "generatedAt": "2026-09-28T12:00:00.000Z",
+  "pageCount": 1,
+  "appCount": 3,
+  "categoryCount": 24,
+  "catalogEmitHash": "sha256:d0d88592a7bb46f0284a617532385ceafeabd284dde9f53a9a38627471a955ec",
+  "files": {
+    "apps/quick-recipes.json": "sha256:b691b271d22e0fe6c866ba4fcaffeb616285d73fb363377085b403f8ceae530c",
+    "apps/swift-mail.json": "sha256:e8cf45ea4c9870a85cb5cf1672c3dccc939ea792f746bc2ad198b607f07febf8",
+    "apps/vivid-journal.json": "sha256:a1a2f2e3f2cce08d8faaf90a5b25895e1308457dfaff42290cb666e15ab92289",
+    "categories.json": "sha256:82f77e38e2767caeed0834861be0ef28b4c1039143b0cc1005ff055284e97e80",
+    "index.json": "sha256:0f4805ebb8f37a2f4e9953ceae87c525ab603069babe971d3ac881508244b3af"
+  }
+}

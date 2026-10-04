@@ -1,0 +1,72 @@
+{
+  "format": "iris.mobile-shell.package+json",
+  "approval": {
+    "kind": "iris.mobile-shell.delivery-approval",
+    "version": 1,
+    "approvalId": "approval_4e792c1a5370d81e0f944071",
+    "requestId": null,
+    "requestNonce": null,
+    "appId": "iris.native-demo",
+    "projectId": "iris.native-demo.shell",
+    "baseRevisionId": null,
+    "approvedRevisionId": "rev-sha256:5990a290789e8ca60b73fcf4e992d2b4f05b2efdd7a4bd59b27ec0e2d2b9ed39",
+    "approvedContentHash": "sha256:5990a290789e8ca60b73fcf4e992d2b4f05b2efdd7a4bd59b27ec0e2d2b9ed39",
+    "approvedAt": "2026-09-17T19:55:54.509Z"
+  },
+  "envelope": {
+    "kind": "iris.mobile-shell.delivery-envelope",
+    "version": 1,
+    "envelopeId": "delivery_b897bf044300721c2881950e",
+    "deliveryNonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "approvalId": "approval_4e792c1a5370d81e0f944071",
+    "appId": "iris.native-demo",
+    "projectId": "iris.native-demo.shell",
+    "baseRevisionId": null,
+    "revisionId": "rev-sha256:5990a290789e8ca60b73fcf4e992d2b4f05b2efdd7a4bd59b27ec0e2d2b9ed39",
+    "contentHash": "sha256:5990a290789e8ca60b73fcf4e992d2b4f05b2efdd7a4bd59b27ec0e2d2b9ed39",
+    "issuedAt": "2026-09-17T19:55:54.565Z",
+    "revision": {
+      "kind": "iris.mobile-shell.revision",
+      "version": 1,
+      "appId": "iris.native-demo",
+      "projectId": "iris.native-demo.shell",
+      "revisionId": "rev-sha256:5990a290789e8ca60b73fcf4e992d2b4f05b2efdd7a4bd59b27ec0e2d2b9ed39",
+      "baseRevisionId": null,
+      "manifestHash": "sha256:f40a331727c35188d1b3355141aa2aa28d98fb8c31b7568d3b6102e95e67e046",
+      "contentHash": "sha256:5990a290789e8ca60b73fcf4e992d2b4f05b2efdd7a4bd59b27ec0e2d2b9ed39",
+      "createdAt": "2026-09-17T19:55:54.437Z",
+      "manifest": {
+        "kind": "iris.mobile-shell.manifest",
+        "version": 1,
+        "appId": "iris.native-demo",
+        "projectId": "iris.native-demo.shell",
+        "displayName": "Iris Native Demo",
+        "runtime": {
+          "type": "web",
+          "entrypoint": "index.html",
+          "minShellVersion": "1.0.0"
+        },
+        "capabilities": [],
+        "data": {
+          "namespace": "iris.native-demo",
+          "updatePolicy": "preserve"
+        }
+      },
+      "files": [
+        {
+          "path": "index.html",
+          "sha256": "sha256:542b2153df1eab113c84a3cf5f456f5c27b63f7e835e8a8cc34db43ddf3ec156",
+          "bytes": 713,
+          "mediaType": "text/html"
+        }
+      ]
+    }
+  },
+  "files": [
+    {
+      "path": "index.html",
+      "mediaType": "text/html",
+      "contentBase64": "PCFkb2N0eXBlIGh0bWw+PG1ldGEgY2hhcnNldD11dGYtOD48bWV0YSBuYW1lPXZpZXdwb3J0IGNvbnRlbnQ9IndpZHRoPWRldmljZS13aWR0aCxpbml0aWFsLXNjYWxlPTEiPjx0aXRsZT5JcmlzIERlbW8gVjE8L3RpdGxlPjxzdHlsZT5ib2R5e2ZvbnQtZmFtaWx5Oi1hcHBsZS1zeXN0ZW07bWFyZ2luOjA7cGFkZGluZzozMnB4O2JhY2tncm91bmQ6IzEwMTExNDtjb2xvcjp3aGl0ZX1tYWlue21heC13aWR0aDozMnJlbTttYXJnaW46YXV0b31zbWFsbHtjb2xvcjojOWRhM2FmfWgxe2ZvbnQtc2l6ZToyLjJyZW19cHtsaW5lLWhlaWdodDoxLjU1O2NvbG9yOiNkMWQ1ZGJ9LmNhcmR7bWFyZ2luLXRvcDoyNHB4O3BhZGRpbmc6MThweDtib3JkZXItcmFkaXVzOjE4cHg7YmFja2dyb3VuZDojMWIxZDIyfTwvc3R5bGU+PG1haW4+PHNtYWxsPklSSVMgTU9CSUxFIERFTU8gwrcgVkVSU0lPTiAxPC9zbWFsbD48aDE+Rmlyc3QgdmVyaWZpZWQgdmVyc2lvbi48L2gxPjxwPlRoaXMgaXMgdGhlIGluaXRpYWwgbm8tY2FwYWJpbGl0eSBkZW1vIHJldmlzaW9uLiBSZXZpZXcgaXQsIHN0YWdlIGl0LCBhY3RpdmF0ZSBpdCwgdGhlbiBvcGVuIGl0IGZyb20gdGhlIElyaXMgc2hlbGwuPC9wPjxkaXYgY2xhc3M9Y2FyZD5WZXJzaW9uIDEgaXMgaW50ZW50aW9uYWxseSBzaW1wbGUgc28gdGhlIGxhdGVyIHVwZGF0ZSBpcyB2aXN1YWxseSBvYnZpb3VzLjwvZGl2PjwvbWFpbj4="
+    }
+  ]
+}

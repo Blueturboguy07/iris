@@ -1,0 +1,24 @@
+// Iris Apps (mobile shell) - Debug configuration.
+//
+// This file is the single place to change the owner decisions below.
+// Do not put these three settings back into project.pbxproj; if you need
+// to change one, change it here (and in Release.xcconfig too, if it is a
+// setting that should match). See PLAN.md section 8 in this unit's impl
+// folder for the open owner decisions this maps to.
+
+// Empty on purpose: no Apple Developer Program membership is enrolled or
+// paid for yet. For a Phase 0 device run, sign in to Xcode with your own
+// Apple ID, pick your Personal (free) team in the project's Signing &
+// Capabilities tab, and Xcode will sign locally without this value. Do not
+// fill this in until Phase 1 (see PHASE0_DEVICE_GUIDE.md in this folder).
+DEVELOPMENT_TEAM =
+
+// Debug keeps its own ".dev" bundle id so a debug build never collides
+// with a real TestFlight or App Store install of the same app on one
+// phone.
+PRODUCT_BUNDLE_IDENTIFIER = com.publikhq.iris.mobileshell.dev
+
+// Home Screen and App Store display name placeholder. Change this (and
+// the same key in Release.xcconfig) if the owner decides on "Iris"
+// instead of "Iris Apps" (PLAN.md section 8, item 3).
+INFOPLIST_KEY_CFBundleDisplayName = Iris Apps

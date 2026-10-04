@@ -1,0 +1,546 @@
+import Foundation
+import XCTest
+import IrisMobileShellCore
+
+// Independent examples and schedules come from SPEC.md, never from product internals.
+final class PublikAccountSpecTests: XCTestCase {
+    private let now = Date(timeIntervalSince1970: 1_790_769_600) // 2026-09-30 12:00 UTC
+    private let packURL = URL(string: "https://publikhq.com/dashboard/api")!
+
+    func testExactMoneyIncludingSmallestCreditAndInt64Boundary() throws {
+        let examples: [(Int64, String)] = [
+            (0, "$0.00 USD"), (1, "$0.000001 USD"), (4_000, "$0.004 USD"),
+            (10_000, "$0.01 USD"), (999_999, "$0.999999 USD"),
+            (1_000_001, "$1.000001 USD"), (12_340_000, "$12.34 USD"),
+            (Int64.max, "$9223372036854.775807 USD")
+        ]
+        for (raw, expected) in examples {
+            XCTAssertEqual(try PublikAPIAmount(microUSD: raw).formattedUSD, expected,
+                           "SPEC.md:43 PA-026: exact available credit must not round up or vanish")
+        }
+    }
+
+    func testCanonicalMoneyParsingRejectsProtocolGarbage() throws {
+        for text in ["", "-1", "+1", "00", "01", "1.0", "1e6", "true", " 1", "1\n", "١", "１２", "9223372036854775808"] {
+            XCTAssertThrowsError(try PublikAPIAmount.parseMicroUSD(text), "SPEC.md:130 PA-060: reject noncanonical or overflowing money") { error in
+                XCTAssertEqual(error as? PublikAPIAccountFailure, .invalidData, "SPEC.md:130 PA-060: sanitized invalidData")
+            }
+        }
+        XCTAssertThrowsError(try PublikAPIAmount(microUSD: -1), "SPEC.md:43 PA-026: negative balance is invalid") { error in
+            XCTAssertEqual(error as? PublikAPIAccountFailure, .invalidData, "SPEC.md:130 PA-060: negative amount failure")
+        }
+        XCTAssertEqual(try PublikAPIAmount.parseMicroUSD("9223372036854775807").microUSD, Int64.max, "SPEC.md:130 PA-060: valid boundary is retained")
+        XCTAssertEqual(try PublikAPIAmount.parseMicroUSD("0").microUSD, 0, "SPEC.md:130 PA-060: canonical zero accepted")
+    }
+
+    func testUTCBoundsAcrossMondayAndMonthBoundary() {
+        let clock = ISO8601DateFormatter()
+        for (current, monday) in [
+            ("2026-09-30T12:00:00Z", "2026-09-28T00:00:00Z"),
+            ("2026-10-04T23:59:59Z", "2026-09-28T00:00:00Z"),
+            ("2026-10-05T00:00:00Z", "2026-10-05T00:00:00Z"),
+            ("2027-01-01T00:00:00Z", "2026-12-28T00:00:00Z")
+        ] {
+            let end = clock.date(from: current)!
+            XCTAssertEqual(PublikAPIUsagePeriod.week.bounds(now: end), DateInterval(start: clock.date(from: monday)!, end: end), "SPEC.md:47 PA-028: Monday UTC boundary")
+            XCTAssertEqual(PublikAPIUsagePeriod.thirtyDays.bounds(now: end), DateInterval(start: end.addingTimeInterval(-2_592_000), end: end), "SPEC.md:47 PA-028: exactly thirty days through now")
+        }
+    }
+
+    private func context(storefront: String? = "USA", policy: Bool = true, regional: Bool = true,
+                         payment: Bool = true, age: Bool = true, online: Bool = true, fresh: Bool = true,
+                         url: URL? = nil, verified: Bool = true, expiry: Date? = nil) -> PublikAPIPurchaseContext {
+        PublikAPIPurchaseContext(storefront: storefront, policyCurrent: policy, regionRequirementsMet: regional,
+            paymentAuthorityEligible: payment, ageEligible: age, online: online, accountFresh: fresh,
+            offer: PublikAPICreditOffer(destination: url ?? packURL, verifiedCreditPack: verified,
+                                        validUntil: expiry ?? now.addingTimeInterval(60)))
+    }
+
+    private func decision(_ context: PublikAPIPurchaseContext, session: PublikAPISessionState = .signedIn(accountID: "person-a")) -> PublikAPIPurchaseDecision {
+        PublikAPIPurchasePolicy.decision(context: context, session: session, now: now)
+    }
+
+    func testEveryRestrictedStorefrontAndUnknownFailsClosed() {
+        for region in ["DEU", "FRA", "JPN", "BRA", "KOR", "NLD", "NOR", "ISL", "RUS", "GBR", "CAN", "AUS"] {
+            XCTAssertEqual(decision(context(storefront: region)), .hidden(reason: .restrictedStorefront), "SPEC.md:59 PA-033 and SPEC.md:157 PA-062: only USA can open")
+        }
+        for region: String? in [nil, "", "UNKNOWN", "usa", "US", " USA", "USA\n", "12A"] {
+            XCTAssertEqual(decision(context(storefront: region)), .hidden(reason: .unknownStorefront), "SPEC.md:157 PA-062: unknown and malformed storefronts fail closed")
+        }
+        XCTAssertEqual(decision(context()), .externalBrowser(packURL), "SPEC.md:76 PA-034 and SPEC.md:157 PA-062: verified US pack opens browser")
+    }
+
+    func testEveryUSPrerequisiteAndDenialPrecedence() {
+        let examples: [(PublikAPIPurchaseContext, PublikAPISessionState, PublikAPIPurchaseDenial)] = [
+            (context(storefront: nil, policy: false, age: false), .signedOut, .unknownStorefront),
+            (context(storefront: "GBR", policy: false, age: false), .signedOut, .restrictedStorefront),
+            (context(policy: false, age: false), .signedOut, .policyUnavailable),
+            (context(regional: false), .signedOut, .eligibilityUnavailable),
+            (context(payment: false), .signedIn(accountID: "person-a"), .eligibilityUnavailable),
+            (context(age: false), .signedIn(accountID: "person-a"), .eligibilityUnavailable),
+            (context(online: false), .signedOut, .signedOut),
+            (context(), .authenticating, .signedOut), (context(), .expired, .signedOut),
+            (context(online: false), .signedIn(accountID: "person-a"), .accountUnavailable),
+            (context(fresh: false), .signedIn(accountID: "person-a"), .accountUnavailable),
+            (context(verified: false), .signedIn(accountID: "person-a"), .unverifiedOffer),
+            (context(expiry: now), .signedIn(accountID: "person-a"), .unverifiedOffer),
+            (context(expiry: now.addingTimeInterval(-1)), .signedIn(accountID: "person-a"), .unverifiedOffer)
+        ]
+        for (input, session, reason) in examples {
+            XCTAssertEqual(decision(input, session: session), .hidden(reason: reason), "SPEC.md:157 PA-062: denial precedence and every prerequisite")
+        }
+        let missingOffer = PublikAPIPurchaseContext(storefront: "USA", policyCurrent: true, regionRequirementsMet: true,
+            paymentAuthorityEligible: true, ageEligible: true, online: true, accountFresh: true, offer: nil)
+        XCTAssertEqual(decision(missingOffer), .hidden(reason: .unverifiedOffer), "SPEC.md:157 PA-062: missing offer evidence")
+    }
+
+    func testUnsafeDestinationsNeverEscapeTheApp() {
+        for text in ["http://publikhq.com/dashboard/api", "https://publikhq.com.evil.invalid/dashboard/api",
+                     "https://checkout.stripe.com/dashboard/api", "https://sub.publikhq.com/dashboard/api",
+                     "https://user:secret@publikhq.com/dashboard/api", "https://publikhq.com/dashboard/api#token",
+                     "https://publikhq.com/pricing", "https://publikhq.com/dashboard/api?account=person-a",
+                     "javascript:alert(1)"] {
+            XCTAssertEqual(decision(context(url: URL(string: text)!)), .hidden(reason: .unverifiedOffer), "SPEC.md:76 PA-034 and SPEC.md:157 PA-062: unsafe or unapproved destination")
+        }
+    }
+
+    func testStorefrontChangeInvalidatesAnOtherwiseValidOffer() {
+        XCTAssertEqual(decision(context()), .externalBrowser(packURL), "SPEC.md:57 PA-032: initially eligible USA")
+        XCTAssertEqual(decision(context(storefront: "GBR")), .hidden(reason: .restrictedStorefront), "SPEC.md:57 PA-032: recheck hides after change")
+        XCTAssertEqual(decision(context(fresh: false)), .hidden(reason: .accountUnavailable), "SPEC.md:57 PA-032: USA return still requires fresh evidence")
+    }
+
+    private func snapshot(id: String = "person-a", amount: Int64 = 12_340_000) throws -> PublikAPIAccountSnapshot {
+        PublikAPIAccountSnapshot(identity: PublikAPIIdentity(accountID: id, displayName: "Synthetic Person", email: "person@example.invalid"),
+            balance: PublikAPIBalance(available: try PublikAPIAmount(microUSD: amount), plan: nil, pack: nil,
+                free: nil, existingPlan: nil, resetAt: nil, used: nil, budget: nil), observedAt: now)
+    }
+
+    private func record(_ id: String, seconds: TimeInterval, cost: Int64 = 1_000) throws -> PublikAPIUsageRecord {
+        PublikAPIUsageRecord(id: id, occurredAt: now.addingTimeInterval(seconds), appName: nil,
+                            modelName: nil, status: "Completed", cost: try PublikAPIAmount(microUSD: cost))
+    }
+
+    func testFirstTimePersonStartsWithoutInventedAccountFacts() async throws {
+        let service = try AccountWorld(account: snapshot(), restoreHasSession: false)
+        let store = PublikAPIAccountStore(service: service)
+        let initial = await store.state()
+        XCTAssertEqual(initial.session, .signedOut, "SPEC.md:155 PA-061: no implicit sign-in")
+        XCTAssertNil(initial.account, "SPEC.md:155 PA-061: no invented identity or balance")
+        XCTAssertNil(initial.usage, "SPEC.md:155 PA-061: no invented history")
+        XCTAssertNil(initial.transactions, "SPEC.md:155 PA-061: no invented transactions")
+        XCTAssertEqual(initial.selectedPeriod, .week, "SPEC.md:155 PA-061: initial week")
+        XCTAssertFalse(initial.isBusy, "SPEC.md:155 PA-061: initially idle")
+        XCTAssertNil(initial.failure, "SPEC.md:155 PA-061: initially no failure")
+        XCTAssertFalse(initial.deletionRequested, "SPEC.md:155 PA-061: no invented deletion acknowledgement")
+        await store.restoreSession()
+        let observed1 = await store.state()
+        XCTAssertEqual(observed1.session, .signedOut, "SPEC.md:33 PA-022: no saved token")
+        await store.signIn()
+        let signedIn = await store.state()
+        XCTAssertEqual(signedIn.session, .signedIn(accountID: "person-a"), "SPEC.md:31 PA-021: successful sign-in")
+        XCTAssertEqual(signedIn.account, try snapshot(), "SPEC.md:33 PA-022: supplied facts only")
+    }
+
+    func testCancelledOrFailedSignInNeverCreatesPrivateFacts() async throws {
+        for failure in [PublikAPIAccountFailure.signInCancelled, .signInFailed, .secureStorageFailed] {
+            let service = try AccountWorld(account: snapshot(), signInFailure: failure)
+            let store = PublikAPIAccountStore(service: service)
+            await store.signIn()
+            let state = await store.state()
+            XCTAssertEqual(state.session, .signedOut, "SPEC.md:31 PA-021: failed auth stays signed out")
+            XCTAssertNil(state.account, "SPEC.md:31 PA-021: failed auth has no private facts")
+            XCTAssertNotNil(state.failure, "SPEC.md:31 PA-021: show failure or cancellation")
+            XCTAssertFalse(state.isBusy, "SPEC.md:31 PA-021: retry enabled after outcome")
+        }
+    }
+
+    func testBackDuringAuthenticationDropsLateSuccess() async throws {
+        let started = expectation(description: "SPEC.md:31 PA-021: system authentication began")
+        let service = try AccountWorld(account: snapshot(), held: .signIn, started: { started.fulfill() })
+        let store = PublikAPIAccountStore(service: service)
+        let operation = Task { await store.signIn() }
+        await fulfillment(of: [started], timeout: 3)
+        let busy = await store.state()
+        XCTAssertTrue(busy.isBusy, "SPEC.md:155 PA-061: busy published before await")
+        XCTAssertEqual(busy.session, .authenticating, "SPEC.md:31 PA-021: authentication in progress")
+        await store.cancelSignIn()
+        await service.release()
+        await operation.value
+        let cancelled = await store.state()
+        XCTAssertEqual(cancelled.session, .signedOut, "SPEC.md:31 PA-021: late callback cannot sign in")
+        XCTAssertNil(cancelled.account, "SPEC.md:31 PA-021: late identity discarded")
+    }
+
+    func testFlakyNetworkPreservesValidatedFactsButExpiryClearsEverything() async throws {
+        let service = try AccountWorld(account: snapshot())
+        let store = PublikAPIAccountStore(service: service)
+        await store.signIn()
+        await service.setRefreshFailure(.offline)
+        await store.refresh()
+        let offline = await store.state()
+        XCTAssertEqual(offline.account, try snapshot(), "SPEC.md:33 PA-022 and SPEC.md:92 PA-041: safe stale snapshot retained")
+        XCTAssertEqual(offline.session, .signedIn(accountID: "person-a"), "SPEC.md:33 PA-022: transient failure is not expiry")
+        XCTAssertEqual(offline.failure, .offline, "SPEC.md:92 PA-041: offline state exposed")
+        await service.setRefreshFailure(nil)
+        await store.refresh()
+        let observed2 = await store.state()
+        XCTAssertNil(observed2.failure, "SPEC.md:92 PA-041: explicit retry recovers")
+        await store.selectUsagePeriod(.week)
+        await store.loadTransactions()
+        await service.setRefreshFailure(.sessionExpired)
+        await store.refresh()
+        let expired = await store.state()
+        XCTAssertEqual(expired.session, .expired, "SPEC.md:35 PA-023: rejected session expires")
+        XCTAssertNil(expired.account, "SPEC.md:35 PA-023: clear identity and balance")
+        XCTAssertNil(expired.usage, "SPEC.md:35 PA-023: clear usage")
+        XCTAssertNil(expired.transactions, "SPEC.md:35 PA-023: clear transactions")
+    }
+
+    func testExpiryInvalidatesAPendingUsageResponse() async throws {
+        let started = expectation(description: "SPEC.md:35 PA-023: usage is pending before expiry")
+        let service = try AccountWorld(account: snapshot(), refreshFailure: .sessionExpired,
+            held: .week, started: { started.fulfill() })
+        let store = PublikAPIAccountStore(service: service)
+        await store.signIn()
+        let usage = Task { await store.selectUsagePeriod(.week) }
+        await fulfillment(of: [started], timeout: 3)
+        await store.refresh()
+        await service.release()
+        await usage.value
+        let state = await store.state()
+        XCTAssertEqual(state.session, .expired, "SPEC.md:35 PA-023: session stays expired after late usage")
+        XCTAssertNil(state.account, "SPEC.md:35 PA-023: expired identity not restored")
+        XCTAssertNil(state.usage, "SPEC.md:35 PA-023: late private usage dropped")
+    }
+
+    func testVerifiedRetryIntervalPreventsEarlyRefreshAndAllowsRecovery() async throws {
+        let clock = SpecClock(now)
+        let service = try AccountWorld(account: snapshot(), refreshFailure: .rateLimited(retryAfterSeconds: 60))
+        let store = PublikAPIAccountStore(service: service, now: { clock.read() })
+        await store.signIn()
+        await store.refresh()
+        await service.setRefreshFailure(nil)
+        await service.replaceAccount(try snapshot(amount: 7_000_000))
+        clock.advance(59)
+        await store.refresh()
+        let early = await store.state()
+        XCTAssertEqual(early.account?.balance?.available.microUSD, 12_340_000, "SPEC.md:94 PA-042: Refresh cannot send before verified interval")
+        XCTAssertEqual(early.failure, .rateLimited(retryAfterSeconds: 60), "SPEC.md:94 PA-042: early retry retains safe rate-limit category")
+        clock.advance(1)
+        await store.refresh()
+        let recovered = await store.state()
+        XCTAssertEqual(recovered.account?.balance?.available.microUSD, 7_000_000, "SPEC.md:94 PA-042: permitted retry at interval boundary loads fresh credit")
+        XCTAssertNil(recovered.failure, "SPEC.md:94 PA-042: successful retry clears rate limit")
+    }
+
+    func testAuthorizationFailureDoesNotPretendTheSessionExpired() async throws {
+        let service = try AccountWorld(account: snapshot(), refreshFailure: .accessUnavailable)
+        let store = PublikAPIAccountStore(service: service)
+        await store.signIn()
+        await store.refresh()
+        let state = await store.state()
+        XCTAssertEqual(state.failure, .accessUnavailable, "SPEC.md:35 PA-023: sanitize authorization rejection")
+        XCTAssertEqual(state.session, .signedIn(accountID: "person-a"), "SPEC.md:35 PA-023: generic 403 is not expiry")
+    }
+
+    func testOfflineRestoreExposesNoCachedFactsAndCanRecover() async throws {
+        let service = try AccountWorld(account: snapshot(), restoreFailure: .offline)
+        let store = PublikAPIAccountStore(service: service)
+        await store.restoreSession()
+        let observed3 = await store.state()
+        XCTAssertNil(observed3.account, "SPEC.md:155 PA-061 and SPEC.md:108 PA-052: cold offline launch has no account cache")
+        await service.setRestoreFailure(nil)
+        await store.restoreSession()
+        let observed4 = await store.state()
+        XCTAssertEqual(observed4.account, try snapshot(), "SPEC.md:155 PA-061: retained credential may validate on recovery")
+    }
+
+    func testSignOutAndAccountSwitchRejectLateAccountARefresh() async throws {
+        let started = expectation(description: "SPEC.md:96 PA-043: A refresh is suspended at network edge")
+        let service = try AccountWorld(account: snapshot(), held: .refresh, started: { started.fulfill() })
+        let store = PublikAPIAccountStore(service: service)
+        await store.signIn()
+        let refresh = Task { await store.refresh() }
+        await fulfillment(of: [started], timeout: 3)
+        await store.signOut()
+        let out = await store.state()
+        XCTAssertEqual(out.session, .signedOut, "SPEC.md:37 PA-024: local sign-out succeeds")
+        XCTAssertNil(out.account, "SPEC.md:37 PA-024: account memory cleared")
+        XCTAssertNil(out.usage, "SPEC.md:37 PA-024: usage cleared")
+        XCTAssertNil(out.transactions, "SPEC.md:37 PA-024: transactions cleared")
+        await service.replaceAccount(try snapshot(id: "person-b", amount: 7_000_000))
+        await store.signIn()
+        await service.release()
+        await refresh.value
+        let switched = await store.state()
+        XCTAssertEqual(switched.session, .signedIn(accountID: "person-b"), "SPEC.md:37 PA-024: old response cannot restore A")
+        XCTAssertEqual(switched.account?.balance?.available.microUSD, 7_000_000, "SPEC.md:37 PA-024: B credit survives A late response")
+        XCTAssertEqual(switched.account?.identity.accountID, "person-b", "SPEC.md:37 PA-024: B identity survives")
+    }
+
+    func testSecureRemovalFailureCannotReportSuccessfulSignOut() async throws {
+        let service = try AccountWorld(account: snapshot(), signOutFailure: .secureStorageFailed)
+        let store = PublikAPIAccountStore(service: service)
+        await store.signIn()
+        await store.signOut()
+        let state = await store.state()
+        XCTAssertEqual(state.failure, .secureStorageFailed, "SPEC.md:37 PA-024: removal failure is visible")
+        XCTAssertNil(state.account, "SPEC.md:37 PA-024: lock account access on removal failure")
+        if case .signedIn = state.session {
+            XCTFail("SPEC.md:37 PA-024: unusable credential must not retain signed-in access")
+        }
+    }
+
+    func testPagingDeduplicatesFirstOccurrenceOrdersRowsAndKeepsServerTotal() async throws {
+        let original = try record("same", seconds: -60, cost: 7_000)
+        let duplicate = try record("same", seconds: -30, cost: 99_000)
+        let first = try usage([original], cursor: "next")
+        let second = try usage([duplicate, record("z", seconds: -10), record("a", seconds: -10)], cursor: nil)
+        let service = try AccountWorld(account: snapshot(), pages: [first, second])
+        let store = PublikAPIAccountStore(service: service)
+        await store.signIn()
+        await store.selectUsagePeriod(.week)
+        await store.loadMoreUsage()
+        let state = await store.state()
+        XCTAssertEqual(state.usage?.records.map(\.id), ["a", "z", "same"], "SPEC.md:155 PA-061: newest first with lexical tie-break, deduplicated")
+        XCTAssertEqual(state.usage?.records.last, original, "SPEC.md:155 PA-061: retain first occurrence")
+        XCTAssertEqual(state.usage?.total?.microUSD, 123_456, "SPEC.md:47 PA-028: server total is not sum of visible rows")
+        XCTAssertNil(state.usage?.nextCursor, "SPEC.md:47 PA-028: exhausted server cursor")
+    }
+
+    func testFailedNextPageKeepsRowsAndCursorSoThePersonCanRetry() async throws {
+        let first = try usage([record("first", seconds: -10)], cursor: "next")
+        let second = try usage([record("second", seconds: -20)], cursor: nil)
+        let service = try AccountWorld(account: snapshot(), pages: [first, second])
+        let store = PublikAPIAccountStore(service: service)
+        await store.signIn()
+        await store.selectUsagePeriod(.week)
+        await service.setUsageFailure(.offline)
+        await store.loadMoreUsage()
+        let failed = await store.state()
+        XCTAssertEqual(failed.usage?.records.map(\.id), ["first"], "SPEC.md:96 PA-043: failed page retains prior rows")
+        XCTAssertEqual(failed.usage?.nextCursor, "next", "SPEC.md:96 PA-043: failed page retains retry cursor")
+        await service.setUsageFailure(nil)
+        await store.loadMoreUsage()
+        let retried = await store.state()
+        XCTAssertEqual(retried.usage?.records.map(\.id), ["first", "second"], "SPEC.md:96 PA-043: retry appends correct page")
+        XCTAssertNil(retried.usage?.nextCursor, "SPEC.md:47 PA-028: successful final page exhausts cursor")
+    }
+
+    func testUsageRetentionStopsAtOneThousandWithoutSummingTheTotal() async throws {
+        let total = try PublikAPIAmount(microUSD: 9_999_999)
+        var pages: [PublikAPIUsagePage] = []
+        for page in 0..<21 {
+            let rows = try (0..<50).map { offset in
+                try record(String(format: "r%04d", page * 50 + offset), seconds: -Double(page * 50 + offset))
+            }
+            pages.append(PublikAPIUsagePage(accountID: "person-a", period: .week, total: total,
+                records: rows, nextCursor: "page-\(page + 1)", available: true))
+        }
+        let service = try AccountWorld(account: snapshot(), pages: pages)
+        let store = PublikAPIAccountStore(service: service)
+        await store.signIn()
+        await store.selectUsagePeriod(.week)
+        for _ in 0..<21 { await store.loadMoreUsage() }
+        let state = await store.state()
+        XCTAssertEqual(state.usage?.records.count, 1_000, "SPEC.md:47 PA-028: bounded retained usage")
+        XCTAssertEqual(state.usage?.records.first?.id, "r0000", "SPEC.md:47 PA-028: retain latest request")
+        XCTAssertEqual(state.usage?.records.last?.id, "r0999", "SPEC.md:47 PA-028: retain latest thousand")
+        XCTAssertEqual(state.usage?.total, total, "SPEC.md:47 PA-028: authoritative total survives local limit")
+    }
+
+    func testTransactionPagingRetainsFirstDuplicateAndOrdersRefundFacts() async throws {
+        let amount = try PublikAPIAmount(microUSD: 4_000)
+        let original = PublikAPITransactionRecord(id: "refund", occurredAt: now.addingTimeInterval(-60),
+            kind: "Refund", detail: "Synthetic refund", amount: amount, status: "Posted")
+        let duplicate = PublikAPITransactionRecord(id: "refund", occurredAt: now,
+            kind: "Refund", detail: "Duplicate with changed content", amount: try PublikAPIAmount(microUSD: 99_000), status: "Pending")
+        let newest = PublikAPITransactionRecord(id: "added", occurredAt: now.addingTimeInterval(-10),
+            kind: "Credit added", detail: "Synthetic entry", amount: amount, status: "Posted")
+        let pages = [PublikAPITransactionPage(accountID: "person-a", records: [original], nextCursor: "next", available: true),
+                     PublikAPITransactionPage(accountID: "person-a", records: [duplicate, newest], nextCursor: nil, available: true)]
+        let service = try AccountWorld(account: snapshot(), transactionPages: pages)
+        let store = PublikAPIAccountStore(service: service)
+        await store.signIn()
+        await store.loadTransactions()
+        await store.loadMoreTransactions()
+        let state = await store.state()
+        XCTAssertEqual(state.transactions?.records, [newest, original], "SPEC.md:49 PA-029 and SPEC.md:155 PA-061: deduplicated newest-first factual history")
+        XCTAssertNil(state.transactions?.nextCursor, "SPEC.md:49 PA-029: exhausted cursor")
+        XCTAssertEqual(state.account?.balance?.available.microUSD, 12_340_000, "SPEC.md:49 PA-029: refund history never invents balance delta")
+    }
+
+    func testPeriodChangeDropsPreviousPeriodsLateResponse() async throws {
+        let started = expectation(description: "SPEC.md:96 PA-043: week response held")
+        let service = try AccountWorld(account: snapshot(), held: .week, started: { started.fulfill() })
+        let store = PublikAPIAccountStore(service: service)
+        await store.signIn()
+        let week = Task { await store.selectUsagePeriod(.week) }
+        await fulfillment(of: [started], timeout: 3)
+        await store.selectUsagePeriod(.thirtyDays)
+        await service.release()
+        await week.value
+        let state = await store.state()
+        XCTAssertEqual(state.selectedPeriod, .thirtyDays, "SPEC.md:96 PA-043: selected period preserved")
+        XCTAssertEqual(state.usage?.period, .thirtyDays, "SPEC.md:96 PA-043: late week cannot replace current page")
+        XCTAssertEqual(state.usage?.records.map(\.id), ["thirty"], "SPEC.md:96 PA-043: previous rows discarded")
+    }
+
+    func testUnavailableUsageIsDistinctFromConfirmedEmpty() async throws {
+        for available in [false, true] {
+            let page = PublikAPIUsagePage(accountID: "person-a", period: .week,
+                total: available ? try PublikAPIAmount(microUSD: 0) : nil, records: [], nextCursor: nil, available: available)
+            let service = try AccountWorld(account: snapshot(), pages: [page])
+            let store = PublikAPIAccountStore(service: service)
+            await store.signIn()
+            await store.selectUsagePeriod(.week)
+            let state = await store.state()
+            XCTAssertEqual(state.usage?.available, available, "SPEC.md:47 PA-028: availability is not inferred from empty rows")
+            XCTAssertEqual(state.usage?.total?.microUSD, available ? 0 : nil, "SPEC.md:47 PA-028: unavailable is not fabricated zero")
+            XCTAssertEqual(state.account?.balance?.available.microUSD, 12_340_000, "SPEC.md:94 PA-042: usage cannot hide balance")
+        }
+    }
+
+    func testDeletionOnlyAcknowledgedOnAcceptanceAndResetOnSignOut() async throws {
+        let service = try AccountWorld(account: snapshot())
+        let store = PublikAPIAccountStore(service: service)
+        await store.signIn()
+        await store.requestDeletion()
+        let observed5 = await store.state()
+        XCTAssertFalse(observed5.deletionRequested, "SPEC.md:39 PA-025: unavailable deletion is not acknowledged")
+        await service.acceptDeletion()
+        await store.requestDeletion()
+        let observed6 = await store.state()
+        XCTAssertTrue(observed6.deletionRequested, "SPEC.md:155 PA-061: accepted request acknowledged")
+        await store.signOut()
+        let observed7 = await store.state()
+        XCTAssertFalse(observed7.deletionRequested, "SPEC.md:155 PA-061: reset acknowledgement after sign-out")
+    }
+
+    private func usage(_ records: [PublikAPIUsageRecord], cursor: String?) throws -> PublikAPIUsagePage {
+        PublikAPIUsagePage(accountID: "person-a", period: .week, total: try PublikAPIAmount(microUSD: 123_456),
+                           records: records, nextCursor: cursor, available: true)
+    }
+
+    #if DEBUG
+    func testFixtureOverridesRequireExplicitIsolationAndRejectInvalidInputs() throws {
+        XCTAssertNil(try PublikAPIArguments.parse(["--iris-publik-api-fixture", "zero-balance", "--iris-publik-api-storefront", "USA"]), "SPEC.md:161 PA-070: overrides ignored without isolated mode")
+        let defaults = try XCTUnwrap(PublikAPIArguments.parse(["--iris-publik-api-test-mode"]), "SPEC.md:163 PA-071: explicit fixture mode")
+        XCTAssertEqual(defaults.fixture, "signed-out", "SPEC.md:163 PA-071: safe default fixture")
+        XCTAssertEqual(defaults.storefront, "UNKNOWN", "SPEC.md:163 PA-071: safe storefront default")
+        XCTAssertEqual(defaults.entry, "browse", "SPEC.md:163 PA-071: default entry")
+        for (key, value) in [("fixture", "secret-invalid"), ("storefront", "usa"), ("entry", "checkout"),
+                              ("auth-result", "maybe"), ("browser-result", "maybe"), ("policy-date", "2026-10-02"), ("eligibility", "allowed")] {
+            XCTAssertThrowsError(try PublikAPIArguments.parse(["--iris-publik-api-test-mode", "--iris-publik-api-" + key, value]), "SPEC.md:165 PA-072: invalid configuration must not fall back to production") { error in
+                XCTAssertFalse(String(describing: error).contains(value), "SPEC.md:165 PA-072: expose argument name only")
+            }
+        }
+    }
+
+    func testFixtureRegionEligibilityMatrixIncludingBothEUDates() throws {
+        for date in ["2026-09-30", "2026-10-01"] {
+            for region in ["USA", "DEU", "FRA", "JPN", "BRA", "KOR", "NLD", "NOR", "ISL", "RUS", "GBR", "CAN", "UNKNOWN"] {
+                for eligibility in ["eligible", "payment-blocked", "age-unknown", "minor", "policy-stale", "offer-unverified", "offer-expired"] {
+                    let args = PublikAPIArguments(fixture: "zero-balance", storefront: region, entry: "balance", authResult: "success", browserResult: "success", policyDate: date, eligibility: eligibility)
+                    let fixture = try PublikAPIFixtures.make(args)
+                    let result = PublikAPIPurchasePolicy.decision(context: fixture.purchaseContext, session: fixture.initialState.session, now: fixture.now)
+                    if region == "USA" && eligibility == "eligible" {
+                        XCTAssertEqual(result, .externalBrowser(packURL), "SPEC.md:169 PA-074 and SPEC.md:190 PA-075: zero balance still eligible in USA")
+                    } else if case .externalBrowser = result {
+                        XCTFail("SPEC.md:190 PA-075: forbidden purchase for \(region)/\(eligibility)/\(date)")
+                    }
+                    XCTAssertEqual(fixture.initialState.account?.balance?.available.microUSD, 0, "SPEC.md:169 PA-074: factual zero independent of purchase policy")
+                }
+            }
+        }
+    }
+    #endif
+}
+
+// Fake only external account/auth/network boundaries. Policy and state are real product types.
+private actor AccountWorld: PublikAPIAccountService {
+    enum Held: Equatable, Sendable { case signIn, refresh, week }
+    private var account: PublikAPIAccountSnapshot
+    private var restoreFailure: PublikAPIAccountFailure?
+    private let restoreHasSession: Bool
+    private var signInFailure: PublikAPIAccountFailure?
+    private var refreshFailure: PublikAPIAccountFailure?
+    private var signOutFailure: PublikAPIAccountFailure?
+    private var deletion: PublikAPIDeletionResult = .unavailable
+    private var usageFailure: PublikAPIAccountFailure?
+    private var pages: [PublikAPIUsagePage]
+    private var transactionPages: [PublikAPITransactionPage]
+    private let held: Held?
+    private let started: @Sendable () -> Void
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+
+    init(account: PublikAPIAccountSnapshot, restoreHasSession: Bool = true, restoreFailure: PublikAPIAccountFailure? = nil,
+         signInFailure: PublikAPIAccountFailure? = nil, refreshFailure: PublikAPIAccountFailure? = nil,
+         signOutFailure: PublikAPIAccountFailure? = nil, pages: [PublikAPIUsagePage] = [],
+         transactionPages: [PublikAPITransactionPage] = [],
+         held: Held? = nil, started: @escaping @Sendable () -> Void = {}) {
+        self.restoreHasSession = restoreHasSession
+        self.account = account; self.restoreFailure = restoreFailure; self.signInFailure = signInFailure
+        self.refreshFailure = refreshFailure; self.signOutFailure = signOutFailure; self.pages = pages
+        self.transactionPages = transactionPages
+        self.held = held; self.started = started
+    }
+    private func suspend(_ operation: Held) async {
+        guard held == operation, !released else { return }
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            started()
+        }
+    }
+    func release() { released = true; continuation?.resume(); continuation = nil }
+    func replaceAccount(_ account: PublikAPIAccountSnapshot) { self.account = account }
+    func setRefreshFailure(_ failure: PublikAPIAccountFailure?) { refreshFailure = failure }
+    func setRestoreFailure(_ failure: PublikAPIAccountFailure?) { restoreFailure = failure }
+    func setUsageFailure(_ failure: PublikAPIAccountFailure?) { usageFailure = failure }
+    func acceptDeletion() { deletion = .accepted }
+    func restoreSession() async throws -> PublikAPIAccountSnapshot? {
+        if let restoreFailure { throw restoreFailure }
+        return restoreHasSession ? account : nil
+    }
+    func signIn() async throws -> PublikAPIAccountSnapshot {
+        let result = account
+        await suspend(.signIn)
+        if let signInFailure { throw signInFailure }
+        return result
+    }
+    func refreshAccount() async throws -> PublikAPIAccountSnapshot {
+        let result = account
+        await suspend(.refresh)
+        if let refreshFailure { throw refreshFailure }
+        return result
+    }
+    func fetchUsage(period: PublikAPIUsagePeriod, cursor: String?) async throws -> PublikAPIUsagePage {
+        let id = account.identity.accountID
+        if period == .week { await suspend(.week) }
+        if let usageFailure { throw usageFailure }
+        if !pages.isEmpty {
+            let page = cursor == nil ? 0 : (Int(cursor!.replacingOccurrences(of: "page-", with: "")) ?? 1)
+            return pages[min(page, pages.count - 1)]
+        }
+        return PublikAPIUsagePage(accountID: id, period: period, total: nil,
+            records: [PublikAPIUsageRecord(id: period == .week ? "week" : "thirty", occurredAt: account.observedAt,
+                appName: nil, modelName: nil, status: "Completed", cost: nil)], nextCursor: nil, available: true)
+    }
+    func fetchTransactions(cursor: String?) async throws -> PublikAPITransactionPage {
+        if !transactionPages.isEmpty { return transactionPages[min(cursor == nil ? 0 : 1, transactionPages.count - 1)] }
+        return PublikAPITransactionPage(accountID: account.identity.accountID, records: [], nextCursor: nil, available: true)
+    }
+    func signOut() async throws { if let signOutFailure { throw signOutFailure } }
+    func requestDeletion() async throws -> PublikAPIDeletionResult { deletion }
+}
+
+// Only the external clock is mutable. Advancing time never waits or polls.
+private final class SpecClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var instant: Date
+    init(_ instant: Date) { self.instant = instant }
+    func read() -> Date { lock.lock(); defer { lock.unlock() }; return instant }
+    func advance(_ seconds: TimeInterval) { lock.lock(); defer { lock.unlock() }; instant.addTimeInterval(seconds) }
+}

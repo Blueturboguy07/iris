@@ -1,0 +1,21 @@
+Simulator run keepcount-2 (iPhone 18 Pro simulator, KeepCountUITests and StorageUITests)
+KeepCountUITests.swift:154: error: -[IrisMobileShellUITests.KeepCountUITests testChoiceIsGlobalAcrossAppsAndFeaturesLedgerStillShowsAppBHistory] : XCTAssertTrue failed - The second seeded app must be reachable from Storage.
+KeepCountUITests testChoiceIsGlobalAcrossAppsAndFeaturesLedgerStillShowsAppBHistory failed (49.757 seconds).
+KeepCountUITests.swift:209: error: -[IrisMobileShellUITests.KeepCountUITests testConfirmLoweringWaitsForPruneAndReportsTheConfirmedAmount] : failed - Unexpected confirmation copy or amount format: Keep 2 versions per app? Iris will free Zero KB of allocated storage now. This is the space the files give back to your iPhone.
+KeepCountUITests testConfirmLoweringWaitsForPruneAndReportsTheConfirmedAmount failed (22.843 seconds).
+KeepCountUITests.swift:113: error: -[IrisMobileShellUITests.KeepCountUITests testDefaultSelectionIsTwo] : XCTAssertTrue failed - The control's accessibility value must report K=2 (Default); label=Versions kept per app, value=3
+KeepCountUITests testDefaultSelectionIsTwo failed (19.718 seconds).
+KeepCountUITests.swift:141: error: -[IrisMobileShellUITests.KeepCountUITests testFourChoicesKeepExactCopyIdentifiersAndAccessibilityAtXXXL] : XCTAssertTrue failed - The control's accessibility value must report K=2 (Default); label=Versions kept per app, value=3
+KeepCountUITests testFourChoicesKeepExactCopyIdentifiersAndAccessibilityAtXXXL failed (28.510 seconds).
+KeepCountUITests.swift:245: error: -[IrisMobileShellUITests.KeepCountUITests testRaisingCountDoesNotRestoreFreedVersion] : XCTAssertTrue failed - The fixture's catalog-offered historical row remains in the ledger after its files are freed.
+KeepCountUITests testRaisingCountDoesNotRestoreFreedVersion failed (34.803 seconds).
+KeepCountUITests.swift:184: error: -[IrisMobileShellUITests.KeepCountUITests testResetToTwoPersistsAcrossSecondRelaunch] : XCTAssertTrue failed - The control's accessibility value must report K=5; label=Versions kept per app, value=2 (Default)
+KeepCountUITests testResetToTwoPersistsAcrossSecondRelaunch failed (20.813 seconds).
+	 Executed 6 tests, with 6 failures (0 unexpected) in 176.445 (176.464) seconds
+StorageUITests.swift:139: error: -[IrisMobileShellUITests.StorageUITests testKeepAtMostSettingOffersOneTwoAndFourGigabytesAndARoomyCapClearsTheOverLimitSentence] : XCTAssertTrue failed - the cap starts far below what is installed, so the over-the-limit sentence shows
+StorageUITests testKeepAtMostSettingOffersOneTwoAndFourGigabytesAndARoomyCapClearsTheOverLimitSentence failed (94.810 seconds).
+StorageUITests.swift:109: error: -[IrisMobileShellUITests.StorageUITests testOverTheCapTheScreenSaysInstalledAppsUseMoreThanTheLimit] : XCTAssertTrue failed - SPEC 1.4: Storage says the current versions use more than the limit when they do.
+StorageUITests testOverTheCapTheScreenSaysInstalledAppsUseMoreThanTheLimit failed (92.621 seconds).
+	 Executed 2 tests, with 2 failures (0 unexpected) in 187.430 (187.482) seconds
+	 Executed 8 tests, with 8 failures (0 unexpected) in 363.875 (363.951) seconds
+	 Executed 8 tests, with 8 failures (0 unexpected) in 363.875 (363.954) seconds

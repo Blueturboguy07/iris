@@ -1,0 +1,8 @@
+mobile-ios-typecheck exit=0 errors=0 log=/var/folders/h7/ft7dzjtn71dd54szmr_yy2p00000gn/T/mobile-ios-tc.RQFgCfd6MM/log.txt
+core-ok
+host-ok
+== normal exit 0
+mobile-ios-typecheck-debug exit=0 errors=0 log=/var/folders/h7/ft7dzjtn71dd54szmr_yy2p00000gn/T/mobile-ios-tc-debug.mw7ZBcxqFR/log.txt
+core-ok
+host-ok
+== debug exit 0

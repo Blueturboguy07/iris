@@ -1,0 +1,523 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 60;
+	objects = {
+
+/* Begin PBXBuildFile section */
+			D10000000000000000000001 /* Starter in Resources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000002 /* Starter */; };
+			C10000000000000000000001 /* LocalAppAcceptance in Resources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000001; };
+		A10000000000000000000001 /* IrisMobileShellApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* IrisMobileShellApp.swift */; };
+			A10000000000000000000002 /* SafeDemo.irisapp in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* SafeDemo.irisapp */; };
+				A10000000000000000000005 /* SafeDemoUpdate.irisapp in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* SafeDemoUpdate.irisapp */; };
+			A10000000000000000000006 /* StorageCheck.irisapp in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* StorageCheck.irisapp */; };
+		A10000000000000000000003 /* IrisMobileShellCore in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000001 /* IrisMobileShellCore */; };
+		A10000000000000000000004 /* IrisMobileShellHost in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000002 /* IrisMobileShellHost */; };
+		F10000000000000000000001 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000001 /* PrivacyInfo.xcprivacy */; };
+
+			B10000000000000000000001 /* Host lifecycle tests */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001; };
+			B10000000000000000000004 /* Multi-app runtime tests */ = {isa = PBXBuildFile; fileRef = B20000000000000000000003; };
+				B10000000000000000000005 /* Media lease safety tests */ = {isa = PBXBuildFile; fileRef = B20000000000000000000004; };
+				B10000000000000000000006 /* App close runtime tests */ = {isa = PBXBuildFile; fileRef = B20000000000000000000005; };
+				B10000000000000000000007 /* Media export adversarial tests */ = {isa = PBXBuildFile; fileRef = B20000000000000000000006; };
+					B10000000000000000000008 /* Fullscreen Home safe area tests */ = {isa = PBXBuildFile; fileRef = B20000000000000000000007; };
+					B10000000000000000000009 /* Media document lifetime tests */ = {isa = PBXBuildFile; fileRef = B20000000000000000000008; };
+					B1000000000000000000000A /* Actual SwiftUI teardown tests */ = {isa = PBXBuildFile; fileRef = B20000000000000000000009; };
+					B1000000000000000000000B /* Home and first launch wiring tests */ = {isa = PBXBuildFile; fileRef = B2000000000000000000000A; };
+				B1000000000000000000000C /* Media import move and cleanup tests */ = {isa = PBXBuildFile; fileRef = B2000000000000000000000C; };
+				B1000000000000000000000D /* WKFileUploadPanel cleanup tests */ = {isa = PBXBuildFile; fileRef = B2000000000000000000000D; };
+				B1000000000000000000000E /* WKFileUploadPanel follow-up tests */ = {isa = PBXBuildFile; fileRef = B2000000000000000000000E; };
+		B10000000000000000000002 /* Core in test Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000001; };
+		B10000000000000000000003 /* Host in test Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000002; };
+		E10000000000000000000001 /* NativeUITestFixtureSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000001 /* NativeUITestFixtureSupport.swift */; };
+		E10000000000000000000002 /* StoreHomeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000002 /* StoreHomeUITests.swift */; };
+		E10000000000000000000003 /* StoreSearchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000003 /* StoreSearchUITests.swift */; };
+		E10000000000000000000004 /* StoreAppPageUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000004 /* StoreAppPageUITests.swift */; };
+		E10000000000000000000005 /* MyAppsUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000005 /* MyAppsUITests.swift */; };
+		E10000000000000000000006 /* StorageUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000006 /* StorageUITests.swift */; };
+		E10000000000000000000007 /* FullscreenAppUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000007 /* FullscreenAppUITests.swift */; };
+		E10000000000000000000008 /* AccessibilityUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000008 /* AccessibilityUITests.swift */; };
+		E10000000000000000000009 /* RotationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000009 /* RotationUITests.swift */; };
+		E1000000000000000000000A /* IrisStoreUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2000000000000000000000A /* IrisStoreUITests.swift */; };
+		E1000000000000000000000B /* StoreLinkLandingUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2000000000000000000000B /* StoreLinkLandingUITests.swift */; };
+		E1000000000000000000000C /* MyAppsOrganizationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2000000000000000000000C /* MyAppsOrganizationUITests.swift */; };
+		E1000000000000000000000D /* StoreProportionsUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2000000000000000000000D /* StoreProportionsUITests.swift */; };
+		E1000000000000000000000E /* StoreProportionsMeasure.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2000000000000000000000E /* StoreProportionsMeasure.swift */; };
+		E10500000000000000000001 /* KeepCountUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20500000000000000000001 /* KeepCountUITests.swift */; };
+		EA0105000000000000000001 /* PublikAccountUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA0105000000000000000002 /* PublikAccountUITests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+			D10000000000000000000002 /* Starter */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Starter; sourceTree = "<group>"; };
+			D20000000000000000000001 /* IrisMobileShell.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = IrisMobileShell.entitlements; sourceTree = "<group>"; };
+			D20000000000000000000002 /* Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Debug.xcconfig; sourceTree = "<group>"; };
+			D20000000000000000000003 /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Release.xcconfig; sourceTree = "<group>"; };
+			C20000000000000000000001 /* LocalAppAcceptance */ = {isa = PBXFileReference; lastKnownFileType = folder; name = LocalAppAcceptance; path = "../../../outputs/iris_kneecap_user_test_20260916/seamless_mobile_20260918/resumed_20260918/core-acceptance/multiapp-storage-20260920/LocalAppAcceptance"; sourceTree = SOURCE_ROOT; };
+		A20000000000000000000001 /* IrisMobileShellApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrisMobileShellApp.swift; sourceTree = "<group>"; };
+			A20000000000000000000002 /* SafeDemo.irisapp */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = SafeDemo.irisapp; sourceTree = "<group>"; };
+			A20000000000000000000003 /* IrisMobileShellApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = IrisMobileShellApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+				A20000000000000000000004 /* SafeDemoUpdate.irisapp */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = SafeDemoUpdate.irisapp; sourceTree = "<group>"; };
+			A20000000000000000000005 /* StorageCheck.irisapp */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = StorageCheck.irisapp; sourceTree = "<group>"; };
+		F20000000000000000000001 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+
+		B20000000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/VerifiedRevisionWebViewLifecycleDeepAcceptanceTests.swift; sourceTree = "<group>"; };
+			B20000000000000000000002 = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = IrisMobileShellAcceptanceTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+			B20000000000000000000003 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/NativeMultiAppRuntimeTests.swift; sourceTree = "<group>"; };
+				B20000000000000000000004 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/NativeMediaLeaseSafetyTests.swift; sourceTree = "<group>"; };
+				B20000000000000000000005 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/NativeAppCloseRuntimeTests.swift; sourceTree = "<group>"; };
+				B20000000000000000000006 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/NativeMediaExportAdversarialTests.swift; sourceTree = "<group>"; };
+					B20000000000000000000007 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/NativeFullscreenHomeSafeAreaTests.swift; sourceTree = "<group>"; };
+					B20000000000000000000008 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/NativeMediaDocumentLifetimeTests.swift; sourceTree = "<group>"; };
+					B20000000000000000000009 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/NativeAppCloseSwiftUITeardownTests.swift; sourceTree = "<group>"; };
+					B2000000000000000000000A = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/NativeHomeAndFirstLaunchWiringTests.swift; sourceTree = "<group>"; };
+				B2000000000000000000000C = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/NativeMediaImportMoveAndCleanupTests.swift; sourceTree = "<group>"; };
+				B2000000000000000000000D = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/NativeWKFileUploadPanelCleanupTests.swift; sourceTree = "<group>"; };
+				B2000000000000000000000E = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/NativeWKFileUploadPanelFollowUpTests.swift; sourceTree = "<group>"; };
+		E20000000000000000000001 /* NativeUITestFixtureSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeUITestFixtureSupport.swift; sourceTree = "<group>"; };
+		E20000000000000000000002 /* StoreHomeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoreHomeUITests.swift; sourceTree = "<group>"; };
+		E20000000000000000000003 /* StoreSearchUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoreSearchUITests.swift; sourceTree = "<group>"; };
+		E20000000000000000000004 /* StoreAppPageUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoreAppPageUITests.swift; sourceTree = "<group>"; };
+		E20000000000000000000005 /* MyAppsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MyAppsUITests.swift; sourceTree = "<group>"; };
+		E20000000000000000000006 /* StorageUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageUITests.swift; sourceTree = "<group>"; };
+		E20000000000000000000007 /* FullscreenAppUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullscreenAppUITests.swift; sourceTree = "<group>"; };
+		E20000000000000000000008 /* AccessibilityUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityUITests.swift; sourceTree = "<group>"; };
+		E20000000000000000000009 /* RotationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RotationUITests.swift; sourceTree = "<group>"; };
+		E2000000000000000000000A /* IrisStoreUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrisStoreUITests.swift; sourceTree = "<group>"; };
+		E2000000000000000000000B /* StoreLinkLandingUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoreLinkLandingUITests.swift; sourceTree = "<group>"; };
+		E2000000000000000000000C /* MyAppsOrganizationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MyAppsOrganizationUITests.swift; sourceTree = "<group>"; };
+		E2000000000000000000000D /* StoreProportionsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoreProportionsUITests.swift; sourceTree = "<group>"; };
+		E2000000000000000000000E /* StoreProportionsMeasure.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoreProportionsMeasure.swift; sourceTree = "<group>"; };
+		E20500000000000000000001 /* KeepCountUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeepCountUITests.swift; sourceTree = "<group>"; };
+		E200000000000000000000FF /* IrisMobileShellUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = IrisMobileShellUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		EA0105000000000000000002 /* PublikAccountUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PublikAccountUITests.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A30000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000003 /* IrisMobileShellCore in Frameworks */,
+				A10000000000000000000004 /* IrisMobileShellHost in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+
+		B30000000000000000000001 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (B10000000000000000000002, B10000000000000000000003,); runOnlyForDeploymentPostprocessing = 0; };
+		E30000000000000000000001 /* UI test Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A40000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				A20000000000000000000001 /* IrisMobileShellApp.swift */,
+				F20000000000000000000001 /* PrivacyInfo.xcprivacy */,
+					D20000000000000000000004 /* Config */,
+					B20000000000000000000001 /* Acceptance test source */,
+					B20000000000000000000003 /* Multi-app runtime test source */,
+						B20000000000000000000004 /* Media lease safety test source */,
+						B20000000000000000000005 /* App close runtime test source */,
+						B20000000000000000000006 /* Media export adversarial test source */,
+							B20000000000000000000007 /* Fullscreen Home safe area test source */,
+							B20000000000000000000008 /* Media document lifetime test source */,
+							B20000000000000000000009 /* Actual SwiftUI teardown test source */,
+							B2000000000000000000000A /* Home and first launch wiring test source */,
+						B2000000000000000000000C /* Media import move and cleanup test source */,
+						B2000000000000000000000D /* WKFileUploadPanel cleanup test source */,
+						B2000000000000000000000E /* WKFileUploadPanel follow-up test source */,
+				E40000000000000000000001 /* IrisMobileShellUITests */,
+				A40000000000000000000002 /* Resources */,
+				A40000000000000000000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+			A40000000000000000000002 /* Resources */ = {
+				isa = PBXGroup;
+					children = (
+						D10000000000000000000002 /* Starter */,
+						C20000000000000000000001 /* LocalAppAcceptance */,
+					A20000000000000000000002 /* SafeDemo.irisapp */,
+						A20000000000000000000004 /* SafeDemoUpdate.irisapp */,
+						A20000000000000000000005 /* StorageCheck.irisapp */,
+				);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+			D20000000000000000000004 /* Config */ = {
+				isa = PBXGroup;
+				children = (
+					D20000000000000000000002 /* Debug.xcconfig */,
+					D20000000000000000000003 /* Release.xcconfig */,
+					D20000000000000000000001 /* IrisMobileShell.entitlements */,
+				);
+				name = Config;
+				sourceTree = "<group>";
+			};
+		A40000000000000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A20000000000000000000003 /* IrisMobileShellApp.app */,
+				B20000000000000000000002 /* Acceptance test product */,
+				E200000000000000000000FF /* IrisMobileShellUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		E40000000000000000000001 /* IrisMobileShellUITests */ = {
+			isa = PBXGroup;
+			children = (
+				E20000000000000000000001 /* NativeUITestFixtureSupport.swift */,
+				E20000000000000000000002 /* StoreHomeUITests.swift */,
+				E20000000000000000000003 /* StoreSearchUITests.swift */,
+				E20000000000000000000004 /* StoreAppPageUITests.swift */,
+				E20000000000000000000005 /* MyAppsUITests.swift */,
+				E20000000000000000000006 /* StorageUITests.swift */,
+				E20000000000000000000007 /* FullscreenAppUITests.swift */,
+				E20000000000000000000008 /* AccessibilityUITests.swift */,
+				E20000000000000000000009 /* RotationUITests.swift */,
+				E2000000000000000000000A /* IrisStoreUITests.swift */,
+				E2000000000000000000000B /* StoreLinkLandingUITests.swift */,
+				E2000000000000000000000C /* MyAppsOrganizationUITests.swift */,
+				E2000000000000000000000D /* StoreProportionsUITests.swift */,
+				E2000000000000000000000E /* StoreProportionsMeasure.swift */,
+				E20500000000000000000001 /* KeepCountUITests.swift */,
+				EA0105000000000000000002 /* PublikAccountUITests.swift */,
+			);
+			path = IrisMobileShellUITests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A50000000000000000000001 /* IrisMobileShellApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A80000000000000000000002 /* Build configuration list for PBXNativeTarget "IrisMobileShellApp" */;
+			buildPhases = (
+				A60000000000000000000001 /* Sources */,
+				A30000000000000000000001 /* Frameworks */,
+				A60000000000000000000002 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = IrisMobileShellApp;
+			packageProductDependencies = (
+				A90000000000000000000001 /* IrisMobileShellCore */,
+				A90000000000000000000002 /* IrisMobileShellHost */,
+			);
+			productName = IrisMobileShellApp;
+			productReference = A20000000000000000000003 /* IrisMobileShellApp.app */;
+			productType = "com.apple.product-type.application";
+		};
+
+		B50000000000000000000001 = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B80000000000000000000001;
+			buildPhases = (B60000000000000000000001, B30000000000000000000001,);
+			buildRules = ();
+			dependencies = (B70000000000000000000002,);
+			name = IrisMobileShellAcceptanceTests;
+			packageProductDependencies = (A90000000000000000000001, A90000000000000000000002,);
+			productName = IrisMobileShellAcceptanceTests;
+			productReference = B20000000000000000000002;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		E50000000000000000000001 /* IrisMobileShellUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E80000000000000000000001 /* Build configuration list for PBXNativeTarget "IrisMobileShellUITests" */;
+			buildPhases = (
+				E60000000000000000000001 /* Sources */,
+				E30000000000000000000001 /* UI test Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E70000000000000000000002 /* PBXTargetDependency */,
+			);
+			name = IrisMobileShellUITests;
+			productName = IrisMobileShellUITests;
+			productReference = E200000000000000000000FF /* IrisMobileShellUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+
+/* Begin PBXContainerItemProxy section */
+		B70000000000000000000001 = {isa = PBXContainerItemProxy; containerPortal = A70000000000000000000001; proxyType = 1; remoteGlobalIDString = A50000000000000000000001; remoteInfo = IrisMobileShellApp; };
+		E70000000000000000000001 /* PBXContainerItemProxy */ = {isa = PBXContainerItemProxy; containerPortal = A70000000000000000000001 /* Project object */; proxyType = 1; remoteGlobalIDString = A50000000000000000000001; remoteInfo = IrisMobileShellApp; };
+/* End PBXContainerItemProxy section */
+/* Begin PBXTargetDependency section */
+		B70000000000000000000002 = {isa = PBXTargetDependency; target = A50000000000000000000001; targetProxy = B70000000000000000000001; };
+		E70000000000000000000002 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = A50000000000000000000001 /* IrisMobileShellApp */; targetProxy = E70000000000000000000001 /* PBXContainerItemProxy */; };
+/* End PBXTargetDependency section */
+
+/* Begin PBXProject section */
+		A70000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					A50000000000000000000001 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+					E50000000000000000000001 = {
+						CreatedOnToolsVersion = 16.0;
+						TestTargetID = A50000000000000000000001;
+					};
+				};
+			};
+			buildConfigurationList = A80000000000000000000001 /* Build configuration list for PBXProject "IrisMobileShellApp" */;
+			compatibilityVersion = "Xcode 15.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A40000000000000000000001;
+			packageReferences = (
+				A90000000000000000000003 /* XCLocalSwiftPackageReference ".." */,
+			);
+			productRefGroup = A40000000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				B50000000000000000000001 /* IrisMobileShellAcceptanceTests */,
+				A50000000000000000000001 /* IrisMobileShellApp */,
+				E50000000000000000000001 /* IrisMobileShellUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+			A60000000000000000000002 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+					files = (
+						D10000000000000000000001 /* Starter in Resources */,
+						C10000000000000000000001 /* LocalAppAcceptance in Resources */,
+					A10000000000000000000002 /* SafeDemo.irisapp in Resources */,
+						A10000000000000000000005 /* SafeDemoUpdate.irisapp in Resources */,
+						A10000000000000000000006 /* StorageCheck.irisapp in Resources */,
+						F10000000000000000000001 /* PrivacyInfo.xcprivacy in Resources */,
+				);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A60000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000001 /* IrisMobileShellApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+
+					B60000000000000000000001 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B10000000000000000000001, B10000000000000000000004, B10000000000000000000005, B10000000000000000000006, B10000000000000000000007, B10000000000000000000008, B10000000000000000000009, B1000000000000000000000A, B1000000000000000000000B, B1000000000000000000000C, B1000000000000000000000D, B1000000000000000000000E,); runOnlyForDeploymentPostprocessing = 0; };
+		E60000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E10000000000000000000001 /* NativeUITestFixtureSupport.swift in Sources */,
+				E10000000000000000000002 /* StoreHomeUITests.swift in Sources */,
+				E10000000000000000000003 /* StoreSearchUITests.swift in Sources */,
+				E10000000000000000000004 /* StoreAppPageUITests.swift in Sources */,
+				E10000000000000000000005 /* MyAppsUITests.swift in Sources */,
+				E10000000000000000000006 /* StorageUITests.swift in Sources */,
+				E10000000000000000000007 /* FullscreenAppUITests.swift in Sources */,
+				E10000000000000000000008 /* AccessibilityUITests.swift in Sources */,
+				E10000000000000000000009 /* RotationUITests.swift in Sources */,
+				E1000000000000000000000A /* IrisStoreUITests.swift in Sources */,
+				E1000000000000000000000B /* StoreLinkLandingUITests.swift in Sources */,
+				E1000000000000000000000C /* MyAppsOrganizationUITests.swift in Sources */,
+				E1000000000000000000000D /* StoreProportionsUITests.swift in Sources */,
+				E1000000000000000000000E /* StoreProportionsMeasure.swift in Sources */,
+				E10500000000000000000001 /* KeepCountUITests.swift in Sources */,
+				EA0105000000000000000001 /* PublikAccountUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A81000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.4;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		A81000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.4;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+			A81000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = D20000000000000000000002 /* Debug.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CODE_SIGN_STYLE = Automatic;
+					GENERATE_INFOPLIST_FILE = YES;
+						INFOPLIST_FILE = "DebugAcceptance-Info.plist";
+					INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+					INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+					INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.4;
+				MARKETING_VERSION = 1.0;
+                                    CURRENT_PROJECT_VERSION = 17;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+			A81000000000000000000004 /* Release */ = {
+				isa = XCBuildConfiguration;
+				baseConfigurationReference = D20000000000000000000003 /* Release.xcconfig */;
+				buildSettings = {
+					ASSETCATALOG_COMPILER_APPICON_NAME = "";
+					CODE_SIGN_ENTITLEMENTS = IrisMobileShell.entitlements;
+					CODE_SIGN_STYLE = Automatic;
+						EXCLUDED_SOURCE_FILE_NAMES = "$(inherited) SafeDemo.irisapp SafeDemoUpdate.irisapp StorageCheck.irisapp LocalAppAcceptance";
+					GENERATE_INFOPLIST_FILE = YES;
+						INFOPLIST_FILE = "IrisMobileShell-Info.plist";
+					INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+					INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.4;
+				MARKETING_VERSION = 1.0;
+                                    CURRENT_PROJECT_VERSION = 17;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+
+		B81000000000000000000001 = {isa = XCBuildConfiguration; buildSettings = { BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 18.4; PRODUCT_BUNDLE_IDENTIFIER = com.publikhq.iris.mobileshell.acceptancetests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 5.0; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/IrisMobileShellApp.app/IrisMobileShellApp"; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Debug; };
+		B81000000000000000000002 = {isa = XCBuildConfiguration; buildSettings = { BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 18.4; PRODUCT_BUNDLE_IDENTIFIER = com.publikhq.iris.mobileshell.acceptancetests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 5.0; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/IrisMobileShellApp.app/IrisMobileShellApp"; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Release; };
+		E81000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.4;
+				PRODUCT_BUNDLE_IDENTIFIER = com.publikhq.iris.mobileshell.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = IrisMobileShellApp;
+			};
+			name = Debug;
+		};
+		E81000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.4;
+				PRODUCT_BUNDLE_IDENTIFIER = com.publikhq.iris.mobileshell.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = IrisMobileShellApp;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A80000000000000000000001 /* Build configuration list for PBXProject "IrisMobileShellApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A81000000000000000000001 /* Debug */,
+				A81000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A80000000000000000000002 /* Build configuration list for PBXNativeTarget "IrisMobileShellApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A81000000000000000000003 /* Debug */,
+				A81000000000000000000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+
+		B80000000000000000000001 = {isa = XCConfigurationList; buildConfigurations = (B81000000000000000000001, B81000000000000000000002,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+		E80000000000000000000001 /* Build configuration list for PBXNativeTarget "IrisMobileShellUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E81000000000000000000001 /* Debug */,
+				E81000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		A90000000000000000000003 /* XCLocalSwiftPackageReference ".." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ..;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A90000000000000000000001 /* IrisMobileShellCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A90000000000000000000003 /* XCLocalSwiftPackageReference ".." */;
+			productName = IrisMobileShellCore;
+		};
+		A90000000000000000000002 /* IrisMobileShellHost */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A90000000000000000000003 /* XCLocalSwiftPackageReference ".." */;
+			productName = IrisMobileShellHost;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = A70000000000000000000001 /* Project object */;
+}

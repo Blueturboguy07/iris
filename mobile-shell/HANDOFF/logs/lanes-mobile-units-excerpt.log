@@ -1,0 +1,95 @@
+2026-10-01 00:10:22 START wfv-r1-phone-adapter (PRODUCT FIXER, sol)
+2026-10-01 00:29:11 START wfv-r1-spec-e7-e9-3 (SPEC WRITER (no code), sol)
+2026-10-01 00:36:00 DONE wfv-r1-spec-e7-e9-3 -> done: Applied the requested spec updates. SPEC.md changes: E3 storage accounting and bootstrap start, lines 24, 26, 58; E7 shipping, post-capture change handling, observable checks, and evidence citations, lines 104 to 106; E9 keyframe behavior and compile-excluded timing, lines 116 to 120; Q7, Q9, and ne
+2026-10-01 02:49:13 DONE wfv-r1-phone-adapter -> partial: C15's cache patch was rejected and did not apply. C14 still compiles and its focused gate has only the previously identified disputed assertions. The rewritten C16 patch below preserves the same validation rules, memoizes unchanged manifest validation and canonical timestamps, and backs up both owne
+2026-10-01 02:50:28 START wfv-r1-phone-tests-2 (TEST AUTHOR (spec only), sol)
+2026-10-01 02:50:28 START wfv-r1-phone-adapter-2 (PRODUCT FIXER, sol)
+2026-10-01 04:29:18 START wfv-r1-engine-fix-1 (PRODUCT FIXER, sol)
+2026-10-01 05:21:36 START wfv-r1-engine-fix-1 (PRODUCT FIXER, sol)
+2026-10-01 05:32:12 DONE wfv-r1-phone-tests-2 -> partial: Completed the test revisions, migration rulings, mutation checks, and report. The combined gate passed with 47 tests executed, 0 failures, and 1 B2 test skipped because the public package contract rejects the 50 MiB fixture before staging.
+2026-10-01 05:32:42 DONE wfv-r1-engine-fix-1 -> done: Completed scoped SI-1 and GC-1 fixes. Stable captures honor four attempts with 25/50/100 ms pauses; ctime-only changes require equal-content rereads; inventory changes use bounded retries ending deferred. Optimized compile passed before in 394.68 s and after in 184.38 s. No additional fixes were nee
+2026-10-01 05:37:10 START wfv-r1-desk-eff-oracles-2 (TEST AUTHOR (spec only), sol)
+2026-10-01 07:33:25 DONE wfv-r1-desk-eff-oracles-2 -> done: Completed the efficiency oracle fixes and verification. The bootstrap check now reports the product’s measured 27-file addition against K=3 and L=4, a proposed-bound failure. The settled depth and app-count ratios passed in the current run, so the anticipated history-scaling regression was not repro
+2026-10-01 07:34:27 START wfv-r1-engine-fix-2 (PRODUCT FIXER, sol)
+2026-10-01 07:48:19 START wfv-r1-bootstrap-bound (TEST AUTHOR (spec only), sol)
+2026-10-01 09:54:45 DONE wfv-r1-bootstrap-bound -> done: Completed the owned bootstrap-bound unit. All four storage scenarios pass with 27 bootstrap files against 32. Steady-state K_i + 8 and all other gates remain unchanged. Depth-300 completes with flat harness delivery timing under its 600-second guard.
+2026-10-01 10:41:16 DONE wfv-r1-engine-fix-2 -> blocked: Product fixes and executable regression gates passed. The remaining public-trace gate is blocked by missing authentic IRIS_EFF_PUBLIC_TRACE input. This unit cannot collect it because native Mac execution is prohibited. No code or test change can resolve that missing evidence.
+2026-10-01 12:01:29 DONE wfv-r1-phone-adapter-2 -> blocked: C37's iOS test build passed, and the real WebKit removal case passed outside the sandbox. The full package reproduced exactly the same 10 disputed methods, with no new failing methods. Source fingerprints remain unchanged; no product or test edits were warranted. All supplied outside commands have c
+2026-10-01 13:40:18 START wfv-r1-engine-fix-3 (PRODUCT FIXER, sol)
+2026-10-01 14:25:11 DONE wfv-r1-engine-fix-3 -> done: Completed the scoped quiet identity retry and lazy .operation fixes. Final gates passed with unchanged inputs. Storage fixtures measured 26 first-delivery files. No tests or existing harness files were edited.
+2026-10-01 14:29:08 START wfv-r1-phone-tests-3 (TEST AUTHOR (spec only), sol)
+2026-10-01 14:29:08 START wfm-r1-core-retention (TEST AUTHOR (spec only), sol)
+2026-10-01 15:05:40 START wfm-r1-fixture-session-2 (PRODUCT FIXER, sol)
+2026-10-01 15:15:28 DONE wfv-r1-phone-tests-3 -> partial: All eight requested test methods pass. The required product-copy mutation checks remain incomplete. The cancellation mutant copy test did not reach its assertion because copied fixtures resolved outside the writable scratch tree.
+2026-10-01 15:16:52 START wfv-r1-phone-tests-3b (TEST AUTHOR (spec only), sol)
+2026-10-01 15:19:54 DONE wfm-r1-fixture-session-2 -> blocked: The Debug SDK typecheck again fails at `NativeMarketplaceView.swift:80` because `fontDesign` requires iOS 16.1. This file is outside my assigned edit paths, so I cannot make the required correction. The my-apps Host sweep hook is also owned by another unit.
+2026-10-01 15:21:05 START wfm-r1-fixture-session-3 (PRODUCT FIXER, sol)
+2026-10-01 15:25:27 DONE wfm-r1-fixture-session-3 -> partial: Added a session-only stale sweep to the My apps fixture and corrected its fresh-token seeding comment. The sweep keeps per-sibling error handling and removes matching UserDefaults suite plists only after their session library was successfully removed; it checks paths under the app container's Librar
+2026-10-01 15:27:03 DONE wfm-r1-core-retention -> partial: Prepared guarded C1/C2 availability fixes. Local execution remains blocked by the executor's symlinked writable root.  OWNER DECISION The cap remains 2 GB (choices 1, 2, 4 GB). A kept-tier age or count limit remains undecided. Offloading after 30 days remains pending and defaults off.
+2026-10-01 15:58:18 DONE wfv-r1-phone-tests-3b -> done: Completed mutation proof for the eight changed tests. The baseline passed, all eight mutants were killed by their named tests with spec-linked assertions, and the disposable copies were removed. Mutants were applied only to copied product source; no real product or test files changed.
+2026-10-01 15:58:21 START wfm-r1-core-retention-2 (TEST AUTHOR (spec only), sol)
+2026-10-01 16:03:19 START wfm-r1-keepcount-spec (SPEC AUTHOR, sol)
+2026-10-01 16:16:13 DONE wfm-r1-core-retention-2 -> partial: The repeated external run confirms the same C4 failure: 22 tests executed, 2 failures. Both are cleanup assertions in the test I own. The C1, C2, and C3 tests and the other filtered classes pass. C4 plants the required interrupted state by renaming the stale manifest to `.json.tomb` while leaving it
+2026-10-01 16:24:09 DONE wfm-r1-keepcount-spec -> done: Updated the owned mobile version-history spec with the 2-version default and customizable keep count. Sections 1.1 and 1.4 clarify the visible status and cap behavior; new sections 1.6 and 1.7 specify the Storage setting, confirmation, cancel, result, and reset copy. Section 2.5 defines K, protected
+2026-10-01 17:48:21 START wfv-r1-phone-tomb-recovery (PRODUCT FIXER, sol)
+2026-10-01 17:48:38 START wfm-r1-row-name-fix (PRODUCT FIXER, sol)
+2026-10-01 18:01:50 DONE wfv-r1-phone-tomb-recovery -> done: Implemented idempotent tombstone cleanup in the three owned files. Recovery rebuilds references from live manifests, preserves shared objects, immediately deletes unreferenced tombstone objects, and retains unavailable history. Failed deletes remain retryable. Files were backed up; no tests were edi
+2026-10-01 18:02:32 START wfm-r1-core-retention-3 (TEST AUTHOR (spec only), sol)
+2026-10-01 18:03:23 DONE wfm-r1-row-name-fix -> partial: Owned-file implementation is complete and all gates pass. Rows prefer catalog names, custom renames win, and search and name-based sorting use displayed names case insensitively. No environment blocker remains. INTEGRATION is still required for titles, Features, Storage and starter fallback; those c
+2026-10-01 18:03:23 DONE wfm-r1-core-retention-3 -> blocked: I could not run the filtered gate or author the mutation script because the referenced briefs and gate files are missing from the available workspace. I made no edits.
+2026-10-01 18:04:31 START wfm-r1-core-retention-3b (TEST AUTHOR (spec only), sol)
+2026-10-01 18:04:31 START wfm-r1-row-name-integrate (PRODUCT INTEGRATOR, sol)
+2026-10-01 18:57:16 DONE wfm-r1-core-retention-3b -> done: The filtered package gate passed with 22 tests and 0 failures. The six fresh-clone mutant tests each failed at the expected assertion. No owned test files changed; the PRE-2026-10-01-DECISION comments remain intact. The final script pass reclassified the saved fresh-clone outputs after correcting th
+2026-10-01 19:00:13 START wfm-r1-keepcount-contract (SPEC AUTHOR, sol)
+2026-10-01 19:09:52 DONE wfm-r1-keepcount-contract -> done: Created the keep-count public API contract and added one link sentence to SPEC.md section 1.6. Read SPEC.md, round6/version-efficiency/PUBLIC_CONTRACT.md section 1.2, NativeShellLibraryCoordinator.swift, NativeRevisionStore.swift, NativeStorageRetentionPolicy.swift, NativeStorageBlockMeasurement.swi
+2026-10-01 19:11:10 START wfm-r1-keepcount-tests-a (TEST AUTHOR (spec only), sol)
+2026-10-01 19:11:10 START wfm-r1-keepcount-tests-b (TEST AUTHOR (spec only), sol)
+2026-10-01 19:11:11 START wfm-r1-keepcount-tests-old (TEST AUTHOR (spec only), sol)
+2026-10-01 19:15:17 DONE wfm-r1-keepcount-tests-b -> partial: Added the two assigned test files. Syntax parsing and the forbidden-character checks passed. The suite is incomplete: three retention fixture methods are placeholders, and mutation checks were not run.
+2026-10-01 19:16:00 START wfm-r1-keepcount-tests-b2 (TEST AUTHOR (spec only), sol)
+2026-10-01 19:17:14 DONE wfm-r1-keepcount-tests-a -> partial: The owned test file passes Swift syntax parsing. The forbidden-character check printed 0. No test or build was run because the builder-dependent APIs are not available yet.
+2026-10-01 19:22:13 DONE wfm-r1-keepcount-tests-old -> done: Revised the three retention tests for K-based pruning. The 20-app scenario runs at default K=2 and Keep all; fixtures explicitly offer their generated revisions, and allocation checks use an independent lstat walk with hard-link deduplication. Backups were saved before editing.
+2026-10-01 19:26:43 DONE wfm-r1-keepcount-tests-b2 -> partial: Both owned test files passed syntax parsing and the forbidden-character check using commands allowed inside the sandbox. No test or build was run.
+2026-10-01 19:27:08 START wfm-r1-keepcount-contract-2 (SPEC AUTHOR, sol)
+2026-10-01 19:33:46 DONE wfm-r1-keepcount-contract-2 -> done: Backed up and updated KEEPCOUNT_PUBLIC_API.md with seven gap rulings and concrete public-API recipes. Made two documented corrections to earlier text. No product code or tests changed.
+2026-10-01 19:34:13 START wfm-r1-keepcount-tests-a2 (TEST AUTHOR (spec only), sol)
+2026-10-01 19:34:13 START wfm-r1-keepcount-tests-b3 (TEST AUTHOR (spec only), sol)
+2026-10-01 19:34:13 START wfm-r1-keepcount-tests-old2 (TEST AUTHOR (spec only), sol)
+2026-10-01 19:39:05 DONE wfm-r1-keepcount-tests-old2 -> done: Reworked the three-package resume test to follow contract addendum 7.7, including pending C protection, restart, installOne resume, launch-content checks, and an independent object-byte check. Kept the PRE and RESOLVED markers. Reviewed the two pruning tests; their K and protected-version assertions
+2026-10-01 19:39:31 DONE wfm-r1-row-name-integrate -> blocked: Owned-file integration is complete. Repeated test compilation failures require changes to Core files outside this brief's ownership. No permitted caller edit can resolve them. No further unchanged run is requested.
+2026-10-01 19:41:06 DONE wfm-r1-keepcount-tests-b3 -> partial: Updated the owned tests with pending derivation and tie coverage, local-only plus catalog-withdrawal protection, separate tests for each Features storage-state row, and a validator-backed coordinator-first-launch migration fixture. Backups are in the required orch-scratch path.
+2026-10-01 19:43:16 DONE wfm-r1-keepcount-tests-a2 -> done: Updated the reset and Go back/Undo tests to follow addenda 7.1 and 7.2. Added check 18 coverage for stage and swap crash points, journal refusal, recovery, pruning, garbage collection, and migration. The owned test file parses, and the forbidden-character scan prints 0.
+2026-10-01 19:43:23 START wfm-r1-keepcount-core (PRODUCT BUILDER, sol)
+2026-10-01 20:32:43 DONE wfm-r1-keepcount-core -> blocked: The unchanged failure is inside a locked test, so no authorized product fix is available. Stop automatic gate retries and route the visibility correction to the separate test author. No files changed this turn.
+2026-10-01 20:33:45 START wfm-r1-keepcount-tests-fix1 (TEST AUTHOR (spec only), sol)
+2026-10-01 21:23:08 DONE wfm-r1-keepcount-tests-fix1 -> partial: Fixed the invalid generated identity in the crash-point test. The latest run had 44 tests with 1 failure; the crash-point test now uses normalized IDs, but the orchestrator has not rerun it yet.
+2026-10-01 21:52:31 START wfm-r1-keepcount-core-2 (PRODUCT BUILDER, sol)
+2026-10-01 22:38:05 START wfm-r1-keepcount-tests-realstate (TEST AUTHOR (spec only), sol)
+2026-10-01 22:57:10 DONE wfm-r1-keepcount-tests-realstate -> partial: The test remains `.pending`, so SwiftPM cannot discover it yet. The isolated package build succeeded but ran no matching tests. The orchestrator has not renamed the file into the test target.
+2026-10-02 00:16:37 START wfm-r1-keepcount-tests-fix2 (TEST AUTHOR (spec only), sol)
+2026-10-02 01:19:41 START wfm-r1-mv4-storage-keepcount (PRODUCT BUILDER, sol)
+2026-10-02 01:23:23 DONE wfm-r1-mv4-storage-keepcount -> partial: Read the required spec, public contract, and landed Core declarations. Added keep-count accessibility identifiers and the Core import in mobile-shell/native/Sources/IrisMobileShellHost/NativeAccessibilityIdentifiers.swift:2, with backups in both required locations. The control and StoreStorageModel 
+2026-10-02 01:25:33 START wfm-r1-mv4-storage-keepcount-2 (PRODUCT BUILDER, sol)
+2026-10-02 02:16:47 DONE wfm-r1-mv4-storage-keepcount-2 -> done: Implemented Core-backed keep-count selection, lowering confirmation, awaited save-and-prune, reset, exact result and raising copy, failure retry, wrapping controls, 44 pt targets and VoiceOver announcements in StoreStorageView.swift:30,131,176,402,441. Reused existing identifiers. Backed up every ed
+2026-10-02 02:20:45 START wfm-r1-mv6-keepcount-uitests (TEST AUTHOR (spec only), sol)
+2026-10-02 02:29:11 DONE wfm-r1-mv6-keepcount-uitests -> partial: The allowed direct Swift typecheck passed for the UI test sources excluding the existing AccessibilityUITests.swift failure. KeepCountUITests.swift has no typecheck errors. Both authored files have zero em dashes.
+2026-10-02 02:31:27 START wfm-r1-mv6-fixtures-integrate (PRODUCT BUILDER, sol)
+2026-10-02 02:59:03 DONE wfm-r1-keepcount-core-2 -> partial: Product work is complete in NativeRevisionStore.swift: shared settlement under the root writer and temporary-allocation drainage preserve SPEC 2.5 and section 8 protections. Backups exist; no tests were edited. Acceptance remains red solely on two locked-fixture disputes.
+2026-10-02 03:07:50 DONE wfm-r1-mv6-fixtures-integrate -> partial: Implemented the DEBUG-only storage-keep-count fixture: it seeds three app histories through the real coordinator and revision store, writes the user-data sentinel only if absent, and preserves seeded state on relaunch. The app injects the fixture UserDefaults suite for keep-count handling and prunin
+2026-10-02 04:08:11 DONE wfm-r1-keepcount-tests-fix2 -> partial: Removed the duplicate coordinator declaration that blocked compilation. The corrected crash-point fixture still needs verification.
+2026-10-02 04:09:41 START wfm-r1-keepcount-tests-fix3 (TEST AUTHOR (spec only), sol)
+2026-10-02 04:26:31 DONE wfm-r1-keepcount-tests-fix3 -> partial: The build passed. The new count-prune test and both existing global-cap tests passed. The broader focused gate reported `Executed 59 tests, with 49 failures`; the returned output does not identify the failing cases, so dispute 1 remains unresolved pending an isolated run.
+2026-10-02 04:36:38 START wfm-r1-keepcount-tests-fix4 (TEST AUTHOR (spec only), sol)
+2026-10-02 04:42:44 DONE wfm-r1-keepcount-tests-fix4 -> done: The keep-count test suite passed all 14 tests with 0 failures. Build succeeded, and the em dash scan printed 0.
+2026-10-02 04:51:12 START wfm-r1-keepcount-tests-fix5 (TEST AUTHOR (spec only), sol)
+2026-10-02 04:56:04 DONE wfm-r1-keepcount-tests-fix5 -> partial: Updated the test to use the specified read-only state copy when `IRIS_PHONE_STATE_COPY` is absent, while preserving the environment override and all migration and retention assertions. This addresses the repeated gate failure at the input guard.
+2026-10-02 05:37:25 START wfm-r1-keepcount-tests-fix6 (TEST AUTHOR (spec only), sol)
+2026-10-02 05:43:57 DONE wfm-r1-keepcount-tests-fix6 -> done: The real-state migration and keep-count test passes. Its independent state checks, migration warning checks, pruning stages, keep-all case, and capability validation completed successfully.
+2026-10-02 07:10:41 START wfm-r1-keepcount-tests-fix7 (TEST AUTHOR (spec only), sol)
+2026-10-02 07:19:32 DONE wfm-r1-keepcount-tests-fix7 -> partial: Build passed and the focused suites executed 9 tests with 0 failures. The unavailable-version test is complete. The requested K=2 over-free mutation remains uncovered because the contract’s count rule leaves no eligible kept-tier revision for the cap to free after current and fallback occupy both sl
+2026-10-02 09:06:54 START wfm-r1-keepcount-tests-fix8 (TEST AUTHOR (spec only), sol)
+2026-10-02 09:19:52 DONE wfm-r1-keepcount-tests-fix8 -> partial: Changed both launchability loops to visit retained revisions newest to oldest, keeping each subsequent revert on the active history chain. The focused suite needs another external run.
+2026-10-03 09:06:27 START wfm-r1-sim-fixture-rc2rc3 (PRODUCT FIXER, sol)
+2026-10-03 10:04:04 DONE wfm-r1-sim-fixture-rc2rc3 -> partial: This third Simulator run has the same result: StorageUITests passed 6 of 6 and KeepCountUITests failed 8 of 8. KeepCountUITests.swift:21 still supplies a 41-character session token, which the required DEBUG guard rejects. No test files were changed.
+2026-10-03 10:04:36 START wfm-r1-sim-tests-token-nav (TEST AUTHOR (spec only), sol)
+2026-10-03 10:08:34 DONE wfm-r1-sim-tests-token-nav -> partial: The token and Features-screen navigation fixes are in place. The full UI test source typechecks with an iOS 17 target. The prescribed iOS 16 typecheck is blocked by an availability error in AccessibilityUITests.swift.

@@ -1,0 +1,72 @@
+{
+  "format": "iris.mobile-shell.package+json",
+  "approval": {
+    "kind": "iris.mobile-shell.delivery-approval",
+    "version": 1,
+    "approvalId": "approval_bbffd681b67cc4938804d6fd",
+    "requestId": null,
+    "requestNonce": null,
+    "appId": "iris.native-demo",
+    "projectId": "iris.native-demo.shell",
+    "baseRevisionId": "rev-sha256:5990a290789e8ca60b73fcf4e992d2b4f05b2efdd7a4bd59b27ec0e2d2b9ed39",
+    "approvedRevisionId": "rev-sha256:b379a89e8d716823009b1843d9ef164ee9029b083172872bc720c13f93be15cc",
+    "approvedContentHash": "sha256:b379a89e8d716823009b1843d9ef164ee9029b083172872bc720c13f93be15cc",
+    "approvedAt": "2026-09-17T19:56:02.871Z"
+  },
+  "envelope": {
+    "kind": "iris.mobile-shell.delivery-envelope",
+    "version": 1,
+    "envelopeId": "delivery_2086e5a2fcaedd83f13c6bc5",
+    "deliveryNonce": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "approvalId": "approval_bbffd681b67cc4938804d6fd",
+    "appId": "iris.native-demo",
+    "projectId": "iris.native-demo.shell",
+    "baseRevisionId": "rev-sha256:5990a290789e8ca60b73fcf4e992d2b4f05b2efdd7a4bd59b27ec0e2d2b9ed39",
+    "revisionId": "rev-sha256:b379a89e8d716823009b1843d9ef164ee9029b083172872bc720c13f93be15cc",
+    "contentHash": "sha256:b379a89e8d716823009b1843d9ef164ee9029b083172872bc720c13f93be15cc",
+    "issuedAt": "2026-09-17T19:56:02.926Z",
+    "revision": {
+      "kind": "iris.mobile-shell.revision",
+      "version": 1,
+      "appId": "iris.native-demo",
+      "projectId": "iris.native-demo.shell",
+      "revisionId": "rev-sha256:b379a89e8d716823009b1843d9ef164ee9029b083172872bc720c13f93be15cc",
+      "baseRevisionId": "rev-sha256:5990a290789e8ca60b73fcf4e992d2b4f05b2efdd7a4bd59b27ec0e2d2b9ed39",
+      "manifestHash": "sha256:f40a331727c35188d1b3355141aa2aa28d98fb8c31b7568d3b6102e95e67e046",
+      "contentHash": "sha256:b379a89e8d716823009b1843d9ef164ee9029b083172872bc720c13f93be15cc",
+      "createdAt": "2026-09-17T19:56:02.818Z",
+      "manifest": {
+        "kind": "iris.mobile-shell.manifest",
+        "version": 1,
+        "appId": "iris.native-demo",
+        "projectId": "iris.native-demo.shell",
+        "displayName": "Iris Native Demo",
+        "runtime": {
+          "type": "web",
+          "entrypoint": "index.html",
+          "minShellVersion": "1.0.0"
+        },
+        "capabilities": [],
+        "data": {
+          "namespace": "iris.native-demo",
+          "updatePolicy": "preserve"
+        }
+      },
+      "files": [
+        {
+          "path": "index.html",
+          "sha256": "sha256:c5aeed4864cdc53ea7b890f652199679a4cf645e603abcf579ba305d6f5087c5",
+          "bytes": 978,
+          "mediaType": "text/html"
+        }
+      ]
+    }
+  },
+  "files": [
+    {
+      "path": "index.html",
+      "mediaType": "text/html",
+      "contentBase64": "PCFkb2N0eXBlIGh0bWw+PG1ldGEgY2hhcnNldD11dGYtOD48bWV0YSBuYW1lPXZpZXdwb3J0IGNvbnRlbnQ9IndpZHRoPWRldmljZS13aWR0aCxpbml0aWFsLXNjYWxlPTEiPjx0aXRsZT5JcmlzIERlbW8gVjI8L3RpdGxlPjxzdHlsZT5ib2R5e2ZvbnQtZmFtaWx5Oi1hcHBsZS1zeXN0ZW07bWFyZ2luOjA7cGFkZGluZzozMnB4O2JhY2tncm91bmQ6I2VlZjJmZjtjb2xvcjojMTcxODFkfW1haW57bWF4LXdpZHRoOjMycmVtO21hcmdpbjphdXRvfXNtYWxse2NvbG9yOiM1YjVmYzd9aDF7Zm9udC1zaXplOjIuMnJlbX1we2xpbmUtaGVpZ2h0OjEuNTU7Y29sb3I6IzRiNTU2M30uY2FyZHttYXJnaW4tdG9wOjI0cHg7cGFkZGluZzoxOHB4O2JvcmRlci1yYWRpdXM6MThweDtiYWNrZ3JvdW5kOndoaXRlO2JveC1zaGFkb3c6MCAxMnB4IDMycHggIzAwMDF9LmJhZGdle2Rpc3BsYXk6aW5saW5lLWJsb2NrO21hcmdpbi10b3A6MTRweDtwYWRkaW5nOjhweCAxMnB4O2JvcmRlci1yYWRpdXM6OTk5cHg7YmFja2dyb3VuZDojNWI1ZmM3O2NvbG9yOndoaXRlO2ZvbnQtd2VpZ2h0OjcwMH08L3N0eWxlPjxtYWluPjxzbWFsbD5JUklTIE1PQklMRSBERU1PIMK3IFZFUlNJT04gMjwvc21hbGw+PGgxPlVwZGF0ZSBhY3RpdmF0ZWQuPC9oMT48cD5UaGlzIGRpc3RpbmN0IHNlY29uZCByZXZpc2lvbiB3YXMgZ2VuZXJhdGVkIGZyb20gdGhlIGV4YWN0IFZlcnNpb24gMSBiYXNlLiBZb3UgcmV2aWV3ZWQgYW5kIHN0YWdlZCBpdCBzZXBhcmF0ZWx5IGJlZm9yZSBhY3RpdmF0aW9uLjwvcD48ZGl2IGNsYXNzPWNhcmQ+PHN0cm9uZz5XaGF0IGNoYW5nZWQ/PC9zdHJvbmc+PHA+VGhlIHZpc3VhbCB0cmVhdG1lbnQsIGNvcHksIGFuZCB2ZXJzaW9uIG1hcmtlciBjaGFuZ2VkIHdoaWxlIHRoZSBzaGVsbCBhbmQgdHJ1c3QgcGF0aCBzdGF5ZWQgdGhlIHNhbWUuPC9wPjxzcGFuIGNsYXNzPWJhZGdlPlZFUlNJT04gMjwvc3Bhbj48L2Rpdj48L21haW4+"
+    }
+  ]
+}

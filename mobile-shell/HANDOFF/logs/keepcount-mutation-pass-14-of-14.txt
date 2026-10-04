@@ -1,0 +1,24 @@
+running KC12-warning-memory-only (NativeKeepCountRealStateMigrationTests|NativeKeepCountRetentionTests)
+KC12-warning-memory-only: CAUGHT (expected caught) 1 failing test(s) in NativeKeepCountRetentionTests; aimed suite MISSED it; restored e0d7125fec77 sha ok; 74s
+running KC13-default-keepall (NativeKeepCountPolicyTests|NativeShellLibraryCoordinatorGlobalCapTests)
+KC13-default-keepall: CAUGHT (expected caught) 2 failing test(s) in NativeKeepCountPolicyTests, NativeShellLibraryCoordinatorGlobalCapTests; aimed suite caught it; restored e35abf428b00 sha ok; 29s
+running KC14-plan-deletes (NativeKeepCountSettingTests)
+KC14-plan-deletes: CAUGHT (expected caught) 3 failing test(s) in NativeKeepCountSettingTests; aimed suite caught it; restored e35abf428b00 sha ok; 65s
+
+mutant                             verdict        expected aimed suite
+KC01-k2-keeps-three                CAUGHT         caught   caught
+KC02-fallback-not-a-role           CAUGHT         caught   caught
+KC03-pinned-ignored                CAUGHT         caught   caught
+KC04-catalog-offers-ignored        CAUGHT         caught   caught
+KC05-unavailable-not-protected     CAUGHT         survive  caught
+KC06-settled-guards-removed        CAUGHT         caught   caught
+KC07-choice-not-persisted          CAUGHT         caught   caught
+KC08-apply-ignores-chosen-k        CAUGHT         caught   caught
+KC09-cap-ignored-under-keepall     CAUGHT         caught   caught
+KC10-cap-loop-ignores-count-savings CAUGHT         survive  caught
+KC11-migration-drops-fallback      CAUGHT         caught   caught
+KC12-warning-memory-only           CAUGHT         caught   missed
+KC13-default-keepall               CAUGHT         caught   caught
+KC14-plan-deletes                  CAUGHT         caught   caught
+report: <scratch>/keepcount-mirror/scratch/report.json
+RESULT: 14 mutant(s) run, 0 problem(s); survivors: none

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Iris storage check: synthetic test</title>
+<style>
+body{font:17px -apple-system,BlinkMacSystemFont,sans-serif;line-height:1.5;margin:0;padding:28px 22px;background:#f3f5f8;color:#142132}
+main{max-width:32rem;margin:auto}h1{font-size:28px;line-height:1.2}p{overflow-wrap:anywhere}
+button{display:block;width:100%;font:inherit;font-weight:600;padding:16px;margin:18px 0;border:1px solid #64748b;border-radius:12px;background:white;color:inherit}
+button:disabled{opacity:.5}output{display:block;font-size:32px;font-weight:700;padding:20px 0}
+small{display:block;color:#475569}#status{min-height:3em}
+</style>
+<main>
+<small>SYNTHETIC TEST · NOT A PUBLIK APP DOWNLOAD</small>
+<h1>Local storage check</h1>
+<p>This test saves only a tap counter. Close and reopen it to check both browser stores.</p>
+<output id="counter" aria-live="polite">Reading saved taps…</output>
+<p id="status" role="status">Opening localStorage and IndexedDB.</p>
+<button id="save" disabled>Save one more tap</button>
+<button id="clear" disabled>Clear this test’s counter</button>
+<small>No network, account, personal content, or native JavaScript bridge is used. This is not a data-backup or migration test.</small>
+</main>
+<script>
+'use strict';
+const key='iris.storage.check.counter.v1';
+const output=document.querySelector('#counter'),status=document.querySelector('#status');
+const save=document.querySelector('#save'),clear=document.querySelector('#clear');
+function openDB(){return new Promise((resolve,reject)=>{
+ const request=indexedDB.open('iris-storage-check-v1',1);
+ request.onupgradeneeded=()=>request.result.createObjectStore('counts');
+ request.onerror=()=>reject(request.error);request.onsuccess=()=>resolve(request.result);
+});}
+function stored(db){return new Promise((resolve,reject)=>{
+ const tx=db.transaction('counts','readonly'),request=tx.objectStore('counts').get(key);
+ request.onsuccess=()=>resolve(request.result??null);request.onerror=()=>reject(request.error);
+});}
+function write(db,value){return new Promise((resolve,reject)=>{
+ const tx=db.transaction('counts','readwrite');
+ if(value===null)tx.objectStore('counts').delete(key);else tx.objectStore('counts').put(value,key);
+ tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error);
+});}
+async function check(db){
+ const a=localStorage.getItem(key),b=await stored(db);
+ if(a!==b)throw new Error('StoresDisagree');
+ const count=a===null?0:Number(a);
+ if(!Number.isSafeInteger(count)||count<0||count>999999)throw new Error('InvalidCounter');
+ output.textContent='Saved taps: '+count;
+ status.textContent='Both stores agree: localStorage and IndexedDB.';
+ return count;
+}
+async function run(action){
+ save.disabled=clear.disabled=true;let db;
+ try{
+  db=await openDB();const count=await check(db);
+  if(action==='save'){
+   if(count===999999)throw new Error('CounterLimit');
+   const next=String(count+1);await write(db,next);localStorage.setItem(key,next);
+  }else if(action==='clear'){await write(db,null);localStorage.removeItem(key);}
+  await check(db);save.disabled=clear.disabled=false;
+ }catch(error){output.textContent='Storage check failed';status.textContent=error?.name==='Error'?(error.message||'Failure'):(error?.name||'Failure');}
+ finally{if(db)db.close();}
+}
+save.addEventListener('click',()=>run('save'));clear.addEventListener('click',()=>run('clear'));run('read');
+</script>
+</html>

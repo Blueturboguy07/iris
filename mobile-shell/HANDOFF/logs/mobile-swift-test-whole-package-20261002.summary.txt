@@ -1,0 +1,30 @@
+	 Executed 5 tests, with 0 failures (0 unexpected) in 1.651 (1.652) seconds
+Test Suite 'VersionsGCAndScaleTests' started at 2026-10-02 10:40:07.209.
+Test Case '-[IrisMobileShellCoreTests.VersionsGCAndScaleTests testFreeingOneAppsVersionNeverFreesAnObjectAnotherAppStillReferences]' started.
+Test Case '-[IrisMobileShellCoreTests.VersionsGCAndScaleTests testFreeingOneAppsVersionNeverFreesAnObjectAnotherAppStillReferences]' passed (0.023 seconds).
+Test Case '-[IrisMobileShellCoreTests.VersionsGCAndScaleTests testFreeVersionReclaimsExpectedBytesAndOracleAgrees]' started.
+Test Case '-[IrisMobileShellCoreTests.VersionsGCAndScaleTests testFreeVersionReclaimsExpectedBytesAndOracleAgrees]' passed (0.117 seconds).
+Test Case '-[IrisMobileShellCoreTests.VersionsGCAndScaleTests testMarkAndSweepNeverDeletesAReferencedObject]' started.
+Test Case '-[IrisMobileShellCoreTests.VersionsGCAndScaleTests testMarkAndSweepNeverDeletesAReferencedObject]' passed (0.021 seconds).
+Test Case '-[IrisMobileShellCoreTests.VersionsGCAndScaleTests testMarkAndSweepRespectsTenMinuteGracePeriod]' started.
+Test Case '-[IrisMobileShellCoreTests.VersionsGCAndScaleTests testMarkAndSweepRespectsTenMinuteGracePeriod]' passed (0.007 seconds).
+Test Case '-[IrisMobileShellCoreTests.VersionsGCAndScaleTests testMarkAndSweepSelfHealsADriftedRefcount]' started.
+Test Case '-[IrisMobileShellCoreTests.VersionsGCAndScaleTests testMarkAndSweepSelfHealsADriftedRefcount]' passed (0.019 seconds).
+Test Case '-[IrisMobileShellCoreTests.VersionsGCAndScaleTests testReclaimOrdersOldestCreatedAtFirstNeverByClock]' started.
+Test Case '-[IrisMobileShellCoreTests.VersionsGCAndScaleTests testReclaimOrdersOldestCreatedAtFirstNeverByClock]' passed (0.056 seconds).
+Test Case '-[IrisMobileShellCoreTests.VersionsGCAndScaleTests testScaleMechanicsAtReducedAppAndVersionCounts]' started.
+Test Case '-[IrisMobileShellCoreTests.VersionsGCAndScaleTests testScaleMechanicsAtReducedAppAndVersionCounts]' passed (11.704 seconds).
+Test Suite 'VersionsGCAndScaleTests' passed at 2026-10-02 10:40:19.158.
+	 Executed 7 tests, with 0 failures (0 unexpected) in 11.948 (11.949) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 3.986 (3.987) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.024 (0.025) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.372 (0.373) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.017 (0.017) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.606 (0.607) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.029 (0.029) seconds
+	 Executed 648 tests, with 0 failures (0 unexpected) in 3261.377 (3262.124) seconds
+	 Executed 648 tests, with 0 failures (0 unexpected) in 3261.377 (3262.125) seconds
+[VersionsGCAndScaleTests scale] 3x1: manifests=3 build=0.040662042 seconds refresh=0.000455375 seconds gc=0.003465083 seconds allocatedBytes=73728
+[VersionsGCAndScaleTests scale] 3x5: manifests=15 build=0.194253708 seconds refresh=0.000478667 seconds gc=0.005632167 seconds allocatedBytes=147456
+[VersionsGCAndScaleTests scale] 100x1: manifests=100 build=1.569419292 seconds refresh=0.014222417 seconds gc=0.111774833 seconds allocatedBytes=2457600
+[VersionsGCAndScaleTests scale] 100x5: manifests=500 build=9.089442792 seconds refresh=0.016246625 seconds gc=0.110339084 seconds allocatedBytes=4915200

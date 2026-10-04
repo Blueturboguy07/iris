@@ -1,0 +1,41 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+		F0000000000000000000001 /* PBXNativeTarget */ = {
+			isa = PBXNativeTarget;
+			name = IrisMobileShellApp;
+			buildConfigurationList = F0000000000000000000002;
+		};
+		F0000000000000000000002 /* Build configuration list for PBXNativeTarget "IrisMobileShellApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F0000000000000000000003,
+				F0000000000000000000004,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F0000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			name = Debug;
+			buildSettings = {
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				INFOPLIST_FILE = "IrisMobileShell-Info.plist";
+			};
+		};
+		F0000000000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			name = Release;
+			buildSettings = {
+				GCC_PREPROCESSOR_DEFINITIONS = "DEBUG=1 $(inherited)";
+
+				INFOPLIST_FILE = "IrisMobileShell-Info.plist";
+			};
+		};
+	};
+	rootObject = F0000000000000000000000;
+}

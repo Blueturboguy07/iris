@@ -1,0 +1,24 @@
+// Iris Apps (mobile shell) - Release configuration.
+//
+// This file is the single place to change the owner decisions below.
+// Do not put these three settings back into project.pbxproj; if you need
+// to change one, change it here (and in Debug.xcconfig too, if it is a
+// setting that should match). See PLAN.md section 8 in this unit's impl
+// folder for the open owner decisions this maps to.
+
+// Empty on purpose: no Apple Developer Program membership is enrolled or
+// paid for yet (PLAN.md section 8, item 1). This is required before any
+// TestFlight or App Store upload. Fill in the enrolled team id here once
+// enrollment is done; do not edit project.pbxproj to do it. An empty team
+// can still archive locally, but Xcode Organizer will refuse to upload.
+DEVELOPMENT_TEAM =
+
+// Placeholder bundle id for the first paid submission. The final id is a
+// real, unmade owner decision (PLAN.md section 8, item 3); change it here
+// once, before the first TestFlight upload.
+PRODUCT_BUNDLE_IDENTIFIER = com.publikhq.iris.mobileshell
+
+// Home Screen and App Store display name placeholder. Change this (and
+// the same key in Debug.xcconfig) if the owner decides on "Iris" instead
+// of "Iris Apps".
+INFOPLIST_KEY_CFBundleDisplayName = Iris Apps

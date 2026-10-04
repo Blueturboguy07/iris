@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta http-equiv="Content-Security-Policy" content="frame-src 'none'" />
+    <meta name="theme-color" content="#101114" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Iris" />
+    <title>Iris · Apps</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./icons/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./icons/icon-180.png" />
+    <link rel="stylesheet" href="./styles.css" />
+    <script type="module" src="./main.mjs"></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <button class="brand" id="home-button" type="button" aria-label="Show app library">
+          <span class="eye" aria-hidden="true"><span></span></span>
+          <strong>Iris</strong>
+        </button>
+        <div class="topbar__status">
+          <span class="network-pill" id="network-pill" data-state="online">Online</span>
+          <button class="icon-button" id="import-button" type="button" aria-label="Import verified app package" title="Import package">+</button>
+          <input id="package-file" type="file" accept="application/json,.json,.irisapp" hidden />
+        </div>
+      </header>
+
+      <section class="update-banner" id="shell-update" hidden aria-live="polite">
+        <div>
+          <strong>Iris shell update ready</strong>
+          <span>Your apps and data stay on this device.</span>
+        </div>
+        <button class="small-button" id="activate-shell-update" type="button">Review & refresh</button>
+      </section>
+
+      <section class="notice notice--offline" id="offline-notice" hidden aria-live="polite">
+        <strong>Offline.</strong> Installed apps still open from verified local copies. Import/export and local notes continue to work.
+      </section>
+
+      <section class="notice notice--error" id="error-notice" hidden role="alert">
+        <span id="error-text"></span>
+        <button class="notice__close" id="error-close" type="button" aria-label="Dismiss error">×</button>
+      </section>
+
+      <main>
+        <section class="library" id="library-view">
+          <div class="hero">
+            <span class="eyebrow">On this device</span>
+            <h1>Your apps stay here.</h1>
+            <p>Iris keeps verified app revisions available offline and keeps your app data separate when content changes.</p>
+            <div class="hero__actions">
+              <button class="primary-button" id="install-demo-button" type="button">Install Iris Notes Demo</button>
+              <button class="secondary-button" id="hero-import-button" type="button">Import package</button>
+            </div>
+          </div>
+
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Library</span>
+              <h2>Installed content</h2>
+            </div>
+            <span class="count" id="app-count">0</span>
+          </div>
+
+          <div class="app-list" id="app-list" aria-live="polite"></div>
+          <div class="empty-state" id="empty-library">
+            <div class="empty-icon" aria-hidden="true">↘</div>
+            <strong>No apps installed yet</strong>
+            <p>Install the local demo or import a package exported by a trusted Iris delivery flow.</p>
+          </div>
+
+          <aside class="truth-card">
+            <strong>Web-shell scope</strong>
+            <p>Kneecap workflows that require native photo-library access, native media processing/export, or other native host APIs are not provided by this PWA. A package that asks for unsupported capabilities stays inactive and Iris shows why.</p>
+          </aside>
+        </section>
+
+        <section class="app-detail" id="detail-view" hidden>
+          <button class="back-button" id="back-button" type="button">← Library</button>
+          <div class="app-identity">
+            <div class="app-icon" id="detail-icon" aria-hidden="true">I</div>
+            <div>
+              <span class="eyebrow" id="detail-app-id"></span>
+              <h1 id="detail-name">App</h1>
+              <p id="detail-revision"></p>
+            </div>
+          </div>
+
+          <div class="status-card" id="compatibility-card" data-state="ready">
+            <span class="status-dot" aria-hidden="true"></span>
+            <div>
+              <strong id="compatibility-title">Ready offline</strong>
+              <p id="compatibility-detail">This active revision is verified and supported by the web shell.</p>
+            </div>
+          </div>
+
+          <div class="detail-actions">
+            <button class="primary-button" id="open-app-button" type="button">Open app</button>
+            <button class="secondary-button" id="demo-update-button" type="button" hidden>Load demo update</button>
+          </div>
+
+          <section class="panel">
+            <div class="section-heading section-heading--compact">
+              <div>
+                <span class="eyebrow">Versions</span>
+                <h2>Verified revisions</h2>
+              </div>
+            </div>
+            <div class="revision-list" id="revision-list"></div>
+          </section>
+
+          <section class="panel">
+            <div class="section-heading section-heading--compact">
+              <div>
+                <span class="eyebrow">Edit from phone</span>
+                <h2>Request a change</h2>
+              </div>
+            </div>
+            <p class="panel-copy">Describe the change you want. Iris creates a scoped request for the current revision. It does not run commands or edit files on the phone.</p>
+            <form class="edit-form" id="edit-form">
+              <label>
+                <span>Type</span>
+                <select id="edit-type">
+                  <option value="feature">Feature</option>
+                  <option value="bugfix">Bug fix</option>
+                </select>
+              </label>
+              <label>
+                <span>What should change?</span>
+                <textarea id="edit-text" rows="4" maxlength="4000" placeholder="Make the saved note easier to read…" required></textarea>
+              </label>
+              <button class="primary-button" id="create-edit-button" type="submit">Create review request</button>
+            </form>
+            <div class="request-review" id="request-review" hidden>
+              <div>
+                <span class="eyebrow">Awaiting desktop review</span>
+                <strong id="request-title">Request ready</strong>
+                <p id="request-detail"></p>
+              </div>
+              <button class="secondary-button" id="export-request-button" type="button">Export request</button>
+            </div>
+            <div class="request-list" id="request-list"></div>
+          </section>
+
+          <aside class="truth-card truth-card--detail">
+            <strong>Installation state</strong>
+            <p id="deployment-state">This is verified local content inside the browser shell. Browser preview, Home Screen installation, production deployment, and native distribution are separate acceptance states.</p>
+          </aside>
+        </section>
+      </main>
+
+      <dialog class="runtime-dialog" id="runtime-dialog">
+        <div class="runtime-toolbar">
+          <div>
+            <span class="eyebrow">Sandboxed app</span>
+            <strong id="runtime-title">App</strong>
+          </div>
+          <button class="icon-button" id="close-runtime" type="button" aria-label="Close app">×</button>
+        </div>
+        <iframe id="app-frame" title="App content" sandbox="allow-scripts" referrerpolicy="no-referrer" allow=""></iframe>
+      </dialog>
+
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    </div>
+  </body>
+</html>

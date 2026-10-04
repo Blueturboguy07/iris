@@ -1,0 +1,269 @@
+/* RC-03 (round5/rc03-website). One shared stylesheet for every Iris Apps
+   website page (hub, app pages, privacy, support, not-found). Plain CSS,
+   system fonts only, no build step and no external font, script, or image
+   request, so a page looks and works the same on localhost, on a staging
+   preview, and once deployed to publikhq.com. Loaded from every page as
+   "/iris/site.css" (site-pages.mjs's pageShell); site-audit.mjs treats a
+   stylesheet link the same as any other internal link, so a typo here
+   would fail the site-links test, not just look wrong. */
+
+:root {
+  --iris-ink: #16181d;
+  --iris-ink-soft: #5b6270;
+  --iris-bg: #ffffff;
+  --iris-bg-soft: #f4f5f7;
+  --iris-line: #e1e4ea;
+  --iris-brand: #2952e3;
+  --iris-brand-ink: #ffffff;
+  --iris-radius: 12px;
+  --iris-max-width: 720px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--iris-bg);
+  color: var(--iris-ink);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 17px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--iris-brand);
+}
+
+img {
+  max-width: 100%;
+}
+
+.wrap {
+  max-width: var(--iris-max-width);
+  margin: 0 auto;
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+.site-header {
+  border-bottom: 1px solid var(--iris-line);
+  background: var(--iris-bg);
+}
+
+.site-header .wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding-top: 14px;
+  padding-bottom: 14px;
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 19px;
+  color: var(--iris-ink);
+  text-decoration: none;
+}
+
+.site-header nav {
+  display: flex;
+  gap: 18px;
+}
+
+.site-header nav a {
+  color: var(--iris-ink-soft);
+  text-decoration: none;
+  font-size: 15px;
+  padding: 4px 0;
+}
+
+.site-header nav a:hover,
+.site-header nav a:focus {
+  color: var(--iris-brand);
+}
+
+main .wrap {
+  padding-top: 28px;
+  padding-bottom: 56px;
+}
+
+h1 {
+  font-size: 27px;
+  line-height: 1.25;
+  margin: 0 0 14px;
+}
+
+h2 {
+  font-size: 18px;
+  margin: 30px 0 8px;
+}
+
+p {
+  margin: 0 0 14px;
+}
+
+.lede {
+  color: var(--iris-ink-soft);
+}
+
+ul {
+  margin: 0 0 14px;
+  padding-left: 22px;
+}
+
+li {
+  margin-bottom: 6px;
+}
+
+.category-block {
+  margin-bottom: 30px;
+}
+
+.app-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.app-list li {
+  border-bottom: 1px solid var(--iris-line);
+  padding: 14px 0;
+}
+
+.app-list li:first-child {
+  border-top: 1px solid var(--iris-line);
+}
+
+.app-list a.app-link {
+  display: block;
+  color: var(--iris-ink);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 17px;
+}
+
+.app-list .app-summary {
+  display: block;
+  color: var(--iris-ink-soft);
+  font-size: 15px;
+  margin-top: 3px;
+  font-weight: 400;
+}
+
+.handoff {
+  margin: 22px 0;
+  padding: 18px;
+  border: 1px solid var(--iris-line);
+  border-radius: var(--iris-radius);
+  background: var(--iris-bg-soft);
+}
+
+.handoff h2 {
+  margin-top: 0;
+}
+
+.btn {
+  display: inline-block;
+  padding: 13px 22px;
+  border-radius: 999px;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 16px;
+  min-height: 44px;
+  line-height: 20px;
+  text-align: center;
+}
+
+.btn-primary {
+  background: var(--iris-brand);
+  color: var(--iris-brand-ink);
+}
+
+.btn-primary:hover,
+.btn-primary:focus {
+  background: #1f3fc4;
+}
+
+.btn-secondary {
+  background: transparent;
+  color: var(--iris-brand);
+  border: 1px solid var(--iris-line);
+}
+
+.hint {
+  color: var(--iris-ink-soft);
+  font-size: 14px;
+  margin: 10px 0 0;
+}
+
+.meta-block {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--iris-line);
+}
+
+.age-rating-badge {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--iris-bg-soft);
+  border: 1px solid var(--iris-line);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--iris-ink-soft);
+}
+
+.contact-list {
+  list-style: none;
+  margin: 0 0 14px;
+  padding: 0;
+}
+
+.contact-list li {
+  border-bottom: 1px solid var(--iris-line);
+  padding: 12px 0;
+}
+
+.site-footer {
+  border-top: 1px solid var(--iris-line);
+  background: var(--iris-bg-soft);
+}
+
+.site-footer .wrap {
+  padding-top: 20px;
+  padding-bottom: 20px;
+  font-size: 14px;
+  color: var(--iris-ink-soft);
+}
+
+.site-footer p {
+  margin: 0 0 4px;
+}
+
+.site-footer a {
+  color: var(--iris-ink-soft);
+}
+
+.not-found {
+  text-align: center;
+  padding: 40px 0 8px;
+}
+
+@media (min-width: 640px) {
+  body {
+    font-size: 16px;
+  }
+
+  h1 {
+    font-size: 32px;
+  }
+}

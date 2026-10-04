@@ -1,0 +1,13 @@
+{
+  "name": "@iris/mobile-shell-catalog-fixture-generator",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --test ./test/*.test.mjs",
+    "generate": "node ./bin/generate.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

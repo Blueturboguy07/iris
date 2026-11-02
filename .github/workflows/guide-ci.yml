@@ -88,13 +88,6 @@ jobs:
           nohup node .guide-ci-mock/serve.cjs 3999 > guide-mock-serve.log 2>&1 &
           for i in $(seq 1 20); do curl -sf http://127.0.0.1:3999/api/iris/guides/nut-ai > /dev/null && break; sleep 1; done
           curl -sf http://127.0.0.1:3999/api/iris/guides/nut-ai | head -c 200; echo
-      - name: Serve the v16 nut-ai guide on loopback (verify branch only, Windows)
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: |
-          Start-Process -FilePath node -ArgumentList '.guide-ci-mock/serve.cjs','3999' -RedirectStandardOutput guide-mock-serve.log -RedirectStandardError guide-mock-serve.err -WindowStyle Hidden
-          for ($i = 0; $i -lt 20; $i++) { try { $r = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:3999/api/iris/guides/nut-ai; if ($r.StatusCode -eq 200) { break } } catch { Start-Sleep 1 } }
-          (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:3999/api/iris/guides/nut-ai).Content.Substring(0,200)
 
       - name: Check out the Windows autopilot modules
         if: matrix.platform == 'windows'
@@ -126,6 +119,11 @@ jobs:
         if: matrix.platform == 'windows'
         shell: bash
         run: |
+          # Verify branch: on Windows a process started in an earlier step is
+          # killed when that step ends, so the loopback guide server starts here.
+          node .guide-ci-mock/serve.cjs 3999 > guide-mock-serve.log 2>&1 &
+          for i in $(seq 1 20); do curl -sf http://127.0.0.1:3999/api/iris/guides/nut-ai > /dev/null && break; sleep 1; done
+          curl -sf http://127.0.0.1:3999/api/iris/guides/nut-ai | head -c 120; echo
           node scripts/guide-ci/run-windows.cjs \
             --slug "${{ matrix.slug }}" --target "${{ matrix.target }}" \
             --dist iris-parity/iris-windows/dist \

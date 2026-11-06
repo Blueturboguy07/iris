@@ -36,6 +36,10 @@ on:
   schedule:
     - cron: "0 9 * * 1"
 
+# publik telemetry is off on build machines: a test run is not a user.
+env:
+  DO_NOT_TRACK: "1"
+
 jobs:
   plan:
     runs-on: ubuntu-latest

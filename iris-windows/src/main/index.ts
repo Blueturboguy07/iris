@@ -45,6 +45,16 @@ import {
 } from "../services/launch-arguments";
 import { FIRST_RUN_WINDOW_GEOMETRY, SETTINGS_WINDOW_GEOMETRY } from "../services/window-geometry";
 
+// publik's usage-count client (telemetry v1): one vendored CommonJS file with
+// no dependencies. It is not TypeScript, so it is loaded with `require` and
+// typed here. `vendor/` is not in forge.config.ts's `ignore` list, so the file
+// ships inside the asar, two folders up from `dist/main/index.js`.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const publikTelemetry = require("../../vendor/publik-telemetry.cjs") as {
+  start(appSlug: string, appVersion: string, publikKeyProvider?: () => string | null): void;
+  stop(): void;
+};
+
 /**
  * index.ts
  *
@@ -1386,6 +1396,13 @@ if (gotSingleInstanceLock) {
     // Iris knowing when it itself is out of date — see services/self-update-check.ts
     // for why this is a plain GitHub-releases poll rather than update.electronjs.org.
     startSelfUpdateWatch(settings, app.getVersion());
+
+    // Anonymous usage counts (publik telemetry v1): one `app_opened` now, then
+    // one `active_session` every 30 minutes. Each holds the app slug, the app
+    // version, the OS, the CPU type and a random install ID — no content.
+    // DO_NOT_TRACK=1 turns it off. The provider returns the publik key when
+    // the reader has one, and no other key.
+    publikTelemetry.start("iris", app.getVersion(), () => settings.getPublikApiKey());
 
     // Does the reader have a usable `codex`? Probed once, in the background,
     // so a missing CLI costs nothing and a present one is simply one more

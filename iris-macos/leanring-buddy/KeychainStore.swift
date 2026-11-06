@@ -154,6 +154,30 @@ enum KeychainStore {
         return SecItemCopyMatching(existenceQuery as CFDictionary, nil) == errSecSuccess
     }
 
+    /// Reads one item without touching the main actor.
+    ///
+    /// Only the usage-count client (`PublikTelemetry`) uses this: it asks for
+    /// the publik key on its own background thread before each send. The
+    /// caller passes the service and account names in, so this function reads
+    /// no main-actor state. Same contract as `readSecret`: every failure is
+    /// nil, and the value is never logged.
+    nonisolated static func readSecretOffTheMainActor(service: String, account: String) -> String? {
+        let readQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+
+        var readResult: CFTypeRef?
+        let readStatus = SecItemCopyMatching(readQuery as CFDictionary, &readResult)
+        guard readStatus == errSecSuccess, let secretData = readResult as? Data else {
+            return nil
+        }
+        return String(data: secretData, encoding: .utf8)
+    }
+
     // MARK: - Deleting
 
     /// Removes a secret. Signing out and "forget my key" both land here.

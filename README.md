@@ -72,6 +72,17 @@ cd iris-windows && pnpm install && pnpm dev
 Release builds go through `.github/workflows/iris-release.yml` (macOS + Tauri
 today) and `iris-windows.yml` (Electron).
 
+## Usage counts
+
+Iris for macOS and Iris for Windows send usage counts to publik (telemetry v1):
+one `app_opened` event at each start, and one `active_session` event every 30
+minutes while Iris runs. An event holds the app name (`iris`), the app version,
+the operating system, the CPU type and a random install ID. If Iris holds a
+publik API key, the key goes with the event, so that publik counts one account
+one time. Nothing else is sent: no prompts, no screen content, no file names.
+To turn it off, set `DO_NOT_TRACK=1` in the environment. Details:
+https://publikhq.com/skills/telemetry.md
+
 ## The one thing to watch
 
 Nothing tells you when the clients diverge. Across the entire history of the

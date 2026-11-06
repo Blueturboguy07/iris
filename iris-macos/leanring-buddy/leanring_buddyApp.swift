@@ -95,6 +95,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotific
         }
         registerAsLoginItemIfNeeded()
         startSparkleUpdater()
+        startUsageCounts()
 
         if let guideDeepLinkWaitingForLaunchToFinish {
             self.guideDeepLinkWaitingForLaunchToFinish = nil
@@ -225,6 +226,31 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotific
                 print("⚠️ Iris: Failed to register as login item: \(error)")
             }
         }
+    }
+
+    /// Starts publik's usage counts (telemetry v1): one `app_opened` now, then
+    /// one `active_session` every 30 minutes. Each event holds the app slug,
+    /// the app version, the OS, the CPU type and a random install ID — no
+    /// content. `DO_NOT_TRACK=1` turns it off. The call returns at once; the
+    /// client works on its own background thread.
+    ///
+    /// The key provider runs on that thread, so it must not touch the main
+    /// actor: the two Keychain names are read here and handed over as values.
+    /// It returns the publik key when the reader has one (signed in), and nil
+    /// otherwise. No other key is ever passed.
+    private func startUsageCounts() {
+        let keychainServiceName = KeychainStore.keychainServiceName
+        let publikAPIKeyAccountName = KeychainSecretKind.publikAPIKey.rawValue
+        PublikTelemetry.start(
+            appSlug: "iris",
+            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "",
+            keyProvider: {
+                KeychainStore.readSecretOffTheMainActor(
+                    service: keychainServiceName,
+                    account: publikAPIKeyAccountName
+                )
+            }
+        )
     }
 
     /// Starts the updater only when this build is configured to update itself

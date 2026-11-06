@@ -1,0 +1,353 @@
+name: publik-build
+
+# Builds the files of a publik release that carries usage counts (telemetry v1).
+#
+# This workflow BUILDS ONLY. It creates no release, it uploads to no release
+# and it pushes no tag. Its output is two workflow artifacts:
+#
+#   iris-macos-unsigned   Iris.app, NOT signed, packed with `ditto` (keeps the
+#                         symlinks inside Sparkle.framework). The Mac that holds
+#                         the Developer ID signs it, notarizes it, staples it and
+#                         makes Iris-assistant.dmg from it. No Apple secret is
+#                         needed here.
+#   iris-windows          Iris-Setup.exe, not signed (there is no Windows
+#                         certificate), plus the result of the usage-count check.
+#
+# Both jobs start the build on the runner with PUBLIK_TELEMETRY_URL pointed at a
+# local listener (scripts/publik-build/), so a check never reaches publikhq.com.
+
+on:
+  push:
+    branches:
+      - "telemetry/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publik-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      # Node runs the two helper scripts in scripts/publik-build/.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # Iris 0.9.15 was built with Xcode 26.2. Use the same one when the runner
+      # has it; else another Xcode 26; else the runner's default.
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          ls -d /Applications/Xcode*.app || true
+          for version in 26.2 26.2.0 26.3 26.3.0 26.1.1 26.1 26.0.1 26.0; do
+            if [ -d "/Applications/Xcode_${version}.app" ]; then
+              sudo xcode-select -s "/Applications/Xcode_${version}.app"
+              break
+            fi
+          done
+          xcodebuild -version
+          sw_vers
+
+      # The same `archive` action a local release uses, with code signing off.
+      # PUBLIK_APP_TOKEN is a build setting that Info.plist expands; see the
+      # comment in iris-release.yml. A build with no token still compiles, and
+      # every new install then has to paste a key, so a missing secret stops
+      # this job.
+      - name: Build Iris.app (not signed)
+        working-directory: iris-macos
+        env:
+          PUBLIK_APP_TOKEN: ${{ secrets.PUBLIK_APP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PUBLIK_APP_TOKEN:-}" ]; then
+            echo "::error::The PUBLIK_APP_TOKEN secret is not set. Refusing to build an app with no publik app token."
+            exit 1
+          fi
+          echo "Baking a ${#PUBLIK_APP_TOKEN}-character publik app token into Info.plist."
+          xcodebuild archive -quiet \
+            -project leanring-buddy.xcodeproj -scheme leanring-buddy \
+            -configuration Release \
+            -archivePath build/Iris.xcarchive \
+            -derivedDataPath build/derived \
+            PUBLIK_APP_TOKEN="${PUBLIK_APP_TOKEN}" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY=""
+          test -d "build/Iris.xcarchive/Products/Applications/Iris.app"
+
+      - name: Check the version, the token and the architectures
+        working-directory: iris-macos
+        run: |
+          set -euo pipefail
+          APP="build/Iris.xcarchive/Products/Applications/Iris.app"
+          PLIST="$APP/Contents/Info.plist"
+          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")"
+          build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST")"
+          bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")"
+          token="$(/usr/libexec/PlistBuddy -c 'Print :PublikAppToken' "$PLIST")"
+          archs="$(lipo -archs "$APP/Contents/MacOS/Iris")"
+          sparkle="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Resources/Info.plist")"
+          want="$(sed -n 's/^  "version": "\(.*\)",$/\1/p' ../iris-windows/package.json | head -1)"
+          sparkle_pin="$(sed -n 's/^ *"version" : "\(.*\)"$/\1/p' leanring-buddy.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved | head -1)"
+          echo "Iris $version (build $build), bundle id $bundle_id, architectures: $archs, Sparkle $sparkle (pinned: $sparkle_pin)"
+          [ "$sparkle" = "$sparkle_pin" ] || { echo "::error::The app holds Sparkle $sparkle, Package.resolved pins $sparkle_pin."; exit 1; }
+          [ "$version" = "$want" ] || { echo "::error::The app says $version, iris-windows/package.json says $want."; exit 1; }
+          [ "$bundle_id" = "com.publikhq.iris" ] || { echo "::error::Bundle id is $bundle_id."; exit 1; }
+          case "$token" in
+            pat_iris_*) echo "PublikAppToken: ${#token} characters, pat_iris_ prefix." ;;
+            *) echo "::error::Info.plist holds no pat_iris_ app token."; exit 1 ;;
+          esac
+          case "$archs" in *arm64*) ;; *) echo "::error::No arm64 slice."; exit 1 ;; esac
+          case "$archs" in *x86_64*) ;; *) echo "::error::No x86_64 slice."; exit 1 ;; esac
+          {
+            echo "### Iris for macOS (not signed)"
+            echo "- version $version, build $build"
+            echo "- architectures: $archs"
+            echo "- Sparkle $sparkle"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Information only. The real check runs on the Mac that signs the app,
+      # with the notarized build. This one says early whether the client fires.
+      - name: Usage counts on this runner (start, listen)
+        continue-on-error: true
+        working-directory: iris-macos
+        run: |
+          # No `-e` here: every check below must run and be written down.
+          set +e
+          set -uo pipefail
+          APP="$PWD/build/Iris.xcarchive/Products/Applications/Iris.app"
+          want="$(sed -n 's/^  "version": "\(.*\)",$/\1/p' ../iris-windows/package.json | head -1)"
+          requests="$RUNNER_TEMP/telemetry-requests.jsonl"
+          port_file="$RUNNER_TEMP/telemetry-port.txt"
+          result="$RUNNER_TEMP/macos-telemetry-check.txt"
+          node ../scripts/publik-build/telemetry-listener.cjs "$requests" "$port_file" 120 > /dev/null 2>&1 &
+          listener_pid=$!
+          for _ in $(seq 1 50); do [ -s "$port_file" ] && break; sleep 0.2; done
+          port="$(cat "$port_file")"
+          export PUBLIK_TELEMETRY_URL="http://127.0.0.1:${port}/api/v1/telemetry"
+          export PUBLIK_TELEMETRY_DEBUG=1
+
+          "$APP/Contents/MacOS/Iris" > "$RUNNER_TEMP/iris-out.log" 2> "$RUNNER_TEMP/iris-err.log" &
+          iris_pid=$!
+          sleep 20
+          if kill -0 "$iris_pid" 2>/dev/null; then alive="yes"; else alive="no"; fi
+          kill "$iris_pid" 2>/dev/null || true
+          sleep 2
+          kill -9 "$iris_pid" 2>/dev/null || true
+          {
+            echo "process still up after 20 s: $alive"
+            grep "publik-telemetry" "$RUNNER_TEMP/iris-err.log" || echo "(no publik-telemetry line on stderr)"
+            node ../scripts/publik-build/check-app-opened.cjs "$requests" 0 "$want" macos
+          } | tee "$result"
+          status="${PIPESTATUS[0]}"
+
+          before="$(wc -l < "$requests" 2>/dev/null | tr -d ' ' || echo 0)"
+          DO_NOT_TRACK=1 "$APP/Contents/MacOS/Iris" > /dev/null 2> "$RUNNER_TEMP/iris-optout-err.log" &
+          optout_pid=$!
+          sleep 12
+          kill "$optout_pid" 2>/dev/null || true
+          sleep 1
+          kill -9 "$optout_pid" 2>/dev/null || true
+          after="$(wc -l < "$requests" 2>/dev/null | tr -d ' ' || echo 0)"
+          if [ "$before" = "$after" ]; then
+            echo "DO_NOT_TRACK=1: no request (PASS)" | tee -a "$result"
+          else
+            echo "DO_NOT_TRACK=1: a request arrived (FAIL)" | tee -a "$result"
+            status=1
+          fi
+          { echo "### Usage counts on the macOS runner"; echo '```'; cat "$result"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p dist && cp "$result" dist/macos-telemetry-check.txt
+          kill "$listener_pid" 2>/dev/null || true
+          [ "$alive" = "yes" ] && [ "$status" = "0" ]
+
+      - name: Pack the app
+        working-directory: iris-macos
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          [ -f dist/macos-telemetry-check.txt ] || echo "the runner check did not finish" > dist/macos-telemetry-check.txt
+          ditto -c -k --keepParent "build/Iris.xcarchive/Products/Applications/Iris.app" dist/Iris-unsigned.app.zip
+          shasum -a 256 dist/Iris-unsigned.app.zip
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iris-macos-unsigned
+          path: |
+            iris-macos/dist/Iris-unsigned.app.zip
+            iris-macos/dist/macos-telemetry-check.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: iris-windows
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: iris-windows/package-lock.json
+
+      - name: Prefer https for git dependencies
+        run: git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      # The same step as in iris-release.yml: after the suite, before `make`.
+      # Here a missing secret stops the job, for the reason given in the macOS
+      # job above.
+      - name: Bake the publik app token
+        env:
+          PUBLIK_APP_TOKEN: ${{ secrets.PUBLIK_APP_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${PUBLIK_APP_TOKEN:-}" ]; then
+            echo "::error::The PUBLIK_APP_TOKEN secret is not set. Refusing to build an app with no publik app token."
+            exit 1
+          fi
+          node -e '
+            const fs = require("fs");
+            const file = "src/main/publik-app-token.ts";
+            const token = process.env.PUBLIK_APP_TOKEN.trim();
+            if (!token.startsWith("pat_iris_")) {
+              console.error("PUBLIK_APP_TOKEN is not a pat_iris_ token; refusing to bake it.");
+              process.exit(1);
+            }
+            const before = fs.readFileSync(file, "utf8");
+            const target = `const BAKED_APP_TOKEN = "";`;
+            if (!before.includes(target)) {
+              console.error("Could not find the BAKED_APP_TOKEN placeholder in " + file + ".");
+              process.exit(1);
+            }
+            const after = before.replace(target, "const BAKED_APP_TOKEN = " + JSON.stringify(token) + ";");
+            fs.writeFileSync(file, after);
+            console.log("Baked a " + token.length + "-character app token into " + file + ".");
+          '
+
+      - name: Make the installer
+        run: npm run make
+
+      # Installs the real Iris-Setup.exe the way a reader does, starts the
+      # installed Iris for 20 seconds, and fails the job unless exactly one
+      # correct `app_opened` reaches the local listener. Then the same start
+      # with DO_NOT_TRACK=1 must send nothing.
+      #
+      # PUBLIK_TELEMETRY_URL is set BEFORE the installer runs, so no Iris that
+      # this step starts, by any route, can reach publikhq.com.
+      - name: Usage counts on this runner (install, start, listen)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Get-ChildItem -Path out/make -Recurse -Filter Iris-Setup.exe | Select-Object -First 1
+          if (-not $setup) { throw 'npm run make produced no Iris-Setup.exe' }
+          $want = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $scripts = Resolve-Path '../scripts/publik-build'
+          $listenerScript = Join-Path $scripts 'telemetry-listener.cjs'
+          $checkScript = Join-Path $scripts 'check-app-opened.cjs'
+
+          $requests = Join-Path $env:RUNNER_TEMP 'telemetry-requests.jsonl'
+          $portFile = Join-Path $env:RUNNER_TEMP 'telemetry-port.txt'
+          $result = Join-Path (Resolve-Path 'out/make') 'windows-telemetry-check.txt'
+          function Get-RequestCount {
+            if (Test-Path $requests) { return @(Get-Content $requests).Count }
+            return 0
+          }
+
+          $listener = Start-Process -FilePath node -ArgumentList @("`"$listenerScript`"", "`"$requests`"", "`"$portFile`"", '300') -PassThru -WindowStyle Hidden
+          $deadline = (Get-Date).AddSeconds(30)
+          while (-not (Test-Path $portFile) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
+          if (-not (Test-Path $portFile)) { throw 'The local listener did not start.' }
+          $port = (Get-Content $portFile -Raw).Trim()
+          $env:PUBLIK_TELEMETRY_URL = "http://127.0.0.1:$port/api/v1/telemetry"
+          $env:PUBLIK_TELEMETRY_DEBUG = '1'
+          Write-Host "Listener on port $port"
+
+          # ── Install ──
+          $install = Start-Process -FilePath $setup.FullName -ArgumentList '--silent' -PassThru -Wait
+          Write-Host "Iris-Setup.exe --silent exited with $($install.ExitCode)"
+          $root = Join-Path $env:LOCALAPPDATA 'Iris'
+          $exe = $null
+          $deadline = (Get-Date).AddSeconds(90)
+          while (-not $exe -and (Get-Date) -lt $deadline) {
+            $exe = Get-ChildItem -Path $root -Recurse -Filter iris.exe -ErrorAction SilentlyContinue |
+              Where-Object { $_.Directory.Name -like 'app-*' } | Select-Object -First 1
+            if (-not $exe) { Start-Sleep -Seconds 2 }
+          }
+          if (-not $exe) { throw "No installed iris.exe under $root" }
+          Write-Host "Installed: $($exe.FullName)"
+          # The install hook can finish a moment after Setup.exe returns.
+          Start-Sleep -Seconds 8
+          Get-Process iris -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+
+          # ── Start the installed Iris; one app_opened must arrive ──
+          $before = Get-RequestCount
+          $userData = Join-Path $env:RUNNER_TEMP 'iris-telemetry-userdata'
+          New-Item -ItemType Directory -Force -Path $userData | Out-Null
+          $stdout = Join-Path $env:RUNNER_TEMP 'iris-stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'iris-stderr.log'
+          $iris = Start-Process -FilePath $exe.FullName -ArgumentList "--user-data-dir=$userData" `
+            -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          Start-Sleep -Seconds 20
+          $stayedUp = -not $iris.HasExited
+          Get-Process iris -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+          Write-Host '--- stderr ---'; Get-Content $stderr -ErrorAction SilentlyContinue | Select-Object -First 40
+          "process still up after 20 s: $stayedUp" | Tee-Object -FilePath $result
+          node $checkScript $requests $before $want windows | Tee-Object -FilePath $result -Append
+          $checkExit = $LASTEXITCODE
+
+          # ── The opt-out: DO_NOT_TRACK=1 sends nothing ──
+          $before = Get-RequestCount
+          $userDataOptOut = Join-Path $env:RUNNER_TEMP 'iris-telemetry-userdata-optout'
+          New-Item -ItemType Directory -Force -Path $userDataOptOut | Out-Null
+          $env:DO_NOT_TRACK = '1'
+          $irisOptOut = Start-Process -FilePath $exe.FullName -ArgumentList "--user-data-dir=$userDataOptOut" -PassThru
+          Start-Sleep -Seconds 15
+          $optOutStayedUp = -not $irisOptOut.HasExited
+          Get-Process iris -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Remove-Item Env:DO_NOT_TRACK
+          $after = Get-RequestCount
+          $optOutSilent = ($after -eq $before)
+          "DO_NOT_TRACK=1: process up: $optOutStayedUp, new requests: $($after - $before)" | Tee-Object -FilePath $result -Append
+
+          Stop-Process -Id $listener.Id -Force -ErrorAction SilentlyContinue
+          $fence = '```'
+          @('### Usage counts on the Windows runner', $fence, (Get-Content $result -Raw).TrimEnd(), $fence) |
+            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+          if (-not $stayedUp) { throw 'Iris exited on its own within 20 seconds.' }
+          if ($checkExit -ne 0) { throw 'No correct app_opened reached the listener.' }
+          if (-not $optOutStayedUp) { throw 'Iris exited on its own with DO_NOT_TRACK=1.' }
+          if (-not $optOutSilent) { throw 'A request arrived with DO_NOT_TRACK=1.' }
+          Write-Host 'Usage-count check passed.'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iris-windows
+          path: |
+            iris-windows/out/make/**/*.exe
+            iris-windows/out/make/windows-telemetry-check.txt
+          if-no-files-found: error
+          retention-days: 14

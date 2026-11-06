@@ -23,6 +23,11 @@ on:
       - ".github/workflows/iris-windows-gui-e2e.yml"
   workflow_dispatch:
 
+# A CI run is not a user: the packaged app this suite starts must not send a
+# usage count (publik telemetry v1) from the runner. The app inherits this.
+env:
+  DO_NOT_TRACK: "1"
+
 defaults:
   run:
     working-directory: iris-windows

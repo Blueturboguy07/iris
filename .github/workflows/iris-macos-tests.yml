@@ -17,6 +17,13 @@ on:
         description: "Comma-separated -only-testing targets (e.g. leanring-buddyTests/GuideAutopilotRunnerTests); empty = whole suite"
         default: ""
 
+# A CI run is not a user. The test host is the real app, so each run would send
+# a usage count (publik telemetry v1) from the runner. xcodebuild hands a
+# TEST_RUNNER_<NAME> variable to the test host as <NAME>.
+env:
+  DO_NOT_TRACK: "1"
+  TEST_RUNNER_DO_NOT_TRACK: "1"
+
 jobs:
   test:
     runs-on: macos-latest

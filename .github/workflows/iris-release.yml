@@ -37,6 +37,12 @@ on:
 permissions:
   contents: write
 
+# A CI run is not a user: the two "it opens" checks below start the real app,
+# and it must not send a usage count (publik telemetry v1) from the runner.
+# The app reads this when it runs. It is not built into the app.
+env:
+  DO_NOT_TRACK: "1"
+
 jobs:
   # macOS ships the Swift app. It used to ship iris-desktop (Tauri) from a job
   # that uploaded it under the artifact name `iris-macos`, while this job built
@@ -250,7 +256,9 @@ jobs:
               [ -n "${APPLE_ID:-}" ] && exit 1 || true
             }
           fi
-          open "$APP"
+          # `open` does not hand the shell environment to the app, so the
+          # opt-out goes in by name.
+          open --env DO_NOT_TRACK=1 "$APP"
           sleep 5
           pgrep -x Iris >/dev/null
           osascript -e 'tell application "Iris" to quit' || pkill -x Iris || true

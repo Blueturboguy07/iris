@@ -257,7 +257,10 @@ extension PublikAPIWalletSnapshot {
             claimState: PublikAPIClaimState(wireValue: payload["claim_state"] as? String),
             claimURLString: nonEmptyString(payload["claim_url"]),
             addCreditURLString: nonEmptyString(payload["add_credit_url"]),
-            topUpURLString: nonEmptyString(payload["top_up_url"])
+            topUpURLString: nonEmptyString(payload["top_up_url"]),
+            // Null for a developer key pasted from the dashboard.
+            installIdentifier: nonEmptyString(payload["install_id"]),
+            appSlug: nonEmptyString(payload["app_slug"])
         )
     }
 

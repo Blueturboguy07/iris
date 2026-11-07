@@ -49,8 +49,9 @@ enum KeychainSecretKind: String, CaseIterable, Sendable {
     case publikAPIKey = "publik-api-key"
     /// The key of the install that links this Mac to the reader's publik
     /// account (`PublikAPIAccount.linkThisComputerToTheSignedInAccount`). It
-    /// exists only while the reader is signed in and has no publik API key of
-    /// its own, and it is deleted at sign-out. It is NOT a model credential:
+    /// exists only while the reader is signed in and has no publik API key
+    /// that publik can count as this Mac (none, or a dashboard key), and it is
+    /// deleted at sign-out. It is NOT a model credential:
     /// it never reaches `AssistantTransport`, the provider choice or the
     /// publik API key slot. Its only reader is the usage-count client, so a
     /// signed-in reader is counted by their account rather than anonymously.

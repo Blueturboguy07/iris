@@ -1430,9 +1430,9 @@ if (gotSingleInstanceLock) {
     // Anonymous usage counts (publik telemetry v1): one `app_opened` now, then
     // one `active_session` every 30 minutes. Each holds the app slug, the app
     // version, the OS, the CPU type and a random install ID — no content.
-    // DO_NOT_TRACK=1 turns it off. The provider returns the publik API key
-    // when the reader has one, else the account-link key while they are
-    // signed in, and never any other key.
+    // DO_NOT_TRACK=1 turns it off. The provider returns the account-link key
+    // first (signed in, always bound to the account), else the publik API
+    // key, and never any other key.
     publikTelemetry.start("iris", app.getVersion(), () => publikSetup.telemetryKey());
 
     // A stored session is a session start: link this computer to it. With no

@@ -178,6 +178,12 @@ export interface PublikBalance {
   claimUrl: string | null;
   addCreditUrl: string | null;
   topUpUrl: string | null;
+  /** The publik install this key belongs to (`install_id`). Null for a
+   *  developer key pasted from the dashboard: it belongs to an account, not
+   *  to an install, so publik's usage counts never treat it as this computer. */
+  installId: string | null;
+  /** The app that install was minted for (`app_slug`); "iris" for Iris's own. */
+  appSlug: string | null;
 }
 
 function stringField(source: Record<string, unknown>, name: string): string | null {
@@ -213,6 +219,8 @@ export function parseBalanceResponse(rawBody: string): PublikBalance | null {
     claimUrl: stringField(parsed, "claim_url"),
     addCreditUrl: stringField(parsed, "add_credit_url"),
     topUpUrl: stringField(parsed, "top_up_url"),
+    installId: stringField(parsed, "install_id"),
+    appSlug: stringField(parsed, "app_slug"),
   };
 }
 

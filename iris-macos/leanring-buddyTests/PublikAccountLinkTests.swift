@@ -99,13 +99,16 @@ struct PublikAccountLinkTests {
 
     // MARK: The install request
 
+    // The gateway is optional rather than defaulted to `publikGatewayURL`: a
+    // default argument is evaluated outside the main actor, where that static
+    // property may not be read.
     private static func installRequest(
-        gatewayBaseURL: URL = publikGatewayURL,
+        gatewayBaseURL: URL? = nil,
         disclosureVersion: Int?,
         accountAccessToken: String?
     ) -> URLRequest? {
         PublikAPIAccount.installRequest(
-            gatewayBaseURL: gatewayBaseURL,
+            gatewayBaseURL: gatewayBaseURL ?? publikGatewayURL,
             appToken: "pat_iris_0123456789abcdef0123456789abcdef",
             installIdentifier: "3f0c2a52-7a1e-4c1b-9a53-0b6c0e1d2f44",
             disclosureVersion: disclosureVersion,
@@ -150,6 +153,64 @@ struct PublikAccountLinkTests {
             disclosureVersion: nil,
             accountAccessToken: Self.fakeSessionToken
         ) == nil)
+    }
+
+    // MARK: Which keys publik can count as this Mac
+
+    @Test func theWalletNamesTheInstallAndTheAppOfAnIrisKey() throws {
+        let body = Data("""
+        {"install_id":"7d3c2a4e-58b1-4f6e-9a0c-2b8f1e6d9c41","app_slug":"iris","claim_state":"anonymous",
+         "balance_micros":0,"available_micros":0,"claim_url":"https://publikhq.com/claim/HK7F-2QWD",
+         "top_up_url":"https://publikhq.com/claim/HK7F-2QWD"}
+        """.utf8)
+        let snapshot = try #require(PublikAPIWalletSnapshot.parse(balanceResponseBody: body))
+        #expect(snapshot.installIdentifier == "7d3c2a4e-58b1-4f6e-9a0c-2b8f1e6d9c41")
+        #expect(snapshot.appSlug == "iris")
+        // The fields the card already used are unchanged.
+        #expect(snapshot.claimState == .anonymous)
+        #expect(snapshot.claimURLString == "https://publikhq.com/claim/HK7F-2QWD")
+        #expect(snapshot.balanceMicros == 0)
+    }
+
+    @Test func aDashboardKeysWalletNamesNoInstall() throws {
+        let body = Data("""
+        {"install_id":null,"app_slug":null,"claim_state":"claimed","balance_micros":1843210,
+         "add_credit_url":"https://publikhq.com/dashboard/api/add"}
+        """.utf8)
+        let snapshot = try #require(PublikAPIWalletSnapshot.parse(balanceResponseBody: body))
+        #expect(snapshot.installIdentifier == nil)
+        #expect(snapshot.appSlug == nil)
+        #expect(snapshot.claimState == .claimed)
+    }
+
+    @Test func noKeyNeedsALinkInstall() {
+        #expect(PublikAccountLink.needsAnAccountLinkInstall(
+            hasPublikAPIKey: false, walletInstallIdentifier: nil, walletAppSlug: nil
+        ))
+    }
+
+    @Test func aPastedDashboardKeyNeedsALinkInstall() {
+        #expect(PublikAccountLink.needsAnAccountLinkInstall(
+            hasPublikAPIKey: true, walletInstallIdentifier: nil, walletAppSlug: nil
+        ))
+        #expect(PublikAccountLink.needsAnAccountLinkInstall(
+            hasPublikAPIKey: true, walletInstallIdentifier: "", walletAppSlug: "iris"
+        ))
+    }
+
+    @Test func aKeyMintedForAnotherAppNeedsALinkInstall() {
+        #expect(PublikAccountLink.needsAnAccountLinkInstall(
+            hasPublikAPIKey: true, walletInstallIdentifier: "7d3c2a4e-58b1-4f6e-9a0c-2b8f1e6d9c41", walletAppSlug: "cue"
+        ))
+        #expect(PublikAccountLink.needsAnAccountLinkInstall(
+            hasPublikAPIKey: true, walletInstallIdentifier: "7d3c2a4e-58b1-4f6e-9a0c-2b8f1e6d9c41", walletAppSlug: nil
+        ))
+    }
+
+    @Test func anIrisKeyIsClaimedInstead() {
+        #expect(PublikAccountLink.needsAnAccountLinkInstall(
+            hasPublikAPIKey: true, walletInstallIdentifier: "7d3c2a4e-58b1-4f6e-9a0c-2b8f1e6d9c41", walletAppSlug: "iris"
+        ) == false)
     }
 
     // MARK: The secret

@@ -7,9 +7,11 @@ import {
   claimCodeFromClaimUrl,
   forgetTheAccountLink,
   linkThisComputerToTheAccount,
+  needsAnAccountLinkInstall,
   telemetryKey,
 } from "../src/services/publik-account-link";
 import { buildInstallProvisioningRequest } from "../src/services/publik-api";
+import { parseBalanceResponse } from "../src/services/publik-balance";
 import { provisionPublikInstall } from "../src/services/publik-provisioning";
 
 const APP_TOKEN = "pat_iris_0123456789abcdef0123456789abcdef";
@@ -18,6 +20,15 @@ const FOREIGN_BASE = "https://example.com/api/v1";
 const SESSION = "eyJhbGciOiJIUzI1NiJ9.not-a-real-session";
 const PUBLIK_API_KEY = "pk_live_abcdef123456_0123456789abcdef0123456789abcdef";
 const LINK_KEY = "pk_live_linklink1234_fedcba9876543210fedcba9876543210";
+const IRIS_INSTALL = { installId: "7d3c2a4e-58b1-4f6e-9a0c-2b8f1e6d9c41", appSlug: "iris" };
+/** What `GET /balance` says for a developer key pasted from the dashboard. */
+const DASHBOARD_KEY_WALLET: AccountLinkWallet = {
+  claimState: "claimed",
+  claimUrl: null,
+  topUpUrl: "https://publikhq.com/dashboard/api/add",
+  installId: null,
+  appSlug: null,
+};
 
 type SentRequest = { url: string; method: string; headers: Record<string, string>; body: string };
 
@@ -97,8 +108,8 @@ describe("claiming the publik API install on sign-in", () => {
     const harness = linkSeams({
       publikApiKey: PUBLIK_API_KEY,
       wallets: [
-        { claimState: "anonymous", claimUrl: "https://publikhq.com/claim/ABCD-EFGH", topUpUrl: null },
-        { claimState: "claimed", claimUrl: null, topUpUrl: "https://publikhq.com/dashboard/api/add" },
+        { claimState: "anonymous", claimUrl: "https://publikhq.com/claim/ABCD-EFGH", topUpUrl: null, ...IRIS_INSTALL },
+        { claimState: "claimed", claimUrl: null, topUpUrl: "https://publikhq.com/dashboard/api/add", ...IRIS_INSTALL },
       ],
       respond: () => response(200, { claimed: true }),
     });
@@ -126,7 +137,9 @@ describe("claiming the publik API install on sign-in", () => {
   it("falls back to the top-up link for the claim code", async () => {
     const harness = linkSeams({
       publikApiKey: PUBLIK_API_KEY,
-      wallets: [{ claimState: "anonymous", claimUrl: null, topUpUrl: "https://publikhq.com/claim/WXYZ-2345" }],
+      wallets: [
+        { claimState: "anonymous", claimUrl: null, topUpUrl: "https://publikhq.com/claim/WXYZ-2345", ...IRIS_INSTALL },
+      ],
       respond: () => response(200),
     });
     await linkThisComputerToTheAccount({
@@ -141,7 +154,7 @@ describe("claiming the publik API install on sign-in", () => {
   it("sends nothing when the install is already linked", async () => {
     const harness = linkSeams({
       publikApiKey: PUBLIK_API_KEY,
-      wallets: [{ claimState: "claimed", claimUrl: null, topUpUrl: null }],
+      wallets: [{ claimState: "claimed", claimUrl: null, topUpUrl: null, ...IRIS_INSTALL }],
     });
     const outcome = await linkThisComputerToTheAccount({
       apiBaseUrl: API_BASE,
@@ -153,7 +166,7 @@ describe("claiming the publik API install on sign-in", () => {
     expect(harness.sent).toHaveLength(0);
   });
 
-  it("sends nothing when the wallet cannot be read", async () => {
+  it("does nothing at all when the wallet cannot be read", async () => {
     const harness = linkSeams({ publikApiKey: PUBLIK_API_KEY, wallets: [null] });
     const outcome = await linkThisComputerToTheAccount({
       apiBaseUrl: API_BASE,
@@ -161,14 +174,17 @@ describe("claiming the publik API install on sign-in", () => {
       accountAccessToken: SESSION,
       seams: harness.seams,
     });
-    expect(outcome.kind).toBe("noClaimCodeAvailable");
+    expect(outcome.kind).toBe("walletUnreadable");
     expect(harness.sent).toHaveLength(0);
+    expect(harness.linkKey()).toBeNull();
   });
 
   it("reports a refused claim without throwing", async () => {
     const harness = linkSeams({
       publikApiKey: PUBLIK_API_KEY,
-      wallets: [{ claimState: "anonymous", claimUrl: "https://publikhq.com/claim/ABCD-EFGH", topUpUrl: null }],
+      wallets: [
+        { claimState: "anonymous", claimUrl: "https://publikhq.com/claim/ABCD-EFGH", topUpUrl: null, ...IRIS_INSTALL },
+      ],
       respond: () => response(404, { error: { code: "not_claimable" } }),
     });
     const outcome = await linkThisComputerToTheAccount({
@@ -178,6 +194,94 @@ describe("claiming the publik API install on sign-in", () => {
       seams: harness.seams,
     });
     expect(outcome).toEqual({ kind: "refused", statusCode: 404 });
+  });
+});
+
+describe("a pasted dashboard key", () => {
+  it("is linked by a link-install mint on sign-in, not by a claim", async () => {
+    const harness = linkSeams({ publikApiKey: PUBLIK_API_KEY, wallets: [DASHBOARD_KEY_WALLET] });
+    const outcome = await linkThisComputerToTheAccount({
+      apiBaseUrl: API_BASE,
+      appToken: APP_TOKEN,
+      accountAccessToken: SESSION,
+      seams: harness.seams,
+    });
+
+    expect(outcome.kind).toBe("mintedAnAccountLinkInstall");
+    expect(harness.readWallet).toHaveBeenCalledTimes(1);
+    expect(harness.sent).toHaveLength(1);
+    const [mint] = harness.sent;
+    expect(mint.url).toBe("https://publikhq.com/api/v1/installs");
+    expect(mint.headers.Authorization).toBe(`Bearer ${SESSION}`);
+    expect("disclosure_version" in JSON.parse(mint.body)).toBe(false);
+    expect(harness.sent.some((request) => request.url.endsWith("/installs/claim"))).toBe(false);
+    expect(harness.linkKey()).toBe(LINK_KEY);
+  });
+
+  it("is treated the same when its key was minted for another app", async () => {
+    const harness = linkSeams({
+      publikApiKey: PUBLIK_API_KEY,
+      wallets: [{ ...DASHBOARD_KEY_WALLET, installId: IRIS_INSTALL.installId, appSlug: "cue" }],
+    });
+    const outcome = await linkThisComputerToTheAccount({
+      apiBaseUrl: API_BASE,
+      appToken: APP_TOKEN,
+      accountAccessToken: SESSION,
+      seams: harness.seams,
+    });
+    expect(outcome.kind).toBe("mintedAnAccountLinkInstall");
+    expect(harness.linkKey()).toBe(LINK_KEY);
+  });
+
+  it("does not mint again when a link key is already held", async () => {
+    const harness = linkSeams({ publikApiKey: PUBLIK_API_KEY, linkKey: LINK_KEY, wallets: [DASHBOARD_KEY_WALLET] });
+    const outcome = await linkThisComputerToTheAccount({
+      apiBaseUrl: API_BASE,
+      appToken: APP_TOKEN,
+      accountAccessToken: SESSION,
+      seams: harness.seams,
+    });
+    expect(outcome.kind).toBe("alreadyHadAnAccountLinkInstall");
+    expect(harness.sent).toHaveLength(0);
+  });
+
+  it("an Iris-minted key with an install id is claimed, and nothing is minted", async () => {
+    const harness = linkSeams({
+      publikApiKey: PUBLIK_API_KEY,
+      wallets: [{ claimState: "anonymous", claimUrl: "https://publikhq.com/claim/ABCD-EFGH", topUpUrl: null, ...IRIS_INSTALL }],
+      respond: () => response(200),
+    });
+    const outcome = await linkThisComputerToTheAccount({
+      apiBaseUrl: API_BASE,
+      appToken: APP_TOKEN,
+      accountAccessToken: SESSION,
+      seams: harness.seams,
+    });
+    expect(outcome.kind).toBe("claimedTheExistingInstall");
+    expect(harness.sent.map((request) => request.url)).toEqual(["https://publikhq.com/api/v1/installs/claim"]);
+    expect(harness.linkKey()).toBeNull();
+  });
+
+  it("decides from the key and the wallet's install", () => {
+    expect(needsAnAccountLinkInstall(false, null)).toBe(true);
+    expect(needsAnAccountLinkInstall(true, { installId: null, appSlug: null })).toBe(true);
+    expect(needsAnAccountLinkInstall(true, { installId: "", appSlug: "iris" })).toBe(true);
+    expect(needsAnAccountLinkInstall(true, { installId: IRIS_INSTALL.installId, appSlug: "cue" })).toBe(true);
+    expect(needsAnAccountLinkInstall(true, IRIS_INSTALL)).toBe(false);
+  });
+
+  it("is told apart by the install_id and app_slug that GET /balance sends", () => {
+    const irisWallet = parseBalanceResponse(
+      JSON.stringify({ balance_micros: 0, claim_state: "anonymous", install_id: IRIS_INSTALL.installId, app_slug: "iris" })
+    );
+    expect(irisWallet?.installId).toBe(IRIS_INSTALL.installId);
+    expect(irisWallet?.appSlug).toBe("iris");
+    const dashboardWallet = parseBalanceResponse(
+      JSON.stringify({ balance_micros: 1_843_210, claim_state: "claimed", install_id: null, app_slug: null })
+    );
+    expect(dashboardWallet?.installId).toBeNull();
+    expect(dashboardWallet?.appSlug).toBeNull();
+    expect(dashboardWallet?.balanceMicros).toBe(1_843_210);
   });
 });
 
@@ -338,11 +442,12 @@ describe("the link-key mint when there is no publik API key", () => {
 });
 
 describe("the usage-count key", () => {
-  it("prefers the publik API key, then the link key, then nothing", () => {
-    expect(telemetryKey(PUBLIK_API_KEY, LINK_KEY)).toBe(PUBLIK_API_KEY);
-    expect(telemetryKey(null, LINK_KEY)).toBe(LINK_KEY);
-    expect(telemetryKey("", LINK_KEY)).toBe(LINK_KEY);
-    expect(telemetryKey(null, null)).toBeNull();
+  it("prefers the link key, then the publik API key, then nothing", () => {
+    expect(telemetryKey({ accountLinkKey: LINK_KEY, publikApiKey: PUBLIK_API_KEY })).toBe(LINK_KEY);
+    expect(telemetryKey({ accountLinkKey: null, publikApiKey: PUBLIK_API_KEY })).toBe(PUBLIK_API_KEY);
+    expect(telemetryKey({ accountLinkKey: "", publikApiKey: PUBLIK_API_KEY })).toBe(PUBLIK_API_KEY);
+    expect(telemetryKey({ accountLinkKey: LINK_KEY, publikApiKey: null })).toBe(LINK_KEY);
+    expect(telemetryKey({ accountLinkKey: null, publikApiKey: null })).toBeNull();
   });
 });
 

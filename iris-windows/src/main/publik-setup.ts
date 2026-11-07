@@ -73,6 +73,8 @@ export class PublikSetup {
   private pendingBalanceRefresh: ReturnType<typeof setTimeout> | null = null;
   /** A read already on the wire, shared by anyone who asks meanwhile. */
   private balanceReadInFlight: Promise<boolean> | null = null;
+  /** The last readable `GET /balance`, for the account link's install check. */
+  private lastBalanceRead: PublikBalance | null = null;
   private readonly balanceListeners = new Set<() => void>();
 
   constructor(settings: SettingsStore) {
@@ -159,19 +161,26 @@ export class PublikSetup {
     });
   }
 
-  /** The key the usage counts carry: the publik API key, else the link key. */
+  /** The key the usage counts carry: the link key first, then the publik
+   *  API key. See `telemetryKey` in services/publik-account-link.ts. */
   telemetryKey(): string | null {
-    return telemetryKey(this.settings.getPublikApiKey(), this.settings.getPublikLinkKey());
+    return telemetryKey({
+      accountLinkKey: this.settings.getPublikLinkKey(),
+      publikApiKey: this.settings.getPublikApiKey(),
+    });
   }
 
-  /** `GET /balance`, then what it stored. Null when the read failed, so a
-   *  claim code is never taken from a stale settings file. */
+  /** `GET /balance`, then what it said. Null when the read failed, so a claim
+   *  code or an install check never comes from a stale settings file. */
   private async readWalletForTheAccountLink(): Promise<AccountLinkWallet | null> {
-    if (!(await this.refreshBalance())) return null;
+    if (!(await this.refreshBalance()) || !this.lastBalanceRead) return null;
+    const balance = this.lastBalanceRead;
     return {
-      claimState: this.settings.get("publikClaimState") === "claimed" ? "claimed" : "anonymous",
-      claimUrl: this.settings.get("publikClaimUrl") || null,
-      topUpUrl: this.settings.get("publikTopUpUrl") || null,
+      claimState: balance.claimState === "claimed" ? "claimed" : "anonymous",
+      claimUrl: balance.claimUrl,
+      topUpUrl: balance.topUpUrl,
+      installId: balance.installId,
+      appSlug: balance.appSlug,
     };
   }
 
@@ -295,6 +304,7 @@ export class PublikSetup {
     )
       .then((balance) => {
         if (!balance) return false;
+        this.lastBalanceRead = balance;
         this.storeBalance(balance);
         this.notifyBalanceChanged();
         return true;
@@ -325,6 +335,7 @@ export class PublikSetup {
   }
 
   private forgetTheBalance(): void {
+    this.lastBalanceRead = null;
     this.settings.set("publikBalanceSeen", false);
     this.settings.set("publikBalanceMicros", 0);
     this.settings.set("publikTopUpUrl", "");

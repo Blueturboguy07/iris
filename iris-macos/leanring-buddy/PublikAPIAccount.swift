@@ -89,6 +89,14 @@ struct PublikAPIWalletSnapshot: Sendable, Equatable {
     /// the claim page while anonymous, the add-credit page once claimed). Only
     /// `GET /balance` sends it; see `PublikAPIAddCredit`.
     var topUpURLString: String? = nil
+    /// The publik install this key belongs to (`install_id` in `GET /balance`).
+    /// Nil for a developer key pasted from the dashboard: it belongs to an
+    /// account, not to an install, so publik's usage counts never treat it
+    /// as this computer's. Only `GET /balance` sends it.
+    var installIdentifier: String? = nil
+    /// The app that install was minted for (`app_slug`); "iris" for a key Iris
+    /// minted. Only `GET /balance` sends it.
+    var appSlug: String? = nil
 
     /// "$0.25". Always two decimal places, always a dollar sign, rounded DOWN
     /// so Iris never advertises money that is not there.
@@ -527,7 +535,9 @@ final class PublikAPIAccount: ObservableObject {
         case alreadyHadAnAccountLinkInstall
         /// This build ships no app token, so it cannot mint.
         case thisBuildHasNoAppToken
-        /// The wallet could not be read, or held no claim code.
+        /// `GET /balance` could not be read, so nothing was done.
+        case walletUnreadable
+        /// The wallet held no claim code.
         case noClaimCodeAvailable
         /// publik answered, but not with success.
         case gatewayDeclined(statusCode: Int)
@@ -538,26 +548,38 @@ final class PublikAPIAccount: ObservableObject {
     /// Links this computer to the publik account the reader just signed in to.
     ///
     /// Called once per session start (sign-in, or the silent restore at
-    /// launch) with that session's access token. With a publik API key on
-    /// this Mac, its install is claimed; without one, a small install bound
-    /// to the account is minted and its key kept apart from the publik API
-    /// key. Never throws and never touches the UI: the reader's chat route
-    /// is the same before and after.
+    /// launch) with that session's access token. With a publik API key that
+    /// Iris minted on this Mac, its install is claimed. Without one, or with a
+    /// developer key pasted from the dashboard (no install of its own, so
+    /// publik never counts it as this computer), a small install bound to the
+    /// account is minted and its key kept apart from the publik API key.
+    /// Never throws and never touches the UI: the reader's chat route is the
+    /// same before and after.
     @discardableResult
     func linkThisComputerToTheSignedInAccount(accountAccessToken: String) async -> AccountLinkOutcome {
         if storedKey != nil {
-            return await claimTheExistingInstall(accountAccessToken: accountAccessToken)
+            // Always a fresh read: `install_id` and `app_slug` come from
+            // `GET /balance` only. A failed read changes nothing.
+            guard await refreshTheBalance(), let snapshot = walletSnapshot else {
+                return .walletUnreadable
+            }
+            if !PublikAccountLink.needsAnAccountLinkInstall(
+                hasPublikAPIKey: true,
+                walletInstallIdentifier: snapshot.installIdentifier,
+                walletAppSlug: snapshot.appSlug
+            ) {
+                return await claimTheExistingInstall(snapshot: snapshot, accountAccessToken: accountAccessToken)
+            }
         }
         return await mintAnAccountLinkInstall(accountAccessToken: accountAccessToken)
     }
 
-    /// Case A: the reader holds a publik API key whose install may still be
-    /// anonymous. The claim code comes from the wallet (`GET /balance`).
-    private func claimTheExistingInstall(accountAccessToken: String) async -> AccountLinkOutcome {
-        if walletSnapshot?.claimState != .claimed {
-            _ = await refreshTheBalance()
-        }
-        guard let snapshot = walletSnapshot else { return .noClaimCodeAvailable }
+    /// Case A: the reader holds a publik API key from an Iris install, which
+    /// may still be anonymous. The claim code comes from that fresh wallet.
+    private func claimTheExistingInstall(
+        snapshot: PublikAPIWalletSnapshot,
+        accountAccessToken: String
+    ) async -> AccountLinkOutcome {
         guard snapshot.claimState == .anonymous else { return .existingInstallWasAlreadyLinked }
         guard let claimCode = PublikAccountLink.claimCode(fromClaimURLString: snapshot.claimURLString)
                 ?? PublikAccountLink.claimCode(fromClaimURLString: snapshot.topUpURLString),

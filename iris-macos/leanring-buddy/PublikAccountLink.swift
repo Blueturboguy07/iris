@@ -14,10 +14,14 @@
 //    - a reader who already holds a publik API key from `POST /installs` has
 //      that install CLAIMED: `POST /installs/claim` with the install's claim
 //      code and the session's access token as the bearer;
-//    - a reader with no publik API key gets a small install of its own, minted
+//    - a reader with no publik API key, or with a developer key pasted from
+//      the dashboard (`GET /balance` names no `install_id` for it, so publik
+//      never counts it as this Mac), gets a small install of its own, minted
 //      WITH the session's access token, which binds it to the account at mint.
 //      Its key is kept apart from the publik API key (Keychain item
 //      `publik-account-link-key`) and is never a model credential.
+//
+//  The usage counts carry the link key first when there is one.
 //
 //  The sign-in panel says "Signing in links this Mac to your publik account",
 //  so the reader is told before it happens. Signing out deletes the link key
@@ -92,6 +96,27 @@ enum PublikAccountLink {
         request.timeoutInterval = 15
         request.setValue(installKey, forHTTPHeaderField: "x-api-key")
         return try? AssistantTransport.validatedRequest(request)
+    }
+
+    /// This app's slug on publik, as `GET /balance` names it in `app_slug`.
+    static let irisAppSlug = "iris"
+
+    /// Whether linking this Mac needs an account-link install of its own,
+    /// rather than a claim of the publik API key's install.
+    ///
+    /// publik counts a computer by its account only through a key whose
+    /// install belongs to this app. A developer key pasted from the dashboard
+    /// has no install (`install_id` is null), and a key minted for another app
+    /// names that app, so neither can ever be counted as this Mac: both get a
+    /// link install, exactly like a reader with no key at all.
+    static func needsAnAccountLinkInstall(
+        hasPublikAPIKey: Bool,
+        walletInstallIdentifier: String?,
+        walletAppSlug: String?
+    ) -> Bool {
+        guard hasPublikAPIKey else { return true }
+        guard let walletInstallIdentifier, !walletInstallIdentifier.isEmpty else { return true }
+        return walletAppSlug != irisAppSlug
     }
 
     /// Whether a URL may carry the reader's session token: publik hosts only.

@@ -13,13 +13,16 @@
  *   - a reader who holds a publik API key has that install CLAIMED:
  *     `POST /installs/claim` with the install's claim code (read from
  *     `GET /balance`) and the session's access token as the bearer;
- *   - a reader with no publik API key gets a small install of its own, minted
+ *   - a reader with no publik API key, or with a developer key pasted from the
+ *     dashboard (`GET /balance` names no `install_id` for it, so publik never
+ *     counts it as this computer), gets a small install of its own, minted
  *     WITH the session's access token, which binds it to the account at mint.
  *     Its key is a separate secret (`publikLinkKey`) and is never a model
  *     credential: the chat route, the provider choice and the publik API key
  *     slot never read it. Its only reader is the usage-count client.
  *
- * Signing out deletes the link key and revokes its install. The settings page
+ * The usage counts carry the link key first when there is one. Signing out
+ * deletes the link key and revokes its install. The settings page
  * says "Signing in links this computer to your publik account" before any of
  * this happens.
  *
@@ -98,12 +101,34 @@ export function buildInstallRevokeRequest(apiBaseUrl: string, installKey: string
 }
 
 /**
- * The key the usage counts carry: the publik API key when the reader has one,
- * else the account-link key, else none (the count is anonymous). Never any
- * other key: never the reader's own provider keys.
+ * The key the usage counts carry: the account-link key FIRST when there is
+ * one (it exists only while the reader is signed in, and its install is
+ * always bound to their account), else the publik API key (which can be a
+ * dashboard key that publik never counts as this computer), else none: the
+ * count is anonymous. Never any other key: never the reader's own provider
+ * keys.
  */
-export function telemetryKey(publikApiKey: string | null, accountLinkKey: string | null): string | null {
-  return publikApiKey || accountLinkKey || null;
+export function telemetryKey(keys: { accountLinkKey: string | null; publikApiKey: string | null }): string | null {
+  return keys.accountLinkKey || keys.publikApiKey || null;
+}
+
+/** This app's slug on publik, as `GET /balance` names it in `app_slug`. */
+export const IRIS_WALLET_APP_SLUG = "iris";
+
+/**
+ * Whether linking this computer needs an account-link install of its own,
+ * rather than a claim of the publik API key's install. publik counts a
+ * computer by its account only through a key whose install belongs to this
+ * app. A dashboard key has no install (`install_id` null), and a key minted
+ * for another app names that app, so both are treated like no key at all.
+ */
+export function needsAnAccountLinkInstall(
+  hasPublikApiKey: boolean,
+  wallet: { installId: string | null; appSlug: string | null } | null
+): boolean {
+  if (!hasPublikApiKey) return true;
+  if (!wallet?.installId) return true;
+  return wallet.appSlug !== IRIS_WALLET_APP_SLUG;
 }
 
 export type AccountLinkOutcome =
@@ -117,7 +142,9 @@ export type AccountLinkOutcome =
   | { kind: "alreadyHadAnAccountLinkInstall" }
   /** This build ships no app token, so it cannot mint. */
   | { kind: "noAppToken" }
-  /** The wallet could not be read, or held no claim code. */
+  /** `GET /balance` could not be read, so nothing was done. */
+  | { kind: "walletUnreadable" }
+  /** The wallet held no claim code. */
   | { kind: "noClaimCodeAvailable" }
   /** The gateway is not a publik host, so the session is not sent. */
   | { kind: "notAPublikHost" }
@@ -129,6 +156,9 @@ export interface AccountLinkWallet {
   claimState: "anonymous" | "claimed";
   claimUrl: string | null;
   topUpUrl: string | null;
+  /** Null for a dashboard key. */
+  installId: string | null;
+  appSlug: string | null;
 }
 
 export interface AccountLinkSeams {
@@ -158,7 +188,13 @@ export async function linkThisComputerToTheAccount(options: {
 
   try {
     if (seams.readPublikApiKey()) {
-      return await claimTheExistingInstall(apiBaseUrl, accountAccessToken, seams);
+      // Always a fresh read: `install_id` and `app_slug` come from
+      // `GET /balance` only. A failed read changes nothing.
+      const wallet = await seams.readWallet();
+      if (!wallet) return { kind: "walletUnreadable" };
+      if (!needsAnAccountLinkInstall(true, wallet)) {
+        return await claimTheExistingInstall(apiBaseUrl, accountAccessToken, wallet, seams);
+      }
     }
     return await mintAnAccountLinkInstall(options);
   } catch {
@@ -169,10 +205,9 @@ export async function linkThisComputerToTheAccount(options: {
 async function claimTheExistingInstall(
   apiBaseUrl: string,
   accountAccessToken: string,
+  wallet: AccountLinkWallet,
   seams: AccountLinkSeams
 ): Promise<AccountLinkOutcome> {
-  const wallet = await seams.readWallet();
-  if (!wallet) return { kind: "noClaimCodeAvailable" };
   if (wallet.claimState === "claimed") return { kind: "existingInstallWasAlreadyLinked" };
 
   const claimCode = claimCodeFromClaimUrl(wallet.claimUrl) ?? claimCodeFromClaimUrl(wallet.topUpUrl);

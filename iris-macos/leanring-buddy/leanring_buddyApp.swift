@@ -236,9 +236,9 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotific
     ///
     /// The key provider runs on that thread, so it must not touch the main
     /// actor: the Keychain names are read here and handed over as values.
-    /// It returns the publik API key when the reader has one, else the
-    /// account-link key while they are signed in, and nil otherwise. No other
-    /// key is ever passed: never the reader's own provider keys.
+    /// It returns the account-link key when there is one, else the publik API
+    /// key, and nil otherwise. No other key is ever passed: never the reader's
+    /// own provider keys.
     private func startUsageCounts() {
         let keychainServiceName = KeychainStore.keychainServiceName
         let publikAPIKeyAccountName = KeychainSecretKind.publikAPIKey.rawValue
@@ -246,21 +246,23 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotific
         PublikTelemetry.start(
             appSlug: "iris",
             appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "",
-            // The publik API key when the reader has one; otherwise the key of
-            // the install that links this Mac to their signed-in account
-            // (`PublikAPIAccount.linkThisComputerToTheSignedInAccount`);
-            // otherwise nothing, and the count is anonymous. Both reads stay
-            // off the main actor and pass only names, never main-actor state.
+            // The account-link key FIRST: it exists only while the reader is
+            // signed in, and its install is always bound to their account
+            // (`PublikAPIAccount.linkThisComputerToTheSignedInAccount`). A
+            // publik API key can be a dashboard key, which publik never counts
+            // as this computer. Then the publik API key; otherwise nothing,
+            // and the count is anonymous. Both reads stay off the main actor
+            // and pass only names, never main-actor state.
             keyProvider: {
-                if let publikAPIKey = KeychainStore.readSecretOffTheMainActor(
+                if let accountLinkKey = KeychainStore.readSecretOffTheMainActor(
                     service: keychainServiceName,
-                    account: publikAPIKeyAccountName
-                ), !publikAPIKey.isEmpty {
-                    return publikAPIKey
+                    account: publikAccountLinkKeyAccountName
+                ), !accountLinkKey.isEmpty {
+                    return accountLinkKey
                 }
                 return KeychainStore.readSecretOffTheMainActor(
                     service: keychainServiceName,
-                    account: publikAccountLinkKeyAccountName
+                    account: publikAPIKeyAccountName
                 )
             }
         )

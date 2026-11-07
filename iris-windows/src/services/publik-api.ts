@@ -167,6 +167,28 @@ export interface InstallProvisioningRequest {
   arch: string;
   installId: string;
   deviceName?: string;
+  /**
+   * The reader's publik session (Supabase access token) when they are signed
+   * in. It rides as the bearer and binds the new install to that account at
+   * mint; the app token stays in the body. Sent to a publik host only.
+   */
+  accountAccessToken?: string | null;
+  /**
+   * Leaves `disclosure_version` out (the gateway then records its default).
+   * The account-link mint sets this: it is made at sign-in, not from the
+   * publik API disclosure, so naming a disclosure version would be false.
+   */
+  omitDisclosureVersion?: boolean;
+}
+
+/** Whether a gateway root is publik's own, so it may receive the session. */
+export function isPublikGateway(apiBaseUrl: string): boolean {
+  try {
+    const host = new URL(apiBaseUrl).hostname.toLowerCase();
+    return host === "publikhq.com" || host === "www.publikhq.com";
+  } catch {
+    return false;
+  }
 }
 
 /** The URL and body for `POST /installs`. The caller does the fetch. */
@@ -183,15 +205,22 @@ export function buildInstallProvisioningRequest(
     os_version: request.osVersion,
     arch: request.arch,
     install_id: request.installId,
-    disclosure_version: DISCLOSURE_VERSION,
     // Iris speaks the Anthropic Messages format, not chat/completions.
     dialects: ["messages"],
   };
+  if (!request.omitDisclosureVersion) body.disclosure_version = DISCLOSURE_VERSION;
   if (request.deviceName) body.device_name = request.deviceName;
+
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  // The session is a publik account credential: it goes to publik and nowhere
+  // else, whatever base URL a mis-set setting names.
+  if (request.accountAccessToken && isPublikGateway(base)) {
+    headers.Authorization = `Bearer ${request.accountAccessToken}`;
+  }
 
   return {
     url: `${base}/installs`,
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(body),
   };
 }

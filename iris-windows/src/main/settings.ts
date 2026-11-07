@@ -32,6 +32,11 @@ export interface SettingsSchema {
   /** This machine's `install_id` for publik API, minted once and replayed. */
   publikInstallId: string;
 
+  /** The `install_id` of the account-link install (see
+   *  `services/publik-account-link.ts`). Its own id, so a later publik API
+   *  mint is not answered as a replay of it. Cleared at sign-out. */
+  publikLinkInstallId: string;
+
   /** The claim URL provisioning returned, so the settings card can offer it
    *  long after first run. Not secret: it is a one-time code in a URL the user
    *  is meant to open themselves. */
@@ -99,6 +104,7 @@ const defaults: SettingsSchema = {
   claudeModel: "claude-sonnet-4-5-20250929",
   providerPreference: "",
   publikInstallId: "",
+  publikLinkInstallId: "",
   publikClaimUrl: "",
   publikAddCreditUrl: "",
   publikClaimState: "anonymous",
@@ -227,6 +233,16 @@ export class SettingsStore {
       return true;
     }
     return writeSecret("publikApiKey", apiKey);
+  }
+
+  /** The account-link key, or null. Read only by the usage-count client. */
+  getPublikLinkKey(): string | null {
+    return readSecret("publikLinkKey");
+  }
+
+  setPublikLinkKey(linkKey: string | null): void {
+    if (linkKey) writeSecret("publikLinkKey", linkKey);
+    else deleteSecret("publikLinkKey");
   }
 
   /** The gateway root, derived from `publikBaseUrl` unless provisioning moved

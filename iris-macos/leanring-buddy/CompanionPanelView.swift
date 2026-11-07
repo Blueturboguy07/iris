@@ -1031,6 +1031,14 @@ struct CompanionPanelView: View {
                 signInProviderButton(provider: .github)
             }
 
+            // Told before it happens: a session links this Mac to the account
+            // (CompanionManager.bindTheAccountLinkToSignInChanges), whichever
+            // of the three sign-in routes the reader takes.
+            Text("Signing in links this Mac to your publik account.")
+                .font(.system(size: 10))
+                .foregroundColor(DS.Colors.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
             Button(action: {
                 isShowingEmailAndPasswordSignIn.toggle()
             }) {
@@ -1543,9 +1551,17 @@ struct CompanionPanelView: View {
         publikAPISetupMessage = nil
         isProvisioningPublikAPI = true
         let account = publikAPIAccount
+        let signedInAccountService = accountService
         Task { @MainActor in
+            // Signed in: the mint carries the session, so the new install is
+            // bound to the reader's publik account at once.
+            var accountAccessToken: String?
+            if signedInAccountService.signedInAccount != nil {
+                accountAccessToken = await signedInAccountService.currentAccessTokenRefreshingIfNeeded()
+            }
             let outcome = await account.provisionAKey(
-                havingAccepted: .readerAcceptedTheDisclosure()
+                havingAccepted: .readerAcceptedTheDisclosure(),
+                accountAccessToken: accountAccessToken
             )
             isProvisioningPublikAPI = false
             switch outcome {
@@ -1553,6 +1569,11 @@ struct CompanionPanelView: View {
                 isShowingPublikAPIDisclosure = false
                 publikAPISetupMessage = nil
                 accountService.refreshPublikAPIKeyState()
+                // The new key now links this Mac, so the separate link
+                // install is no longer needed.
+                if accountAccessToken != nil {
+                    await account.forgetTheAccountLink()
+                }
             case .failure(let failure):
                 publikAPISetupMessage = failure.userFacingMessage
             }

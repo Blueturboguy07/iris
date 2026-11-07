@@ -222,10 +222,32 @@ function receiveDeepLink(url: string): void {
 
   account
     .completeSignIn(result.link.authCallback)
-    .then(() => broadcast("iris-account-changed", { signedIn: true }))
+    .then(() => {
+      broadcast("iris-account-changed", { signedIn: true });
+      void linkThisComputerToTheSignedInAccount();
+    })
     .catch((error: unknown) => {
       broadcast("iris-account-error", error instanceof Error ? error.message : String(error));
     });
+}
+
+/**
+ * Once each time a publik session starts (a sign-in, or a launch with a stored
+ * session): links this computer to that account, so publik counts the reader
+ * by their account. The settings page says so next to the sign-in buttons.
+ * Best effort and silent; it never throws and never changes how Iris answers.
+ */
+async function linkThisComputerToTheSignedInAccount(): Promise<void> {
+  try {
+    const accountAccessToken = await account.currentAccessToken();
+    // No token: offline (the session stays, and so does any link), or the
+    // refresh was refused, which signed out and so already forgot the link.
+    if (!accountAccessToken) return;
+    const outcome = await publikSetup.linkThisComputerToTheAccount(accountAccessToken);
+    console.log(`[iris] publik account link: ${outcome.kind}`);
+  } catch {
+    // Linking is never worth an error in front of the reader.
+  }
 }
 
 function broadcast(channel: string, payload: unknown): void {
@@ -1235,9 +1257,15 @@ function setupIPC(): void {
   // precedes the mint (CONTRACT section 3.2 [S4]). The main process will not
   // provision on its own initiative anywhere.
   ipcMain.handle("publik:provision", async () => {
-    const outcome = await publikSetup.provision();
+    // Signed in: the mint carries the session, so the new install is bound
+    // to the reader's publik account at once.
+    const accountAccessToken = account.isSignedIn() ? await account.currentAccessToken() : null;
+    const outcome = await publikSetup.provision(accountAccessToken);
     if (outcome.kind === "provisioned") {
       settings.set("providerPreference", "publikApi");
+      // The new key now links this computer, so the separate link install
+      // is no longer needed.
+      if (accountAccessToken && outcome.install.apiKey) void publikSetup.forgetTheAccountLink();
       // Provisioning named the balance ($0.00 for a new install since publik's
       // migration 0059); /balance adds the one Add credit link.
       void refreshPublikBalanceIfAnswering();
@@ -1356,6 +1384,9 @@ if (gotSingleInstanceLock) {
     // Every change the balance lines could show — a reply's charge, a read of
     // /balance, a new key — reaches the tray and the open windows from here.
     publikSetup.onBalanceChanged(() => publishPublikBalance());
+    // Every way a session ends (Sign out, a refused refresh) deletes the link
+    // key and revokes its install.
+    account.onSignedOut(() => void publikSetup.forgetTheAccountLink());
     maintain = new MaintainController(maintainHost());
 
     setupIPC();
@@ -1399,9 +1430,16 @@ if (gotSingleInstanceLock) {
     // Anonymous usage counts (publik telemetry v1): one `app_opened` now, then
     // one `active_session` every 30 minutes. Each holds the app slug, the app
     // version, the OS, the CPU type and a random install ID — no content.
-    // DO_NOT_TRACK=1 turns it off. The provider returns the publik key when
-    // the reader has one, and no other key.
-    publikTelemetry.start("iris", app.getVersion(), () => settings.getPublikApiKey());
+    // DO_NOT_TRACK=1 turns it off. The provider returns the publik API key
+    // when the reader has one, else the account-link key while they are
+    // signed in, and never any other key.
+    publikTelemetry.start("iris", app.getVersion(), () => publikSetup.telemetryKey());
+
+    // A stored session is a session start: link this computer to it. With no
+    // session, a link key left over (its session ended while Iris was closed)
+    // is deleted and its install revoked.
+    if (account.isSignedIn()) void linkThisComputerToTheSignedInAccount();
+    else void publikSetup.forgetTheAccountLink();
 
     // Does the reader have a usable `codex`? Probed once, in the background,
     // so a missing CLI costs nothing and a present one is simply one more

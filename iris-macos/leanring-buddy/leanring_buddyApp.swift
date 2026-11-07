@@ -235,19 +235,32 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotific
     /// client works on its own background thread.
     ///
     /// The key provider runs on that thread, so it must not touch the main
-    /// actor: the two Keychain names are read here and handed over as values.
-    /// It returns the publik key when the reader has one (signed in), and nil
-    /// otherwise. No other key is ever passed.
+    /// actor: the Keychain names are read here and handed over as values.
+    /// It returns the publik API key when the reader has one, else the
+    /// account-link key while they are signed in, and nil otherwise. No other
+    /// key is ever passed: never the reader's own provider keys.
     private func startUsageCounts() {
         let keychainServiceName = KeychainStore.keychainServiceName
         let publikAPIKeyAccountName = KeychainSecretKind.publikAPIKey.rawValue
+        let publikAccountLinkKeyAccountName = KeychainSecretKind.publikAccountLinkKey.rawValue
         PublikTelemetry.start(
             appSlug: "iris",
             appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "",
+            // The publik API key when the reader has one; otherwise the key of
+            // the install that links this Mac to their signed-in account
+            // (`PublikAPIAccount.linkThisComputerToTheSignedInAccount`);
+            // otherwise nothing, and the count is anonymous. Both reads stay
+            // off the main actor and pass only names, never main-actor state.
             keyProvider: {
-                KeychainStore.readSecretOffTheMainActor(
+                if let publikAPIKey = KeychainStore.readSecretOffTheMainActor(
                     service: keychainServiceName,
                     account: publikAPIKeyAccountName
+                ), !publikAPIKey.isEmpty {
+                    return publikAPIKey
+                }
+                return KeychainStore.readSecretOffTheMainActor(
+                    service: keychainServiceName,
+                    account: publikAccountLinkKeyAccountName
                 )
             }
         )

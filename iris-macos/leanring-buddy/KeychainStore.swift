@@ -47,6 +47,14 @@ enum KeychainSecretKind: String, CaseIterable, Sendable {
     /// and only a publik host — `AssistantTransport.validatedRequest` enforces
     /// both halves of that.
     case publikAPIKey = "publik-api-key"
+    /// The key of the install that links this Mac to the reader's publik
+    /// account (`PublikAPIAccount.linkThisComputerToTheSignedInAccount`). It
+    /// exists only while the reader is signed in and has no publik API key of
+    /// its own, and it is deleted at sign-out. It is NOT a model credential:
+    /// it never reaches `AssistantTransport`, the provider choice or the
+    /// publik API key slot. Its only reader is the usage-count client, so a
+    /// signed-in reader is counted by their account rather than anonymously.
+    case publikAccountLinkKey = "publik-account-link-key"
 }
 
 /// Credentials this app used to store and must not store again.

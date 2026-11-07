@@ -23,8 +23,16 @@ import { SettingsStore } from "./settings";
 import { publikAppToken } from "./publik-app-token";
 import {
   ProvisioningOutcome,
+  ProvisioningSeams,
   provisionPublikInstall,
 } from "../services/publik-provisioning";
+import {
+  AccountLinkOutcome,
+  AccountLinkWallet,
+  forgetTheAccountLink,
+  linkThisComputerToTheAccount,
+  telemetryKey,
+} from "../services/publik-account-link";
 import {
   DEFAULT_PUBLIK_MODEL,
   PublikCardState,
@@ -46,6 +54,16 @@ import {
  * asking at once would read the balance with the call's hold still taken out.
  */
 const BALANCE_REFRESH_DELAY_AFTER_A_REPLY_MS = 1_500;
+
+/** The one `fetch` every install call (mint, claim, revoke) goes through. */
+const postWithFetch: ProvisioningSeams["fetchImplementation"] = async (url, init) => {
+  const response = await fetch(url, {
+    method: init.method,
+    headers: init.headers,
+    body: init.body,
+  });
+  return { status: response.status, text: () => response.text() };
+};
 
 export class PublikSetup {
   private readonly settings: SettingsStore;
@@ -69,21 +87,19 @@ export class PublikSetup {
   /**
    * Runs the machine route. The caller must have shown the disclosure and got
    * consent first — CONTRACT section 3.2 [S4], "consent precedes mint".
+   *
+   * `accountAccessToken` is the reader's publik session when they are signed
+   * in: it rides as the bearer and binds the new install to their account at
+   * once. Null when signed out, and the mint is anonymous as before.
    */
-  async provision(): Promise<ProvisioningOutcome> {
+  async provision(accountAccessToken: string | null = null): Promise<ProvisioningOutcome> {
     const outcome = await provisionPublikInstall({
       apiBaseUrl: this.settings.getPublikApiBaseUrl(),
       appToken: publikAppToken(),
       alreadyHoldsAKey: this.hasKey(),
+      accountAccessToken,
       seams: {
-        fetchImplementation: async (url, init) => {
-          const response = await fetch(url, {
-            method: init.method,
-            headers: init.headers,
-            body: init.body,
-          });
-          return { status: response.status, text: () => response.text() };
-        },
+        fetchImplementation: postWithFetch,
         randomBytes: (byteCount) => new Uint8Array(randomBytes(byteCount)),
         readStoredInstallId: () => this.settings.get("publikInstallId") || null,
         writeStoredInstallId: (installId) => this.settings.set("publikInstallId", installId),
@@ -96,6 +112,67 @@ export class PublikSetup {
 
     if (outcome.kind === "provisioned") this.storeProvisionedInstall(outcome);
     return outcome;
+  }
+
+  // MARK: - Linking this computer to the signed-in account
+
+  /**
+   * Called once each time a publik session starts. Claims the publik API
+   * install when there is one; otherwise mints a small install bound to the
+   * account and keeps its key apart (`publikLinkKey`). Best effort and silent.
+   * See `services/publik-account-link.ts`.
+   */
+  linkThisComputerToTheAccount(accountAccessToken: string): Promise<AccountLinkOutcome> {
+    return linkThisComputerToTheAccount({
+      apiBaseUrl: this.settings.getPublikApiBaseUrl(),
+      appToken: publikAppToken(),
+      accountAccessToken,
+      seams: {
+        fetchImplementation: postWithFetch,
+        readPublikApiKey: () => this.settings.getPublikApiKey(),
+        readAccountLinkKey: () => this.settings.getPublikLinkKey(),
+        writeAccountLinkKey: (linkKey) => this.settings.setPublikLinkKey(linkKey),
+        readWallet: () => this.readWalletForTheAccountLink(),
+        linkInstallProvisioning: {
+          randomBytes: (byteCount) => new Uint8Array(randomBytes(byteCount)),
+          readStoredInstallId: () => this.settings.get("publikLinkInstallId") || null,
+          writeStoredInstallId: (installId) => this.settings.set("publikLinkInstallId", installId),
+          appVersion: app.getVersion(),
+          osVersion: os.release(),
+          arch: process.arch,
+          deviceName: os.hostname(),
+        },
+      },
+    });
+  }
+
+  /** Sign-out: deletes the link key, then revokes its install, best effort. */
+  forgetTheAccountLink(): Promise<boolean> {
+    return forgetTheAccountLink({
+      apiBaseUrl: this.settings.getPublikApiBaseUrl(),
+      seams: {
+        fetchImplementation: postWithFetch,
+        readAccountLinkKey: () => this.settings.getPublikLinkKey(),
+        deleteAccountLinkKey: () => this.settings.setPublikLinkKey(null),
+        forgetLinkInstallId: () => this.settings.set("publikLinkInstallId", ""),
+      },
+    });
+  }
+
+  /** The key the usage counts carry: the publik API key, else the link key. */
+  telemetryKey(): string | null {
+    return telemetryKey(this.settings.getPublikApiKey(), this.settings.getPublikLinkKey());
+  }
+
+  /** `GET /balance`, then what it stored. Null when the read failed, so a
+   *  claim code is never taken from a stale settings file. */
+  private async readWalletForTheAccountLink(): Promise<AccountLinkWallet | null> {
+    if (!(await this.refreshBalance())) return null;
+    return {
+      claimState: this.settings.get("publikClaimState") === "claimed" ? "claimed" : "anonymous",
+      claimUrl: this.settings.get("publikClaimUrl") || null,
+      topUpUrl: this.settings.get("publikTopUpUrl") || null,
+    };
   }
 
   private storeProvisionedInstall(outcome: Extract<ProvisioningOutcome, { kind: "provisioned" }>): void {

@@ -1348,6 +1348,9 @@ final class CompanionManager: ObservableObject {
 
     private var summonHotkeyTransitionCancellable: AnyCancellable?
     private var accountStateChangeCancellable: AnyCancellable?
+    /// Links this Mac to the publik account at each sign-in, and unlinks it at
+    /// sign-out. See `bindTheAccountLinkToSignInChanges`.
+    private var accountLinkCancellable: AnyCancellable?
     private var maintainAskCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
     /// Scheduled hide for transient cursor mode — cancelled if the user
@@ -1444,12 +1447,14 @@ final class CompanionManager: ObservableObject {
         connectTheGuideToTheEye()
         bindSummonHotkeyTransitions()
         bindAccountStateChanges()
+        bindTheAccountLinkToSignInChanges()
 
         // Trade the stored refresh token for a live access token, then warm the
         // TLS connection to whichever host that leaves us talking to. Both are
         // best-effort and neither blocks the panel from appearing.
         Task {
             await accountService.restorePreviousSessionIfPossible()
+            await forgetTheAccountLinkWhenNoSessionRemains()
             await claudeAPI.warmUpTLSConnectionIfNeeded()
         }
 
@@ -1827,6 +1832,7 @@ final class CompanionManager: ObservableObject {
         currentResponseTask = nil
         summonHotkeyTransitionCancellable?.cancel()
         accountStateChangeCancellable?.cancel()
+        accountLinkCancellable?.cancel()
         maintainAskCancellable?.cancel()
         onDemandEditPhaseCancellable?.cancel()
         onDemandEditAttentionCancellable?.cancel()
@@ -2453,6 +2459,52 @@ final class CompanionManager: ObservableObject {
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
             }
+    }
+
+    /// Each time a publik session starts (a sign-in, or the silent restore at
+    /// launch), this Mac is linked to that account once, so publik counts the
+    /// reader by their account (the panel says so under the sign-in buttons).
+    /// Each time it ends, the link key is deleted and its install revoked.
+    ///
+    /// Only the signed-in/signed-out edge counts: a token refresh re-publishes
+    /// the same account and must not link again. The first value is skipped
+    /// because it is the "nothing restored yet" nil from before the launch
+    /// restore, not a sign-out. Linking is best effort and silent; a failure
+    /// changes nothing the reader sees.
+    private func bindTheAccountLinkToSignInChanges() {
+        accountLinkCancellable = accountService.$signedInAccount
+            .map { $0 != nil }
+            .removeDuplicates()
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isSignedIn in
+                guard let self else { return }
+                let accountService = self.accountService
+                let publikAPIAccount = self.publikAPIAccount
+                Task { @MainActor in
+                    if isSignedIn {
+                        guard let accountAccessToken = await accountService.currentAccessTokenRefreshingIfNeeded() else {
+                            return
+                        }
+                        let outcome = await publikAPIAccount.linkThisComputerToTheSignedInAccount(
+                            accountAccessToken: accountAccessToken
+                        )
+                        print("🔗 publik account link: \(outcome)")
+                    } else {
+                        await publikAPIAccount.forgetTheAccountLink()
+                    }
+                }
+            }
+    }
+
+    /// A link key outlives its session only when the session ended while Iris
+    /// was not watching (the refresh token was refused at the launch restore,
+    /// or removed by hand). The refresh token, not the in-memory session, is
+    /// the test: an offline launch keeps the token and must keep the link.
+    private func forgetTheAccountLinkWhenNoSessionRemains() async {
+        guard publikAPIAccount.storedAccountLinkKey != nil,
+              !KeychainStore.hasSecret(ofKind: .supabaseRefreshToken) else { return }
+        await publikAPIAccount.forgetTheAccountLink()
     }
 
     private func bindSummonHotkeyTransitions() {

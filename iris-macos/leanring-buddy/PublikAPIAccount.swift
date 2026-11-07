@@ -312,9 +312,16 @@ final class PublikAPIAccount: ObservableObject {
 
     /// Mints a key for this install. Requires the disclosure to have been
     /// accepted — see the file header.
+    ///
+    /// `accountAccessToken` is the reader's publik session when they are
+    /// signed in. It rides as the bearer of the mint, which binds the new
+    /// install to that account at once (the gateway claims it inside the same
+    /// call), so a signed-in reader is counted by their account from the
+    /// first request on. Nil when signed out: the mint is anonymous, as before.
     @discardableResult
     func provisionAKey(
-        havingAccepted disclosureAcceptance: PublikAPIDisclosureAcceptance
+        havingAccepted disclosureAcceptance: PublikAPIDisclosureAcceptance,
+        accountAccessToken: String? = nil
     ) async -> Result<PublikAPIWalletSnapshot, ProvisioningFailure> {
         guard let appToken = Self.buildAppToken else {
             return .failure(.thisBuildHasNoAppToken)
@@ -322,7 +329,9 @@ final class PublikAPIAccount: ObservableObject {
 
         let firstAttempt = await requestAnInstall(
             appToken: appToken,
-            disclosureAcceptance: disclosureAcceptance
+            installIdentifier: installIdentifier(),
+            disclosureVersion: disclosureAcceptance.disclosureVersion,
+            accountAccessToken: accountAccessToken
         )
 
         switch firstAttempt {
@@ -341,7 +350,9 @@ final class PublikAPIAccount: ObservableObject {
             forgetInstallIdentifier()
             let secondAttempt = await requestAnInstall(
                 appToken: appToken,
-                disclosureAcceptance: disclosureAcceptance
+                installIdentifier: installIdentifier(),
+                disclosureVersion: disclosureAcceptance.disclosureVersion,
+                accountAccessToken: accountAccessToken
             )
             switch secondAttempt {
             case .failure(let failure):
@@ -358,29 +369,23 @@ final class PublikAPIAccount: ObservableObject {
     /// One `POST /api/v1/installs`.
     private func requestAnInstall(
         appToken: String,
-        disclosureAcceptance: PublikAPIDisclosureAcceptance
+        installIdentifier: String,
+        disclosureVersion: Int?,
+        accountAccessToken: String?
     ) async -> Result<InstallsResponse, ProvisioningFailure> {
-        var request = URLRequest(url: gatewayBaseURL.appendingPathComponent("installs"))
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
         let operatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion
-        let body: [String: Any] = [
-            "app_token": appToken,
-            "app_slug": "iris",
-            "app_version": AppBundleConfiguration.stringValue(forKey: "CFBundleShortVersionString") ?? "0",
-            "os": "macos",
-            "os_version": "\(operatingSystemVersion.majorVersion).\(operatingSystemVersion.minorVersion)",
-            "arch": Self.machineArchitecture,
-            "install_id": installIdentifier(),
-            "disclosure_version": disclosureAcceptance.disclosureVersion,
-            // Iris speaks the Anthropic Messages wire format, so it asks the
-            // gateway for that dialect rather than the chat-completions one the
-            // contract's example shows.
-            "dialects": ["messages"],
-        ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard let request = Self.installRequest(
+            gatewayBaseURL: gatewayBaseURL,
+            appToken: appToken,
+            installIdentifier: installIdentifier,
+            disclosureVersion: disclosureVersion,
+            accountAccessToken: accountAccessToken,
+            appVersion: AppBundleConfiguration.stringValue(forKey: "CFBundleShortVersionString") ?? "0",
+            operatingSystemVersion: "\(operatingSystemVersion.majorVersion).\(operatingSystemVersion.minorVersion)",
+            machineArchitecture: Self.machineArchitecture
+        ) else {
+            return .failure(.couldNotReachPublik)
+        }
 
         do {
             let (data, response) = try await urlSession.data(for: request)
@@ -397,6 +402,56 @@ final class PublikAPIAccount: ObservableObject {
         } catch {
             return .failure(.couldNotReachPublik)
         }
+    }
+
+    /// The request for one `POST /api/v1/installs`. Pure, so the suite can
+    /// check its shape.
+    ///
+    /// - `disclosureVersion` is the wording the reader accepted on the publik
+    ///   API disclosure sheet. Nil leaves the field out (the gateway then
+    ///   records version 1, its default): the account-link mint is made at
+    ///   sign-in, not from that sheet, so claiming a version would be false.
+    /// - `accountAccessToken`, when present, rides as the bearer and binds the
+    ///   install to that publik account at mint. The app token stays in the
+    ///   body, where the gateway reads it first. A gateway that is not a
+    ///   publik host never receives the session: nil is returned instead.
+    static func installRequest(
+        gatewayBaseURL: URL,
+        appToken: String,
+        installIdentifier: String,
+        disclosureVersion: Int?,
+        accountAccessToken: String?,
+        appVersion: String,
+        operatingSystemVersion: String,
+        machineArchitecture: String
+    ) -> URLRequest? {
+        var request = URLRequest(url: gatewayBaseURL.appendingPathComponent("installs"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let accountAccessToken {
+            guard PublikAccountLink.mayCarryTheAccountSession(gatewayBaseURL) else { return nil }
+            request.setValue("Bearer \(accountAccessToken)", forHTTPHeaderField: "Authorization")
+        }
+
+        var body: [String: Any] = [
+            "app_token": appToken,
+            "app_slug": "iris",
+            "app_version": appVersion,
+            "os": "macos",
+            "os_version": operatingSystemVersion,
+            "arch": machineArchitecture,
+            "install_id": installIdentifier,
+            // Iris speaks the Anthropic Messages wire format, so it asks the
+            // gateway for that dialect rather than the chat-completions one the
+            // contract's example shows.
+            "dialects": ["messages"],
+        ]
+        if let disclosureVersion {
+            body["disclosure_version"] = disclosureVersion
+        }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        return request
     }
 
     /// The fields of a provisioning response Iris reads. Everything else the
@@ -443,6 +498,147 @@ final class PublikAPIAccount: ObservableObject {
         )
         walletSnapshot = snapshot
         return snapshot
+    }
+
+    // MARK: Linking this computer to the signed-in publik account
+
+    /// Where the install id of the account-link install is remembered. It is
+    /// separate from the publik API install's id on purpose: if the reader
+    /// later accepts the publik API disclosure, that mint keeps its own id and
+    /// is not answered as a replay of the link install.
+    private static let accountLinkInstallIdentifierDefaultsKey = "irisPublikAccountLinkInstallIdentifier"
+
+    /// The key of the install that links this Mac to the signed-in account,
+    /// or nil. Read only by the usage-count client; never a model credential.
+    var storedAccountLinkKey: String? {
+        KeychainStore.readSecret(ofKind: .publikAccountLinkKey)
+    }
+
+    /// What one attempt to link this computer did. Logged as a word, never
+    /// shown to the reader: linking is best effort and silent.
+    enum AccountLinkOutcome: Equatable, Sendable {
+        /// The publik API install this Mac already had is now claimed.
+        case claimedTheExistingInstall
+        /// The publik API install was already linked to an account.
+        case existingInstallWasAlreadyLinked
+        /// A new install, bound to the account, now holds the link key.
+        case mintedAnAccountLinkInstall
+        /// A link install from earlier in this session is still here.
+        case alreadyHadAnAccountLinkInstall
+        /// This build ships no app token, so it cannot mint.
+        case thisBuildHasNoAppToken
+        /// The wallet could not be read, or held no claim code.
+        case noClaimCodeAvailable
+        /// publik answered, but not with success.
+        case gatewayDeclined(statusCode: Int)
+        /// publik was not reached.
+        case couldNotReachPublik
+    }
+
+    /// Links this computer to the publik account the reader just signed in to.
+    ///
+    /// Called once per session start (sign-in, or the silent restore at
+    /// launch) with that session's access token. With a publik API key on
+    /// this Mac, its install is claimed; without one, a small install bound
+    /// to the account is minted and its key kept apart from the publik API
+    /// key. Never throws and never touches the UI: the reader's chat route
+    /// is the same before and after.
+    @discardableResult
+    func linkThisComputerToTheSignedInAccount(accountAccessToken: String) async -> AccountLinkOutcome {
+        if storedKey != nil {
+            return await claimTheExistingInstall(accountAccessToken: accountAccessToken)
+        }
+        return await mintAnAccountLinkInstall(accountAccessToken: accountAccessToken)
+    }
+
+    /// Case A: the reader holds a publik API key whose install may still be
+    /// anonymous. The claim code comes from the wallet (`GET /balance`).
+    private func claimTheExistingInstall(accountAccessToken: String) async -> AccountLinkOutcome {
+        if walletSnapshot?.claimState != .claimed {
+            _ = await refreshTheBalance()
+        }
+        guard let snapshot = walletSnapshot else { return .noClaimCodeAvailable }
+        guard snapshot.claimState == .anonymous else { return .existingInstallWasAlreadyLinked }
+        guard let claimCode = PublikAccountLink.claimCode(fromClaimURLString: snapshot.claimURLString)
+                ?? PublikAccountLink.claimCode(fromClaimURLString: snapshot.topUpURLString),
+              let claimRequest = PublikAccountLink.claimRequest(
+                gatewayBaseURL: gatewayBaseURL,
+                claimCode: claimCode,
+                accountAccessToken: accountAccessToken
+              ) else {
+            return .noClaimCodeAvailable
+        }
+
+        do {
+            let (_, response) = try await urlSession.data(for: claimRequest)
+            guard let httpResponse = response as? HTTPURLResponse else { return .couldNotReachPublik }
+            guard (200..<300).contains(httpResponse.statusCode) else {
+                return .gatewayDeclined(statusCode: httpResponse.statusCode)
+            }
+            // The wallet changed hands (and may have gained the one-time link
+            // credit), so the card is re-read rather than guessed.
+            _ = await refreshTheBalance()
+            return .claimedTheExistingInstall
+        } catch {
+            return .couldNotReachPublik
+        }
+    }
+
+    /// Case C: no publik API key. Mints an install bound to the account. The
+    /// same replay rule as `provisionAKey`: a `200` with no key means the id
+    /// was used before, so one fresh id is minted and tried once more.
+    private func mintAnAccountLinkInstall(accountAccessToken: String) async -> AccountLinkOutcome {
+        guard storedAccountLinkKey == nil else { return .alreadyHadAnAccountLinkInstall }
+        guard let appToken = Self.buildAppToken else { return .thisBuildHasNoAppToken }
+
+        for attemptNumber in 1...2 {
+            let result = await requestAnInstall(
+                appToken: appToken,
+                installIdentifier: accountLinkInstallIdentifier(),
+                disclosureVersion: nil,
+                accountAccessToken: accountAccessToken
+            )
+            switch result {
+            case .failure(.gatewayDeclined(let statusCode)):
+                return .gatewayDeclined(statusCode: statusCode)
+            case .failure:
+                return .couldNotReachPublik
+            case .success(let response):
+                if let linkKey = response.key {
+                    try? KeychainStore.saveSecret(linkKey, ofKind: .publikAccountLinkKey)
+                    return .mintedAnAccountLinkInstall
+                }
+                if attemptNumber == 1 { forgetAccountLinkInstallIdentifier() }
+            }
+        }
+        return .gatewayDeclined(statusCode: 200)
+    }
+
+    /// Called when the reader signs out: the link key is deleted at once, then
+    /// its install is revoked on publik, best effort. A failed revoke leaves an
+    /// install nobody holds a key for, which publik's idle sweep retires.
+    func forgetTheAccountLink() async {
+        guard let linkKey = storedAccountLinkKey else { return }
+        try? KeychainStore.deleteSecret(ofKind: .publikAccountLinkKey)
+        forgetAccountLinkInstallIdentifier()
+        guard let revokeRequest = PublikAccountLink.revokeRequest(
+            gatewayBaseURL: gatewayBaseURL,
+            installKey: linkKey
+        ) else { return }
+        _ = try? await urlSession.data(for: revokeRequest)
+    }
+
+    private func accountLinkInstallIdentifier() -> String {
+        if let existing = userDefaults.string(forKey: Self.accountLinkInstallIdentifierDefaultsKey), !existing.isEmpty {
+            return existing
+        }
+        let fresh = UUID().uuidString.lowercased()
+        userDefaults.set(fresh, forKey: Self.accountLinkInstallIdentifierDefaultsKey)
+        return fresh
+    }
+
+    private func forgetAccountLinkInstallIdentifier() {
+        userDefaults.removeObject(forKey: Self.accountLinkInstallIdentifierDefaultsKey)
     }
 
     // MARK: Reading the headers back

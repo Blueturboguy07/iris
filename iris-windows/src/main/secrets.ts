@@ -45,6 +45,10 @@ import * as path from "node:path";
 export type SecretName =
   | "anthropicApiKey"
   | "publikApiKey"
+  /** The key of the install that links this computer to the signed-in
+   *  publik account (`services/publik-account-link.ts`). Not a model
+   *  credential: only the usage-count client reads it. Deleted at sign-out. */
+  | "publikLinkKey"
   | "supabaseRefreshToken"
   | "gitHubAccessToken"
   | "gitHubRefreshToken"

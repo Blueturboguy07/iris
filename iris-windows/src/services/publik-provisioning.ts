@@ -69,13 +69,22 @@ export async function provisionPublikInstall(options: {
   /** True when the caller already holds a usable key; changes only whether a
    *  replayed `200` is worth retrying with a fresh `install_id`. */
   alreadyHoldsAKey: boolean;
+  /** The reader's publik session when signed in: the mint then binds the new
+   *  install to their account (see `buildInstallProvisioningRequest`). */
+  accountAccessToken?: string | null;
+  /** False for the account-link mint, which is not made from the disclosure. */
+  sendDisclosureVersion?: boolean;
   seams: ProvisioningSeams;
 }): Promise<ProvisioningOutcome> {
   const { appToken, seams } = options;
   if (!appToken || !looksLikeAnAppToken(appToken)) return { kind: "noAppToken" };
+  const binding: MintBinding = {
+    accountAccessToken: options.accountAccessToken ?? null,
+    omitDisclosureVersion: options.sendDisclosureVersion === false,
+  };
 
   const firstInstallId = seams.readStoredInstallId() ?? newInstallId(seams.randomBytes);
-  const firstAttempt = await attemptProvisioning(options.apiBaseUrl, appToken, firstInstallId, seams);
+  const firstAttempt = await attemptProvisioning(options.apiBaseUrl, appToken, firstInstallId, binding, seams);
 
   if (firstAttempt.kind !== "provisioned") return firstAttempt;
 
@@ -89,17 +98,24 @@ export async function provisionPublikInstall(options: {
   }
 
   const freshInstallId = newInstallId(seams.randomBytes);
-  const secondAttempt = await attemptProvisioning(options.apiBaseUrl, appToken, freshInstallId, seams);
+  const secondAttempt = await attemptProvisioning(options.apiBaseUrl, appToken, freshInstallId, binding, seams);
   if (secondAttempt.kind === "provisioned") {
     seams.writeStoredInstallId(freshInstallId);
   }
   return secondAttempt;
 }
 
+/** Who the mint is for, and whether it names the disclosure. */
+interface MintBinding {
+  accountAccessToken: string | null;
+  omitDisclosureVersion: boolean;
+}
+
 async function attemptProvisioning(
   apiBaseUrl: string,
   appToken: string,
   installId: string,
+  binding: MintBinding,
   seams: ProvisioningSeams
 ): Promise<ProvisioningOutcome> {
   const request = buildInstallProvisioningRequest(apiBaseUrl, {
@@ -110,6 +126,8 @@ async function attemptProvisioning(
     arch: seams.arch,
     installId,
     deviceName: seams.deviceName,
+    accountAccessToken: binding.accountAccessToken,
+    omitDisclosureVersion: binding.omitDisclosureVersion,
   });
 
   let response: { status: number; text(): Promise<string> };

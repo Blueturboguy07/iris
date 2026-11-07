@@ -47,9 +47,20 @@ export class AccountSession {
   private session: SupabaseSession | null = null;
   private pendingAuthorization: PendingAuthorization | null = null;
   private inFlightRefresh: Promise<SupabaseSession | null> | null = null;
+  private readonly signedOutListeners = new Set<() => void>();
 
   constructor(settings: SettingsStore) {
     this.settings = settings;
+  }
+
+  /**
+   * Told every time the session ends: the Sign out button, and a refresh the
+   * server refused. The account link (`PublikSetup.forgetTheAccountLink`)
+   * listens, so its key never outlives the session either way.
+   */
+  onSignedOut(listener: () => void): () => void {
+    this.signedOutListeners.add(listener);
+    return () => this.signedOutListeners.delete(listener);
   }
 
   isSignedIn(): boolean {
@@ -159,5 +170,12 @@ export class AccountSession {
     this.session = null;
     this.pendingAuthorization = null;
     this.settings.setSupabaseRefreshToken(null);
+    for (const listener of this.signedOutListeners) {
+      try {
+        listener();
+      } catch {
+        // A listener's failure must not stop the sign-out itself.
+      }
+    }
   }
 }

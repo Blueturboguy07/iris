@@ -26,7 +26,7 @@ struct PublikGateTests {
         #expect(hostVersion == Publik.appVersion)
     }
 
-    @Test func theAppTokenHasOneSource() {
+    @Test @MainActor func theAppTokenHasOneSource() {
         // `PublikAPIAccount.buildAppToken` is what the settings card asks; the
         // module is what provisions. They read the same Info.plist key.
         if let buildToken = PublikAPIAccount.buildAppToken {

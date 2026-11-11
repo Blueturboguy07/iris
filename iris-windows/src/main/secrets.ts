@@ -45,10 +45,6 @@ import * as path from "node:path";
 export type SecretName =
   | "anthropicApiKey"
   | "publikApiKey"
-  /** The key of the install that links this computer to the signed-in
-   *  publik account (`services/publik-account-link.ts`). Not a model
-   *  credential: only the usage-count client reads it. Deleted at sign-out. */
-  | "publikLinkKey"
   | "supabaseRefreshToken"
   | "gitHubAccessToken"
   | "gitHubRefreshToken"
@@ -130,6 +126,28 @@ export function deleteSecret(secretName: SecretName): void {
       delete contents[secretName];
       writeSecretFile(contents);
     }
+  } catch {
+    // Nothing to clean up.
+  }
+}
+
+/**
+ * Secret names an earlier Iris stored and this one no longer uses. Until
+ * 0.9.17 the account-link key (`publikLinkKey`) linked this computer to the
+ * signed-in account for the usage counts. Sign in with publik replaced it:
+ * the publik module's install key carries the account. An upgrade deletes
+ * the old entry, so no key stays on disk that nothing reads.
+ */
+const RETIRED_SECRET_NAMES = ["publikLinkKey"] as const;
+
+/** Deletes every retired secret from the file. Called once, at start-up. */
+export function deleteRetiredSecrets(): void {
+  try {
+    const contents = readSecretFile();
+    const retired = RETIRED_SECRET_NAMES.filter((secretName) => secretName in contents);
+    if (retired.length === 0) return;
+    for (const secretName of retired) delete contents[secretName];
+    writeSecretFile(contents);
   } catch {
     // Nothing to clean up.
   }

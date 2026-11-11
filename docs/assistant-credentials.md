@@ -62,13 +62,19 @@ error message.
 
 **Provisioning.** Two routes to a key:
 
-- *Machine* (preferred, this is the "auto setup"): show the disclosure, then
-  `POST /api/v1/installs` with the build's app token. Returns a `pk_live_…` key
-  and a claim code, at a $0.00 balance (`starter_micros` and `balance_micros`
-  are both 0). Consent precedes the mint — never call this before the
-  disclosure is accepted. The disclosure must not promise free usage: it says
-  the balance starts at $0.00 and that linking the publik account gives $0.05
-  of free use, once.
+- *Machine* (the publik module, at the Sign in with publik gate): at the first
+  start the module (`Publik.swift` on macOS, `publik.ts` on Windows, from
+  publikhq.com/skills/setup.md) calls `POST /api/v1/installs` with the build's
+  app token. The call returns a `pk_live_…` key and a claim link, at a $0.00
+  balance. The module stores the key at the publik credential path
+  (`~/Library/Application Support/publik/apps/iris.json` on macOS,
+  `%LOCALAPPDATA%\publik\apps\iris.json` on Windows) and opens the claim link;
+  the gate waits until the install is claimed by a publik account. Then it asks
+  how Iris pays for AI. *Connect your plan* adopts the install key as the app's
+  publik API key (the Keychain on macOS, the secrets store on Windows) and
+  selects the publik API route. *Use my own key* leaves the key where the
+  module put it; the settings card's "auto setup" (still behind the disclosure)
+  adopts it later, with no second mint. There is one install per computer.
 - *Human*: the user pastes a `pk_live_…` key from `publikhq.com/dashboard/api`.
   This is the fallback whenever the build carries no app token, and must keep
   working regardless.

@@ -1,38 +1,20 @@
 /**
  * publik-setup.ts
  *
- * The main-process side of setting up publik API: it owns the Electron-flavoured
- * pieces (randomness, the app's version, storing the key) and delegates every
- * decision to `services/publik-provisioning.ts`, which is where the suite can
- * reach it.
+ * The main-process side of publik API: the key this install uses, the
+ * balance, and what each reply cost. The install itself comes from the publik
+ * module (`./publik`). Its gate runs at start-up (`main/index.ts`) and makes
+ * this computer's key, so nothing here mints an install of its own.
  *
  * CONTRACT.md section 12 (4) is enforced here rather than in the renderer:
  * "an app must not consume the starter without having shown (a)–(c) at least
- * once". `publikCardHasBeenShown` gates spending, not just drawing — a card the
- * user closed before it painted must not be treated as shown. Since publik's
- * migration 0059 a new install is minted at $0.00 and the one free $0.05
- * arrives when the computer is linked to a publik account, so the gate now
- * guards that balance, and whatever a plan or a pack adds, rather than a
- * starter the mint handed over.
+ * once". `publikCardHasBeenShown` gates spending, not just drawing. The gate's
+ * plan screen shows the plan or the balance before the person connects it, so
+ * Connect your plan marks the card as shown.
  */
 
-import { app } from "electron";
-import { randomBytes } from "node:crypto";
-import * as os from "node:os";
 import { SettingsStore } from "./settings";
-import { publikAppToken } from "./publik-app-token";
-import {
-  ProvisioningOutcome,
-  ProvisioningSeams,
-  provisionPublikInstall,
-} from "../services/publik-provisioning";
-import {
-  AccountLinkOutcome,
-  AccountLinkWallet,
-  forgetTheAccountLink,
-  linkThisComputerToTheAccount,
-  telemetryKey,
-} from "../services/publik-account-link";
+import { PublikCredential, provision as provisionWithPublik, readCredential, setChoice } from "./publik";
 import {
   DEFAULT_PUBLIK_MODEL,
   PublikCardState,
@@ -55,15 +37,17 @@ import {
  */
 const BALANCE_REFRESH_DELAY_AFTER_A_REPLY_MS = 1_500;
 
-/** The one `fetch` every install call (mint, claim, revoke) goes through. */
-const postWithFetch: ProvisioningSeams["fetchImplementation"] = async (url, init) => {
-  const response = await fetch(url, {
-    method: init.method,
-    headers: init.headers,
-    body: init.body,
-  });
-  return { status: response.status, text: () => response.text() };
-};
+/** What `provision()` reports to the window that asked. */
+export type ProvisioningOutcome =
+  | { kind: "provisioned" }
+  /** publik answered, but not with a key this computer can use. */
+  | { kind: "refused"; message: string }
+  | { kind: "networkFailure" };
+
+/** True for an error that means publik did not answer at all. The same test the module uses. */
+function publikWasNotReachable(error: unknown): boolean {
+  return error instanceof TypeError || (error instanceof Error && /abort|timeout/i.test(error.name));
+}
 
 export class PublikSetup {
   private readonly settings: SettingsStore;
@@ -73,8 +57,6 @@ export class PublikSetup {
   private pendingBalanceRefresh: ReturnType<typeof setTimeout> | null = null;
   /** A read already on the wire, shared by anyone who asks meanwhile. */
   private balanceReadInFlight: Promise<boolean> | null = null;
-  /** The last readable `GET /balance`, for the account link's install check. */
-  private lastBalanceRead: PublikBalance | null = null;
   private readonly balanceListeners = new Set<() => void>();
 
   constructor(settings: SettingsStore) {
@@ -87,133 +69,73 @@ export class PublikSetup {
   }
 
   /**
-   * Runs the machine route. The caller must have shown the disclosure and got
-   * consent first — CONTRACT section 3.2 [S4], "consent precedes mint".
-   *
-   * `accountAccessToken` is the reader's publik session when they are signed
-   * in: it rides as the bearer and binds the new install to their account at
-   * once. Null when signed out, and the mint is anonymous as before.
+   * The machine route, from the settings page, the chat window or the
+   * first-run window. The gate made this computer's install at start-up, so
+   * this adopts the module's credential. It provisions again only when the
+   * credential file is gone. The person pressed a button under the disclosure,
+   * so the stored choice becomes "publik".
    */
-  async provision(accountAccessToken: string | null = null): Promise<ProvisioningOutcome> {
-    const outcome = await provisionPublikInstall({
-      apiBaseUrl: this.settings.getPublikApiBaseUrl(),
-      appToken: publikAppToken(),
-      alreadyHoldsAKey: this.hasKey(),
-      accountAccessToken,
-      seams: {
-        fetchImplementation: postWithFetch,
-        randomBytes: (byteCount) => new Uint8Array(randomBytes(byteCount)),
-        readStoredInstallId: () => this.settings.get("publikInstallId") || null,
-        writeStoredInstallId: (installId) => this.settings.set("publikInstallId", installId),
-        appVersion: app.getVersion(),
-        osVersion: os.release(),
-        arch: process.arch,
-        deviceName: os.hostname(),
-      },
-    });
-
-    if (outcome.kind === "provisioned") this.storeProvisionedInstall(outcome);
-    return outcome;
+  async provision(): Promise<ProvisioningOutcome> {
+    let credential: PublikCredential;
+    try {
+      credential = readCredential() ?? (await provisionWithPublik());
+    } catch (error) {
+      if (publikWasNotReachable(error)) return { kind: "networkFailure" };
+      return { kind: "refused", message: error instanceof Error ? error.message : String(error) };
+    }
+    if (!this.connectThePlan(credential.key)) {
+      return {
+        kind: "refused",
+        message: "Windows will not let Iris encrypt stored secrets on this machine, so the key cannot be saved safely.",
+      };
+    }
+    setChoice("publik");
+    return { kind: "provisioned" };
   }
-
-  // MARK: - Linking this computer to the signed-in account
 
   /**
-   * Called once each time a publik session starts. Claims the publik API
-   * install when there is one; otherwise mints a small install bound to the
-   * account and keeps its key apart (`publikLinkKey`). Best effort and silent.
-   * See `services/publik-account-link.ts`.
+   * After Connect your plan, at the gate or here: the module's install key is
+   * the publik API key. The gate showed the plan or the balance before the
+   * person agreed, so the card counts as shown. A key pasted in Settings is
+   * replaced: the choice "publik" means the install key. Returns false when
+   * Windows refused to store the key.
    */
-  linkThisComputerToTheAccount(accountAccessToken: string): Promise<AccountLinkOutcome> {
-    return linkThisComputerToTheAccount({
-      apiBaseUrl: this.settings.getPublikApiBaseUrl(),
-      appToken: publikAppToken(),
-      accountAccessToken,
-      seams: {
-        fetchImplementation: postWithFetch,
-        readPublikApiKey: () => this.settings.getPublikApiKey(),
-        readAccountLinkKey: () => this.settings.getPublikLinkKey(),
-        writeAccountLinkKey: (linkKey) => this.settings.setPublikLinkKey(linkKey),
-        readWallet: () => this.readWalletForTheAccountLink(),
-        linkInstallProvisioning: {
-          randomBytes: (byteCount) => new Uint8Array(randomBytes(byteCount)),
-          readStoredInstallId: () => this.settings.get("publikLinkInstallId") || null,
-          writeStoredInstallId: (installId) => this.settings.set("publikLinkInstallId", installId),
-          appVersion: app.getVersion(),
-          osVersion: os.release(),
-          arch: process.arch,
-          deviceName: os.hostname(),
-        },
-      },
-    });
-  }
-
-  /** Sign-out: deletes the link key, then revokes its install, best effort. */
-  forgetTheAccountLink(): Promise<boolean> {
-    return forgetTheAccountLink({
-      apiBaseUrl: this.settings.getPublikApiBaseUrl(),
-      seams: {
-        fetchImplementation: postWithFetch,
-        readAccountLinkKey: () => this.settings.getPublikLinkKey(),
-        deleteAccountLinkKey: () => this.settings.setPublikLinkKey(null),
-        forgetLinkInstallId: () => this.settings.set("publikLinkInstallId", ""),
-      },
-    });
-  }
-
-  /** The key the usage counts carry: the link key first, then the publik
-   *  API key. See `telemetryKey` in services/publik-account-link.ts. */
-  telemetryKey(): string | null {
-    return telemetryKey({
-      accountLinkKey: this.settings.getPublikLinkKey(),
-      publikApiKey: this.settings.getPublikApiKey(),
-    });
-  }
-
-  /** `GET /balance`, then what it said. Null when the read failed, so a claim
-   *  code or an install check never comes from a stale settings file. */
-  private async readWalletForTheAccountLink(): Promise<AccountLinkWallet | null> {
-    if (!(await this.refreshBalance()) || !this.lastBalanceRead) return null;
-    const balance = this.lastBalanceRead;
-    return {
-      claimState: balance.claimState === "claimed" ? "claimed" : "anonymous",
-      claimUrl: balance.claimUrl,
-      topUpUrl: balance.topUpUrl,
-      installId: balance.installId,
-      appSlug: balance.appSlug,
-    };
-  }
-
-  private storeProvisionedInstall(outcome: Extract<ProvisioningOutcome, { kind: "provisioned" }>): void {
-    const { install } = outcome;
-    if (install.apiKey) this.settings.setPublikApiKey(install.apiKey);
-    if (install.claimUrl) this.settings.set("publikClaimUrl", install.claimUrl);
-    if (install.addCreditUrl) this.settings.set("publikAddCreditUrl", install.addCreditUrl);
-    this.settings.set("publikClaimState", install.claimState);
-    if (install.starterMicros > 0) this.settings.set("publikStarterMicros", install.starterMicros);
-    // A freshly minted key's balance is the one the mint reported — $0.00 for a
-    // new install since publik's migration 0059 — so it is recorded even at
-    // zero. Otherwise the card and the tray would carry over whatever an
-    // earlier key had left, instead of saying "link this computer".
-    if (install.apiKey || install.balanceMicros > 0) {
-      this.settings.set("publikBalanceMicros", install.balanceMicros);
-      this.settings.set("publikBalanceSeen", true);
+  connectThePlan(installKey: string): boolean {
+    if (this.settings.getPublikApiKey() !== installKey) {
+      if (!this.settings.setPublikApiKey(installKey)) return false;
+      // Whatever was known about the balance belonged to the key this replaced.
+      this.forgetTheBalance();
     }
+    const credential = readCredential();
+    if (credential?.key === installKey) this.honourAMovedGateway(credential.base_url);
+    this.settings.set("publikCardHasBeenShown", true);
+    void this.refreshBalance();
+    return true;
+  }
 
-    // The gateway is allowed to move (CONTRACT section 1 [S8]). Only a publik
-    // origin is honoured — an unexpected host here would be the one input that
-    // could aim a key somewhere else, and `assistant-transport` would refuse
-    // the request anyway, so it is dropped rather than stored.
-    if (install.baseUrl) {
-      try {
-        const movedTo = new URL(install.baseUrl);
-        if (/(^|\.)publikhq\.com$/i.test(movedTo.hostname)) {
-          this.settings.set("publikBaseUrl", movedTo.origin);
-        }
-      } catch {
-        // Keep the compiled default.
+  /**
+   * The gateway is allowed to move (CONTRACT section 1 [S8]). Only a publik
+   * origin is honoured: an unexpected host here would be the one input that
+   * could aim a key somewhere else, and `assistant-transport` would refuse
+   * the request anyway, so it is dropped rather than stored.
+   */
+  private honourAMovedGateway(baseUrl: string): void {
+    try {
+      const movedTo = new URL(baseUrl);
+      if (/(^|\.)publikhq\.com$/i.test(movedTo.hostname)) {
+        this.settings.set("publikBaseUrl", movedTo.origin);
       }
+    } catch {
+      // Keep the compiled default.
     }
+  }
+
+  /** Settings: Clear. The key goes, and the gate asks again at the next start. */
+  forgetTheKey(): boolean {
+    this.settings.setPublikApiKey("");
+    this.forgetTheBalance();
+    setChoice(null);
+    return true;
   }
 
   /** The human route: a key pasted from publikhq.com/dashboard/api. */
@@ -304,7 +226,6 @@ export class PublikSetup {
     )
       .then((balance) => {
         if (!balance) return false;
-        this.lastBalanceRead = balance;
         this.storeBalance(balance);
         this.notifyBalanceChanged();
         return true;
@@ -335,7 +256,6 @@ export class PublikSetup {
   }
 
   private forgetTheBalance(): void {
-    this.lastBalanceRead = null;
     this.settings.set("publikBalanceSeen", false);
     this.settings.set("publikBalanceMicros", 0);
     this.settings.set("publikTopUpUrl", "");

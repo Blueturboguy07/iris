@@ -55,8 +55,8 @@ export class AccountSession {
 
   /**
    * Told every time the session ends: the Sign out button, and a refresh the
-   * server refused. The account link (`PublikSetup.forgetTheAccountLink`)
-   * listens, so its key never outlives the session either way.
+   * server refused. Nothing listens today. The account link did, until Sign
+   * in with publik (the publik module's gate) replaced it.
    */
   onSignedOut(listener: () => void): () => void {
     this.signedOutListeners.add(listener);

@@ -62,6 +62,26 @@ jobs:
       - name: Package the app
         run: npm run package
 
+      # The app opens with Sign in with publik (src/main/publik.ts), and a
+      # runner cannot sign in in a browser. A claimed install's credential,
+      # held in the PUBLIK_E2E_CREDENTIAL_JSON secret (the content of a
+      # %LOCALAPPDATA%\publik\apps\iris.json whose "choice" is "own_key"),
+      # lets the gate pass with no screen. Without the secret the packaged app
+      # stops at the gate and the suite cannot pass; this step says so.
+      - name: Seed the publik credential for the gate
+        env:
+          PUBLIK_E2E_CREDENTIAL_JSON: ${{ secrets.PUBLIK_E2E_CREDENTIAL_JSON }}
+        shell: pwsh
+        run: |
+          if (-not $env:PUBLIK_E2E_CREDENTIAL_JSON) {
+            Write-Host '::warning::No PUBLIK_E2E_CREDENTIAL_JSON secret: the packaged app stops at Sign in with publik, and the suite cannot pass.'
+            exit 0
+          }
+          $dir = Join-Path $env:LOCALAPPDATA 'publik\apps'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          [IO.File]::WriteAllText((Join-Path $dir 'iris.json'), $env:PUBLIK_E2E_CREDENTIAL_JSON)
+          Write-Host 'Seeded the publik credential for the gate.'
+
       # The headed suite. It launches the packaged app with
       # --remote-debugging-port, drives + asserts every flow and edge case, and
       # exits non-zero on any failed assertion — which fails the job.

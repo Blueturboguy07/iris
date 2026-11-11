@@ -13,13 +13,13 @@ name: publik-build
 #                         makes Iris-assistant.dmg from it. No Apple secret is
 #                         needed here.
 #   iris-windows          Iris-Setup.exe, not signed (there is no Windows
-#                         certificate), plus the result of the usage-count check.
+#                         certificate), plus the result of the publik self-test.
 #
-# The macOS job runs the publik self-test on the built app
+# Both jobs run the publik self-test on what they built
 # (publikhq.com/skills/setup.md, step 6): PUBLIK_SELF_TEST=1 makes the app
 # provision its install with the baked token, read GET /wallet from publik,
-# print one line and exit. The Windows job starts the build on the runner with
-# PUBLIK_TELEMETRY_URL pointed at a local listener (scripts/publik-build/).
+# print one line and exit. That line proves the Sign in with publik gate is on
+# the start-up path of the exact build.
 
 on:
   push:
@@ -217,42 +217,26 @@ jobs:
       - name: Make the installer
         run: npm run make
 
-      # Installs the real Iris-Setup.exe the way a reader does, starts the
-      # installed Iris for 20 seconds, and fails the job unless exactly one
-      # correct `app_opened` reaches the local listener. Then the same start
-      # with DO_NOT_TRACK=1 must send nothing.
-      #
-      # PUBLIK_TELEMETRY_URL is set BEFORE the installer runs, so no Iris that
-      # this step starts, by any route, can reach publikhq.com.
-      - name: Usage counts on this runner (install, start, listen)
+      # The publik self-test on the installed app (publikhq.com/skills/setup.md,
+      # step 6). Installs the real Iris-Setup.exe the way a reader does, then
+      # starts the installed iris.exe with PUBLIK_SELF_TEST=1: the module
+      # provisions this runner's install with the baked token, reads
+      # GET /wallet from publik, prints one line and exits. The job fails
+      # unless the line is exactly `publik self-test: ok iris <version>`.
+      - name: publik self-test (the installed app)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $setup = Get-ChildItem -Path out/make -Recurse -Filter Iris-Setup.exe | Select-Object -First 1
           if (-not $setup) { throw 'npm run make produced no Iris-Setup.exe' }
           $want = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $scripts = Resolve-Path '../scripts/publik-build'
-          $listenerScript = Join-Path $scripts 'telemetry-listener.cjs'
-          $checkScript = Join-Path $scripts 'check-app-opened.cjs'
-
-          $requests = Join-Path $env:RUNNER_TEMP 'telemetry-requests.jsonl'
-          $portFile = Join-Path $env:RUNNER_TEMP 'telemetry-port.txt'
-          $result = Join-Path (Resolve-Path 'out/make') 'windows-telemetry-check.txt'
-          function Get-RequestCount {
-            if (Test-Path $requests) { return @(Get-Content $requests).Count }
-            return 0
-          }
-
-          $listener = Start-Process -FilePath node -ArgumentList @("`"$listenerScript`"", "`"$requests`"", "`"$portFile`"", '300') -PassThru -WindowStyle Hidden
-          $deadline = (Get-Date).AddSeconds(30)
-          while (-not (Test-Path $portFile) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
-          if (-not (Test-Path $portFile)) { throw 'The local listener did not start.' }
-          $port = (Get-Content $portFile -Raw).Trim()
-          $env:PUBLIK_TELEMETRY_URL = "http://127.0.0.1:$port/api/v1/telemetry"
-          $env:PUBLIK_TELEMETRY_DEBUG = '1'
-          Write-Host "Listener on port $port"
+          $result = Join-Path (Resolve-Path 'out/make') 'windows-publik-self-test.txt'
 
           # ── Install ──
+          # The install hook starts Iris once. That Iris stops at the Sign in
+          # with publik dialog and is closed below. DO_NOT_TRACK keeps the
+          # runner out of the usage counts; the self-test sends none anyway.
+          $env:DO_NOT_TRACK = '1'
           $install = Start-Process -FilePath $setup.FullName -ArgumentList '--silent' -PassThru -Wait
           Write-Host "Iris-Setup.exe --silent exited with $($install.ExitCode)"
           $root = Join-Path $env:LOCALAPPDATA 'Iris'
@@ -270,53 +254,43 @@ jobs:
           Get-Process iris -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 2
 
-          # ── Start the installed Iris; one app_opened must arrive ──
-          $before = Get-RequestCount
-          $userData = Join-Path $env:RUNNER_TEMP 'iris-telemetry-userdata'
+          # ── The self-test ──
+          $env:PUBLIK_SELF_TEST = '1'
+          Remove-Item Env:PUBLIK_APP_TOKEN -ErrorAction SilentlyContinue
+          $userData = Join-Path $env:RUNNER_TEMP 'iris-self-test-userdata'
           New-Item -ItemType Directory -Force -Path $userData | Out-Null
-          $stdout = Join-Path $env:RUNNER_TEMP 'iris-stdout.log'
-          $stderr = Join-Path $env:RUNNER_TEMP 'iris-stderr.log'
+          $stdout = Join-Path $env:RUNNER_TEMP 'iris-self-test-stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'iris-self-test-stderr.log'
           $iris = Start-Process -FilePath $exe.FullName -ArgumentList "--user-data-dir=$userData" `
             -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-          Start-Sleep -Seconds 20
-          $stayedUp = -not $iris.HasExited
-          Get-Process iris -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 2
-          Write-Host '--- stderr ---'; Get-Content $stderr -ErrorAction SilentlyContinue | Select-Object -First 40
-          "process still up after 20 s: $stayedUp" | Tee-Object -FilePath $result
-          node $checkScript $requests $before $want windows | Tee-Object -FilePath $result -Append
-          $checkExit = $LASTEXITCODE
-
-          # ── The opt-out: DO_NOT_TRACK=1 sends nothing ──
-          $before = Get-RequestCount
-          $userDataOptOut = Join-Path $env:RUNNER_TEMP 'iris-telemetry-userdata-optout'
-          New-Item -ItemType Directory -Force -Path $userDataOptOut | Out-Null
-          $env:DO_NOT_TRACK = '1'
-          $irisOptOut = Start-Process -FilePath $exe.FullName -ArgumentList "--user-data-dir=$userDataOptOut" -PassThru
-          Start-Sleep -Seconds 15
-          $optOutStayedUp = -not $irisOptOut.HasExited
-          Get-Process iris -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-          Remove-Item Env:DO_NOT_TRACK
-          $after = Get-RequestCount
-          $optOutSilent = ($after -eq $before)
-          "DO_NOT_TRACK=1: process up: $optOutStayedUp, new requests: $($after - $before)" | Tee-Object -FilePath $result -Append
-
-          Stop-Process -Id $listener.Id -Force -ErrorAction SilentlyContinue
+          $finished = $iris.WaitForExit(120000)
+          Remove-Item Env:PUBLIK_SELF_TEST
+          $line = ''
+          if (-not $finished) {
+            Get-Process iris -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            'the self-test did not finish within 120 s' | Tee-Object -FilePath $result
+          } else {
+            $line = Get-Content $stdout -ErrorAction SilentlyContinue | Where-Object { $_ -like 'publik self-test:*' } | Select-Object -Last 1
+            "exit code: $($iris.ExitCode)" | Tee-Object -FilePath $result
+            "$line" | Tee-Object -FilePath $result -Append
+          }
           $fence = '```'
-          @('### Usage counts on the Windows runner', $fence, (Get-Content $result -Raw).TrimEnd(), $fence) |
+          @('### publik self-test on the Windows runner', $fence, (Get-Content $result -Raw).TrimEnd(), $fence) |
             Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
-          if (-not $stayedUp) { throw 'Iris exited on its own within 20 seconds.' }
-          if ($checkExit -ne 0) { throw 'No correct app_opened reached the listener.' }
-          if (-not $optOutStayedUp) { throw 'Iris exited on its own with DO_NOT_TRACK=1.' }
-          if (-not $optOutSilent) { throw 'A request arrived with DO_NOT_TRACK=1.' }
-          Write-Host 'Usage-count check passed.'
+          if (-not $finished) { throw 'The self-test did not finish within 120 s.' }
+          if ("$line" -ne "publik self-test: ok iris $want") {
+            Write-Host '--- stdout ---'; Get-Content $stdout -ErrorAction SilentlyContinue | Select-Object -First 40
+            Write-Host '--- stderr ---'; Get-Content $stderr -ErrorAction SilentlyContinue | Select-Object -First 40
+            throw "Expected 'publik self-test: ok iris $want'."
+          }
+          Write-Host 'publik self-test passed.'
 
       - uses: actions/upload-artifact@v4
         with:
           name: iris-windows
           path: |
             iris-windows/out/make/**/*.exe
-            iris-windows/out/make/windows-telemetry-check.txt
+            iris-windows/out/make/windows-publik-self-test.txt
           if-no-files-found: error
           retention-days: 14

@@ -123,6 +123,32 @@ The main process answers the command names `app.js` already invokes
 is no cross-process foreground-app API without a native module, and `app.js`
 already renders that case honestly.
 
+### Sign in with publik (the publik module)
+
+`src/main/publik.ts` is a copy of publikhq.com/sdk/publik.ts.md with four
+local changes, listed in its header. Keep the rest word for word: the publik
+scan reads the file, and `tests/publik-gate.test.ts` pins the gate's words and
+`APP_SLUG = "iris"`. Bump `APP_VERSION` with every release.
+
+`app.whenReady()` in `main/index.ts` awaits `ensureSignedIn(publikGateUI)`
+first. Nothing else starts before it: no tray, no window, no deep link (links
+that arrive during the gate wait in `deepLinksHeldByTheGate`). The gate makes
+this computer's install, shows "Sign in with publik" until the install is
+claimed, asks once how the app pays for AI, and starts the user counts. It is
+the only caller of `POST /api/v1/installs` and the only sender of telemetry.
+`PUBLIK_SELF_TEST=1` prints the self-test line and exits inside it, so nothing
+may print to stdout before it.
+
+After the gate: `choice === "publik"` makes `PublikSetup.connectThePlan` store
+the install key as the publik API key, mark the first-run card as shown, and
+read the balance. `choice === "own_key"` changes nothing, so the BYO Anthropic
+key and the codex route stay as they were. The "Set up publik API" button adopts
+the same install (`PublikSetup.provision`), and clearing the publik key in
+Settings calls `setChoice(null)` so the gate asks again at the next start. Do
+not add a second install mint or a second telemetry client; until 0.9.17 the
+app had both (`vendor/publik-telemetry.cjs`, `services/publik-provisioning.ts`,
+`services/publik-account-link.ts`) and they are gone.
+
 ### Secrets
 
 `src/main/secrets.ts` is the only code that touches a secret at rest. The set
@@ -134,8 +160,10 @@ the Supabase refresh token, maintain mode's GitHub device-flow token pair
 
 The publik *app token* (`pat_iris_…`, `main/publik-app-token.ts`) is NOT a
 secret and deliberately does not live here: it ships inside every binary by
-design, and is contained by being per-release, revocable and rate-limited. The access token is
-memory-only, per protocol §4.
+design, and is contained by being per-release, revocable and rate-limited. The
+publik module reads it (`appToken()` in `main/publik.ts`: `PUBLIK_APP_TOKEN`,
+then the baked constant, then a `publik-app-token.txt` file). The access token
+is memory-only, per protocol §4.
 
 `settings.json` must stay free of secrets — it is plain text and users paste it
 into bug reports. If `safeStorage.isEncryptionAvailable()` is false, refuse to

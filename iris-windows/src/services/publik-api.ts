@@ -11,7 +11,6 @@
  * model name, which must be one of the three aliases below.
  *
  * What this file owns:
- *   - provisioning an install (the "auto setup": disclosure -> POST /installs)
  *   - reading the `x-publik-*` headers every metered response carries
  *   - reading a 402 `insufficient_credit` body into something the CTA can render
  *   - the money vocabulary (micros -> dollars) and the justification sentence
@@ -83,7 +82,9 @@ export const WHY_IT_COSTS_SENTENCE =
   "The AI model behind Iris is run by a provider that charges per use; publik passes that on at half the provider's list price, nothing is charged behind your back, and every call is visible on your dashboard.";
 
 /**
- * The disclosure shown BEFORE provisioning. Consent precedes the mint (section 3.2 [S4]).
+ * The disclosure shown BEFORE the "Set up publik API" button. Consent precedes
+ * the mint (section 3.2 [S4]); the publik module (`main/publik.ts`) makes the
+ * install.
  *
  * Since publik's migration 0059 (founder, 2026-09-28) a new install is minted
  * at $0.00. The one free thing is $0.05 of use, paid once per publik account
@@ -94,13 +95,6 @@ export const WHY_IT_COSTS_SENTENCE =
  */
 export const PROVISIONING_DISCLOSURE =
   "Iris will set up publik API on this computer so it can answer you. Your balance starts at $0.00 and no card is asked for. Linking your publik account gives $0.05 of free use, once, and you will see the balance before anything is spent.";
-
-/**
- * Bumped when the disclosure text changes materially. The server records it and
- * never rejects on it, so this is an audit trail rather than a gate. Version 2
- * is the $0.00-start wording above; version 1 promised "free usage".
- */
-export const DISCLOSURE_VERSION = 2;
 
 /**
  * What an install that is not linked to a publik account shows at $0.00, in
@@ -118,28 +112,7 @@ export function publikBalanceLine(balanceMicros: number, claimState?: PublikClai
   return `${formatMicrosAsDollars(balanceMicros)} left`;
 }
 
-// MARK: - Install identity
-
-/**
- * A v4 UUID naming this installation. It is minted by the app, persisted, and
- * replayed: presenting the same `install_id` a second time is answered `200`
- * with `"key": null`, which is the server telling us it already gave us a key.
- */
-export function newInstallId(randomBytes: (byteCount: number) => Uint8Array): string {
-  const bytes = randomBytes(16);
-  if (bytes.length < 16) throw new Error("newInstallId needs 16 random bytes");
-  const withVersion = Uint8Array.from(bytes.subarray(0, 16));
-  withVersion[6] = (withVersion[6] & 0x0f) | 0x40; // version 4
-  withVersion[8] = (withVersion[8] & 0x3f) | 0x80; // variant 10xx
-  const hex = Array.from(withVersion, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  return [
-    hex.slice(0, 8),
-    hex.slice(8, 12),
-    hex.slice(12, 16),
-    hex.slice(16, 20),
-    hex.slice(20, 32),
-  ].join("-");
-}
+// MARK: - The key shape
 
 /** `pk_(live|test)_<12>_<32>`, per CONTRACT.md section 1. */
 const PUBLIK_KEY_PATTERN = /^pk_(live|test)_[a-z0-9]{12}_[a-z0-9]{32}$/;
@@ -148,148 +121,12 @@ export function looksLikeAPublikApiKey(candidate: string): boolean {
   return PUBLIK_KEY_PATTERN.test(candidate.trim());
 }
 
-/**
- * `pat_<slug>_<32>`. Checked before a provisioning call so a build carrying a
- * malformed token fails locally with something readable instead of spending a
- * round trip to be told `401`.
- */
-export function looksLikeAnAppToken(candidate: string): boolean {
-  return /^pat_[a-z0-9][a-z0-9-]*_[a-z0-9]{32}$/.test(candidate.trim());
-}
-
-// MARK: - Provisioning
-
-export interface InstallProvisioningRequest {
-  appToken: string;
-  appSlug: string;
-  appVersion: string;
-  osVersion: string;
-  arch: string;
-  installId: string;
-  deviceName?: string;
-  /**
-   * The reader's publik session (Supabase access token) when they are signed
-   * in. It rides as the bearer and binds the new install to that account at
-   * mint; the app token stays in the body. Sent to a publik host only.
-   */
-  accountAccessToken?: string | null;
-  /**
-   * Leaves `disclosure_version` out (the gateway then records its default).
-   * The account-link mint sets this: it is made at sign-in, not from the
-   * publik API disclosure, so naming a disclosure version would be false.
-   */
-  omitDisclosureVersion?: boolean;
-}
-
-/** Whether a gateway root is publik's own, so it may receive the session. */
-export function isPublikGateway(apiBaseUrl: string): boolean {
-  try {
-    const host = new URL(apiBaseUrl).hostname.toLowerCase();
-    return host === "publikhq.com" || host === "www.publikhq.com";
-  } catch {
-    return false;
-  }
-}
-
-/** The URL and body for `POST /installs`. The caller does the fetch. */
-export function buildInstallProvisioningRequest(
-  apiBaseUrl: string,
-  request: InstallProvisioningRequest
-): { url: string; headers: Record<string, string>; body: string } {
-  const base = apiBaseUrl.replace(/\/+$/, "");
-  const body: Record<string, unknown> = {
-    app_token: request.appToken,
-    app_slug: request.appSlug,
-    app_version: request.appVersion,
-    os: "windows",
-    os_version: request.osVersion,
-    arch: request.arch,
-    install_id: request.installId,
-    // Iris speaks the Anthropic Messages format, not chat/completions.
-    dialects: ["messages"],
-  };
-  if (!request.omitDisclosureVersion) body.disclosure_version = DISCLOSURE_VERSION;
-  if (request.deviceName) body.device_name = request.deviceName;
-
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  // The session is a publik account credential: it goes to publik and nowhere
-  // else, whatever base URL a mis-set setting names.
-  if (request.accountAccessToken && isPublikGateway(base)) {
-    headers.Authorization = `Bearer ${request.accountAccessToken}`;
-  }
-
-  return {
-    url: `${base}/installs`,
-    headers,
-    body: JSON.stringify(body),
-  };
-}
-
-export interface ProvisionedInstall {
-  /**
-   * Null on a replay: the server has already minted a key for this
-   * `install_id` and will not show it twice. A client with no stored key that
-   * gets a null here mints ONE fresh `install_id` and tries again (section 3.2
-   * [B1]) — more than once would be a mint loop.
-   */
-  apiKey: string | null;
-  claimCode: string | null;
-  claimUrl: string | null;
-  addCreditUrl: string | null;
-  claimState: PublikClaimState;
-  starterMicros: number;
-  balanceMicros: number;
-  /** Honoured over any compiled default, per CONTRACT.md section 1 [S8]. */
-  baseUrl: string | null;
-}
-
 function readString(source: Record<string, unknown>, ...names: string[]): string | null {
   for (const name of names) {
     const value = source[name];
     if (typeof value === "string" && value.length > 0) return value;
   }
   return null;
-}
-
-function readMicros(source: Record<string, unknown>, ...names: string[]): number {
-  for (const name of names) {
-    const value = source[name];
-    if (typeof value === "number" && Number.isFinite(value)) return value;
-  }
-  return 0;
-}
-
-/**
- * Reads a `201` (or a replayed `200`) provisioning body.
- *
- * Field names are read with their documented aliases because section 3.2 ships
- * `balance_micros` and `starting_credit_micros` as the same value "so every app
- * spec's field name resolves" — a client that insists on one spelling would
- * work today and break on the release that drops the other.
- */
-export function parseProvisionedInstall(rawBody: string): ProvisionedInstall | null {
-  let parsed: Record<string, unknown>;
-  try {
-    const candidate: unknown = JSON.parse(rawBody);
-    if (!candidate || typeof candidate !== "object") return null;
-    parsed = candidate as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-
-  const apiKey = readString(parsed, "key", "api_key");
-  const claimStateRaw = readString(parsed, "claim_state");
-
-  return {
-    apiKey: apiKey && looksLikeAPublikApiKey(apiKey) ? apiKey : null,
-    claimCode: readString(parsed, "claim_code", "code"),
-    claimUrl: readString(parsed, "claim_url"),
-    addCreditUrl: readString(parsed, "add_credit_url"),
-    claimState: claimStateRaw === "claimed" ? "claimed" : "anonymous",
-    starterMicros: readMicros(parsed, "starter_micros", "starting_credit_micros"),
-    balanceMicros: readMicros(parsed, "balance_micros", "starting_credit_micros", "starter_micros"),
-    baseUrl: readString(parsed, "base_url"),
-  };
 }
 
 // MARK: - Reading a metered response

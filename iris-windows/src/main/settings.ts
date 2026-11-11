@@ -29,15 +29,7 @@ export interface SettingsSchema {
    */
   providerPreference: string;
 
-  /** This machine's `install_id` for publik API, minted once and replayed. */
-  publikInstallId: string;
-
-  /** The `install_id` of the account-link install (see
-   *  `services/publik-account-link.ts`). Its own id, so a later publik API
-   *  mint is not answered as a replay of it. Cleared at sign-out. */
-  publikLinkInstallId: string;
-
-  /** The claim URL provisioning returned, so the settings card can offer it
+  /** The claim URL the last `GET /balance` named, so the settings card can offer it
    *  long after first run. Not secret: it is a one-time code in a URL the user
    *  is meant to open themselves. */
   publikClaimUrl: string;
@@ -60,14 +52,6 @@ export interface SettingsSchema {
   /** The one "Add credit" link the last `GET /balance` named (`top_up_url`):
    *  the claim page while anonymous, the add-credit page once claimed. */
   publikTopUpUrl: string;
-
-  /**
-   * The starter the mint reported. Always 0 since publik's migration 0059: a
-   * new install starts at $0.00, and the one free $0.05 goes to the publik
-   * account when the computer is linked. Kept so older settings files load;
-   * nothing renders it.
-   */
-  publikStarterMicros: number;
 
   /**
    * Whether the §12 card has been shown. CONTRACT.md section 12 (4) forbids
@@ -103,15 +87,12 @@ const defaults: SettingsSchema = {
   publikBaseUrl: "https://publikhq.com",
   claudeModel: "claude-sonnet-4-5-20250929",
   providerPreference: "",
-  publikInstallId: "",
-  publikLinkInstallId: "",
   publikClaimUrl: "",
   publikAddCreditUrl: "",
   publikClaimState: "anonymous",
   publikBalanceMicros: 0,
   publikBalanceSeen: false,
   publikTopUpUrl: "",
-  publikStarterMicros: 0,
   publikCardHasBeenShown: false,
   alwaysOnTop: false,
   cursorBuddyEnabled: true,
@@ -169,7 +150,9 @@ export class SettingsStore {
     }
 
     // Also drop settings this fork no longer honours, so a stale
-    // `aiProvider: "openai"` cannot be mistaken for a live option.
+    // `aiProvider: "openai"` cannot be mistaken for a live option. The same
+    // step drops the install ids of the retired account link and of the
+    // provisioning the publik module replaced.
     for (const storedKeyName of Object.keys(rawParsed)) {
       if (!(storedKeyName in defaults)) foundAnythingToRewrite = true;
     }
@@ -233,16 +216,6 @@ export class SettingsStore {
       return true;
     }
     return writeSecret("publikApiKey", apiKey);
-  }
-
-  /** The account-link key, or null. Read only by the usage-count client. */
-  getPublikLinkKey(): string | null {
-    return readSecret("publikLinkKey");
-  }
-
-  setPublikLinkKey(linkKey: string | null): void {
-    if (linkKey) writeSecret("publikLinkKey", linkKey);
-    else deleteSecret("publikLinkKey");
   }
 
   /** The gateway root, derived from `publikBaseUrl` unless provisioning moved

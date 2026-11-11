@@ -20,8 +20,9 @@ import {
 } from "../services/deep-link-parser";
 import { classifyExternalLink, refusalMessage } from "../services/external-links";
 import { boundedCommandOutput, toolSpecFor } from "../services/tool-versions";
-import { secretStorageIsAvailable } from "./secrets";
+import { deleteRetiredSecrets, secretStorageIsAvailable } from "./secrets";
 import { PublikSetup } from "./publik-setup";
+import { ensureSignedIn, type GateUI } from "./publik";
 import { openCodexLogin } from "./codex-session";
 import { buildCanProvisionAutomatically } from "./publik-app-token";
 import type { PublikBalanceView } from "../services/publik-balance";
@@ -45,20 +46,11 @@ import {
 } from "../services/launch-arguments";
 import { FIRST_RUN_WINDOW_GEOMETRY, SETTINGS_WINDOW_GEOMETRY } from "../services/window-geometry";
 
-// publik's usage-count client (telemetry v1): one vendored CommonJS file with
-// no dependencies. It is not TypeScript, so it is loaded with `require` and
-// typed here. `vendor/` is not in forge.config.ts's `ignore` list, so the file
-// ships inside the asar, two folders up from `dist/main/index.js`.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const publikTelemetry = require("../../vendor/publik-telemetry.cjs") as {
-  start(appSlug: string, appVersion: string, publikKeyProvider?: () => string | null): void;
-  stop(): void;
-};
-
 /**
  * index.ts
  *
- * Windows shell for Iris: windows, tray, IPC, and the `iris://` scheme.
+ * Windows shell for Iris: the publik gate, windows, tray, IPC, and the
+ * `iris://` scheme.
  *
  * The command names handled here (`check_tool_version`, `take_pending_guide`,
  * `open_external`, ...) are the ones `src/renderer/guide/app.js` already
@@ -148,6 +140,11 @@ let cursorBuddyInterval: ReturnType<typeof setInterval> | null = null;
 /** A guide link that arrived before the panel was ready to receive it. */
 let pendingGuideDeepLink: GuideDeepLink | null = null;
 
+/** True once Sign in with publik has resolved. Before that, no window opens. */
+let gatePassed = false;
+/** Links that arrived while the gate was up. They are delivered after it. */
+const deepLinksHeldByTheGate: string[] = [];
+
 // MARK: - Deep links
 
 /**
@@ -164,11 +161,19 @@ if (isSquirrelHookRun) {
   app.on("second-instance", (_event, argv) => {
     const intent = relaunchIntentFromArgv(argv);
     if (intent.kind === "deepLinks") {
+      // While the gate is up, a link waits. No window opens before sign-in.
+      if (!gatePassed) {
+        deepLinksHeldByTheGate.push(...intent.urls);
+        return;
+      }
       // Unchanged: a link is delivered, then the existing window is raised.
       for (const url of intent.urls) receiveDeepLink(url);
       focusExistingWindow();
       return;
     }
+    // While the gate is up, the sign-in box is the only window. A second
+    // launch opens nothing more.
+    if (!gatePassed) return;
     // Anything else is a person opening Iris again — the Desktop or Start
     // Menu shortcut — while it already runs in the tray. Show them the chat.
     showChatWindow();
@@ -176,6 +181,10 @@ if (isSquirrelHookRun) {
   // macOS/Linux dev convenience; on Windows the argv path above is the real one.
   app.on("open-url", (event, url) => {
     event.preventDefault();
+    if (!gatePassed) {
+      deepLinksHeldByTheGate.push(url);
+      return;
+    }
     receiveDeepLink(url);
   });
 }
@@ -224,30 +233,10 @@ function receiveDeepLink(url: string): void {
     .completeSignIn(result.link.authCallback)
     .then(() => {
       broadcast("iris-account-changed", { signedIn: true });
-      void linkThisComputerToTheSignedInAccount();
     })
     .catch((error: unknown) => {
       broadcast("iris-account-error", error instanceof Error ? error.message : String(error));
     });
-}
-
-/**
- * Once each time a publik session starts (a sign-in, or a launch with a stored
- * session): links this computer to that account, so publik counts the reader
- * by their account. The settings page says so next to the sign-in buttons.
- * Best effort and silent; it never throws and never changes how Iris answers.
- */
-async function linkThisComputerToTheSignedInAccount(): Promise<void> {
-  try {
-    const accountAccessToken = await account.currentAccessToken();
-    // No token: offline (the session stays, and so does any link), or the
-    // refresh was refused, which signed out and so already forgot the link.
-    if (!accountAccessToken) return;
-    const outcome = await publikSetup.linkThisComputerToTheAccount(accountAccessToken);
-    console.log(`[iris] publik account link: ${outcome.kind}`);
-  } catch {
-    // Linking is never worth an error in front of the reader.
-  }
 }
 
 function broadcast(channel: string, payload: unknown): void {
@@ -1232,7 +1221,10 @@ function setupIPC(): void {
       return settings.setOpenAiApiKey(String(value ?? ""));
     }
     if (key === "publikApiKey") {
-      const accepted = publikSetup.acceptPastedKey(String(value ?? ""));
+      const pasted = String(value ?? "").trim();
+      // An empty value is Settings' Clear: the key goes, and the gate asks
+      // again at the next start.
+      const accepted = pasted ? publikSetup.acceptPastedKey(pasted) : publikSetup.forgetTheKey();
       publishPublikBalance();
       return accepted;
     }
@@ -1253,21 +1245,15 @@ function setupIPC(): void {
 
   // MARK: publik API setup
   //
-  // The disclosure is shown by the renderer BEFORE this is called — consent
-  // precedes the mint (CONTRACT section 3.2 [S4]). The main process will not
-  // provision on its own initiative anywhere.
+  // The gate made this computer's install at start-up. This adopts its key
+  // for a person who chose "Use my own key" at the gate and now wants publik
+  // API after all. The disclosure is shown by the renderer BEFORE this is
+  // called (CONTRACT section 3.2 [S4]).
   ipcMain.handle("publik:provision", async () => {
-    // Signed in: the mint carries the session, so the new install is bound
-    // to the reader's publik account at once.
-    const accountAccessToken = account.isSignedIn() ? await account.currentAccessToken() : null;
-    const outcome = await publikSetup.provision(accountAccessToken);
+    const outcome = await publikSetup.provision();
     if (outcome.kind === "provisioned") {
       settings.set("providerPreference", "publikApi");
-      // The new key now links this computer, so the separate link install
-      // is no longer needed.
-      if (accountAccessToken && outcome.install.apiKey) void publikSetup.forgetTheAccountLink();
-      // Provisioning named the balance ($0.00 for a new install since publik's
-      // migration 0059); /balance adds the one Add credit link.
+      // /balance names the balance and the one Add credit link.
       void refreshPublikBalanceIfAnswering();
       return { ok: true as const, card: publikSetup.cardState() };
     }
@@ -1275,11 +1261,9 @@ function setupIPC(): void {
       ok: false as const,
       reason: outcome.kind,
       message:
-        outcome.kind === "noAppToken"
-          ? "This build can't set up publik API on its own. Paste a key from your dashboard instead."
-          : outcome.kind === "refused"
-            ? outcome.message
-            : "Iris couldn't reach publik API. Check your connection, or paste a key from your dashboard.",
+        outcome.kind === "refused"
+          ? outcome.message
+          : "Iris couldn't reach publik API. Check your connection, or paste a key from your dashboard.",
     };
   });
 
@@ -1375,8 +1359,50 @@ function setupIPC(): void {
 
 // MARK: - Bootstrap
 
+/**
+ * The gate's screens, drawn as Electron message boxes: the adapter from
+ * publikhq.com/sdk/publik.ts.md. `signal` closes the box when the poll sees
+ * the sign-in or the plan. The box then answers as if cancelled, and the gate
+ * ignores that answer.
+ */
+const publikGateUI: GateUI = {
+  show: async (gateScreen, signal) => {
+    const result = await dialog.showMessageBox({
+      title: gateScreen.title,
+      message: gateScreen.title,
+      detail: [gateScreen.body, gateScreen.note].filter(Boolean).join("\n\n"),
+      buttons: gateScreen.buttons.map((button) => button.label),
+      noLink: true,
+      signal,
+    });
+    return gateScreen.buttons[result.response].action;
+  },
+  openUrl: (url) => shell.openExternal(url),
+};
+
 if (gotSingleInstanceLock) {
-  void app.whenReady().then(() => {
+  void app.whenReady().then(async () => {
+    // Sign in with publik, before any window or tray. The gate resolves only
+    // when this computer's install is claimed. With PUBLIK_SELF_TEST=1 it
+    // prints the self-test line and exits here, so nothing may print to
+    // stdout before it.
+    const gate = await ensureSignedIn(publikGateUI);
+    gatePassed = true;
+
+    // An upgrade from an Iris with the account link: its key is removed.
+    deleteRetiredSecrets();
+
+    if (gate.choice === "publik") {
+      // Connect your plan: the install key is the publik API key, and the
+      // gate showed the plan or the balance, so the first-run card counts as
+      // shown. A stored provider preference is kept.
+      const stored = publikSetup.connectThePlan(gate.key);
+      if (stored && !settings.get("providerPreference")) settings.set("providerPreference", "publikApi");
+    }
+    // "Use my own key": nothing changes. The person's own Anthropic key or the
+    // codex route works as before, and the first-run window asks for a key
+    // when there is none.
+
     registerIrisScheme();
 
     overlayWindows = createOverlayWindows();
@@ -1384,9 +1410,6 @@ if (gotSingleInstanceLock) {
     // Every change the balance lines could show — a reply's charge, a read of
     // /balance, a new key — reaches the tray and the open windows from here.
     publikSetup.onBalanceChanged(() => publishPublikBalance());
-    // Every way a session ends (Sign out, a refused refresh) deletes the link
-    // key and revokes its install.
-    account.onSignedOut(() => void publikSetup.forgetTheAccountLink());
     maintain = new MaintainController(maintainHost());
 
     setupIPC();
@@ -1427,19 +1450,8 @@ if (gotSingleInstanceLock) {
     // for why this is a plain GitHub-releases poll rather than update.electronjs.org.
     startSelfUpdateWatch(settings, app.getVersion());
 
-    // Anonymous usage counts (publik telemetry v1): one `app_opened` now, then
-    // one `active_session` every 30 minutes. Each holds the app slug, the app
-    // version, the OS, the CPU type and a random install ID — no content.
-    // DO_NOT_TRACK=1 turns it off. The provider returns the account-link key
-    // first (signed in, always bound to the account), else the publik API
-    // key, and never any other key.
-    publikTelemetry.start("iris", app.getVersion(), () => publikSetup.telemetryKey());
-
-    // A stored session is a session start: link this computer to it. With no
-    // session, a link key left over (its session ended while Iris was closed)
-    // is deleted and its install revoked.
-    if (account.isSignedIn()) void linkThisComputerToTheSignedInAccount();
-    else void publikSetup.forgetTheAccountLink();
+    // Usage counts come from the publik module: `ensureSignedIn` started them
+    // above, with the install key, once the person was signed in.
 
     // Does the reader have a usable `codex`? Probed once, in the background,
     // so a missing CLI costs nothing and a present one is simply one more
@@ -1456,7 +1468,9 @@ if (gotSingleInstanceLock) {
     // a working app — the guides do not need a model.
     openFirstRunWindowIfNeeded();
 
-    // A link that launched the app is sitting in this process's own argv.
+    // Links that arrived while the gate was up, then the one that launched
+    // the app, which is sitting in this process's own argv.
+    for (const url of deepLinksHeldByTheGate.splice(0)) receiveDeepLink(url);
     receiveDeepLinksFromArgv(process.argv);
 
     // Test convenience: `IRIS_AUTOPILOT_DEMO=<slug>` opens the animated terminal

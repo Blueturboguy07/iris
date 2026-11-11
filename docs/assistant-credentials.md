@@ -68,7 +68,7 @@ error message.
   app token. The call returns a `pk_live_…` key and a claim link, at a $0.00
   balance. The module stores the key at the publik credential path
   (`~/Library/Application Support/publik/apps/iris.json` on macOS,
-  `%APPDATA%\publik\apps\iris.json` on Windows) and opens the claim link;
+  `%LOCALAPPDATA%\publik\apps\iris.json` on Windows) and opens the claim link;
   the gate waits until the install is claimed by a publik account. Then it asks
   how Iris pays for AI. *Connect your plan* adopts the install key as the app's
   publik API key (the Keychain on macOS, the secrets store on Windows) and

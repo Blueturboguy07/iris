@@ -85,6 +85,20 @@ npm run gui-e2e  # headed GUI suite; needs a packaged app + a Windows desktop (C
 
 ## What was added
 
+**Sign in with publik** (`src/main/publik.ts`). The publik module, copied from
+publikhq.com/sdk/publik.ts.md. Iris opens with it: `app.whenReady()` in
+`main/index.ts` awaits `ensureSignedIn` before any window, the tray, or a deep
+link. The module makes this computer's publik install (`POST /api/v1/installs`),
+shows "Sign in with publik" until the install is claimed, asks once how the app
+pays for AI ("Connect your plan" or "Use my own key"), and counts users
+(`app_opened` at start, `active_session` every 30 minutes). "Connect your plan"
+stores the install key as the publik API key. "Use my own key" changes nothing:
+the user's own Anthropic key and the codex route work as before. The app token
+the module needs still comes from the baked constant in
+`main/publik-app-token.ts`; the release workflow fills it. `DO_NOT_TRACK=1`
+turns the counting off. Clearing the publik key in Settings makes the gate ask
+again at the next start.
+
 **Two transports** (`src/services/assistant-transport.ts`). Funded —
 `POST {publik}/api/assistant/chat` with a Supabase bearer token — or BYO —
 `POST https://api.anthropic.com/v1/messages` with the user's own `x-api-key`.
@@ -192,6 +206,9 @@ src/
 │   ├── companion.ts     typed message → screenshot → model → points → overlay
 │   ├── screenshot.ts    desktopCapturer; all arithmetic delegated to services/
 │   ├── account-session.ts  live sign-in state; the only thing that opens a browser
+│   ├── publik.ts        the publik module: Sign in with publik, user counts, the install key
+│   ├── publik-setup.ts  the publik API key this install uses, and its balance
+│   ├── publik-app-token.ts  the baked app token the module provisions with
 │   ├── secrets.ts       the only code that touches a secret at rest
 │   ├── settings.ts      plain JSON, and nothing secret in it
 │   └── tray.ts
@@ -272,6 +289,9 @@ Being explicit, because the suite's green tick does not cover these:
 |---|---|---|
 | `IRIS_SUPABASE_URL` | pointing a dev/staging build at a different Supabase project | falls back to publik's production project |
 | `IRIS_SUPABASE_ANON_KEY` | same | same |
+| `PUBLIK_APP_TOKEN` | a dev build with no baked app token | the gate uses the baked constant in `main/publik-app-token.ts` |
+| `PUBLIK_SELF_TEST=1` | the builder check: the built app prints `publik self-test: ok iris <version>` and exits | the app starts normally |
+| `DO_NOT_TRACK=1` | turning the user counts off | the publik module sends `app_opened` and `active_session` |
 
 Both are public values, baked in as defaults in `services/account-service.ts`
 (`DEFAULT_SUPABASE_PROJECT_URL` / `DEFAULT_SUPABASE_ANON_KEY`), mirroring

@@ -14,8 +14,7 @@ import globals from "globals";
  */
 export default tseslint.config(
   {
-    // `vendor/**` holds publik's telemetry client, copied in unchanged.
-    ignores: ["dist/**", "out/**", "node_modules/**", "assets/**", "vendor/**"],
+    ignores: ["dist/**", "out/**", "node_modules/**", "assets/**"],
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,

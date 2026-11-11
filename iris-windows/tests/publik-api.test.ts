@@ -3,30 +3,20 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_PUBLIK_MODEL,
-  DISCLOSURE_VERSION,
   PROVISIONING_DISCLOSURE,
   PUBLIK_MODEL_ALIASES,
   UNLINKED_ZERO_BALANCE_LINE,
   WHY_IT_COSTS_SENTENCE,
-  buildInstallProvisioningRequest,
   formatMicrosAsDollars,
   insufficientCreditFallbackMessage,
   isPublikModelAlias,
   looksLikeAPublikApiKey,
-  looksLikeAnAppToken,
-  newInstallId,
   parseInsufficientCredit,
-  parseProvisionedInstall,
   publikBalanceLine,
   publikCardState,
   readPublikUsageHeaders,
   revokedKeyWantsReprovisioning,
 } from "../src/services/publik-api";
-
-/** Deterministic bytes, so a UUID assertion is a real assertion. */
-function fixedBytes(seed: number): (byteCount: number) => Uint8Array {
-  return (byteCount) => Uint8Array.from({ length: byteCount }, (_unused, index) => (seed + index) & 0xff);
-}
 
 function headersFrom(pairs: Record<string, string>): { get(name: string): string | null } {
   const lowered = new Map(Object.entries(pairs).map(([name, value]) => [name.toLowerCase(), value]));
@@ -112,105 +102,12 @@ describe("model aliases", () => {
   });
 });
 
-describe("install identity", () => {
-  it("mints a v4 UUID", () => {
-    const installId = newInstallId(fixedBytes(1));
-    expect(installId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-  });
-
-  it("mints a different id from different bytes", () => {
-    expect(newInstallId(fixedBytes(1))).not.toBe(newInstallId(fixedBytes(90)));
-  });
-
-  it("recognises the key and token shapes, and rejects near-misses", () => {
+describe("the key shape", () => {
+  it("recognises a publik API key, and rejects near-misses", () => {
     expect(looksLikeAPublikApiKey("pk_live_abcdef123456_0123456789abcdef0123456789abcdef")).toBe(true);
     expect(looksLikeAPublikApiKey("pk_test_abcdef123456_0123456789abcdef0123456789abcdef")).toBe(true);
     expect(looksLikeAPublikApiKey("sk-ant-nope")).toBe(false);
     expect(looksLikeAPublikApiKey("pk_live_short_key")).toBe(false);
-
-    expect(looksLikeAnAppToken("pat_iris_0123456789abcdef0123456789abcdef")).toBe(true);
-    expect(looksLikeAnAppToken("pat_iris_tooshort")).toBe(false);
-    expect(looksLikeAnAppToken("")).toBe(false);
-  });
-});
-
-describe("the provisioning request", () => {
-  const request = buildInstallProvisioningRequest("https://publikhq.com/api/v1/", {
-    appToken: "pat_iris_0123456789abcdef0123456789abcdef",
-    appSlug: "iris",
-    appVersion: "0.9.11",
-    osVersion: "10.0.22631",
-    arch: "x64",
-    installId: "11111111-2222-4333-8444-555555555555",
-    deviceName: "A Windows PC",
-  });
-  const body = JSON.parse(request.body) as Record<string, unknown>;
-
-  it("posts to /installs on the gateway, with a normalised base", () => {
-    expect(request.url).toBe("https://publikhq.com/api/v1/installs");
-  });
-
-  it("declares the Anthropic Messages dialect, which is what Iris speaks", () => {
-    expect(body.dialects).toEqual(["messages"]);
-  });
-
-  it("names the platform and carries the app token and install id", () => {
-    expect(body.os).toBe("windows");
-    expect(body.app_slug).toBe("iris");
-    expect(body.app_token).toBe("pat_iris_0123456789abcdef0123456789abcdef");
-    expect(body.install_id).toBe("11111111-2222-4333-8444-555555555555");
-    expect(body.disclosure_version).toBe(DISCLOSURE_VERSION);
-    expect(DISCLOSURE_VERSION).toBe(2);
-  });
-});
-
-describe("reading a provisioning response", () => {
-  it("reads a 201 with a key, a $0.00 balance and a claim link", () => {
-    // publik migration 0059: a new install is minted at $0.00, with no starter.
-    const install = parseProvisionedInstall(
-      JSON.stringify({
-        key: "pk_live_abcdef123456_0123456789abcdef0123456789abcdef",
-        claim_code: "HK7F-2QWD",
-        claim_url: "https://publikhq.com/claim/HK7F-2QWD",
-        add_credit_url: "https://publikhq.com/dashboard/api/add",
-        claim_state: "anonymous",
-        starter_micros: 0,
-        balance_micros: 0,
-        base_url: "https://publikhq.com/api/v1",
-      })
-    );
-    expect(install?.apiKey).toBe("pk_live_abcdef123456_0123456789abcdef0123456789abcdef");
-    expect(install?.starterMicros).toBe(0);
-    expect(install?.balanceMicros).toBe(0);
-    expect(install?.claimState).toBe("anonymous");
-    expect(install?.baseUrl).toBe("https://publikhq.com/api/v1");
-  });
-
-  it("accepts starting_credit_micros as the documented alias of the balance", () => {
-    // An install minted already bound to a publik account carries that
-    // account's one-time $0.05 of free use.
-    const install = parseProvisionedInstall(
-      JSON.stringify({ key: null, claim_state: "claimed", starting_credit_micros: 50_000 })
-    );
-    expect(install?.balanceMicros).toBe(50_000);
-    expect(install?.claimState).toBe("claimed");
-  });
-
-  it("reads a replayed 200 as having no key, rather than inventing one", () => {
-    const install = parseProvisionedInstall(
-      JSON.stringify({ key: null, starter_micros: 0, claim_state: "anonymous" })
-    );
-    expect(install).not.toBeNull();
-    expect(install?.apiKey).toBeNull();
-  });
-
-  it("refuses a key that is not shaped like one", () => {
-    const install = parseProvisionedInstall(JSON.stringify({ key: "not-a-key" }));
-    expect(install?.apiKey).toBeNull();
-  });
-
-  it("returns null for a body that is not JSON", () => {
-    expect(parseProvisionedInstall("<html>502</html>")).toBeNull();
   });
 });
 

@@ -13,6 +13,7 @@
 //
 
 import AppKit
+import Combine
 import SwiftUI
 
 /// The SwiftUI adapter from publikhq.com/sdk/publik.swift.md: draws the screen

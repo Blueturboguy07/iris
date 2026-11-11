@@ -1,6 +1,8 @@
 name: publik-build
 
-# Builds the files of a publik release that carries usage counts (telemetry v1).
+# Builds the files of a publik release that opens with Sign in with publik
+# (the publik module: iris-macos/leanring-buddy/Publik.swift and
+# iris-windows/src/main/publik.ts) and carries usage counts.
 #
 # This workflow BUILDS ONLY. It creates no release, it uploads to no release
 # and it pushes no tag. Its output is two workflow artifacts:
@@ -13,8 +15,11 @@ name: publik-build
 #   iris-windows          Iris-Setup.exe, not signed (there is no Windows
 #                         certificate), plus the result of the usage-count check.
 #
-# Both jobs start the build on the runner with PUBLIK_TELEMETRY_URL pointed at a
-# local listener (scripts/publik-build/), so a check never reaches publikhq.com.
+# The macOS job runs the publik self-test on the built app
+# (publikhq.com/skills/setup.md, step 6): PUBLIK_SELF_TEST=1 makes the app
+# provision its install with the baked token, read GET /wallet from publik,
+# print one line and exit. The Windows job starts the build on the runner with
+# PUBLIK_TELEMETRY_URL pointed at a local listener (scripts/publik-build/).
 
 on:
   push:
@@ -35,10 +40,6 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      # Node runs the two helper scripts in scripts/publik-build/.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
 
       # Iris 0.9.15 was built with Xcode 26.2. Use the same one when the runner
       # has it; else another Xcode 26; else the runner's default.
@@ -111,66 +112,34 @@ jobs:
             echo "- Sparkle $sparkle"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Information only. The real check runs on the Mac that signs the app,
-      # with the notarized build. This one says early whether the client fires.
-      - name: Usage counts on this runner (start, listen)
-        continue-on-error: true
+      # The publik self-test (publikhq.com/skills/setup.md, step 6). The built
+      # app runs with PUBLIK_SELF_TEST=1 and no window: the module provisions
+      # this runner's install with the token baked into Info.plist, reads
+      # GET /wallet from publik, prints one line and exits. The line proves the
+      # gate is on the start-up path of this exact build. The job fails
+      # without it.
+      - name: publik self-test (the built app)
         working-directory: iris-macos
         run: |
-          # No `-e` here: every check below must run and be written down.
-          set +e
-          set -uo pipefail
+          set -euo pipefail
           APP="$PWD/build/Iris.xcarchive/Products/Applications/Iris.app"
-          want="$(sed -n 's/^  "version": "\(.*\)",$/\1/p' ../iris-windows/package.json | head -1)"
-          requests="$RUNNER_TEMP/telemetry-requests.jsonl"
-          port_file="$RUNNER_TEMP/telemetry-port.txt"
-          result="$RUNNER_TEMP/macos-telemetry-check.txt"
-          node ../scripts/publik-build/telemetry-listener.cjs "$requests" "$port_file" 120 > /dev/null 2>&1 &
-          listener_pid=$!
-          for _ in $(seq 1 50); do [ -s "$port_file" ] && break; sleep 0.2; done
-          port="$(cat "$port_file")"
-          export PUBLIK_TELEMETRY_URL="http://127.0.0.1:${port}/api/v1/telemetry"
-          export PUBLIK_TELEMETRY_DEBUG=1
-
-          "$APP/Contents/MacOS/Iris" > "$RUNNER_TEMP/iris-out.log" 2> "$RUNNER_TEMP/iris-err.log" &
-          iris_pid=$!
-          sleep 20
-          if kill -0 "$iris_pid" 2>/dev/null; then alive="yes"; else alive="no"; fi
-          kill "$iris_pid" 2>/dev/null || true
-          sleep 2
-          kill -9 "$iris_pid" 2>/dev/null || true
-          {
-            echo "process still up after 20 s: $alive"
-            grep "publik-telemetry" "$RUNNER_TEMP/iris-err.log" || echo "(no publik-telemetry line on stderr)"
-            node ../scripts/publik-build/check-app-opened.cjs "$requests" 0 "$want" macos
-          } | tee "$result"
-          status="${PIPESTATUS[0]}"
-
-          before="$(wc -l < "$requests" 2>/dev/null | tr -d ' ' || echo 0)"
-          DO_NOT_TRACK=1 "$APP/Contents/MacOS/Iris" > /dev/null 2> "$RUNNER_TEMP/iris-optout-err.log" &
-          optout_pid=$!
-          sleep 12
-          kill "$optout_pid" 2>/dev/null || true
-          sleep 1
-          kill -9 "$optout_pid" 2>/dev/null || true
-          after="$(wc -l < "$requests" 2>/dev/null | tr -d ' ' || echo 0)"
-          if [ "$before" = "$after" ]; then
-            echo "DO_NOT_TRACK=1: no request (PASS)" | tee -a "$result"
-          else
-            echo "DO_NOT_TRACK=1: a request arrived (FAIL)" | tee -a "$result"
-            status=1
+          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+          result="$RUNNER_TEMP/macos-publik-self-test.txt"
+          line="$(env -u PUBLIK_APP_TOKEN PUBLIK_SELF_TEST=1 "$APP/Contents/MacOS/Iris" 2> "$RUNNER_TEMP/iris-self-test-err.log" | tail -n 1 || true)"
+          echo "$line" | tee "$result"
+          { echo "### publik self-test on the macOS runner"; echo '```'; cat "$result"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p dist && cp "$result" dist/macos-publik-self-test.txt
+          if [ "$line" != "publik self-test: ok iris $version" ]; then
+            echo "::error::Expected 'publik self-test: ok iris $version'. stderr follows."
+            cat "$RUNNER_TEMP/iris-self-test-err.log" || true
+            exit 1
           fi
-          { echo "### Usage counts on the macOS runner"; echo '```'; cat "$result"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          mkdir -p dist && cp "$result" dist/macos-telemetry-check.txt
-          kill "$listener_pid" 2>/dev/null || true
-          [ "$alive" = "yes" ] && [ "$status" = "0" ]
 
       - name: Pack the app
         working-directory: iris-macos
         run: |
           set -euo pipefail
           mkdir -p dist
-          [ -f dist/macos-telemetry-check.txt ] || echo "the runner check did not finish" > dist/macos-telemetry-check.txt
           ditto -c -k --keepParent "build/Iris.xcarchive/Products/Applications/Iris.app" dist/Iris-unsigned.app.zip
           shasum -a 256 dist/Iris-unsigned.app.zip
           ls -la dist
@@ -180,7 +149,7 @@ jobs:
           name: iris-macos-unsigned
           path: |
             iris-macos/dist/Iris-unsigned.app.zip
-            iris-macos/dist/macos-telemetry-check.txt
+            iris-macos/dist/macos-publik-self-test.txt
           if-no-files-found: error
           retention-days: 14
 

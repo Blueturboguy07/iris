@@ -43,6 +43,8 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotific
     private let companionManager = CompanionManager()
     private var settingsRequestedBeforeLaunchFinished = false
     private var sparkleUpdaterController: SPUStandardUpdaterController?
+    /// The Sign in with publik window, from launch until the gate passes.
+    private var publikGateWindow: PublikGateWindowController?
 
     /// A guide link that arrived before the panel existed. macOS can deliver
     /// the URL that launched the app before `applicationDidFinishLaunching`
@@ -69,7 +71,6 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotific
         // `stopEverything` below; this catches the unclean one.
         IrisBackgroundCommands.shared.reapLeftovers()
 
-        menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
         // So a tap on the catalog-app-update notification (the only
         // notification Iris ever shows) reaches `userNotificationCenter(_:
         // didReceive:)` below instead of just activating the app with
@@ -81,8 +82,50 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotific
         // party intermediating Claude.ai credentials), and no longer writes
         // one — but an upgrading reader still has theirs on disk until it is
         // actively removed. Removing the code that writes a prohibited
-        // credential is only half the job; this is the other half.
+        // credential is only half the job; this is the other half. The same
+        // sweep removes the account-link key of builds before 0.9.18.
         KeychainStore.deleteRetiredSecrets()
+        runThePublikGate()
+    }
+
+    /// Sign in with publik: the first window, before the menu bar panel, the
+    /// eye and every window Iris owns. `Publik.ensureSignedIn` (Publik.swift)
+    /// shows the gate until the person is signed in, asks once how Iris pays
+    /// for AI, starts the usage counts, and only then returns. With
+    /// `PUBLIK_SELF_TEST=1` it prints the self-test line and exits, so no
+    /// window is shown in that mode.
+    private func runThePublikGate() {
+        let gateWindow = PublikGateWindowController { NSApp.terminate(nil) }
+        publikGateWindow = gateWindow
+        if ProcessInfo.processInfo.environment["PUBLIK_SELF_TEST"] == nil {
+            gateWindow.show()
+        }
+        Task { @MainActor [weak self] in
+            let gate = await Publik.ensureSignedIn(gateWindow.model)
+            gateWindow.close()
+            guard let self else { return }
+            self.publikGateWindow = nil
+            self.adoptThePublikGate(gate)
+            self.finishLaunching()
+        }
+    }
+
+    /// What the gate decided. "publik" (Connect your plan): the module's
+    /// install key becomes the publik API key, and publik API is the provider
+    /// when the person has not chosen one yet. "own_key" (Use my own key):
+    /// nothing changes, and their own Anthropic key or ChatGPT account works
+    /// exactly as before.
+    private func adoptThePublikGate(_ gate: (key: String, wallet: Publik.Wallet, choice: String?)) {
+        guard gate.choice == "publik" else { return }
+        companionManager.publikAPIAccount.adoptTheInstallKey(gate.key)
+        if AssistantProviderChoice.current == nil {
+            AssistantProviderChoice.current = .publikAPI
+        }
+    }
+
+    /// Everything Iris shows and starts at launch, after the gate.
+    private func finishLaunching() {
+        menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
         companionManager.start()
         if settingsRequestedBeforeLaunchFinished {
             settingsRequestedBeforeLaunchFinished = false
@@ -95,7 +138,6 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotific
         }
         registerAsLoginItemIfNeeded()
         startSparkleUpdater()
-        startUsageCounts()
 
         if let guideDeepLinkWaitingForLaunchToFinish {
             self.guideDeepLinkWaitingForLaunchToFinish = nil
@@ -226,46 +268,6 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, UNUserNotific
                 print("⚠️ Iris: Failed to register as login item: \(error)")
             }
         }
-    }
-
-    /// Starts publik's usage counts (telemetry v1): one `app_opened` now, then
-    /// one `active_session` every 30 minutes. Each event holds the app slug,
-    /// the app version, the OS, the CPU type and a random install ID — no
-    /// content. `DO_NOT_TRACK=1` turns it off. The call returns at once; the
-    /// client works on its own background thread.
-    ///
-    /// The key provider runs on that thread, so it must not touch the main
-    /// actor: the Keychain names are read here and handed over as values.
-    /// It returns the account-link key when there is one, else the publik API
-    /// key, and nil otherwise. No other key is ever passed: never the reader's
-    /// own provider keys.
-    private func startUsageCounts() {
-        let keychainServiceName = KeychainStore.keychainServiceName
-        let publikAPIKeyAccountName = KeychainSecretKind.publikAPIKey.rawValue
-        let publikAccountLinkKeyAccountName = KeychainSecretKind.publikAccountLinkKey.rawValue
-        PublikTelemetry.start(
-            appSlug: "iris",
-            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "",
-            // The account-link key FIRST: it exists only while the reader is
-            // signed in, and its install is always bound to their account
-            // (`PublikAPIAccount.linkThisComputerToTheSignedInAccount`). A
-            // publik API key can be a dashboard key, which publik never counts
-            // as this computer. Then the publik API key; otherwise nothing,
-            // and the count is anonymous. Both reads stay off the main actor
-            // and pass only names, never main-actor state.
-            keyProvider: {
-                if let accountLinkKey = KeychainStore.readSecretOffTheMainActor(
-                    service: keychainServiceName,
-                    account: publikAccountLinkKeyAccountName
-                ), !accountLinkKey.isEmpty {
-                    return accountLinkKey
-                }
-                return KeychainStore.readSecretOffTheMainActor(
-                    service: keychainServiceName,
-                    account: publikAPIKeyAccountName
-                )
-            }
-        )
     }
 
     /// Starts the updater only when this build is configured to update itself

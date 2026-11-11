@@ -72,16 +72,34 @@ cd iris-windows && pnpm install && pnpm dev
 Release builds go through `.github/workflows/iris-release.yml` (macOS + Tauri
 today) and `iris-windows.yml` (Electron).
 
-## Usage counts
+## Sign in with publik
 
-Iris for macOS and Iris for Windows send usage counts to publik (telemetry v1):
-one `app_opened` event at each start, and one `active_session` event every 30
-minutes while Iris runs. An event holds the app name (`iris`), the app version,
-the operating system, the CPU type and a random install ID. If Iris holds a
-publik API key, the key goes with the event, so that publik counts one account
-one time. Nothing else is sent: no prompts, no screen content, no file names.
-To turn it off, set `DO_NOT_TRACK=1` in the environment. Details:
+Iris opens with Sign in with publik, before its panel. The publik module holds
+the gate: `iris-macos/leanring-buddy/Publik.swift` on macOS and
+`iris-windows/src/main/publik.ts` on Windows, both from
+https://publikhq.com/skills/setup.md. At the first start on a computer the
+module provisions an install key with the build's app token
+(`POST /api/v1/installs`), opens the claim link in the browser, and polls
+`GET /api/v1/wallet` every 3 seconds, up to 10 minutes, until the install is
+claimed by a publik account. Without a connection it says "publik is not
+reachable. Check your connection." and offers Retry. There is no way past the
+gate. Once signed in, the gate asks how Iris pays for AI: Get a plan or Connect
+your plan, or Use my own key. The own-key routes (the reader's Anthropic key, or
+their `codex` CLI) stay as they are; the choice is stored next to the install
+key.
+
+The same module sends usage counts: one `app_opened` event at each start, and
+one `active_session` event every 30 minutes while Iris runs, with the install
+key as the bearer. An event holds the app name (`iris`), the app version, the
+operating system, the CPU type and a random install ID. Nothing else is sent:
+no prompts, no screen content, no file names. To turn it off, set
+`DO_NOT_TRACK=1` in the environment. Details:
 https://publikhq.com/skills/telemetry.md
+
+A built app proves the gate is on its start-up path with the self-test:
+`PUBLIK_SELF_TEST=1 Iris.app/Contents/MacOS/Iris` prints
+`publik self-test: ok iris <version>` after one real `GET /api/v1/wallet`,
+then exits. The `publik-build` workflow runs it on each built app.
 
 ## The one thing to watch
 

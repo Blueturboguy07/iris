@@ -47,15 +47,6 @@ enum KeychainSecretKind: String, CaseIterable, Sendable {
     /// and only a publik host — `AssistantTransport.validatedRequest` enforces
     /// both halves of that.
     case publikAPIKey = "publik-api-key"
-    /// The key of the install that links this Mac to the reader's publik
-    /// account (`PublikAPIAccount.linkThisComputerToTheSignedInAccount`). It
-    /// exists only while the reader is signed in and has no publik API key
-    /// that publik can count as this Mac (none, or a dashboard key), and it is
-    /// deleted at sign-out. It is NOT a model credential:
-    /// it never reaches `AssistantTransport`, the provider choice or the
-    /// publik API key slot. Its only reader is the usage-count client, so a
-    /// signed-in reader is counted by their account rather than anonymously.
-    case publikAccountLinkKey = "publik-account-link-key"
 }
 
 /// Credentials this app used to store and must not store again.
@@ -68,6 +59,12 @@ enum KeychainSecretKind: String, CaseIterable, Sendable {
 /// left sitting in the reader's Keychain. See `KeychainStore.deleteRetiredSecrets`.
 enum RetiredKeychainSecretKind: String, CaseIterable, Sendable {
     case anthropicOAuthToken = "anthropic-oauth-token"
+    /// Iris 0.9.17 minted a second publik install at sign-in, so the usage
+    /// counts could name the reader's account, and kept its key here. Since
+    /// 0.9.18 the publik module's install (Publik.swift) is claimed by the
+    /// account at the Sign in with publik gate, and the counts carry that key.
+    /// The link key of an upgrading reader is removed at launch.
+    case publikAccountLinkKey = "publik-account-link-key"
 }
 
 enum KeychainStoreError: Error, Equatable, Sendable {
@@ -161,30 +158,6 @@ enum KeychainStore {
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         return SecItemCopyMatching(existenceQuery as CFDictionary, nil) == errSecSuccess
-    }
-
-    /// Reads one item without touching the main actor.
-    ///
-    /// Only the usage-count client (`PublikTelemetry`) uses this: it asks for
-    /// the publik key on its own background thread before each send. The
-    /// caller passes the service and account names in, so this function reads
-    /// no main-actor state. Same contract as `readSecret`: every failure is
-    /// nil, and the value is never logged.
-    nonisolated static func readSecretOffTheMainActor(service: String, account: String) -> String? {
-        let readQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-
-        var readResult: CFTypeRef?
-        let readStatus = SecItemCopyMatching(readQuery as CFDictionary, &readResult)
-        guard readStatus == errSecSuccess, let secretData = readResult as? Data else {
-            return nil
-        }
-        return String(data: secretData, encoding: .utf8)
     }
 
     // MARK: - Deleting

@@ -76,22 +76,6 @@ struct PublikAPIAccountTests {
         account.forgetKey()
     }
 
-    // MARK: The install id
-
-    @Test func theInstallIdentifierIsMintedOnceAndRemembered() throws {
-        let defaults = try isolatedDefaults()
-        let account = PublikAPIAccount(userDefaults: defaults)
-        let first = account.installIdentifier()
-        let second = account.installIdentifier()
-        // Re-minting on every launch would ask the gateway for a fresh install
-        // each time, which is what its per-IP mint caps exist to stop.
-        #expect(first == second)
-        #expect(!first.isEmpty)
-
-        let sameDefaultsAgain = PublikAPIAccount(userDefaults: defaults)
-        #expect(sameDefaultsAgain.installIdentifier() == first)
-    }
-
     // MARK: Money, rendered
 
     @Test func balancesRenderAsDollarsAndNeverAsTokensOrCredits() {
@@ -121,24 +105,6 @@ struct PublikAPIAccountTests {
         #expect(PublikAPIClaimState(wireValue: "anonymous") == .anonymous)
     }
 
-    @Test func aProvisioningResponseIsReadWhicheverFieldNameCarriesTheBalance() {
-        // CONTRACT 3.2 ships `balance_micros` and `starting_credit_micros` with
-        // the same value for one release; either must work, so a rename on the
-        // server does not blank the balance line. Since publik's migration 0059
-        // an anonymous mint is $0.00; an install minted already bound to a
-        // publik account carries that account's one-time $0.05.
-        let anonymousMint = PublikAPIAccount.InstallsResponse(payload: [
-            "key": "pk_live_x", "balance_micros": 0, "starter_micros": 0, "claim_state": "anonymous",
-        ])
-        #expect(anonymousMint.balanceMicros == 0)
-        #expect(anonymousMint.claimState == .anonymous)
-
-        let withStartingCredit = PublikAPIAccount.InstallsResponse(payload: [
-            "key": "pk_live_x", "starting_credit_micros": 50_000, "claim_state": "claimed",
-        ])
-        #expect(withStartingCredit.balanceMicros == 50_000)
-    }
-
     @Test func anUnlinkedInstallAtZeroIsToldHowToGetItsFreeUse() {
         // The line every new install starts on. "$0.00 left" alone would read
         // as broken; this says the one step that gives $0.05 of free use.
@@ -156,15 +122,6 @@ struct PublikAPIAccountTests {
         // free use once you link". The gateway records it and never rejects it.
         #expect(PublikAPIAccount.currentDisclosureVersion == 2)
         #expect(PublikAPIDisclosureAcceptance.readerAcceptedTheDisclosure().disclosureVersion == 2)
-    }
-
-    @Test func aReplayedInstallIdComesBackWithNoKey() {
-        // CONTRACT 3.2 [B1]: a 200 with "key": null is how the gateway says
-        // "this install id already minted one".
-        let replay = PublikAPIAccount.InstallsResponse(payload: [
-            "key": NSNull(), "claim_state": "anonymous",
-        ])
-        #expect(replay.key == nil)
     }
 
     // MARK: The 402
@@ -220,15 +177,18 @@ struct PublikAPIAccountTests {
 
     @Test func aTemplateOrMissingAppTokenLeavesTheBuildOnThePasteRoute() {
         // A build with no minted token is not broken — it falls back to the
-        // human route. No `pat_iris_*` has been minted yet, so this is the
-        // state every current build is actually in.
+        // human route, which is the state of every developer build.
         //
         // Reading the real bundle here is the point: the assertion is about
         // what THIS build ships, and it must not crash or provision when the
-        // Info.plist key is absent.
+        // Info.plist key is absent. The token comes from the publik module
+        // (`Publik.appToken`), so the two can never disagree.
         let buildToken = PublikAPIAccount.buildAppToken
         if let buildToken {
             #expect(buildToken.hasPrefix("pat_"), "a shipped token must be a real one")
+            #expect(buildToken == Publik.appToken)
+        } else {
+            #expect(!Publik.appToken.hasPrefix("pat_"))
         }
     }
 }

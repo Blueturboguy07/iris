@@ -1031,9 +1031,9 @@ struct CompanionPanelView: View {
                 signInProviderButton(provider: .github)
             }
 
-            // Told before it happens: a session links this Mac to the account
-            // (CompanionManager.bindTheAccountLinkToSignInChanges), whichever
-            // of the three sign-in routes the reader takes.
+            // Told before it happens: the Sign in with publik gate (Publik.swift)
+            // claimed this Mac's install for the account at the first start,
+            // and a session here is the same account.
             Text("Signing in links this Mac to your publik account.")
                 .font(.system(size: 10))
                 .foregroundColor(DS.Colors.textTertiary)
@@ -1551,17 +1551,11 @@ struct CompanionPanelView: View {
         publikAPISetupMessage = nil
         isProvisioningPublikAPI = true
         let account = publikAPIAccount
-        let signedInAccountService = accountService
         Task { @MainActor in
-            // Signed in: the mint carries the session, so the new install is
-            // bound to the reader's publik account at once.
-            var accountAccessToken: String?
-            if signedInAccountService.signedInAccount != nil {
-                accountAccessToken = await signedInAccountService.currentAccessTokenRefreshingIfNeeded()
-            }
+            // The install is the one the publik module provisioned at launch
+            // (Publik.swift); this adopts its key as the publik API key.
             let outcome = await account.provisionAKey(
-                havingAccepted: .readerAcceptedTheDisclosure(),
-                accountAccessToken: accountAccessToken
+                havingAccepted: .readerAcceptedTheDisclosure()
             )
             isProvisioningPublikAPI = false
             switch outcome {
@@ -1569,11 +1563,6 @@ struct CompanionPanelView: View {
                 isShowingPublikAPIDisclosure = false
                 publikAPISetupMessage = nil
                 accountService.refreshPublikAPIKeyState()
-                // The new key now links this Mac, so the separate link
-                // install is no longer needed.
-                if accountAccessToken != nil {
-                    await account.forgetTheAccountLink()
-                }
             case .failure(let failure):
                 publikAPISetupMessage = failure.userFacingMessage
             }
@@ -1597,6 +1586,9 @@ struct CompanionPanelView: View {
 
     private func forgetPublikAPIKey() {
         publikAPIAccount.forgetKey()
+        // The gate (Publik.swift) asks again at the next start how Iris pays
+        // for AI: Connect your plan, or Use my own key.
+        Publik.setChoice(nil)
         accountService.refreshPublikAPIKeyState()
         NotificationCenter.default.post(name: .clickyResizePanelToContent, object: nil)
     }

@@ -9,6 +9,8 @@ Iris — the desktop assistant for publik. A text-first fork of Clicky by Farza 
 
 Voice features (AssemblyAI/OpenAI/Apple Speech transcription, ElevenLabs TTS) and PostHog analytics were removed in the fork.
 
+Iris opens with Sign in with publik: `Publik.swift` (the publik module from publikhq.com/sdk/publik.swift.md, one file, `static let appSlug = "iris"`) runs its gate from `applicationDidFinishLaunching` before the menu bar panel exists, provisions this Mac's install, waits for the claim, asks how Iris pays for AI, and sends the usage counts. `PublikGate.swift` draws its screens in an AppKit window; `PublikAPIAccount` adopts the install key the module minted. See the root `AGENTS.md` and `README.md`.
+
 Nothing sensitive ships in the app binary except the public app token that lets a fresh install provision itself a publik API key. The assistant reaches a model by one of three routes the reader chooses between — the publik API gateway, their own Anthropic key, or their own `codex` CLI. See "Assistant transports" below.
 
 ## Architecture
